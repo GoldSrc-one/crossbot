@@ -1,0 +1,13 @@
+# Local test environment (large binary downloads, not part of source)
+/hlds/
+/steamcmd/
+
+# Build output
+/build/
+
+# IDE/editor
+.vs/
+*.user
+
+# Depot download tool
+/depotdownloader/
