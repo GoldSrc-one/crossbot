@@ -67,8 +67,9 @@ void WriteRaw(FILE *f, const void *data, size_t bytes, const char *what)
 
 void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t bspChecksum,
 	const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
-	const std::vector<TaggedSpecialEdge> &specialEdges)
+	const std::vector<TaggedSpecialEdge> &specialEdges, const std::vector<TacticalScore> &tacticalScores)
 {
+	bool haveTactical = tacticalScores.size() == areas.size();
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
 		throw std::runtime_error("cannot open nav file for writing: " + path);
@@ -90,8 +91,24 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		NavAreaRecord &rec = areaRecords[i];
 		rec.id = static_cast<uint32_t>(areas[i].id);
 		ComputeBounds(areas[i].polytope, rec.mins, rec.maxs, rec.centroid);
-		rec.areaFlags = NAV_AREA_NONE; // tactical/water/gravity flags land in later milestones (2e/2g/2h)
+		rec.areaFlags = NAV_AREA_NONE; // water/gravity flags land in later milestones (2g/2h)
 		rec.gravityScale = 1.0f;
+		if (haveTactical)
+		{
+			const TacticalScore &t = tacticalScores[i];
+			rec.exposureScore = static_cast<float>(t.exposureScore);
+			rec.concealmentScore = static_cast<float>(t.concealmentScore);
+			rec.dangerScore = static_cast<float>(t.dangerScore);
+			if (t.isVantage) rec.areaFlags |= NAV_AREA_VANTAGE;
+			if (t.isCamp) rec.areaFlags |= NAV_AREA_CAMP;
+			if (t.isChokepointCover) rec.areaFlags |= NAV_AREA_CHOKEPOINT_COVER;
+		}
+		else
+		{
+			rec.exposureScore = 0.0f;
+			rec.concealmentScore = 0.0f;
+			rec.dangerScore = 0.0f;
+		}
 		rec.portalOffset = ToU16Count(areaPortalIndex.size(), "area-portal-index offset");
 		rec.portalCount = ToU16Count(perArea[i].size(), "portals-per-area");
 

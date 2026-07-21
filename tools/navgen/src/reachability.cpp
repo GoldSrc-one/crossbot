@@ -131,8 +131,24 @@ MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vec
 		int a = queue[qi];
 		for (int pi : adjacency[static_cast<size_t>(a)])
 		{
-			int other = (portals[static_cast<size_t>(pi)].areaA == a) ? portals[static_cast<size_t>(pi)].areaB
-				: portals[static_cast<size_t>(pi)].areaA;
+			const MergedPortal &portal = portals[static_cast<size_t>(pi)];
+			bool isAreaA = (portal.areaA == a);
+
+			// EDGE_FLAG_ONE_WAY means areaA -> areaB only (areaA is always
+			// the higher/"from" side, per TagDropOffs's convention) --
+			// respect that here too, the same way the runtime A*
+			// (path_astar.cpp) does. Without this, a real bug this pruning
+			// pass had: an area only connected to the rest of the graph via
+			// a one-way drop (e.g. jump *off* a tower, no way back up)
+			// still got flood-filled as "reachable" in this undirected
+			// walk, when in practice no bot standing anywhere else could
+			// ever legally path there -- confirmed live via crossbot_nav_goal
+			// targeting a real crossfire.bsp rooftop area that survived
+			// pruning yet A* always reported unreachable from the ground.
+			if ((portal.edgeFlags & crossbot_nav::EDGE_FLAG_ONE_WAY) && !isAreaA)
+				continue; // trying to go areaB -> areaA against a one-way edge
+
+			int other = isAreaA ? portal.areaB : portal.areaA;
 			if (!reachable[static_cast<size_t>(other)])
 			{
 				reachable[static_cast<size_t>(other)] = true;

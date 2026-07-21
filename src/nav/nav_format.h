@@ -15,7 +15,7 @@ namespace crossbot_nav
 {
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
-constexpr uint32_t kNavVersion = 1;
+constexpr uint32_t kNavVersion = 2; // v2 (Milestone 2e): NavAreaRecord gained exposure/concealment/dangerScore
 
 // AreaRecord.areaFlags bits.
 enum AreaFlags : uint32_t
@@ -71,6 +71,15 @@ struct NavAreaRecord
 	float centroid[3];
 	uint32_t areaFlags;
 	float gravityScale;   // 1.0 = normal gravity; meaningful only if NAV_AREA_GRAVITY_SCALE is set
+	// Milestone 2e tactical scores -- see tools/navgen/src/tactical_tagger.h
+	// for exactly what each measures. Heuristic, tunable, not ground truth.
+	// Zeroed (and the NAV_AREA_VANTAGE/CAMP/CHOKEPOINT_COVER flags left
+	// unset) when navgen wasn't given tactical data to write, e.g. a
+	// synthetic test fixture with too little geometry for the scores to
+	// mean anything.
+	float exposureScore;
+	float concealmentScore;
+	float dangerScore;
 	uint16_t portalOffset; // slice into AreaPortalIndex[]
 	uint16_t portalCount;
 };

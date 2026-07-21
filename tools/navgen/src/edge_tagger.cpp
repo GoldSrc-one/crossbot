@@ -20,7 +20,18 @@ using namespace crossbot_nav;
 // them, not treated as ground truth.
 constexpr double kMaxJumpHorizontalDistance = 200.0;
 constexpr double kMaxJumpHeightDelta = 64.0;
-constexpr double kFallDamageThreshold = 200.0;
+// GoldSrc's real auto-step height (HOSTAGE_STEPSIZE_DEFAULT in the HLSDK
+// is the one place it's spelled out as a named constant, 18 units, and
+// matches the well-known engine convention) -- anything taller than this
+// needs an actual jump input to climb, it can't just be walked up. Found
+// via a real live-testing miss: TagDropOffs used to only reclassify a
+// portal once its height delta exceeded 200 units (a "will this actually
+// hurt" fall-damage threshold, not a "can a bot walk this without
+// jumping" one), so a 176-unit ledge -- far beyond walking range but
+// under that 200 cutoff -- was left as an ordinary bidirectional
+// EDGE_WALK, and a bot routed across it just walked into it and stopped
+// forever, live-verified on crossfire.bsp.
+constexpr double kWalkableStepHeight = 18.0;
 constexpr double kAreaAabbMargin = 48.0; // ~1.5x a standing hull's radius; door/ladder proximity search slack
 
 int ParseBrushModelIndex(const std::string &model)
@@ -266,8 +277,20 @@ void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &port
 		double floorB = cache.mins[static_cast<size_t>(p.areaB)].z;
 		double delta = std::fabs(floorA - floorB);
 
-		if (delta <= kFallDamageThreshold)
-			continue; // ordinary step or a fall within safe range -- leave as EDGE_WALK
+		if (delta <= kWalkableStepHeight)
+			continue; // genuinely walkable in either direction -- leave as EDGE_WALK
+
+		if (delta <= kMaxJumpHeightDelta)
+		{
+			// Too tall to walk up (past kWalkableStepHeight) but well
+			// within normal jump range -- bidirectional, unlike the
+			// EDGE_DROP case below: jumping while stepping *down* across
+			// it is harmless (lands fine either way), it's only climbing
+			// up that actually needs the jump input, so there's no
+			// one-way restriction to apply here.
+			p.edgeType = EDGE_JUMP;
+			continue;
+		}
 
 		p.edgeType = EDGE_DROP;
 		p.edgeFlags |= EDGE_FLAG_ONE_WAY;
