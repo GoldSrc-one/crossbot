@@ -5,6 +5,7 @@
 #include "bot.h"
 #include "bot_move.h"
 #include "../game/game_profile.h"
+#include "../nav/nav.h"
 
 namespace
 {
@@ -49,10 +50,22 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	g_pGameProfile = GameProfile_Detect();
 
+	// SERVER_PRINT (pfnServerPrint), not ALERT(at_logged, ...): at_logged
+	// routes to the server's *.log file (sv_logfile), not the console --
+	// confirmed the hard way debugging this milestone's live test (every
+	// ALERT(at_logged, ...) call was silently invisible in qconsole.log
+	// even with `developer 2`, while pfnServerPrint always showed up).
+	// Dev-facing status like this needs to reliably show up wherever
+	// someone's actually looking.
+	char msg[256];
 	if (g_pGameProfile)
-		ALERT(at_logged, "CrossBot: detected game profile '%s'.\n", g_pGameProfile->GetName());
+		snprintf(msg, sizeof(msg), "CrossBot: detected game profile '%s'.\n", g_pGameProfile->GetName());
 	else
-		ALERT(at_logged, "CrossBot: no known game profile matched this mod; bots disabled.\n");
+		snprintf(msg, sizeof(msg), "CrossBot: no known game profile matched this mod; bots disabled.\n");
+	SERVER_PRINT(msg);
+
+	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
+	Nav::LoadForMap(mapName);
 }
 
 void ServerDeactivate()
@@ -61,6 +74,7 @@ void ServerDeactivate()
 		bot = CBot();
 
 	g_pGameProfile = nullptr;
+	Nav::Unload();
 }
 
 void ClientPutInServer(edict_t *pEntity)
@@ -101,14 +115,16 @@ bool AddBot(const char *name)
 {
 	if (!g_pGameProfile)
 	{
-		ALERT(at_logged, "CrossBot: cannot add bot, no game profile detected.\n");
+		SERVER_PRINT("CrossBot: cannot add bot, no game profile detected.\n");
 		return false;
 	}
 
 	CBot *pSlot = FindFreeSlot();
 	if (!pSlot)
 	{
-		ALERT(at_logged, "CrossBot: cannot add bot, all %d slots in use.\n", kMaxBots);
+		char msg[64];
+		snprintf(msg, sizeof(msg), "CrossBot: cannot add bot, all %d slots in use.\n", kMaxBots);
+		SERVER_PRINT(msg);
 		return false;
 	}
 
@@ -121,7 +137,7 @@ bool AddBot(const char *name)
 	edict_t *pEdict = CREATE_FAKE_CLIENT(botName);
 	if (!pEdict)
 	{
-		ALERT(at_logged, "CrossBot: engine refused to create a fake client.\n");
+		SERVER_PRINT("CrossBot: engine refused to create a fake client.\n");
 		return false;
 	}
 
@@ -133,7 +149,9 @@ bool AddBot(const char *name)
 
 	if (rejectReason[0])
 	{
-		ALERT(at_logged, "CrossBot: game rejected bot connection: %s\n", rejectReason);
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot: game rejected bot connection: %s\n", rejectReason);
+		SERVER_PRINT(msg);
 		return false;
 	}
 
@@ -173,6 +191,48 @@ int GetBotCount()
 			++count;
 	}
 	return count;
+}
+
+bool SetGoalForAllBots(const Vector &point)
+{
+	bool any = false;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+		bot.goalPoint = point;
+		bot.hasGoal = true;
+		bot.waypoints.clear();
+		bot.waypointIndex = 0;
+		any = true;
+	}
+	return any;
+}
+
+void PrintNavStatus()
+{
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+		Vector origin = bot.pEdict->v.origin;
+		Vector vel = bot.pEdict->v.velocity;
+		Vector angles = bot.pEdict->v.v_angle;
+		char targetBuf[64] = "(none)";
+		if (bot.waypointIndex < bot.waypoints.size())
+		{
+			Vector t = bot.waypoints[bot.waypointIndex];
+			snprintf(targetBuf, sizeof(targetBuf), "(%.0f,%.0f,%.0f)", t.x, t.y, t.z);
+		}
+		char msg[400];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s origin=(%.0f,%.0f,%.0f) vel=(%.0f,%.0f,%.0f) angles=(%.0f,%.0f) hasGoal=%d "
+			"goal=(%.0f,%.0f,%.0f) target=%s waypoint=%zu/%zu movetype=%d\n",
+			bot.name, origin.x, origin.y, origin.z, vel.x, vel.y, vel.z, angles.x, angles.y,
+			bot.hasGoal ? 1 : 0, bot.goalPoint.x, bot.goalPoint.y, bot.goalPoint.z, targetBuf,
+			bot.waypointIndex, bot.waypoints.size(), bot.pEdict->v.movetype);
+		SERVER_PRINT(msg);
+	}
 }
 
 } // namespace BotManager

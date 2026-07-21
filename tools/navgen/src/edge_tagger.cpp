@@ -262,6 +262,20 @@ void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &port
 
 		p.edgeType = EDGE_DROP;
 		p.edgeFlags |= EDGE_FLAG_ONE_WAY;
+
+		// EDGE_FLAG_ONE_WAY's documented convention (relied on by the
+		// runtime A*, src/nav/path_astar.cpp) is "traversable areaA ->
+		// areaB only." area_merger assigns areaA/areaB in arbitrary
+		// portal-discovery order, so without this swap a one-way drop could
+		// just as easily end up pointing the wrong way (blocking the real
+		// fall and permitting a nonsensical "climb" instead). Ensure areaA
+		// is always the higher (from) side here, once, rather than push
+		// that assumption onto every consumer.
+		if (floorA < floorB)
+		{
+			std::swap(p.areaA, p.areaB);
+			std::swap(p.pointA, p.pointB);
+		}
 	}
 }
 

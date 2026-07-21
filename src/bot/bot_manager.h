@@ -21,4 +21,16 @@ namespace BotManager
 	bool RemoveBot();
 
 	int GetBotCount();
+
+	// Dev/testing hook for crossbot_nav_goal (src/console/commands.cpp):
+	// forces every connected bot's nav goal to `point`, dropping whatever
+	// path it was already following so it repaths immediately. Returns
+	// false if no bots are connected. Has no effect on a bot currently
+	// falling back to wander (no .nav file loaded for this map).
+	bool SetGoalForAllBots(const Vector &point);
+
+	// Dev/testing hook for crossbot_nav_status: logs each connected bot's
+	// current origin and waypoint progress via ALERT(at_logged, ...), so
+	// path-following behavior can be observed in qconsole.log over time.
+	void PrintNavStatus();
 }
