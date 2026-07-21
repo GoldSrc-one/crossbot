@@ -11,3 +11,8 @@
 
 # Depot download tool
 /depotdownloader/
+
+# navgen test-fixture outputs -- regenerable from the committed .map/.bsp
+# via `navgen <bsp> -o <nav>` / `--dump-obj`, not source themselves
+/tools/navgen/tests/fixtures/*.nav
+/tools/navgen/tests/fixtures/*.obj

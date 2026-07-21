@@ -69,3 +69,7 @@ endif()
 if(WIN32)
     target_compile_definitions(crossbot_mm PRIVATE _WINDOWS WIN32)
 endif()
+
+# Offline BSP nav-graph compiler (Milestone 2) -- a standalone tool, not
+# linked against Metamod/engine headers. See tools/navgen/CMakeLists.txt.
+add_subdirectory(tools/navgen)
