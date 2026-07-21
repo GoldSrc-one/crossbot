@@ -23,31 +23,44 @@ bool HasHullClearance(const Vector &from, const Vector &to, edict_t *pIgnore)
 
 } // namespace
 
-std::vector<Vector> BuildWaypointPath(const NavMesh &mesh, const PathResult &path, const Vector &startPoint,
+std::vector<Waypoint> BuildWaypointPath(const NavMesh &mesh, const PathResult &path, const Vector &startPoint,
 	const Vector &goalPoint, edict_t *pIgnore)
 {
-	std::vector<Vector> raw;
-	raw.push_back(startPoint);
+	std::vector<Waypoint> raw;
+	raw.push_back({startPoint, false});
 	for (uint32_t portalIdx : path.portalPath)
 	{
 		const Portal &portal = mesh.portals[portalIdx];
-		raw.push_back((portal.pointA + portal.pointB) * 0.5f);
+		bool isJump = portal.edgeType == crossbot_nav::EDGE_JUMP;
+		raw.push_back({(portal.pointA + portal.pointB) * 0.5f, isJump});
 	}
-	raw.push_back(goalPoint);
+	raw.push_back({goalPoint, false});
 
 	if (raw.size() <= 2)
 		return raw;
 
-	std::vector<Vector> simplified;
+	std::vector<Waypoint> simplified;
 	simplified.push_back(raw.front());
 
 	size_t anchor = 0;
 	while (anchor < raw.size() - 1)
 	{
+		// Jump waypoints are hard stops: never merge past one via a
+		// shortcut hull trace (see the header comment for why that trace
+		// can't actually validate a gap crossing).
+		if (raw[anchor + 1].requiresJump)
+		{
+			simplified.push_back(raw[anchor + 1]);
+			anchor = anchor + 1;
+			continue;
+		}
+
 		size_t furthest = anchor + 1;
 		for (size_t candidate = anchor + 2; candidate < raw.size(); ++candidate)
 		{
-			if (HasHullClearance(raw[anchor], raw[candidate], pIgnore))
+			if (raw[candidate].requiresJump)
+				break; // don't skip over/through a required jump
+			if (HasHullClearance(raw[anchor].point, raw[candidate].point, pIgnore))
 				furthest = candidate;
 		}
 		simplified.push_back(raw[furthest]);

@@ -13,7 +13,6 @@ namespace
 	constexpr float kDirChangeInterval = 3.f;
 	constexpr float kTraceDistance = 64.f;
 	constexpr float kMaxTurnRatePerSec = 300.f; // deg/sec -- fast but not instant, avoids the classic snap-to-target bot tell
-	constexpr float kFrameStepSeconds = 25.f / 1000.f; // matches the fixed 25ms msec passed to every pfnRunPlayerMove call below
 
 	float NormalizeAngle(float a)
 	{
@@ -55,8 +54,27 @@ namespace
 		bot.desiredAngles = Vector(0.f, atan2f(bot.moveDir.y, bot.moveDir.x) * (180.f / kPi), 0.f);
 
 		Vector angles = Bot_UpdateFacing(bot);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, 25);
+		g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
 	}
+}
+
+byte Bot_FrameMsec()
+{
+	// See the header comment: this must reflect real elapsed time, not a
+	// guessed constant -- confirmed against FoxBot/jk_botti/Parabot, which
+	// all derive it from gpGlobals->frametime (or an equivalent self-tracked
+	// delta) rather than hardcoding it, and confirmed the hard way here: a
+	// fixed msec that overstates the server's real ~10ms tick caused
+	// pfnRunPlayerMove to silently produce zero displacement, frame after
+	// frame, with no error -- GoldSrc's own timing bookkeeping appears to
+	// reject a fake client that consistently claims more elapsed time per
+	// move than actually passed.
+	int msec = static_cast<int>(gpGlobals->frametime * 1000.f);
+	if (msec < 1)
+		msec = 1;
+	else if (msec > 100)
+		msec = 100;
+	return static_cast<byte>(msec);
 }
 
 Vector Bot_UpdateFacing(CBot &bot)
@@ -67,7 +85,7 @@ Vector Bot_UpdateFacing(CBot &bot)
 	float yawDelta = NormalizeAngle(bot.desiredAngles.y - current.y);
 	float pitchDelta = NormalizeAngle(bot.desiredAngles.x - current.x);
 
-	float maxStep = kMaxTurnRatePerSec * kFrameStepSeconds;
+	float maxStep = kMaxTurnRatePerSec * gpGlobals->frametime;
 
 	float yawStep = (yawDelta > maxStep) ? maxStep : (yawDelta < -maxStep ? -maxStep : yawDelta);
 	float pitchStep = (pitchDelta > maxStep) ? maxStep : (pitchDelta < -maxStep ? -maxStep : pitchDelta);

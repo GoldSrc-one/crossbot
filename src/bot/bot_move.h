@@ -15,3 +15,12 @@ void Bot_Move(CBot &bot);
 // movement mode (wander, nav, future avoidance/combat) so turning
 // behavior lives in exactly one place.
 Vector Bot_UpdateFacing(CBot &bot);
+
+// The msec argument every pfnRunPlayerMove call needs: real elapsed time
+// since the engine's last server frame, in milliseconds, clamped to a sane
+// range. A hardcoded msec (what this replaced) silently freezes movement --
+// GoldSrc's own timing bookkeeping rejects a fake client that consistently
+// claims more elapsed time per move than the server frame actually took, and
+// every reference bot surveyed for this plan (FoxBot, jk_botti, Parabot) is
+// careful to derive it from real elapsed time rather than hardcoding it.
+byte Bot_FrameMsec();

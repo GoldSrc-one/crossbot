@@ -218,11 +218,12 @@ void PrintNavStatus()
 		Vector origin = bot.pEdict->v.origin;
 		Vector vel = bot.pEdict->v.velocity;
 		Vector angles = bot.pEdict->v.v_angle;
-		char targetBuf[64] = "(none)";
+		char targetBuf[72] = "(none)";
 		if (bot.waypointIndex < bot.waypoints.size())
 		{
-			Vector t = bot.waypoints[bot.waypointIndex];
-			snprintf(targetBuf, sizeof(targetBuf), "(%.0f,%.0f,%.0f)", t.x, t.y, t.z);
+			const Nav::Waypoint &wp = bot.waypoints[bot.waypointIndex];
+			snprintf(targetBuf, sizeof(targetBuf), "(%.0f,%.0f,%.0f)%s", wp.point.x, wp.point.y, wp.point.z,
+				wp.requiresJump ? "[JUMP]" : "");
 		}
 		char msg[400];
 		snprintf(msg, sizeof(msg),
@@ -233,6 +234,20 @@ void PrintNavStatus()
 			bot.waypointIndex, bot.waypoints.size(), bot.pEdict->v.movetype);
 		SERVER_PRINT(msg);
 	}
+}
+
+int GetOtherBotEdicts(edict_t *self, edict_t **outEdicts, int maxCount)
+{
+	int count = 0;
+	for (auto &bot : g_bots)
+	{
+		if (count >= maxCount)
+			break;
+		if (!bot.inUse || bot.pEdict == self)
+			continue;
+		outEdicts[count++] = bot.pEdict;
+	}
+	return count;
 }
 
 } // namespace BotManager

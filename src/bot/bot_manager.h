@@ -33,4 +33,11 @@ namespace BotManager
 	// current origin and waypoint progress via ALERT(at_logged, ...), so
 	// path-following behavior can be observed in qconsole.log over time.
 	void PrintNavStatus();
+
+	// Local-avoidance hook (src/nav/nav_avoid.cpp, Milestone 2d): copies the
+	// edict of every other in-use bot (excluding `self`) into `outEdicts`,
+	// up to `maxCount` entries. Returns the number written. Bounded by
+	// kMaxBots (16) so a fixed-size stack array at the call site is enough --
+	// no allocation needed.
+	int GetOtherBotEdicts(edict_t *self, edict_t **outEdicts, int maxCount);
 }

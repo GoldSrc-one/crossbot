@@ -13,7 +13,7 @@ $exe = Join-Path $hldsDir "hlds.exe"
 
 Remove-Item (Join-Path $hldsDir "qconsole.log") -ErrorAction SilentlyContinue
 
-$launchArgs = "-console -condebug -insecure -game valve +sv_lan 1 +deathmatch 1 +developer 2 +map $Map"
+$launchArgs = "-console -condebug -insecure -game valve +sv_lan 1 +deathmatch 1 +developer 2 +maxplayers 16 +rcon_password crossbot_test +map $Map"
 
 if ($Commands.Count -gt 0) {
     $cfgName = "_crossbot_autotest.cfg"

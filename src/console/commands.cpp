@@ -3,6 +3,7 @@
 
 #include "commands.h"
 #include "../bot/bot_manager.h"
+#include "../nav/nav_avoid.h"
 
 namespace
 {
@@ -48,6 +49,18 @@ namespace
 	{
 		BotManager::PrintNavStatus();
 	}
+
+	void Cmd_CrossBotNavAvoid()
+	{
+		if (CMD_ARGC() < 2)
+		{
+			char msg[64];
+			snprintf(msg, sizeof(msg), "crossbot_nav_avoid is %d\n", NavAvoid::IsEnabled() ? 1 : 0);
+			SERVER_PRINT(msg);
+			return;
+		}
+		NavAvoid::SetEnabled(atoi(CMD_ARGV(1)) != 0);
+	}
 }
 
 namespace CrossBotCommands
@@ -60,6 +73,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_fill", Cmd_CrossBotFill);
 	ADD_SERVER_COMMAND("crossbot_nav_goal", Cmd_CrossBotNavGoal);
 	ADD_SERVER_COMMAND("crossbot_nav_status", Cmd_CrossBotNavStatus);
+	ADD_SERVER_COMMAND("crossbot_nav_avoid", Cmd_CrossBotNavAvoid);
 }
 
 }

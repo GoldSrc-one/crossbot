@@ -192,6 +192,15 @@ std::vector<TaggedSpecialEdge> TagSpecialEdges(const BspFile &bsp, const std::ve
 		if (!isLadder && !isDoor)
 			continue;
 
+		if (isDoor && !ent.Get("targetname").empty())
+			continue; // HL's own CBaseDoor::Spawn does SetTouch(NULL) whenever targetname is
+			          // set -- this door can only be opened by whatever targets it (a
+			          // func_button, a trigger, ...), never by a player/bot walking into it.
+			          // Tagging a crossable edge here would promise a route the bot can never
+			          // actually take; button-gated doors stay out of scope for this milestone
+			          // series (see the plan's "Button-gated doors, platforms, and pads" note),
+			          // so this footprint just stays excluded, the same as a func_wall.
+
 		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
 		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
 			continue;

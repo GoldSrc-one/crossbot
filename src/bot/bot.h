@@ -4,6 +4,8 @@
 
 #include <vector>
 
+#include "../nav/path_funnel.h"
+
 // A single bot's state.
 struct CBot
 {
@@ -20,7 +22,7 @@ struct CBot
 	// fields above, not a replacement -- see src/bot/bot_move_nav.cpp.
 	bool hasGoal = false;
 	Vector goalPoint;
-	std::vector<Vector> waypoints;
+	std::vector<Nav::Waypoint> waypoints;
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;
 	// Last origin seen by Bot_MoveNav, used to detect a discontinuous jump
