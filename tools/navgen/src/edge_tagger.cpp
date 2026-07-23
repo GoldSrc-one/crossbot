@@ -274,9 +274,9 @@ Vec3 ParseEntityOrigin(const std::string &origin)
 void TagLadder(const dmodel_t &model, const Vec3 &origin, const AreaBoundsCache &cache,
 	std::vector<TaggedSpecialEdge> &out)
 {
-	// Margin-expanded, same as TagDoor: a ladder's own climb-trigger brush
-	// is often only a few units thick (its footprint sits flush against a
-	// wall), well inside the 16-unit-per-side hull-1 Minkowski shrink --
+	// Margin-expanded: a ladder's own climb-trigger brush is often only a
+	// few units thick (its footprint sits flush against a wall), well
+	// inside the 16-unit-per-side hull-1 Minkowski shrink --
 	// meaning no navigable area's AABB would ever directly overlap the raw
 	// brush bounds at all. Search nearby instead of requiring literal
 	// overlap (found via a real miss on crossfire.bsp: a ladder only 4
@@ -312,120 +312,6 @@ void TagLadder(const dmodel_t &model, const Vec3 &origin, const AreaBoundsCache 
 	out.push_back(edge);
 }
 
-// Resolves which func_button (if any) opens a targetname'd door: either
-// directly (button.target == doorTargetname), or through one level of
-// indirection via a trigger_relay (relay.targetname == button.target &&
-// relay.target == doorTargetname) or a multi_manager (mm.targetname ==
-// button.target && mm has a keyvalue named doorTargetname -- multi_manager's
-// own keyvalues *are* its fire list, "<target> <delay>"). Only one level of
-// indirection is resolved, not arbitrary chains -- covers both patterns
-// confirmed live (test10_doorbutton's trigger_relay, test11_doorbutton2's
-// multi_manager), and going further would be speculative without another
-// real test case to validate against.
-const Entity *ResolveButtonForDoor(const std::vector<Entity> &entities, const std::string &doorTargetname)
-{
-	for (const Entity &ent : entities)
-	{
-		if (ent.Get("classname") != "func_button")
-			continue;
-
-		std::string target = ent.Get("target");
-		if (target.empty())
-			continue;
-
-		if (target == doorTargetname)
-			return &ent;
-
-		for (const Entity &mid : entities)
-		{
-			std::string midClass = mid.Get("classname");
-			if (midClass == "trigger_relay")
-			{
-				if (mid.Get("targetname") == target && mid.Get("target") == doorTargetname)
-					return &ent;
-			}
-			else if (midClass == "multi_manager")
-			{
-				if (mid.Get("targetname") == target && !mid.Get(doorTargetname).empty())
-					return &ent;
-			}
-		}
-	}
-	return nullptr;
-}
-
-void TagDoor(const BspFile &bsp, const dmodel_t &model, const Vec3 &origin, const std::string &targetname,
-	const Entity *button, const AreaBoundsCache &cache, std::vector<TaggedSpecialEdge> &out)
-{
-	Vec3 boxMins(origin.x + model.mins[0] - kAreaAabbMargin, origin.y + model.mins[1] - kAreaAabbMargin,
-		origin.z + model.mins[2] - kAreaAabbMargin);
-	Vec3 boxMaxs(origin.x + model.maxs[0] + kAreaAabbMargin, origin.y + model.maxs[1] + kAreaAabbMargin,
-		origin.z + model.maxs[2] + kAreaAabbMargin);
-
-	std::vector<int> overlapping = FindOverlappingAreas(boxMins, boxMaxs, cache);
-	if (std::getenv("NAVGEN_DUMP_DOOR"))
-		std::printf("  door model mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) box mins=(%.1f,%.1f,%.1f) "
-			"maxs=(%.1f,%.1f,%.1f) overlapping=%zu\n",
-			model.mins[0], model.mins[1], model.mins[2], model.maxs[0], model.maxs[1], model.maxs[2], boxMins.x,
-			boxMins.y, boxMins.z, boxMaxs.x, boxMaxs.y, boxMaxs.z, overlapping.size());
-	if (overlapping.size() < 2)
-		return; // door's excluded footprint doesn't border enough navigable area to bridge
-
-	Vec3 doorCenter(origin.x + (model.mins[0] + model.maxs[0]) * 0.5, origin.y + (model.mins[1] + model.maxs[1]) * 0.5,
-		origin.z + (model.mins[2] + model.maxs[2]) * 0.5);
-
-	// Connect only the most-separated pair among the candidates (the
-	// polytope-diameter trick portal_builder already uses for portal
-	// endpoints), not every pair -- connecting all pairs blew up badly in
-	// practice: a door surrounded by several small unmerged areas (common,
-	// since area_merger only merges full-coverage matches) produced dozens
-	// of edges per door on crossfire.bsp (584 edges for 11 doors) instead
-	// of the one meaningful "this side to that side" connection. The two
-	// most-separated candidates reliably are the true opposite sides even
-	// in a cluttered local cluster of small nearby areas.
-	int bestI = 0, bestJ = 1;
-	double bestDist = -1.0;
-	for (size_t i = 0; i < overlapping.size(); ++i)
-	{
-		for (size_t j = i + 1; j < overlapping.size(); ++j)
-		{
-			const Vec3 &ci = cache.centroid[static_cast<size_t>(overlapping[i])];
-			const Vec3 &cj = cache.centroid[static_cast<size_t>(overlapping[j])];
-			double d = (ci - cj).Length();
-			if (d > bestDist)
-			{
-				bestDist = d;
-				bestI = static_cast<int>(i);
-				bestJ = static_cast<int>(j);
-			}
-		}
-	}
-
-	TaggedSpecialEdge edge;
-	edge.areaFrom = overlapping[static_cast<size_t>(bestI)];
-	edge.areaTo = overlapping[static_cast<size_t>(bestJ)];
-	edge.type = EDGE_DOOR;
-	edge.anchorFrom = doorCenter;
-	edge.anchorTo = doorCenter;
-	edge.targetname = targetname;
-
-	if (button)
-	{
-		int buttonModelIndex = ParseBrushModelIndex(button->Get("model"));
-		if (buttonModelIndex >= 0 && static_cast<size_t>(buttonModelIndex) < bsp.Models().size())
-		{
-			const dmodel_t &buttonModel = bsp.Models()[static_cast<size_t>(buttonModelIndex)];
-			Vec3 buttonOrigin = ParseEntityOrigin(button->Get("origin"));
-			edge.needsButton = true;
-			edge.buttonPos = Vec3(buttonOrigin.x + (buttonModel.mins[0] + buttonModel.maxs[0]) * 0.5,
-				buttonOrigin.y + (buttonModel.mins[1] + buttonModel.maxs[1]) * 0.5,
-				buttonOrigin.z + (buttonModel.mins[2] + buttonModel.maxs[2]) * 0.5);
-		}
-	}
-
-	out.push_back(edge);
-}
-
 } // namespace
 
 std::vector<TaggedSpecialEdge> TagSpecialEdges(const BspFile &bsp, const std::vector<Entity> &entities,
@@ -436,28 +322,8 @@ std::vector<TaggedSpecialEdge> TagSpecialEdges(const BspFile &bsp, const std::ve
 
 	for (const Entity &ent : entities)
 	{
-		std::string classname = ent.Get("classname");
-		bool isLadder = classname == "func_ladder";
-		bool isDoor = classname == "func_door" || classname == "func_door_rotating";
-		if (!isLadder && !isDoor)
-			continue;
-
-		std::string targetname = ent.Get("targetname");
-		const Entity *button = nullptr;
-		if (isDoor && !targetname.empty())
-		{
-			// HL's own CBaseDoor::Spawn does SetTouch(NULL) whenever
-			// targetname is set -- this door can only be opened by
-			// whatever targets it. Try to resolve a func_button that
-			// actually does (directly or via one level of trigger_relay/
-			// multi_manager indirection -- see ResolveButtonForDoor); if
-			// none exists, this footprint just stays excluded, the same
-			// as a func_wall, rather than tagging a crossable edge that
-			// promises a route the bot can never actually take.
-			button = ResolveButtonForDoor(entities, targetname);
-			if (!button)
-				continue;
-		}
+		if (ent.Get("classname") != "func_ladder")
+			continue; // doors are handled by door_extractor.cpp's ExtractDoorLeaves now, see this file's header comment
 
 		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
 		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
@@ -465,10 +331,7 @@ std::vector<TaggedSpecialEdge> TagSpecialEdges(const BspFile &bsp, const std::ve
 		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
 		Vec3 origin = ParseEntityOrigin(ent.Get("origin"));
 
-		if (isLadder)
-			TagLadder(model, origin, cache, result);
-		else
-			TagDoor(bsp, model, origin, targetname, button, cache, result);
+		TagLadder(model, origin, cache, result);
 	}
 
 	return result;
@@ -588,12 +451,22 @@ void ProbeJumpGaps(const BspFile &bsp, int headnode, const std::vector<Area> &ar
 	}
 }
 
-void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &portals)
+void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &portals,
+	const std::vector<DoorAreaInfo> &doorAreaInfo)
 {
+	bool haveDoor = doorAreaInfo.size() == areas.size();
+
 	for (MergedPortal &p : portals)
 	{
 		if (p.edgeType != EDGE_WALK)
 			continue; // don't reclassify jump/ladder/door edges as drops
+
+		// A door leaf's own floor face lands at a wildly different height
+		// than its real-world neighbors for reasons that have nothing to do
+		// with an actual step/cliff -- see this function's own header
+		// comment for the full Minkowski-expansion-direction explanation.
+		if (haveDoor && (doorAreaInfo[static_cast<size_t>(p.areaA)].isDoor || doorAreaInfo[static_cast<size_t>(p.areaB)].isDoor))
+			continue;
 
 		// Query near the shared boundary itself (real local geometry for a
 		// genuine walk portal), not each area's whole-area mins -- same

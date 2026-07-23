@@ -1,0 +1,11 @@
+maps/test23_precise.bsp: 10 hull-1 empty leaves (0 affected by 0 blocking entities: 0 fully removed, 0 split into multiple pieces), total volume 20658176 cu.units
+maps/test23_precise.bsp: 0 additional crouch-only (hull-3) leaves found
+maps/test23_precise.bsp: 14 raw portals -> 10 areas, 14 inter-area portals (MergeAreas disabled)
+maps/test23_precise.bsp: 0 tiny-leaf-sliver areas absorbed into neighbors (10 areas remain)
+maps/test23_precise.bsp: 1 spawn point(s) resolved, 10 areas reachable after first pass (0 void areas pruned)
+maps/test23_precise.bsp: 10 areas reachable after direction-aware second pass (0 one-way-only areas pruned)
+maps/test23_precise.bsp: 0 ladder edges, 0 door edges, 0 jump edges, 8 drop-off edges, 0 elevator edges
+maps/test23_precise.bsp: tactical tagging -> 2 vantage, 0 camp, 2 chokepoint-cover areas (of 10)
+maps/test23_precise.bsp: 0 areas require crouching (hull-3-only clearance)
+wrote nav_debug/test23_precise.svg
+wrote nav_debug/test23_precise_discard.nav (map "test23_precise", checksum 0x5120F970)

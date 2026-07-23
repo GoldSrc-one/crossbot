@@ -5,6 +5,7 @@
 
 #include "area_merger.h"
 #include "bsp_file.h"
+#include "door_extractor.h"
 #include "entity_parser.h"
 #include "nav_format.h"
 
@@ -18,23 +19,21 @@ struct TaggedSpecialEdge
 	uint8_t type = crossbot_nav::EDGE_LADDER;
 	Vec3 anchorFrom;
 	Vec3 anchorTo;
-	std::string targetname; // Door edges only: re-resolved to a live edict via FIND_ENTITY_BY_STRING at runtime
-	// Door edges only: true if this door has a targetname (so it can't be
-	// touch-opened) but TagDoor still resolved a func_button that opens it
-	// (directly, or via one level of trigger_relay/multi_manager
-	// indirection) -- buttonPos is that button's position, matching
-	// EDGE_ELEVATOR's own button-then-ride fields.
-	bool needsButton = false;
-	Vec3 buttonPos;
 };
 
 // func_ladder -> a Ladder SpecialEdge between whichever area overlapping
 // the ladder's bounding box has the lowest centroid (bottom anchor) and
-// whichever has the highest (top anchor). func_door/func_door_rotating ->
-// a Door SpecialEdge for every pair of areas found within a small margin
-// of the door's bounding box (its footprint was already excluded from the
-// navigable leaf set by blocking_entities, so the "areas adjacent to the
-// hole" are exactly what this margin search recovers).
+// whichever has the highest (top anchor).
+//
+// Doors used to be handled here too (a Door SpecialEdge for every pair of
+// areas found within a small margin of the door's excluded bounding box),
+// but that approach only ever approximated where the crossing really was --
+// a single proximity-anchored point standing in for the door's real shared
+// faces with each neighboring room. door_extractor.cpp's ExtractDoorLeaves
+// (called from main.cpp) replaces it: a door's own solid volume becomes its
+// own real navigable leaf (flagged NAV_AREA_DOOR), and portal_builder's
+// ordinary coplanar-face matching finds the real portals into and out of it
+// on both sides, same as any other pair of adjacent leaves.
 std::vector<TaggedSpecialEdge> TagSpecialEdges(const BspFile &bsp, const std::vector<Entity> &entities,
 	const std::vector<Area> &areas);
 
@@ -58,7 +57,23 @@ void ProbeJumpGaps(const BspFile &bsp, int headnode, const std::vector<Area> &ar
 // EDGE_DROP edges. The threshold is an approximate, tunable stand-in for
 // GoldSrc's speed-based fall-damage formula, not a reverse-engineered
 // constant -- revisit against real engine behavior if it proves off.
-void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &portals);
+//
+// doorAreaInfo, if non-empty, must be parallel to `areas` (door_extractor.h's
+// ComputeDoorAreaInfo, computed early against the *current* area indexing --
+// see main.cpp) -- any portal touching a door area is left as a plain
+// EDGE_WALK, never reclassified. A door leaf's own CONTENTS_SOLID polytope
+// is Minkowski-*expanded* outward by hull-1's half-extents (the correct
+// representation for solid collision), while an ordinary navigable leaf is
+// *shrunk* inward (the correct representation for valid origin positions,
+// see hull_defs.h) -- same hull, opposite directions, so a door leaf's own
+// "floor" face lands roughly 2x hull-1's half-height below the real room
+// floor it borders, even though nothing about walking through an open
+// doorway involves any actual height change. Confirmed live on test9_door:
+// without this exemption, both of its doors' entry portals read as ~72-unit
+// "cliffs" and got marked one-way, pruning both doors down to a single
+// direction of travel.
+void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &portals,
+	const std::vector<DoorAreaInfo> &doorAreaInfo = {});
 
 // True per area if any of its member (pre-merge) leaf ids is a hull-3-only
 // (crouch) leaf, per isCrouchLeaf (indexed by leaf id, built by main.cpp's

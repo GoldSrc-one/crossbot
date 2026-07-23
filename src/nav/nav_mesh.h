@@ -37,6 +37,16 @@ struct Area
 	// exact version match, so this is always populated when an Area exists
 	// at all.
 	std::vector<AreaPlane> planes;
+	// Meaningful only when areaFlags & NAV_AREA_DOOR is set (v5 -- a door's
+	// own solid-until-opened volume kept as its own area, see
+	// tools/navgen/src/door_extractor.h). doorActivation is a
+	// crossbot_nav::DoorActivation value; doorActivatorPos is where to walk
+	// to press/touch it first (DOOR_ACTIVATION_BUTTON/_TRIGGER only);
+	// doorWaitTime is how long to hold once triggered/touched before the
+	// door is assumed open.
+	uint8_t doorActivation = crossbot_nav::DOOR_ACTIVATION_TOUCH;
+	Vector doorActivatorPos;
+	float doorWaitTime = 0.f;
 };
 
 struct Portal
@@ -56,7 +66,6 @@ struct SpecialEdge
 	uint32_t areaFrom = 0, areaTo = 0;
 	uint8_t type = crossbot_nav::EDGE_LADDER;
 	Vector anchorFrom, anchorTo;
-	std::string targetname; // Door edges only; empty if unused
 };
 
 struct NavMesh

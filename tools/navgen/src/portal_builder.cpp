@@ -73,45 +73,6 @@ struct FaceRef
 	int sign; // +1 if this face's plane matched the bucket's canonical orientation, -1 if flipped
 };
 
-// Clips `subject` (a winding lying on the same plane as `clip`, normal
-// `planeNormal`) down to its intersection with the convex polygon `clip`,
-// by successively cutting `subject` against each of clip's edges -- reuses
-// ClipWinding by building, per edge, a plane containing that edge and
-// perpendicular to planeNormal, oriented to keep clip's own interior.
-Winding IntersectCoplanarPolygons(const Winding &subject, const Winding &clip, const Vec3 &planeNormal)
-{
-	if (clip.size() < 3)
-		return {};
-
-	Vec3 centroid(0, 0, 0);
-	for (const Vec3 &v : clip)
-		centroid = centroid + v;
-	centroid = centroid * (1.0 / static_cast<double>(clip.size()));
-
-	Winding result = subject;
-	for (size_t i = 0; i < clip.size() && !result.empty(); ++i)
-	{
-		Vec3 e1 = clip[i];
-		Vec3 e2 = clip[(i + 1) % clip.size()];
-		Vec3 edgeDir = (e2 - e1).Normalized();
-		if (edgeDir.Length() < 1e-9)
-			continue; // degenerate edge (coincident points); skip
-
-		Plane cutPlane;
-		cutPlane.normal = planeNormal.Cross(edgeDir).Normalized();
-		cutPlane.dist = cutPlane.normal.Dot(e1);
-
-		if (cutPlane.normal.Dot(centroid) - cutPlane.dist < 0.0)
-		{
-			cutPlane.normal = cutPlane.normal * -1.0;
-			cutPlane.dist = -cutPlane.dist;
-		}
-
-		result = ClipWinding(result, cutPlane, /*keepFront=*/true, 0.01);
-	}
-	return result;
-}
-
 // The two most-separated vertices of a small convex polygon -- used as the
 // portal's segment endpoints. An approximation for wide shared-face overlaps
 // (a proper navmesh portal edge is a single boundary segment; this takes the

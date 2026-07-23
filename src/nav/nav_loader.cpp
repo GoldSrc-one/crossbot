@@ -113,6 +113,9 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		area.centroid = Vector(rec.centroid[0], rec.centroid[1], rec.centroid[2]);
 		area.areaFlags = rec.areaFlags;
 		area.gravityScale = rec.gravityScale;
+		area.doorActivation = rec.doorActivation;
+		area.doorActivatorPos = Vector(rec.doorActivatorPos[0], rec.doorActivatorPos[1], rec.doorActivatorPos[2]);
+		area.doorWaitTime = rec.doorWaitTime;
 		area.portalIndices.reserve(rec.portalCount);
 		for (uint32_t k = 0; k < rec.portalCount; ++k)
 			area.portalIndices.push_back(areaPortalIndex[rec.portalOffset + k]);
@@ -154,8 +157,6 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		edge.type = rec.type;
 		edge.anchorFrom = Vector(rec.anchorFrom[0], rec.anchorFrom[1], rec.anchorFrom[2]);
 		edge.anchorTo = Vector(rec.anchorTo[0], rec.anchorTo[1], rec.anchorTo[2]);
-		if (rec.stringTableOffset >= 0 && static_cast<size_t>(rec.stringTableOffset) < stringTable.size())
-			edge.targetname = &stringTable[static_cast<size_t>(rec.stringTableOffset)];
 	}
 
 	char msg[700];

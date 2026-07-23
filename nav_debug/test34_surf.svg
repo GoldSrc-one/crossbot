@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-12.8 -524.8 537.6 537.6" font-family="monospace">
+<title>test34_surf nav debug</title>
+<rect x="-12.8" y="-524.8" width="537.6" height="537.6" fill="#0b1220"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/></marker></defs>
+<g stroke="#2c3e50" stroke-width="0.72" fill-opacity="0.85">
+<polygon fill="#c9d6e3" points="288.0,-496.0 496.0,-496.0 496.0,-320.0 288.0,-320.0 "/>
+<polygon fill="#c9d6e3" points="398.7,-320.0 447.7,-320.0 447.7,-16.0 398.7,-16.0 "/>
+<polygon fill="#c9d6e3" points="288.0,-320.0 398.7,-320.0 398.7,-240.0 288.0,-240.0 "/>
+<polygon fill="#c9d6e3" points="288.0,-64.0 384.0,-64.0 384.0,-16.0 288.0,-16.0 "/>
+<polygon fill="#c9d6e3" points="384.0,-64.0 398.7,-64.0 398.7,-16.0 384.0,-16.0 "/>
+<polygon fill="#c9d6e3" points="384.0,-240.0 398.7,-240.0 398.7,-64.0 384.0,-64.0 "/>
+<polygon fill="#c9d6e3" points="384.0,-240.0 398.7,-240.0 398.7,-64.0 384.0,-64.0 "/>
+<polygon fill="#c9d6e3" points="16.0,-240.0 496.0,-240.0 496.0,-64.0 16.0,-64.0 "/>
+<polygon fill="#c9d6e3" points="288.0,-240.0 384.0,-240.0 384.0,-64.0 288.0,-64.0 "/>
+<polygon fill="#c9d6e3" points="288.0,-240.0 384.0,-240.0 384.0,-64.0 288.0,-64.0 "/>
+<polygon fill="#c9d6e3" points="128.0,-240.0 224.0,-240.0 224.0,-64.0 128.0,-64.0 "/>
+<polygon fill="#c9d6e3" points="128.0,-240.0 224.0,-240.0 224.0,-64.0 128.0,-64.0 "/>
+<polygon fill="#c9d6e3" points="224.0,-48.0 288.0,-48.0 288.0,-16.0 224.0,-16.0 "/>
+<polygon fill="#c9d6e3" points="16.0,-496.0 224.0,-496.0 224.0,-320.0 16.0,-320.0 "/>
+<polygon fill="#c9d6e3" points="64.3,-240.0 64.3,-320.0 224.0,-320.0 224.0,-240.0 "/>
+<polygon fill="#c9d6e3" points="64.3,-240.0 113.3,-240.0 113.3,-16.0 64.3,-16.0 "/>
+<polygon fill="#c9d6e3" points="113.3,-64.0 128.0,-64.0 128.0,-16.0 113.3,-16.0 "/>
+<polygon fill="#c9d6e3" points="128.0,-64.0 224.0,-64.0 224.0,-16.0 128.0,-16.0 "/>
+<polygon fill="#c9d6e3" points="113.3,-240.0 128.0,-240.0 128.0,-64.0 113.3,-64.0 "/>
+<polygon fill="#c9d6e3" points="113.3,-240.0 128.0,-240.0 128.0,-64.0 113.3,-64.0 "/>
+<polygon fill="#c9d6e3" points="16.0,-64.0 496.0,-64.0 496.0,-16.0 16.0,-16.0 "/>
+<polygon fill="#caa6f2" points="384.0,-240.0 393.3,-240.0 393.3,-64.0 384.0,-64.0 "/>
+<polygon fill="#caa6f2" points="118.7,-240.0 128.0,-240.0 128.0,-64.0 118.7,-64.0 "/>
+</g>
+<g stroke-linecap="round">
+<line x1="329.1" y1="-40.0" x2="256.0" y2="-32.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="329.1" y1="-40.0" x2="256.0" y2="-32.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="182.9" y1="-40.0" x2="121.7" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="182.9" y1="-40.0" x2="121.7" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-152.0" x2="123.1" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-152.0" x2="123.1" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-152.0" x2="123.1" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-152.0" x2="124.9" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-152.0" x2="123.1" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-152.0" x2="124.9" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="392.0" y1="-408.0" x2="415.0" y2="-168.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="392.0" y1="-408.0" x2="343.4" y2="-280.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="120.0" y1="-408.0" x2="166.1" y2="-280.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="415.0" y1="-168.0" x2="343.4" y2="-280.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="415.0" y1="-168.0" x2="391.4" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="415.0" y1="-168.0" x2="388.9" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="343.4" y1="-280.0" x2="388.9" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="343.4" y1="-280.0" x2="256.0" y2="-152.0" stroke="#c0392b" stroke-width="2.18" stroke-dasharray="8,3" marker-end="url(#arrow)"/>
+<line x1="343.4" y1="-280.0" x2="256.0" y2="-152.0" stroke="#c0392b" stroke-width="2.18" stroke-dasharray="8,3" marker-end="url(#arrow)"/>
+<line x1="166.1" y1="-280.0" x2="97.0" y2="-144.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="166.1" y1="-280.0" x2="97.0" y2="-144.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="166.1" y1="-280.0" x2="256.0" y2="-152.0" stroke="#c0392b" stroke-width="2.18" stroke-dasharray="8,3" marker-end="url(#arrow)"/>
+<line x1="166.1" y1="-280.0" x2="123.1" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="166.1" y1="-280.0" x2="123.1" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="391.4" y1="-40.0" x2="329.1" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="388.9" y1="-152.0" x2="256.0" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="388.9" y1="-152.0" x2="256.0" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="388.9" y1="-152.0" x2="256.0" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="388.9" y1="-152.0" x2="256.0" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="387.1" y1="-152.0" x2="256.0" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="387.1" y1="-152.0" x2="256.0" y2="-152.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="388.9" y1="-152.0" x2="391.4" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="329.1" y1="-40.0" x2="256.0" y2="-152.0" stroke="#c0392b" stroke-width="2.18" stroke-dasharray="8,3" marker-end="url(#arrow)"/>
+<line x1="182.9" y1="-40.0" x2="256.0" y2="-152.0" stroke="#c0392b" stroke-width="2.18" stroke-dasharray="8,3" marker-end="url(#arrow)"/>
+<line x1="123.1" y1="-152.0" x2="121.7" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-152.0" x2="256.0" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-32.0" x2="182.9" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="256.0" y1="-32.0" x2="182.9" y2="-40.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="121.7" y1="-40.0" x2="97.0" y2="-144.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="123.1" y1="-152.0" x2="97.0" y2="-144.0" stroke="#98a6b3" stroke-width="1.68"/>
+</g>
+<g fill="#0b1220" text-anchor="middle" font-size="15.36">
+<text x="392.0" y="-408.0">0</text>
+<text x="415.0" y="-168.0">1</text>
+<text x="343.4" y="-280.0">2</text>
+<text x="329.1" y="-40.0">3</text>
+<text x="391.4" y="-40.0">4</text>
+<text x="391.4" y="-25.6" font-size="11.52" fill="#7a1f1f">V</text>
+<text x="388.9" y="-152.0">5</text>
+<text x="256.0" y="-152.0">6</text>
+<text x="256.0" y="-137.6" font-size="11.52" fill="#7a1f1f">K</text>
+<text x="256.0" y="-32.0">7</text>
+<text x="256.0" y="-17.6" font-size="11.52" fill="#7a1f1f">C</text>
+<text x="120.0" y="-408.0">8</text>
+<text x="120.0" y="-393.6" font-size="11.52" fill="#7a1f1f">VK</text>
+<text x="166.1" y="-280.0">9</text>
+<text x="97.0" y="-144.0">10</text>
+<text x="121.7" y="-40.0">11</text>
+<text x="121.7" y="-25.6" font-size="11.52" fill="#7a1f1f">V</text>
+<text x="182.9" y="-40.0">12</text>
+<text x="123.1" y="-152.0">13</text>
+<text x="256.0" y="-40.0">14</text>
+<text x="387.1" y="-152.0">15</text>
+<text x="124.9" y="-152.0">16</text>
+</g>
+<polyline fill="none" stroke="#f1c40f" stroke-width="3.36" stroke-opacity="0.9" stroke-linecap="round" stroke-linejoin="round" points="128.0,-384.0 193.3,-248.7 384.0,-224.0 391.4,-240.0 382.7,-320.0 400.0,-384.0 "/>
+<circle cx="128.0" cy="-384.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<circle cx="193.3" cy="-248.7" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<circle cx="384.0" cy="-224.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<circle cx="391.4" cy="-240.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<circle cx="382.7" cy="-320.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<circle cx="400.0" cy="-384.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<circle cx="128.0" cy="-384.0" r="7.68" fill="#2ecc71" stroke="#0b1220" stroke-width="0.96"/>
+<circle cx="400.0" cy="-384.0" r="7.68" fill="#e74c3c" stroke="#0b1220" stroke-width="0.96"/>
+<rect x="-12.8" y="-524.8" width="163.2" height="254.6" fill="#0b1220" fill-opacity="0.85" stroke="#4a5a6a" stroke-width="0.72"/>
+<text x="-8.0" y="-515.2" font-size="16.32" fill="#ffffff" font-weight="bold">test34_surf</text>
+<rect x="-8.0" y="-503.5" width="14.40" height="8.64" fill="#c9d6e3"/>
+<text x="11.2" y="-495.8" font-size="12.48" fill="#e8eef4">area (normal)</text>
+<rect x="-8.0" y="-487.2" width="14.40" height="8.64" fill="#caa6f2"/>
+<text x="11.2" y="-479.5" font-size="12.48" fill="#e8eef4">area (crouch-only)</text>
+<rect x="-8.0" y="-470.8" width="14.40" height="8.64" fill="#7fa8d9"/>
+<text x="11.2" y="-463.2" font-size="12.48" fill="#e8eef4">area (door)</text>
+<line x1="-8.0" y1="-450.2" x2="6.4" y2="-450.2" stroke="#98a6b3" stroke-width="2.40"/>
+<text x="11.2" y="-446.8" font-size="12.48" fill="#e8eef4">walk portal</text>
+<line x1="-8.0" y1="-433.9" x2="6.4" y2="-433.9" stroke="#e08a00" stroke-width="2.40" stroke-dasharray="6,4"/>
+<text x="11.2" y="-430.5" font-size="12.48" fill="#e8eef4">jump (heuristic)</text>
+<line x1="-8.0" y1="-417.6" x2="6.4" y2="-417.6" stroke="#c0392b" stroke-width="2.40" stroke-dasharray="8,3"/>
+<text x="11.2" y="-414.2" font-size="12.48" fill="#e8eef4">one-way drop</text>
+<line x1="-8.0" y1="-401.2" x2="6.4" y2="-401.2" stroke="#8e44ad" stroke-width="2.40"/>
+<text x="11.2" y="-397.9" font-size="12.48" fill="#e8eef4">ladder</text>
+<line x1="-8.0" y1="-384.9" x2="6.4" y2="-384.9" stroke="#27ae60" stroke-width="2.40"/>
+<text x="11.2" y="-381.6" font-size="12.48" fill="#e8eef4">elevator</text>
+<line x1="-8.0" y1="-368.6" x2="6.4" y2="-368.6" stroke="#f1c40f" stroke-width="2.40"/>
+<text x="11.2" y="-365.2" font-size="12.48" fill="#e8eef4">A* path (spawn->target)</text>
+<text x="-8.0" y="-348.9" font-size="11.52" fill="#e8eef4">V=vantage C=camp K=chokepoint-cover</text>
+<text x="-8.0" y="-332.6" font-size="11.52" fill="#e8eef4">door area: T=touch B=button G=trigger</text>
+<circle cx="-0.8" cy="-319.6" r="7.68" fill="#2ecc71"/><text x="11.2" y="-316.3" font-size="12.48" fill="#e8eef4">spawn</text><circle cx="59.2" cy="-319.6" r="7.68" fill="#e74c3c"/><text x="71.2" y="-316.3" font-size="12.48" fill="#e8eef4">target</text>
+</svg>

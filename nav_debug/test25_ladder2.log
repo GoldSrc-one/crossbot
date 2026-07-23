@@ -1,0 +1,11 @@
+maps/test25_ladder2.bsp: 6 hull-1 empty leaves (0 affected by 0 blocking entities: 0 fully removed, 0 split into multiple pieces), total volume 22077440 cu.units
+maps/test25_ladder2.bsp: 0 additional crouch-only (hull-3) leaves found
+maps/test25_ladder2.bsp: 5 raw portals -> 6 areas, 5 inter-area portals (MergeAreas disabled)
+maps/test25_ladder2.bsp: 0 tiny-leaf-sliver areas absorbed into neighbors (6 areas remain)
+maps/test25_ladder2.bsp: 1 spawn point(s) resolved, 6 areas reachable after first pass (0 void areas pruned)
+maps/test25_ladder2.bsp: 6 areas reachable after direction-aware second pass (0 one-way-only areas pruned)
+maps/test25_ladder2.bsp: 2 ladder edges, 0 door edges, 0 jump edges, 1 drop-off edges, 0 elevator edges
+maps/test25_ladder2.bsp: tactical tagging -> 2 vantage, 2 camp, 0 chokepoint-cover areas (of 6)
+maps/test25_ladder2.bsp: 0 areas require crouching (hull-3-only clearance)
+wrote nav_debug/test25_ladder2.svg
+wrote nav_debug/test25_ladder2_discard.nav (map "test25_ladder2", checksum 0xA210CDEF)

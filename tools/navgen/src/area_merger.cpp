@@ -232,10 +232,85 @@ MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<
 	return result;
 }
 
-MergeResult AbsorbTinyAreas(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
-	double minVolume)
+MergeResult MergeAreaPairs(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
+	const std::vector<std::pair<int, int>> &pairs)
 {
 	size_t n = areas.size();
+
+	std::vector<int> parent(n);
+	std::iota(parent.begin(), parent.end(), 0);
+	auto find = [&](int x)
+	{
+		while (parent[static_cast<size_t>(x)] != x)
+		{
+			parent[static_cast<size_t>(x)] = parent[static_cast<size_t>(parent[static_cast<size_t>(x)])];
+			x = parent[static_cast<size_t>(x)];
+		}
+		return x;
+	};
+
+	// Union direction matters (see the header comment): the `into` side's
+	// root must stay the root so the surviving polytope is the supporting
+	// area's, never a column's. Chained pairs resolve transitively in
+	// whichever order they arrive: pointing the `from` side's current root
+	// at the `into` side's current root can never make a column a final
+	// root, since a column only ever appears as `from` in some pair.
+	for (const auto &[from, into] : pairs)
+	{
+		if (from < 0 || into < 0 || static_cast<size_t>(from) >= n || static_cast<size_t>(into) >= n)
+			continue;
+		int rootFrom = find(from);
+		int rootInto = find(into);
+		if (rootFrom != rootInto)
+			parent[static_cast<size_t>(rootFrom)] = rootInto;
+	}
+
+	// Assembly is AbsorbTinyAreas' exactly: survivor keeps the root's own
+	// polytope, absorbed members contribute memberLeafIds, portals re-key
+	// and now-internal ones drop.
+	MergeResult result;
+	std::vector<int> rootToNewId(n, -1);
+	for (size_t i = 0; i < n; ++i)
+	{
+		int root = find(static_cast<int>(i));
+		if (rootToNewId[static_cast<size_t>(root)] != -1)
+			continue;
+		rootToNewId[static_cast<size_t>(root)] = static_cast<int>(result.areas.size());
+		Area a = areas[static_cast<size_t>(root)];
+		a.id = rootToNewId[static_cast<size_t>(root)];
+		result.areas.push_back(std::move(a));
+	}
+	for (size_t i = 0; i < n; ++i)
+	{
+		int root = find(static_cast<int>(i));
+		if (root == static_cast<int>(i))
+			continue;
+		Area &survivor = result.areas[static_cast<size_t>(rootToNewId[static_cast<size_t>(root)])];
+		for (int leafId : areas[i].memberLeafIds)
+			survivor.memberLeafIds.push_back(leafId);
+	}
+
+	for (const MergedPortal &p : portals)
+	{
+		int newA = rootToNewId[static_cast<size_t>(find(p.areaA))];
+		int newB = rootToNewId[static_cast<size_t>(find(p.areaB))];
+		if (newA == newB)
+			continue;
+
+		MergedPortal np = p;
+		np.areaA = newA;
+		np.areaB = newB;
+		result.portals.push_back(np);
+	}
+
+	return result;
+}
+
+MergeResult AbsorbTinyAreas(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
+	double minVolume, const std::vector<bool> &neverAbsorber)
+{
+	size_t n = areas.size();
+	bool haveNeverAbsorber = neverAbsorber.size() == n;
 
 	std::vector<double> volume(n);
 	for (size_t i = 0; i < n; ++i)
@@ -282,6 +357,8 @@ MergeResult AbsorbTinyAreas(const std::vector<Area> &areas, const std::vector<Me
 				int otherRoot = find(other);
 				if (otherRoot == root)
 					continue;
+				if (haveNeverAbsorber && neverAbsorber[static_cast<size_t>(otherRoot)])
+					continue; // e.g. a door area -- ineligible as an absorption target, see this function's own comment
 				if (volume[static_cast<size_t>(otherRoot)] > bestVolume)
 				{
 					bestVolume = volume[static_cast<size_t>(otherRoot)];
@@ -302,6 +379,20 @@ MergeResult AbsorbTinyAreas(const std::vector<Area> &areas, const std::vector<Me
 	// root's own polytope/shape as-is. Not a geometric union: an absorbed
 	// sliver contributes nothing meaningful to the survivor's shape, only
 	// its portal connectivity, which the re-key pass below folds in.
+	//
+	// memberLeafIds, though, DOES get every absorbed leaf's id appended --
+	// unlike the polytope, this is cheap, exact bookkeeping (no geometry
+	// merge needed) and it's the one place downstream consumers can still
+	// find "which original leaves ended up part of this area" after their
+	// own shapes stopped being independently represented. Two real consumers
+	// needed this: ComputeCrouchAreaFlags (a hull-3-only sliver absorbed into
+	// a hull-1 survivor must still mark the merged area crouch-required), and
+	// the nav-mesh debug SVG (tools/navgen/src/svg_debug.cpp), which draws
+	// every member leaf's own footprint rather than just the survivor's --
+	// confirmed live: without this, a target/spawn point sitting inside an
+	// absorbed leaf's own volume rendered as a hole in the map with no area
+	// drawn over it at all, even though that space is genuinely still part
+	// of the (reachable) survivor area.
 	MergeResult result;
 	std::vector<int> rootToNewId(n, -1);
 	for (size_t i = 0; i < n; ++i)
@@ -313,6 +404,15 @@ MergeResult AbsorbTinyAreas(const std::vector<Area> &areas, const std::vector<Me
 		Area a = areas[static_cast<size_t>(root)];
 		a.id = rootToNewId[static_cast<size_t>(root)];
 		result.areas.push_back(std::move(a));
+	}
+	for (size_t i = 0; i < n; ++i)
+	{
+		int root = find(static_cast<int>(i));
+		if (root == static_cast<int>(i))
+			continue; // the survivor itself -- its own memberLeafIds are already in place
+		Area &survivor = result.areas[static_cast<size_t>(rootToNewId[static_cast<size_t>(root)])];
+		for (int leafId : areas[i].memberLeafIds)
+			survivor.memberLeafIds.push_back(leafId);
 	}
 
 	for (const MergedPortal &p : portals)

@@ -103,6 +103,40 @@ double WindingArea(const Winding &winding, const Vec3 &normal)
 	return std::fabs(sum.Dot(normal.Normalized())) * 0.5;
 }
 
+Winding IntersectCoplanarPolygons(const Winding &subject, const Winding &clip, const Vec3 &planeNormal)
+{
+	if (clip.size() < 3)
+		return {};
+
+	Vec3 centroid(0, 0, 0);
+	for (const Vec3 &v : clip)
+		centroid = centroid + v;
+	centroid = centroid * (1.0 / static_cast<double>(clip.size()));
+
+	Winding result = subject;
+	for (size_t i = 0; i < clip.size() && !result.empty(); ++i)
+	{
+		Vec3 e1 = clip[i];
+		Vec3 e2 = clip[(i + 1) % clip.size()];
+		Vec3 edgeDir = (e2 - e1).Normalized();
+		if (edgeDir.Length() < 1e-9)
+			continue; // degenerate edge (coincident points); skip
+
+		Plane cutPlane;
+		cutPlane.normal = planeNormal.Cross(edgeDir).Normalized();
+		cutPlane.dist = cutPlane.normal.Dot(e1);
+
+		if (cutPlane.normal.Dot(centroid) - cutPlane.dist < 0.0)
+		{
+			cutPlane.normal = cutPlane.normal * -1.0;
+			cutPlane.dist = -cutPlane.dist;
+		}
+
+		result = ClipWinding(result, cutPlane, /*keepFront=*/true, 0.01);
+	}
+	return result;
+}
+
 double Polytope::Volume() const
 {
 	if (faces.empty())
@@ -145,6 +179,57 @@ Vec3 Polytope::Centroid() const
 	if (count == 0)
 		return Vec3();
 	return sum * (1.0 / count);
+}
+
+Polytope ClipPolytope(const Polytope &poly, const Plane &plane, bool keepFront, double mapRadius, double epsilon)
+{
+	Polytope result;
+
+	for (const Face &f : poly.faces)
+	{
+		Winding w = ClipWinding(f.winding, plane, keepFront, epsilon);
+		if (w.size() >= 3)
+			result.faces.push_back({f.plane, std::move(w)});
+	}
+
+	// `plane` oriented so its front side matches the half-space we kept --
+	// the new face's own "interior is on the front" convention has to agree
+	// with every other face already in `result`.
+	Plane facePlane = plane;
+	if (!keepFront)
+	{
+		facePlane.normal = plane.normal * -1.0;
+		facePlane.dist = -plane.dist;
+	}
+
+	Winding cross = BaseWindingForPlane(facePlane, mapRadius);
+	for (const Face &f : poly.faces)
+	{
+		cross = ClipWinding(cross, f.plane, /*keepFront=*/true, epsilon);
+		if (cross.empty())
+			break;
+	}
+	if (cross.size() >= 3)
+		result.faces.push_back({facePlane, std::move(cross)});
+
+	return result;
+}
+
+Polytope TranslatePolytope(const Polytope &poly, const Vec3 &offset)
+{
+	Polytope result;
+	result.faces.reserve(poly.faces.size());
+	for (const Face &f : poly.faces)
+	{
+		Face nf;
+		nf.plane.normal = f.plane.normal;
+		nf.plane.dist = f.plane.dist + f.plane.normal.Dot(offset);
+		nf.winding.reserve(f.winding.size());
+		for (const Vec3 &v : f.winding)
+			nf.winding.push_back(v + offset);
+		result.faces.push_back(std::move(nf));
+	}
+	return result;
 }
 
 } // namespace navgen

@@ -1,0 +1,11 @@
+maps/test4_slope.bsp: 8 hull-1 empty leaves (0 affected by 0 blocking entities: 0 fully removed, 0 split into multiple pieces), total volume 10107584 cu.units
+maps/test4_slope.bsp: 0 additional crouch-only (hull-3) leaves found
+maps/test4_slope.bsp: 7 raw portals -> 8 areas, 7 inter-area portals (MergeAreas disabled)
+maps/test4_slope.bsp: 1 tiny-leaf-sliver areas absorbed into neighbors (7 areas remain)
+maps/test4_slope.bsp: 1 spawn point(s) resolved, 7 areas reachable after first pass (0 void areas pruned)
+maps/test4_slope.bsp: 7 areas reachable after direction-aware second pass (0 one-way-only areas pruned)
+maps/test4_slope.bsp: 0 ladder edges, 0 door edges, 0 jump edges, 0 drop-off edges, 0 elevator edges
+maps/test4_slope.bsp: tactical tagging -> 2 vantage, 1 camp, 2 chokepoint-cover areas (of 7)
+maps/test4_slope.bsp: 0 areas require crouching (hull-3-only clearance)
+wrote nav_debug/test4_slope.svg
+wrote nav_debug/test4_slope_discard.nav (map "test4_slope", checksum 0x607A3F3F)

@@ -45,4 +45,21 @@ void WalkClipnodeTreeForContents(const BspFile &bsp, int headnode, int targetCon
 // covers, by checking whether that same point reads as solid under hull 1.
 int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point);
 
+// Carves `poly` down one hull's clipnode tree: recursively splits it by
+// each node plane it spans, and returns the disjoint convex pieces landing
+// in leaves whose contents differ from `removeContents` (pieces in
+// `removeContents` leaves are discarded; pieces below `minPieceVolume` are
+// dropped as numeric slivers). For blocking-entity subtraction this is the
+// structurally-bounded alternative to subtracting the entity's extracted
+// solid volumes one by one: those volumes are hull-Minkowski-EXPANDED
+// convex leaves that overlap each other heavily (dozens of overlapping
+// slabs for a curved wall), so sequential per-volume subtraction
+// re-fragments every piece the previous volume produced -- confirmed
+// exploding to std::bad_alloc on test35_smoothwall's many-segment curved
+// func_wall. Carving by the tree fragments a piece at most once per node
+// plane on its path, exactly like the BSP compiler itself would have split
+// the space if the brush had been world geometry.
+std::vector<Polytope> CarvePolytopeAgainstTree(const BspFile &bsp, int headnode, const Polytope &poly,
+	int removeContents, double mapRadius, double minPieceVolume = 1.0, double epsilon = 0.01);
+
 } // namespace navgen

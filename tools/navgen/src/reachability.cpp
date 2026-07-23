@@ -50,6 +50,38 @@ Vec3 AreaCentroid(const Area &area)
 
 } // namespace
 
+int FindAreaContainingPoint(const Vec3 &point, const std::vector<Area> &areas)
+{
+	int found = -1;
+	for (const Area &area : areas)
+	{
+		if (PointInArea(point, area, kPointInAreaEpsilon))
+		{
+			found = area.id;
+			break;
+		}
+	}
+
+	if (found < 0 && !areas.empty())
+	{
+		// Fallback: nearest area by centroid, so a point sitting exactly on
+		// a boundary (or just outside due to compile rounding) still
+		// resolves to something instead of being silently dropped.
+		double best = std::numeric_limits<double>::max();
+		for (const Area &area : areas)
+		{
+			double d = (AreaCentroid(area) - point).Length();
+			if (d < best)
+			{
+				best = d;
+				found = area.id;
+			}
+		}
+	}
+
+	return found;
+}
+
 std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas)
 {
 	std::vector<int> result;
@@ -63,33 +95,7 @@ std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::
 		if (!ParseOrigin(ent.Get("origin"), origin))
 			continue;
 
-		int found = -1;
-		for (const Area &area : areas)
-		{
-			if (PointInArea(origin, area, kPointInAreaEpsilon))
-			{
-				found = area.id;
-				break;
-			}
-		}
-
-		if (found < 0 && !areas.empty())
-		{
-			// Fallback: nearest area by centroid, so a spawn sitting exactly
-			// on a boundary (or just outside due to compile rounding)
-			// still seeds the flood fill instead of being silently dropped.
-			double best = std::numeric_limits<double>::max();
-			for (const Area &area : areas)
-			{
-				double d = (AreaCentroid(area) - origin).Length();
-				if (d < best)
-				{
-					best = d;
-					found = area.id;
-				}
-			}
-		}
-
+		int found = FindAreaContainingPoint(origin, areas);
 		if (found >= 0)
 			result.push_back(found);
 	}

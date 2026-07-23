@@ -51,12 +51,36 @@ struct CBot
 	// short hop) -- without this gate the waypoint would complete before
 	// the bot ever left the ground. See Bot_MoveNav.
 	bool jumpAttempted = false;
+	// One-shot latch for Bot_MoveNav's fall telemetry (a qconsole log line
+	// the first frame of an unplanned airborne drop, with the exact origin
+	// and the waypoint being walked toward) -- reset on landing so each
+	// distinct fall logs exactly once, not every airborne frame.
+	bool fallTelemetryLogged = false;
+	// Per-tick origin recording while a goal is active, dumped to
+	// valve/crossbot_data/nav_trace.txt when the goal ends (reached OR
+	// dropped) -- navgen's --dump-svg --trace overlays it on the debug SVG
+	// next to the planned line and the momentum simulation, so plan vs.
+	// model vs. reality can be compared visually point by point. Cleared on
+	// each new goal assignment (BotManager::SetGoalForAllBots).
+	std::vector<Vector> traceLog;
 	// Set the first frame Bot_MoveNav's dynamic-obstacle trace finds
 	// something in the way that the baked nav mesh doesn't know about (a
 	// player-built structure, a monster, any solid entity placed at
 	// runtime after navgen ran) -- 0 means "not currently blocked". Used
 	// to force an early repath if a dodge doesn't clear it soon enough.
 	float obstacleBlockedSince = 0.f;
+	// Stall detection for the safety repath (Bot_MoveNav): the last time the
+	// bot completed a waypoint (or got a fresh path). The old design
+	// repathed on a blind periodic timer even while the bot was hitting
+	// every waypoint on schedule, which rebuilt the waypoint list
+	// mid-segment -- moving the pursuit line out from under the bot right
+	// as it threaded precise geometry (confirmed live on test24_precise2:
+	// the 10 s timer fired exactly as the bot reached a razor-thin beam
+	// junction, and the offline momentum simulation -- which has no repath
+	// -- drove the identical plan cleanly). Now a repath outside the forced
+	// obstacle case only happens after this has gone stale for the interval.
+	float lastProgressTime = 0.f;
+	int lastSeenWaypointIndex = 0;
 	// Last origin seen by Bot_MoveNav, used to detect a discontinuous jump
 	// (respawn, or -- once Milestone 2h's trigger_teleport lands -- a
 	// teleporter) and invalidate a now-meaningless stale path instead of

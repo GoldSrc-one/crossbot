@@ -8,13 +8,23 @@
 #include "../nav/nav_avoid.h"
 #include "../nav/nav_query.h"
 #include "../nav/path_astar.h"
+#include "../nav/path_follower.h"
 #include "../nav/path_funnel.h"
 
 namespace
 {
 	constexpr float kPi = 3.14159265f;
 	constexpr float kMoveSpeed = 250.f;
-	constexpr float kWaypointReachedDistance = 32.f;
+	// Loose arrival radius for the elevator/button/door approach branches
+	// below. Plain ground waypoints don't use this anymore -- their
+	// switching (tight corner radius + passed-the-perpendicular test),
+	// pure-pursuit aiming, and speed caps all live in the shared steering
+	// controller (src/nav/path_follower.h, NavFollow::Steer), the same code
+	// tools/navgen's offline movement simulation runs. The hard-won
+	// reasoning behind each rule (thin-beam corner cuts, drift bows,
+	// V-turn half-space traps -- all confirmed live on test23_precise/
+	// test24_precise2) is documented there.
+	constexpr float kWaypointReachedDistance = 24.f;
 	// Distance/facing gates before committing to a jump, matching FoxBot's
 	// precedent (bot_navigate.cpp): jump only once reasonably close and
 	// roughly lined up, rather than jk_botti's simpler "press jump the
@@ -32,20 +42,17 @@ namespace
 	// tens of units across, so a tight radius could read "not there yet"
 	// while the bot is already pressed up against it.
 	constexpr float kDoorWaitTriggerDistance = 64.f;
-	// How long to hold still once contact is made, before finishing the
-	// approach through the now-open doorway. GoldSrc's default func_door
-	// speed is commonly 100 units/sec (both test9_door's doors use it) --
-	// covers a plain slide comfortably and a func_door_rotating's 90-degree
-	// swing at speed 100 (0.9s) with margin, not a reverse-engineered
-	// per-door value (this doesn't read the door entity's actual
-	// speed/distance at all, just waits long enough for a typical door).
-	constexpr float kDoorOpenWaitTime = 1.5f;
 
 	// GoldSrc hull convention (dlls/extdef.h): point_hull=0, human_hull=1,
 	// large_hull=2, head_hull=3. Duplicated here rather than sharing a
 	// constant across files, matching this codebase's existing convention
 	// (see tools/navgen/src/hull_defs.h's own independent copy).
 	constexpr int kHullHuman = 1;
+	constexpr int kHullPoint = 0;
+	// How far below a dodge candidate's endpoint ground must exist for the
+	// dodge to be allowed (FindClearDirection) -- a clear forward trace over
+	// a pit is clear precisely BECAUSE there's nothing there.
+	constexpr float kDodgeFloorProbeDepth = 90.f;
 	// Baked nav data only reflects static geometry from whenever navgen ran
 	// -- a player-built structure, a monster, or any other solid entity
 	// placed at runtime isn't in it at all, so the waypoint direction can't
@@ -93,6 +100,20 @@ namespace
 			Vector traceEnd = pEdict->v.origin + candidate * traceDistance;
 			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
 
+			// A clear (or clearest) forward trace is NOT enough: over a pit
+			// edge the trace is clear precisely because there's nothing
+			// there. Require actual ground under the point this candidate
+			// would reach, or the dodge itself becomes the fall -- confirmed
+			// live on test24_precise2: the feeler deflected the bot
+			// "clear"-ward off a thin beam's edge, straight into the pit the
+			// planned route was carefully threading around.
+			Vector reach = pEdict->v.origin + candidate * (traceDistance * tr.flFraction);
+			TraceResult down;
+			g_engfuncs.pfnTraceHull(reach, reach - Vector(0.f, 0.f, kDodgeFloorProbeDepth), ignore_monsters,
+				kHullPoint, pEdict, &down);
+			if (down.flFraction >= 1.0f)
+				continue; // leads over open air -- never dodge that way
+
 			if (tr.flFraction >= 1.0f)
 				return candidate; // fully clear -- good enough, stop looking
 
@@ -103,7 +124,7 @@ namespace
 			}
 		}
 
-		return best; // nothing fully clear -- least-bad candidate
+		return best; // nothing fully clear (or nothing floored) -- least-bad candidate
 	}
 	// More than any single tick's max travel at kMoveSpeed, even at
 	// Bot_FrameMsec()'s 100ms clamp ceiling (250 u/s -> 25 u/tick) -- a jump
@@ -132,16 +153,6 @@ namespace
 	// ratio between this estimate and actual arrival times.
 	constexpr float kEtaSafetyMargin = 1.6f;
 
-	Vector RandomPointInArea(const Nav::Area &area)
-	{
-		// The baked format only stores each area's AABB/centroid, not its
-		// exact polytope (see nav_format.h), so there's nothing to sample
-		// a genuinely random interior point from -- using the centroid
-		// directly is a deliberate simplification, same class of
-		// approximation as nav_query's AABB-based point-to-area lookup.
-		return area.centroid;
-	}
-
 	void ResetPath(CBot &bot)
 	{
 		bot.waypoints.clear();
@@ -154,16 +165,30 @@ namespace
 		bot.visitedAreaPath.clear();
 		bot.pathStartTime = 0.f;
 		bot.estimatedArrivalTime = 0.f;
+		bot.lastProgressTime = 0.f;
+		bot.lastSeenWaypointIndex = 0;
+		bot.nextRepathTime = 0.f; // 0 = no forced repath scheduled (see Bot_MoveNav's repath condition)
 	}
 
-	void PickRandomGoal(CBot &bot, const Nav::NavMesh &mesh)
+	// Dumps the per-tick origin recording (see CBot::traceLog) for offline
+	// comparison: navgen --dump-svg --trace <file> overlays it on the debug
+	// SVG next to the planned line and the momentum simulation. Written
+	// whenever a goal ends, reached or dropped, then cleared.
+	void WriteTraceLog(CBot &bot)
 	{
-		if (mesh.areas.empty())
+		if (bot.traceLog.empty())
 			return;
-		const Nav::Area &area = mesh.areas[static_cast<size_t>(rand()) % mesh.areas.size()];
-		bot.goalPoint = RandomPointInArea(area);
-		bot.hasGoal = true;
-		ResetPath(bot);
+		FILE *f = fopen("valve/crossbot_data/nav_trace.txt", "w");
+		if (f)
+		{
+			for (const Vector &p : bot.traceLog)
+				fprintf(f, "%.1f %.1f %.1f\n", p.x, p.y, p.z);
+			fclose(f);
+			char msg[128];
+			snprintf(msg, sizeof(msg), "CrossBot: wrote nav_trace.txt (%zu points)\n", bot.traceLog.size());
+			SERVER_PRINT(msg);
+		}
+		bot.traceLog.clear();
 	}
 
 	bool Repath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict)
@@ -185,7 +210,7 @@ namespace
 		if (!path.found)
 			return false;
 
-		bot.waypoints = Nav::BuildWaypointPath(mesh, path, pEdict->v.origin, bot.goalPoint, pEdict);
+		bot.waypoints = Nav::BuildWaypointPath(mesh, path, pEdict->v.origin, bot.goalPoint);
 		bot.waypointIndex = 0;
 		bot.plannedAreaPath = path.areaPath;
 
@@ -233,23 +258,90 @@ void Bot_MoveNav(CBot &bot)
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
 	if (!bot.hasGoal)
-		PickRandomGoal(bot, *mesh);
-
-	// Suppressed while actively waiting for/riding an elevator: interrupting
-	// a ride mid-flight to repath from a position the bot is currently
-	// being carried through (not walking through) would abandon real
-	// progress for no reason.
-	if (bot.elevatorReadyTime <= 0.f && (bot.waypoints.empty() || bot.nextRepathTime <= gpGlobals->time))
 	{
+		// No goal -> stand idle. This used to pick a random area centroid to
+		// wander toward, which caused constant trouble in practice: bots
+		// strolled off ledges into inescapable pits before a scripted test's
+		// teleport+goal even arrived, and the resulting "reached goal" spam
+		// buried real arrivals in the log. A future combat/objective layer
+		// is what should be assigning goals, not a coin flip here.
+		Vector angles = Bot_UpdateFacing(bot);
+		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
+		return;
+	}
+
+	// Suppressed while actively waiting for/riding an elevator, holding at a
+	// button/trigger/door (bot.doorWaitUntil, shared by all three -- see
+	// bot.h), or still walking toward an unconsumed button/trigger waypoint
+	// later in the plan: BuildWaypointPath has no memory of "already fired,"
+	// so any repath before that crossing is actually behind the bot just
+	// re-inserts a fresh activation waypoint for the same portal and sends
+	// it walking all the way back -- confirmed live on test20_doortrigger.bsp,
+	// twice: first with only the doorWaitUntil guard (fixed the in-place-hold
+	// case), but the trigger volume sits far from both spawn and the door
+	// (~384 and ~163 units respectively), so the walk *to* it and the walk
+	// *from* it to the door each routinely outlasted kRepathInterval (10s) on
+	// their own -- a periodic repath mid-walk (not mid-hold) reinserted the
+	// same trigger waypoint over and over, forever, since the crossing was
+	// still ahead of the bot's waypointIndex every time. Once the bot's
+	// actually past that waypoint (index advanced beyond it), a repath is
+	// safe again -- by then the activation has already happened.
+	bool hasPendingActivation = false;
+	for (size_t wi = bot.waypointIndex; wi < bot.waypoints.size(); ++wi)
+	{
+		if (bot.waypoints[wi].requiresButtonUse || bot.waypoints[wi].requiresTriggerTouch)
+		{
+			hasPendingActivation = true;
+			break;
+		}
+	}
+	// Waypoint-completion progress tracking (stall detection for the safety
+	// repath below -- see CBot::lastProgressTime).
+	if (static_cast<int>(bot.waypointIndex) != bot.lastSeenWaypointIndex)
+	{
+		bot.lastSeenWaypointIndex = static_cast<int>(bot.waypointIndex);
+		bot.lastProgressTime = gpGlobals->time;
+	}
+
+	// A mid-route repath happens only when something is actually wrong:
+	// either the obstacle-dodge branch forced one (bot.nextRepathTime set to
+	// "now"), or no waypoint has been completed for kRepathInterval (a
+	// stall). The old blind periodic timer repathed even while the bot was
+	// hitting every waypoint on schedule -- rebuilding the waypoint list
+	// mid-segment moved the pursuit line out from under the bot right as it
+	// threaded precise geometry (see CBot::lastProgressTime's comment for
+	// the confirmed test24_precise2 case).
+	bool forcedRepath = bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
+	bool stalled = !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
+		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
+	if (bot.elevatorReadyTime <= 0.f && bot.doorWaitUntil <= 0.f && !hasPendingActivation &&
+		(bot.waypoints.empty() || forcedRepath || stalled))
+	{
+		if (!bot.waypoints.empty())
+		{
+			// Permanent telemetry, same spirit as the fall/arrival lines: a
+			// mid-route repath replaces the corridor from the current
+			// position on, which is a meaningful (and historically
+			// bug-prone) event worth being able to correlate with recorded
+			// trajectories after the fact.
+			char msg[160];
+			snprintf(msg, sizeof(msg), "CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
+				bot.name, forcedRepath ? "obstacle-forced" : "stalled", pEdict->v.origin.x, pEdict->v.origin.y,
+				pEdict->v.origin.z, bot.waypointIndex, bot.waypoints.size());
+			SERVER_PRINT(msg);
+		}
 		if (!Repath(bot, *mesh, pEdict))
 		{
 			// Goal unreachable, or a transient point-in-area miss -- drop
 			// it and let the next frame pick a fresh one rather than
 			// getting stuck retrying the same failing repath forever.
+			WriteTraceLog(bot);
 			bot.hasGoal = false;
 			return;
 		}
-		bot.nextRepathTime = gpGlobals->time + kRepathInterval;
+		bot.nextRepathTime = 0.f; // no scheduled repath -- only forced (obstacle) or stall triggers another
+		bot.lastProgressTime = gpGlobals->time;
+		bot.lastSeenWaypointIndex = static_cast<int>(bot.waypointIndex);
 	}
 
 	// Append to the actual-path trace whenever the bot's real area changes
@@ -260,21 +352,27 @@ void Bot_MoveNav(CBot &bot)
 	if (curArea && (bot.visitedAreaPath.empty() || bot.visitedAreaPath.back() != curArea->id))
 		bot.visitedAreaPath.push_back(curArea->id);
 
+	// Per-tick origin recording while the goal is active (see
+	// CBot::traceLog) -- flushed to disk by WriteTraceLog when the goal
+	// ends. Capped defensively; at ~100 ticks/sec this covers well over ten
+	// minutes of continuous driving, far past any test's timeout.
+	if (bot.traceLog.size() < 100000)
+		bot.traceLog.push_back(pEdict->v.origin);
+
 	if (bot.waypointIndex >= bot.waypoints.size())
 	{
 		// Permanent (not debug-only) telemetry: an external test driver
 		// (scripts/nav_target_test.ps1) greps qconsole.log for this exact
 		// line rather than racing live rcon polls against
-		// crossbot_nav_status -- a bot that arrives at a short goal and
-		// immediately auto-picks a new wander goal (PickRandomGoal, right
-		// above in this same function) can complete well within one poll
-		// interval, so the "goal=" field a poll observes may already be
-		// the *next* goal, never the one that just succeeded.
+		// crossbot_nav_status -- a short goal can complete well within one
+		// poll interval, so the "goal=" field a poll observes may already
+		// be gone by the time the poll lands.
 		char msg[128];
 		snprintf(msg, sizeof(msg), "CrossBot: %s reached goal (%.1f,%.1f,%.1f)\n", bot.name, bot.goalPoint.x,
 			bot.goalPoint.y, bot.goalPoint.z);
 		SERVER_PRINT(msg);
 
+		WriteTraceLog(bot);
 		bot.hasGoal = false; // reached the goal
 		ResetPath(bot);
 		return;
@@ -283,6 +381,29 @@ void Bot_MoveNav(CBot &bot)
 	const Nav::Waypoint &waypoint = bot.waypoints[bot.waypointIndex];
 	Vector toTarget = waypoint.point - pEdict->v.origin;
 	float horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
+
+	// Fall telemetry: log the exact origin the first frame of an unplanned
+	// airborne drop (not a jump waypoint's own deliberate hop). rcon polling
+	// is far too slow to catch where a bot actually stepped off a thin
+	// walkway -- by the next poll it's already at the bottom of the pit with
+	// its momentum gone.
+	{
+		bool onGroundNow = (pEdict->v.flags & FL_ONGROUND) != 0;
+		if (onGroundNow)
+		{
+			bot.fallTelemetryLogged = false;
+		}
+		else if (!bot.fallTelemetryLogged && pEdict->v.velocity.z < -120.f && !waypoint.requiresJump)
+		{
+			char fallMsg[192];
+			snprintf(fallMsg, sizeof(fallMsg),
+				"CrossBot: %s falling at (%.1f,%.1f,%.1f) heading to wp %zu/%zu (%.1f,%.1f,%.1f)\n", bot.name,
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.waypointIndex,
+				bot.waypoints.size(), waypoint.point.x, waypoint.point.y, waypoint.point.z);
+			SERVER_PRINT(fallMsg);
+			bot.fallTelemetryLogged = true;
+		}
+	}
 
 	if (waypoint.requiresElevatorRide)
 	{
@@ -329,7 +450,7 @@ void Bot_MoveNav(CBot &bot)
 
 		// At the button -- face it and hold +USE. CBaseButton only wires up
 		// a Touch function when SF_BUTTON_TOUCH_ONLY is set on the entity;
-		// none of the buttons edge_tagger.cpp's ResolveButtonForDoor
+		// none of the buttons door_extractor.cpp's ResolveButtonForDoor
 		// resolves have that flag (the ones confirmed live on
 		// test10_doorbutton/test11_doorbutton2 don't), so simply touching
 		// it does nothing -- CBasePlayer::PlayerUse's own forward-facing
@@ -376,7 +497,7 @@ void Bot_MoveNav(CBot &bot)
 		// the bot back out of the doorway in a loop that never actually
 		// finished going through.
 		if (bot.doorWaitUntil <= 0.f)
-			bot.doorWaitUntil = gpGlobals->time + kDoorOpenWaitTime;
+			bot.doorWaitUntil = gpGlobals->time + waypoint.doorWaitTime;
 
 		Vector angles = Bot_UpdateFacing(bot);
 		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
@@ -431,10 +552,20 @@ void Bot_MoveNav(CBot &bot)
 			return;
 		}
 	}
-	else if (horizDist < kWaypointReachedDistance)
+
+	// Shared steering decision (waypoint switching, pursuit aim point, and
+	// the plan-encoded speed cap) -- see path_follower.h. Only consulted for
+	// plain ground movement; the jump branch above and the ladder/commit
+	// branches below keep their own aiming.
+	NavFollow::Decision steer;
+	if (!needsJump)
 	{
-		++bot.waypointIndex; // pick up the next waypoint next frame with a fresh direction
-		return;
+		steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin);
+		if (steer.advance)
+		{
+			++bot.waypointIndex; // pick up the next waypoint next frame with a fresh direction
+			return;
+		}
 	}
 
 	// A jump waypoint's point is often a real walk away from the takeoff
@@ -468,9 +599,15 @@ void Bot_MoveNav(CBot &bot)
 	}
 	else
 	{
+		// The shared controller already picked the pure-pursuit aim point on
+		// the planned segment (and the plan-encoded speed cap) -- see
+		// path_follower.h. This branch layers the engine-side reactions on
+		// top: avoidance deflection and the obstacle feeler.
+		Vector aimTarget = steer.aimPoint - pEdict->v.origin;
+
 		// Avoidance only applies to normal ground steering -- deflecting a
 		// bot mid-climb would fight the ladder's precise alignment needs.
-		Vector steerDir = NavAvoid::Deflect(bot, toTarget);
+		Vector steerDir = NavAvoid::Deflect(bot, aimTarget);
 
 		// Don't blindly trust the baked path -- trace ahead the same way
 		// Bot_MoveWander already does, and dodge if something's actually in
@@ -484,7 +621,21 @@ void Bot_MoveNav(CBot &bot)
 			TraceResult tr;
 			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
 
-			if (tr.flFraction < 1.0f)
+			// The feeler exists for obstacles the baked nav data can't know
+			// about -- and those are entities (players, monsters, pushables,
+			// func_walls...), never worldspawn itself. Static world brushes
+			// are exactly what the plan already routes around, so a
+			// worldspawn hit must NOT trigger a dodge: near a tight neck
+			// (test24_precise2's razor beam junction, walls one hull-radius
+			// away) the forward trace brushes the wall every tick, and the
+			// old unconditional dodge deflected the bot toward the "clear"
+			// side -- which was clear because it was the open air above the
+			// pit. Recorded-trajectory overlay confirmed the eastward drift
+			// beginning exactly one feeler-length before the junction.
+			bool hitDynamicObstacle = tr.flFraction < 1.0f && tr.pHit &&
+				g_engfuncs.pfnIndexOfEdict(tr.pHit) != 0;
+
+			if (hitDynamicObstacle)
 			{
 				if (bot.obstacleBlockedSince <= 0.f)
 					bot.obstacleBlockedSince = gpGlobals->time;
@@ -540,5 +691,20 @@ void Bot_MoveNav(CBot &bot)
 			buttons |= IN_DUCK;
 	}
 
-	g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, buttons, 0, Bot_FrameMsec());
+	// Speed: the shared controller's plan-encoded cap for plain ground
+	// movement (jump approaches/commits keep full run-up speed), then
+	// heading-error scaling (turn in place / creep / run -- see
+	// path_follower.h's Config). Ladder climbing is exempt: facing
+	// deliberately pitches steeply there and MOVETYPE_FLY motion is slow
+	// already; a jump commit is also effectively exempt (IN_JUMP only fires
+	// within kJumpFacingToleranceDeg, at or under the slowdown threshold,
+	// so the run-up keeps full speed).
+	float moveSpeed = (!needsJump && !onLadder) ? steer.baseSpeed : kMoveSpeed;
+	if (!onLadder)
+	{
+		float headingError = fabsf(NormalizeAngle(angles.y - bot.desiredAngles.y));
+		moveSpeed = NavFollow::ScaleSpeedByHeadingError(moveSpeed, headingError);
+	}
+
+	g_engfuncs.pfnRunPlayerMove(pEdict, angles, moveSpeed, 0.f, 0.f, buttons, 0, Bot_FrameMsec());
 }

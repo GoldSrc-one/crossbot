@@ -87,7 +87,35 @@ MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<
 // units (a standing hull alone is ~32*32*72 = 73728) became real waypoint
 // targets, and a bot aiming at a shoebox-sized centroid wedged against
 // several walls just got stuck bouncing off them.
+//
+// neverAbsorber, if non-empty, must be parallel to `areas`: true excludes
+// that area from ever being picked as a tiny neighbor's absorption target
+// (it can still itself be absorbed INTO something else if it's tiny) --
+// used for door areas (main.cpp), which tend to be large enough to look
+// like an attractive "biggest neighbor" to a nearby tiny room-approach
+// sliver, but since AbsorbTinyAreas never geometrically unions the
+// absorbed sliver's volume into the survivor's polytope (only its portal
+// connectivity, see above), a door "absorbing" an ordinary room sliver
+// would leave that sliver's real-world space uncovered by the door's own
+// (much smaller, specifically-shaped) polytope -- confirmed live on
+// test9_door: Nav::FindAreaForPoint failed true-containment for points in
+// exactly that dead zone, which poisoned pathfinding (silently dropping
+// the goal and falling back to wander) whenever the bot's real origin
+// landed there.
 MergeResult AbsorbTinyAreas(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
-	double minVolume);
+	double minVolume, const std::vector<bool> &neverAbsorber = {});
+
+// Unions explicit (areaFrom -> areaInto) pairs -- currently exclusively
+// floor_splitter.h's air-column pairs, merging each unsupported column into
+// the area below it. Each union's SURVIVING shape is the `areaInto` side's
+// polytope (transitively, for chained pairs: air over air over a pit floor
+// all collapses onto the pit floor's own area), which is what makes
+// TagDropOffs read the merged area's floor at its real (deep) height --
+// the column's own polytope bottom sits at the opening plane, not on any
+// floor. Like AbsorbTinyAreas, no geometric union: the absorbed side
+// contributes its memberLeafIds and portal connectivity only. Pairs are
+// pre-prune area ids under NoMerge's 1:1 id==index convention.
+MergeResult MergeAreaPairs(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
+	const std::vector<std::pair<int, int>> &pairs);
 
 } // namespace navgen

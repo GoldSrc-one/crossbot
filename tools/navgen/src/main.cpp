@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -6,17 +7,23 @@
 #include <stdexcept>
 #include <string>
 
+#include "astar_graph.h"
+#include "path_follower.h"
+#include "waypoint_plan.h"
 #include "area_merger.h"
 #include "blocking_entities.h"
 #include "bsp_file.h"
+#include "door_extractor.h"
 #include "edge_tagger.h"
 #include "elevator_tagger.h"
 #include "entity_parser.h"
+#include "floor_splitter.h"
 #include "hull_defs.h"
 #include "leaf_extractor.h"
 #include "nav_file.h"
 #include "portal_builder.h"
 #include "reachability.h"
+#include "svg_debug.h"
 #include "tactical_tagger.h"
 
 namespace
@@ -30,12 +37,15 @@ constexpr double kMapRadius = 8192.0;
 void PrintUsage(const char *argv0)
 {
 	std::fprintf(stderr,
-		"usage: %s <map.bsp> [--dump-leaves] [--dump-areas] [--dump-tactical] [--dump-planes <id>] [--dump-obj <out.obj>] [-o <out.nav>]\n"
+		"usage: %s <map.bsp> [--dump-leaves] [--dump-areas] [--dump-tactical] [--dump-planes <id>] [--dump-obj <out.obj>] [--dump-svg <out.svg>] [-o <out.nav>]\n"
 		"  --dump-leaves     print per-leaf (pre-merge) id/faces/volume/centroid stats\n"
 		"  --dump-areas      print per-area (post-merge) id/faces/volume/centroid/portal stats\n"
 		"  --dump-tactical   print per-area vantage/camp/chokepoint-cover scores and flags\n"
 		"  --dump-planes <id> print one final area's exact plane list (normal+dist) and face windings\n"
 		"  --dump-obj <path> write all merged area polytopes as an OBJ mesh, for spot-checking\n"
+		"  --dump-svg <path> write a top-down SVG of the final area/portal graph, for offline inspection\n"
+		"  --trace <path>    overlay a recorded bot trajectory (nav_trace.txt: one \"x y z\" per line,\n"
+		"                    written by the runtime plugin when a goal ends) on the --dump-svg output\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
 		argv0);
 }
@@ -105,7 +115,9 @@ int main(int argc, char **argv)
 	bool dumpLadders = false;
 	int dumpPlanesAreaId = -1;
 	std::string objPath;
+	std::string svgPath;
 	std::string navPath;
+	std::string tracePath;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -143,6 +155,24 @@ int main(int argc, char **argv)
 				return 1;
 			}
 			objPath = argv[++i];
+		}
+		else if (arg == "--dump-svg")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			svgPath = argv[++i];
+		}
+		else if (arg == "--trace")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			tracePath = argv[++i];
 		}
 		else if (arg == "-o")
 		{
@@ -205,12 +235,38 @@ int main(int argc, char **argv)
 		size_t rawLeafCount = leaves.size();
 		std::vector<navgen::ExtractedLeaf> navigableLeaves;
 		navigableLeaves.reserve(leaves.size());
+		size_t affectedLeaves = 0;
+		size_t fullyRemovedLeaves = 0;
+		size_t splitLeaves = 0;
 		for (navgen::ExtractedLeaf &leaf : leaves)
 		{
-			if (navgen::OverlapsAnyBlockingVolume(leaf, blockers))
+			if (!navgen::OverlapsAnyBlockingVolume(leaf, blockers))
+			{
+				leaf.id = static_cast<int>(navigableLeaves.size()); // re-index to match the filtered vector's positions
+				navigableLeaves.push_back(std::move(leaf));
 				continue;
-			leaf.id = static_cast<int>(navigableLeaves.size()); // re-index to match the filtered vector's positions
-			navigableLeaves.push_back(std::move(leaf));
+			}
+
+			// Carve the overlapping blocker(s) out rather than dropping the
+			// whole leaf -- a func_wall/func_door standing free-floating in
+			// the middle of an open room only blocks its own footprint, not
+			// every other bit of navigable space that happens to share the
+			// same hull-1 leaf (worldspawn's own clip tree never splits
+			// around a *different* model's brushwork).
+			++affectedLeaves;
+			std::vector<navgen::Polytope> pieces = navgen::SubtractBlockingVolumes(bsp, leaf.polytope, blockers, kMapRadius);
+			if (pieces.empty())
+				++fullyRemovedLeaves;
+			else if (pieces.size() > 1)
+				++splitLeaves;
+
+			for (navgen::Polytope &piece : pieces)
+			{
+				navgen::ExtractedLeaf split;
+				split.id = static_cast<int>(navigableLeaves.size());
+				split.polytope = std::move(piece);
+				navigableLeaves.push_back(std::move(split));
+			}
 		}
 		leaves = std::move(navigableLeaves);
 
@@ -218,8 +274,9 @@ int main(int argc, char **argv)
 		for (const navgen::ExtractedLeaf &leaf : leaves)
 			totalLeafVolume += leaf.polytope.Volume();
 
-		std::printf("%s: %zu hull-1 empty leaves (%zu excluded by %zu blocking entities), total volume %.0f cu.units\n",
-			bspPath.c_str(), leaves.size(), rawLeafCount - leaves.size(), blockers.size(), totalLeafVolume);
+		std::printf("%s: %zu hull-1 empty leaves (%zu affected by %zu blocking entities: %zu fully removed, %zu split into "
+			"multiple pieces), total volume %.0f cu.units\n",
+			bspPath.c_str(), leaves.size(), affectedLeaves, blockers.size(), fullyRemovedLeaves, splitLeaves, totalLeafVolume);
 
 		// Crouch-only (hull-3) passages: a spot can be too low-ceilinged for
 		// hull1 (standing, 72 units tall) while still open for hull3
@@ -239,6 +296,20 @@ int main(int argc, char **argv)
 		// side; only floor/ceiling planes differ between the two hulls, and
 		// those aren't what connects two adjacent rooms/corridors sideways
 		// anyway.
+		// Split unsupported air columns off the hull-1 leaves before any other
+		// leaf source appends (crouch/door leaves below) -- this renumbers
+		// leaf ids, and everything downstream keys off the final numbering.
+		// The recorded column pairs are consumed right after NoMerge
+		// (MergeAreaPairs), gluing each column onto the area beneath it. See
+		// floor_splitter.h for the full why (a convex hull-1 leaf can span a
+		// thin walkway rim AND the open air above the pit next to it --
+		// confirmed live on test23_precise).
+		size_t leafCountBeforeFloorSplit = leaves.size();
+		navgen::FloorSplitResult floorSplit = navgen::SplitUnsupportedColumns(leaves, kMapRadius);
+		leaves = std::move(floorSplit.leaves);
+		std::printf("%s: floor-support split: %zu leaves -> %zu (%zu unsupported air columns found)\n",
+			bspPath.c_str(), leafCountBeforeFloorSplit, leaves.size(), floorSplit.columnPairs.size());
+
 		std::vector<navgen::ExtractedLeaf> duckLeaves =
 			navgen::ExtractHullLeaves(bsp, worldModel, kMapRadius, navgen::kHullDuck);
 
@@ -246,19 +317,53 @@ int main(int argc, char **argv)
 		size_t crouchLeavesAdded = 0;
 		for (navgen::ExtractedLeaf &duckLeaf : duckLeaves)
 		{
+			std::vector<navgen::Polytope> pieces;
 			if (navgen::OverlapsAnyBlockingVolume(duckLeaf, blockers))
-				continue;
+				pieces = navgen::SubtractBlockingVolumes(bsp, duckLeaf.polytope, blockers, kMapRadius);
+			else
+				pieces.push_back(std::move(duckLeaf.polytope));
 
-			navgen::Vec3 c = duckLeaf.polytope.Centroid();
-			if (navgen::ClassifyPoint(bsp, worldModel.headnode[navgen::kHullHuman], c) != CONTENTS_SOLID)
-				continue; // hull1 already covers this space -- not a crouch-only passage
+			for (navgen::Polytope &piece : pieces)
+			{
+				navgen::Vec3 c = piece.Centroid();
+				if (navgen::ClassifyPoint(bsp, worldModel.headnode[navgen::kHullHuman], c) != CONTENTS_SOLID)
+					continue; // hull1 already covers this space -- not a crouch-only passage
 
-			duckLeaf.id = static_cast<int>(leaves.size());
-			leaves.push_back(std::move(duckLeaf));
-			isCrouchLeaf.push_back(true);
-			++crouchLeavesAdded;
+				navgen::ExtractedLeaf added;
+				added.id = static_cast<int>(leaves.size());
+				added.polytope = std::move(piece);
+				leaves.push_back(std::move(added));
+				isCrouchLeaf.push_back(true);
+				++crouchLeavesAdded;
+			}
 		}
 		std::printf("%s: %zu additional crouch-only (hull-3) leaves found\n", bspPath.c_str(), crouchLeavesAdded);
+
+		// func_door/func_door_rotating: kept as their own real leaves rather
+		// than subtracted away like a permanently-solid blocker (see
+		// door_extractor.h's own header comment for the full reasoning) --
+		// a door eventually becomes passable, so its own solid-until-opened
+		// volume deserves a real area (flagged NAV_AREA_DOOR below) that
+		// portal_builder's ordinary coplanar-face matching can portal into
+		// and out of on both sides, same as any other adjacent leaf pair.
+		std::vector<navgen::DoorLeaf> doorLeaves = navgen::ExtractDoorLeaves(bsp, entities, kMapRadius);
+		std::vector<navgen::DoorAreaInfo> doorInfoByLeafId(leaves.size()); // parallel to `leaves`, grows below
+		for (navgen::DoorLeaf &doorLeaf : doorLeaves)
+		{
+			navgen::ExtractedLeaf added;
+			added.id = static_cast<int>(leaves.size());
+			added.polytope = std::move(doorLeaf.polytope);
+			leaves.push_back(std::move(added));
+			isCrouchLeaf.push_back(false);
+
+			navgen::DoorAreaInfo info;
+			info.isDoor = true;
+			info.needsButton = doorLeaf.needsButton;
+			info.needsTrigger = doorLeaf.needsTrigger;
+			info.activatorPos = doorLeaf.activatorPos;
+			doorInfoByLeafId.push_back(info);
+		}
+		std::printf("%s: %zu func_door/func_door_rotating leaves found\n", bspPath.c_str(), doorLeaves.size());
 
 		if (dumpLeaves)
 		{
@@ -308,6 +413,17 @@ int main(int argc, char **argv)
 		std::printf("%s: %zu raw portals -> %zu areas, %zu inter-area portals (MergeAreas disabled)\n",
 			bspPath.c_str(), portals.size(), merged.areas.size(), merged.portals.size());
 
+		// Glue each unsupported air column (floor_splitter.h, above) onto the
+		// area beneath it -- the pit and the air you'd fall through to reach
+		// it are one place as far as navigation is concerned. Doing this
+		// before AbsorbTinyAreas/pruning means TagDropOffs later reads the
+		// merged area's floor at its real (deep) height and turns the
+		// walkway-to-pit walk portals into one-way drops.
+		size_t areaCountBeforePairMerge = merged.areas.size();
+		merged = navgen::MergeAreaPairs(merged.areas, merged.portals, floorSplit.columnPairs);
+		std::printf("%s: %zu air-column areas merged into their supporting areas (%zu areas remain)\n",
+			bspPath.c_str(), areaCountBeforePairMerge - merged.areas.size(), merged.areas.size());
+
 		// Fold BSP-leaf slivers MergeAreas' convexity constraint left as
 		// their own standalone areas (a ramp cut into many thin pieces,
 		// each far smaller than a standing player's hull -- ~32*32*72 =
@@ -317,7 +433,34 @@ int main(int argc, char **argv)
 		// only catches genuine slivers, not small-but-real rooms/closets.
 		constexpr double kMinAreaVolume = 10000.0;
 		size_t areaCountBeforeAbsorb = merged.areas.size();
-		merged = navgen::AbsorbTinyAreas(merged.areas, merged.portals, kMinAreaVolume);
+		// Two kinds of area are never an eligible absorption target for a
+		// tiny neighbor (see AbsorbTinyAreas' own comment on neverAbsorber):
+		// door areas, and pit blobs that swallowed an air column above --
+		// a tiny walkway sliver bordering a huge pit area would otherwise
+		// pick the pit as its "biggest neighbor" and sever the walkable
+		// route it was part of. MergeAreaPairs already ran, so ids aren't
+		// 1:1 with leaves anymore -- go through memberLeafIds.
+		std::vector<bool> isColumnLeaf(leaves.size(), false);
+		for (const auto &[columnLeafId, supportLeafId] : floorSplit.columnPairs)
+			if (columnLeafId >= 0 && static_cast<size_t>(columnLeafId) < isColumnLeaf.size())
+				isColumnLeaf[static_cast<size_t>(columnLeafId)] = true;
+		std::vector<bool> neverAbsorber(merged.areas.size(), false);
+		for (size_t i = 0; i < merged.areas.size(); ++i)
+		{
+			for (int leafId : merged.areas[i].memberLeafIds)
+			{
+				if (leafId < 0)
+					continue;
+				size_t li = static_cast<size_t>(leafId);
+				if ((li < doorInfoByLeafId.size() && doorInfoByLeafId[li].isDoor) ||
+					(li < isColumnLeaf.size() && isColumnLeaf[li]))
+				{
+					neverAbsorber[i] = true;
+					break;
+				}
+			}
+		}
+		merged = navgen::AbsorbTinyAreas(merged.areas, merged.portals, kMinAreaVolume, neverAbsorber);
 		std::printf("%s: %zu tiny-leaf-sliver areas absorbed into neighbors (%zu areas remain)\n",
 			bspPath.c_str(), areaCountBeforeAbsorb - merged.areas.size(), merged.areas.size());
 
@@ -331,21 +474,17 @@ int main(int argc, char **argv)
 		navgen::ProbeCrouchLinks(bsp, worldModel.headnode[navgen::kHullDuck], merged.areas, isCrouchLeaf,
 			merged.portals);
 
-		// func_ladder/func_door(_rotating): same reasoning as ProbeCrouchLinks
-		// above -- a door or ladder can be the *only* connection between two
-		// areas (confirmed live on test9_door: two rooms with no other
-		// shared geometry at all, joined only by a touch-to-open func_door),
-		// so tagging and converting these into real portals has to happen
-		// before the first reachability pass, not after. TaggedSpecialEdge is
-		// still serialized separately too (nav_format.h's SpecialEdgeRecord,
-		// e.g. for a door's targetname re-resolution) -- this just also
-		// promotes each one into an ordinary MergedPortal, the same way
+		// func_ladder: same reasoning as ProbeCrouchLinks above -- a ladder
+		// can be the only connection between two areas, so tagging and
+		// converting it into a real portal has to happen before the first
+		// reachability pass, not after. TaggedSpecialEdge is still
+		// serialized separately too (nav_format.h's SpecialEdgeRecord), but
+		// this also promotes it into an ordinary MergedPortal, the same way
 		// TagElevators already does below for lifts, so PruneUnreachableAreas
 		// and the runtime A* (src/nav/path_astar.cpp) actually see the
-		// connection. Without this, a door/ladder edge existed only as
-		// descriptive metadata nothing in the pathfinding graph ever
-		// consulted -- confirmed live: test9_door's door was tagged
-		// correctly yet the bot still couldn't route through it at all.
+		// connection. Doors no longer go through this path at all -- they're
+		// their own real leaves now (see ExtractDoorLeaves above), portaled
+		// in naturally by portal_builder like any other adjacent leaf pair.
 		std::vector<navgen::TaggedSpecialEdge> specialEdges = navgen::TagSpecialEdges(bsp, entities, merged.areas);
 		for (const navgen::TaggedSpecialEdge &e : specialEdges)
 		{
@@ -356,17 +495,6 @@ int main(int argc, char **argv)
 			portal.pointB = e.anchorTo;
 			portal.area = 0.0; // not a real shared-face overlap
 			portal.edgeType = e.type;
-			if (e.needsButton)
-			{
-				portal.edgeFlags |= crossbot_nav::EDGE_FLAG_NEEDS_BUTTON;
-				portal.buttonPos = e.buttonPos;
-				// Not a reverse-engineered per-door value -- covers a
-				// typical func_door's open animation (speed 100, whether
-				// sliding or a func_door_rotating's ~90-degree swing) with
-				// margin, same as bot_move_nav.cpp's own kDoorOpenWaitTime
-				// for a plain touch-opened door.
-				portal.travelTime = 1.5;
-			}
 			merged.portals.push_back(portal);
 		}
 
@@ -390,7 +518,14 @@ int main(int argc, char **argv)
 		// ProbeJumpGaps/TagDropOffs run on the now-void-free area set, and
 		// set EDGE_FLAG_ONE_WAY (a one-way drop/jump-only connection).
 		navgen::ProbeJumpGaps(bsp, worldModel.headnode[navgen::kHullHuman], merged.areas, merged.portals);
-		navgen::TagDropOffs(merged.areas, merged.portals);
+		// Computed against the *current* (post-first-prune) area indexing --
+		// memberLeafIds stays correct regardless of how many times areas get
+		// renumbered (same reasoning as the final crouch/door computations
+		// near the end of this function), so this is safe to (cheaply)
+		// recompute here rather than thread the final one back in time.
+		std::vector<navgen::DoorAreaInfo> earlyDoorAreaInfo =
+			navgen::ComputeDoorAreaInfo(merged.areas, doorInfoByLeafId);
+		navgen::TagDropOffs(merged.areas, merged.portals, earlyDoorAreaInfo);
 
 		if (std::getenv("NAVGEN_DUMP_EDGES"))
 		{
@@ -400,7 +535,6 @@ int main(int argc, char **argv)
 					: p.edgeType == crossbot_nav::EDGE_JUMP    ? "JUMP"
 					: p.edgeType == crossbot_nav::EDGE_DROP    ? "DROP"
 					: p.edgeType == crossbot_nav::EDGE_LADDER  ? "LADDER"
-					: p.edgeType == crossbot_nav::EDGE_DOOR    ? "DOOR"
 					: p.edgeType == crossbot_nav::EDGE_ELEVATOR ? "ELEVATOR"
 					: "?";
 				std::printf("  edge area%d<->area%d type=%s pointA=(%.1f,%.1f,%.1f) pointB=(%.1f,%.1f,%.1f)\n",
@@ -414,6 +548,27 @@ int main(int argc, char **argv)
 		// one isn't wrongly discarded as unreachable.
 		std::vector<navgen::MergedPortal> elevatorPortals = navgen::TagElevators(bsp, entities, merged.areas);
 		merged.portals.insert(merged.portals.end(), elevatorPortals.begin(), elevatorPortals.end());
+
+		if (const char *preSvgPath = std::getenv("NAVGEN_DUMP_SVG_PREPRUNE"))
+		{
+			std::vector<navgen::Vec3> spawnPointsDbg, targetPointsDbg;
+			for (const navgen::Entity &ent : entities)
+			{
+				std::string classname = ent.Get("classname");
+				bool isSpawn = classname == "info_player_start" || classname == "info_player_deathmatch" ||
+					classname == "info_player_coop" || classname == "info_player_teamspawn";
+				bool isTarget = classname == "info_target";
+				if (!isSpawn && !isTarget)
+					continue;
+				double x = 0, y = 0, z = 0;
+				if (std::sscanf(ent.Get("origin").c_str(), "%lf %lf %lf", &x, &y, &z) != 3)
+					continue;
+				(isSpawn ? spawnPointsDbg : targetPointsDbg).push_back(navgen::Vec3(x, y, z));
+			}
+			navgen::WriteDebugSvg(preSvgPath, DeriveMapName(bspPath) + "_preprune", merged.areas, merged.portals, {},
+				{}, spawnPointsDbg, targetPointsDbg);
+			std::printf("wrote %s (pre-second-prune diagnostic)\n", preSvgPath);
+		}
 
 		// Second prune pass, now that one-way flags exist: an area only
 		// connected to the rest of the graph via a one-way drop *out* of it
@@ -429,9 +584,7 @@ int main(int argc, char **argv)
 		std::printf("%s: %zu areas reachable after direction-aware second pass (%zu one-way-only areas pruned)\n",
 			bspPath.c_str(), merged.areas.size(), areaCountBeforeSecondPrune - merged.areas.size());
 
-		int ladderEdges = 0, doorEdges = 0;
-		for (const navgen::TaggedSpecialEdge &e : specialEdges)
-			(e.type == crossbot_nav::EDGE_LADDER ? ladderEdges : doorEdges)++;
+		int ladderEdges = static_cast<int>(specialEdges.size()); // ladders are the only producer left, see TagSpecialEdges
 		// Counts every EDGE_JUMP portal in the final graph, not just the
 		// ones ProbeJumpGaps added as brand-new connections -- TagDropOffs
 		// also reclassifies some already-adjacent EDGE_WALK portals to
@@ -448,8 +601,8 @@ int main(int argc, char **argv)
 				++elevatorEdges;
 		}
 
-		std::printf("%s: %d ladder edges, %d door edges, %d jump edges, %d drop-off edges, %d elevator edges\n",
-			bspPath.c_str(), ladderEdges, doorEdges, jumpEdges, dropEdges, elevatorEdges);
+		std::printf("%s: %d ladder edges, %d jump edges, %d drop-off edges, %d elevator edges\n",
+			bspPath.c_str(), ladderEdges, jumpEdges, dropEdges, elevatorEdges);
 
 		std::vector<navgen::TacticalScore> tacticalScores =
 			navgen::TagTactical(bsp, worldModel.headnode[navgen::kHullHuman], merged.areas, merged.portals);
@@ -474,6 +627,18 @@ int main(int argc, char **argv)
 		for (bool c : crouchAreas)
 			crouchAreaCount += c ? 1 : 0;
 		std::printf("%s: %d areas require crouching (hull-3-only clearance)\n", bspPath.c_str(), crouchAreaCount);
+
+		// Final door-area flags: same reasoning as crouchAreas above --
+		// memberLeafIds still refers to the original (pre-merge/pre-prune)
+		// leaf ids doorInfoByLeafId was built against, and now also survives
+		// AbsorbTinyAreas folding (area_merger.cpp propagates every absorbed
+		// leaf's id into the survivor as of this door redesign).
+		std::vector<navgen::DoorAreaInfo> doorAreaInfo = navgen::ComputeDoorAreaInfo(merged.areas, doorInfoByLeafId);
+		int doorAreaCount = 0;
+		for (const navgen::DoorAreaInfo &d : doorAreaInfo)
+			doorAreaCount += d.isDoor ? 1 : 0;
+		std::printf("%s: %d areas are doors (of %zu found in the map)\n", bspPath.c_str(), doorAreaCount,
+			doorLeaves.size());
 
 		if (dumpTactical)
 		{
@@ -542,11 +707,233 @@ int main(int argc, char **argv)
 			std::printf("wrote %s\n", objPath.c_str());
 		}
 
+		if (!svgPath.empty())
+		{
+			std::vector<navgen::Vec3> spawnPoints, targetPoints;
+			for (const navgen::Entity &ent : entities)
+			{
+				std::string classname = ent.Get("classname");
+				bool isSpawn = classname == "info_player_start" || classname == "info_player_deathmatch" ||
+					classname == "info_player_coop" || classname == "info_player_teamspawn";
+				bool isTarget = classname == "info_target";
+				if (!isSpawn && !isTarget)
+					continue;
+				double x = 0, y = 0, z = 0;
+				if (std::sscanf(ent.Get("origin").c_str(), "%lf %lf %lf", &x, &y, &z) != 3)
+					continue;
+				(isSpawn ? spawnPoints : targetPoints).push_back(navgen::Vec3(x, y, z));
+			}
+
+			// Indexed by leaf id (leaves[i].id == i, see NoMerge's own comment)
+			// so WriteDebugSvg can draw each area's ORIGINAL member leaves
+			// individually -- AbsorbTinyAreas doesn't geometrically union an
+			// absorbed leaf into its survivor (see area_merger.cpp), so
+			// area.polytope alone would leave that leaf's own volume as an
+			// unfilled hole in the rendering.
+			std::vector<navgen::Polytope> leafPolytopesById(leaves.size());
+			for (const navgen::ExtractedLeaf &leaf : leaves)
+				leafPolytopesById[static_cast<size_t>(leaf.id)] = leaf.polytope;
+
+			// Spawn-to-target path overlay: runs the exact same A* the live
+			// bot uses (NavAStar::FindPath, src/nav/astar_graph.cpp -- shared
+			// verbatim with the runtime's path_astar.cpp, see that header's
+			// comment) over this map's own final area/portal graph, so the
+			// debug SVG shows literally the same route a bot's Repath() would
+			// find, not a hand-reimplemented approximation that could
+			// silently drift out of sync -- then plans waypoints with the
+			// shared NavPlan::BuildWaypointPlan and simulates driving them
+			// with the shared NavFollow controller under modeled momentum
+			// physics, flagging any point where the simulated bot leaves
+			// supported floor (a predicted fall, before ever starting a
+			// server).
+			std::vector<navgen::Vec3> pathPoints, simPathPoints, simFallPoints;
+			if (!spawnPoints.empty() && !targetPoints.empty())
+			{
+				int startAreaId = navgen::FindAreaContainingPoint(spawnPoints.front(), merged.areas);
+				int goalAreaId = navgen::FindAreaContainingPoint(targetPoints.front(), merged.areas);
+				if (startAreaId >= 0 && goalAreaId >= 0)
+				{
+					std::vector<NavAStar::AreaNode> graphAreas(merged.areas.size());
+					for (size_t i = 0; i < merged.areas.size(); ++i)
+					{
+						navgen::Vec3 c = merged.areas[i].polytope.Centroid();
+						graphAreas[i].centroid = Vector(static_cast<float>(c.x), static_cast<float>(c.y),
+							static_cast<float>(c.z));
+					}
+
+					std::vector<std::vector<uint32_t>> areaPortalIndices(merged.areas.size());
+					for (size_t i = 0; i < merged.portals.size(); ++i)
+					{
+						const navgen::MergedPortal &p = merged.portals[i];
+						if (p.areaA >= 0 && static_cast<size_t>(p.areaA) < areaPortalIndices.size())
+							areaPortalIndices[static_cast<size_t>(p.areaA)].push_back(static_cast<uint32_t>(i));
+						if (p.areaB >= 0 && static_cast<size_t>(p.areaB) < areaPortalIndices.size())
+							areaPortalIndices[static_cast<size_t>(p.areaB)].push_back(static_cast<uint32_t>(i));
+					}
+
+					std::vector<NavAStar::PortalEdge> graphPortals(merged.portals.size());
+					for (size_t i = 0; i < merged.portals.size(); ++i)
+					{
+						const navgen::MergedPortal &p = merged.portals[i];
+						graphPortals[i].areaA = static_cast<uint32_t>(p.areaA);
+						graphPortals[i].areaB = static_cast<uint32_t>(p.areaB);
+						graphPortals[i].oneWay = (p.edgeFlags & crossbot_nav::EDGE_FLAG_ONE_WAY) != 0;
+						// Matches nav_file.cpp's WriteNavFile traverseCost formula exactly.
+						graphPortals[i].traverseCost = (p.edgeType == crossbot_nav::EDGE_JUMP) ? 1.5f
+							: (p.edgeType == crossbot_nav::EDGE_ELEVATOR)                       ? 2.0f
+																								 : 1.0f;
+					}
+
+					NavAStar::GraphResult graphResult = NavAStar::FindPath(graphAreas, areaPortalIndices,
+						graphPortals, static_cast<uint32_t>(startAreaId), static_cast<uint32_t>(goalAreaId));
+
+					if (graphResult.found)
+					{
+						// Build the waypoint plan with the exact same shared
+						// planner the runtime's BuildWaypointPath calls
+						// (src/nav/waypoint_plan.cpp: funnel string-pull
+						// between hard anchors, special-crossing expansions,
+						// plan-encoded speed limits) -- this block is just
+						// the MergedPortal/Area -> PlanArea/PlanPortal
+						// adapter, mirroring path_funnel.cpp's own NavMesh
+						// adapter. The drawn line IS the walk line.
+						auto ToV = [](const navgen::Vec3 &v)
+						{ return Vector(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z)); };
+						auto ToVec3 = [](const Vector &v) { return navgen::Vec3(v.x, v.y, v.z); };
+
+						std::vector<NavPlan::PlanArea> planAreas(merged.areas.size());
+						for (size_t i = 0; i < merged.areas.size(); ++i)
+						{
+							NavPlan::PlanArea &pa = planAreas[i];
+							pa.centroid = ToV(merged.areas[i].polytope.Centroid());
+							pa.crouch = crouchAreas[i];
+							pa.door = doorAreaInfo[i].isDoor;
+							pa.doorActivation = doorAreaInfo[i].needsButton ? crossbot_nav::DOOR_ACTIVATION_BUTTON
+								: doorAreaInfo[i].needsTrigger             ? crossbot_nav::DOOR_ACTIVATION_TRIGGER
+																		   : crossbot_nav::DOOR_ACTIVATION_TOUCH;
+							pa.doorActivatorPos = ToV(doorAreaInfo[i].activatorPos);
+							pa.doorWaitTime = 1.5f; // matches nav_file.cpp's baked doorWaitTime
+						}
+						std::vector<NavPlan::PlanPortal> planPortals(merged.portals.size());
+						for (size_t i = 0; i < merged.portals.size(); ++i)
+						{
+							const navgen::MergedPortal &p = merged.portals[i];
+							NavPlan::PlanPortal &pp = planPortals[i];
+							pp.areaA = static_cast<uint32_t>(p.areaA);
+							pp.areaB = static_cast<uint32_t>(p.areaB);
+							pp.pointA = ToV(p.pointA);
+							pp.pointB = ToV(p.pointB);
+							pp.edgeType = p.edgeType;
+							pp.buttonPos = ToV(p.buttonPos);
+							pp.travelTime = static_cast<float>(p.travelTime);
+							if (p.edgeType == crossbot_nav::EDGE_DROP)
+							{
+								planAreas[static_cast<size_t>(p.areaA)].hasDropPortal = true;
+								planAreas[static_cast<size_t>(p.areaB)].hasDropPortal = true;
+							}
+						}
+
+						std::vector<NavPlan::PlanWaypoint> planWaypoints = NavPlan::BuildWaypointPlan(planAreas,
+							planPortals, graphResult.areaPath, graphResult.portalPath, ToV(spawnPoints.front()),
+							ToV(targetPoints.front()));
+						for (const NavPlan::PlanWaypoint &wp : planWaypoints)
+							pathPoints.push_back(ToVec3(wp.point));
+
+						// Momentum simulation: integrate the shared steering
+						// controller (the same NavFollow::Steer the live bot
+						// runs) against modeled GoldSrc ground physics, then
+						// check every simulated position for supported floor
+						// under it -- a position outside every navigable
+						// leaf's polytope means the modeled bot left the
+						// mesh (walked off an edge / clipped a wall) and the
+						// live one would fall there too.
+						NavFollow::SimResult sim = NavFollow::Simulate(planWaypoints, ToV(spawnPoints.front()));
+
+						auto PointInPolytope = [](const navgen::Vec3 &pt, const navgen::Polytope &poly, double eps)
+						{
+							for (const navgen::Face &f : poly.faces)
+								if (pt.Dot(f.plane.normal) - f.plane.dist < -eps)
+									return false;
+							return true;
+						};
+						std::vector<const navgen::Polytope *> navigableLeafPolys;
+						for (const navgen::Area &area : merged.areas)
+							for (int leafId : area.memberLeafIds)
+							{
+								if (leafId < 0 || static_cast<size_t>(leafId) >= leafPolytopesById.size())
+									continue;
+								if (static_cast<size_t>(leafId) < isColumnLeaf.size() &&
+									isColumnLeaf[static_cast<size_t>(leafId)])
+									continue; // unsupported air -- being here means falling
+								navigableLeafPolys.push_back(&leafPolytopesById[static_cast<size_t>(leafId)]);
+							}
+
+						for (size_t si = 0; si < sim.points.size(); ++si)
+						{
+							navgen::Vec3 p = ToVec3(sim.points[si]);
+							bool supported = false;
+							for (const navgen::Polytope *poly : navigableLeafPolys)
+							{
+								if (PointInPolytope(p, *poly, 4.0))
+								{
+									supported = true;
+									break;
+								}
+							}
+							if (!supported)
+							{
+								simFallPoints.push_back(p);
+								std::printf("%s: SIMULATED FALL at (%.1f, %.1f, %.1f), t=%.2fs -- the planned "
+											"path is not drivable at planned speeds\n",
+									bspPath.c_str(), p.x, p.y, p.z, static_cast<double>(si) / 60.0);
+								break;
+							}
+						}
+						if (!sim.finished && simFallPoints.empty())
+							std::printf("%s: simulation did not reach the goal within its time budget\n",
+								bspPath.c_str());
+
+						// Decimate for drawing (60Hz sim -> every 3rd point);
+						// the fall check above already ran at full rate.
+						for (size_t si = 0; si < sim.points.size(); si += 3)
+							simPathPoints.push_back(ToVec3(sim.points[si]));
+					}
+					else
+					{
+						std::printf("%s: --dump-svg path overlay: no A* route from area %d to area %d\n",
+							bspPath.c_str(), startAreaId, goalAreaId);
+					}
+				}
+			}
+
+			// Recorded live-bot trajectory (see PrintUsage's --trace): one
+			// "x y z" per line, as written by the runtime's WriteTraceLog.
+			std::vector<navgen::Vec3> tracePoints;
+			if (!tracePath.empty())
+			{
+				FILE *tf = std::fopen(tracePath.c_str(), "r");
+				if (!tf)
+					throw std::runtime_error("cannot open trace file: " + tracePath);
+				double x = 0, y = 0, z = 0;
+				while (std::fscanf(tf, "%lf %lf %lf", &x, &y, &z) == 3)
+					tracePoints.push_back(navgen::Vec3(x, y, z));
+				std::fclose(tf);
+				std::printf("%s: overlaying %zu recorded trajectory points from %s\n", bspPath.c_str(),
+					tracePoints.size(), tracePath.c_str());
+			}
+
+			std::string mapName = DeriveMapName(bspPath);
+			navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.portals, crouchAreas, tacticalScores,
+				spawnPoints, targetPoints, leafPolytopesById, doorAreaInfo, pathPoints, simPathPoints,
+				simFallPoints, tracePoints);
+			std::printf("wrote %s\n", svgPath.c_str());
+		}
+
 		if (!navPath.empty())
 		{
 			std::string mapName = DeriveMapName(bspPath);
 			navgen::WriteNavFile(navPath, mapName, bsp.Checksum(), merged.areas, merged.portals, specialEdges,
-				tacticalScores, crouchAreas);
+				tacticalScores, crouchAreas, doorAreaInfo);
 			std::printf("wrote %s (map \"%s\", checksum 0x%08X)\n", navPath.c_str(), mapName.c_str(), bsp.Checksum());
 		}
 	}

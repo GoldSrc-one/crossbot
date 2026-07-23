@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CrossBot nav-mesh debug gallery</title>
+<style>
+  body { background: #05070c; color: #e8eef4; font-family: monospace; margin: 0; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 12px 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+  .card { background: #0b1220; border: 1px solid #2c3e50; border-radius: 6px; padding: 8px; }
+  .card h2 { font-size: 13px; margin: 0 0 6px 0; }
+  .card a { color: #9fd3ff; text-decoration: none; }
+  .card img { width: 100%; height: auto; display: block; border-radius: 4px; background: #0b1220; }
+</style>
+</head>
+<body>
+<h1>CrossBot nav-mesh debug gallery (top-down, Z ignored)</h1>
+<div class="grid">
+<div class="card"><h2><a href="test1_simple.svg" target="_blank">test1_simple</a></h2><a href="test1_simple.svg" target="_blank"><img src="test1_simple.svg"></a></div>
+<div class="card"><h2><a href="test2_doorway.svg" target="_blank">test2_doorway</a></h2><a href="test2_doorway.svg" target="_blank"><img src="test2_doorway.svg"></a></div>
+<div class="card"><h2><a href="test3_steps.svg" target="_blank">test3_steps</a></h2><a href="test3_steps.svg" target="_blank"><img src="test3_steps.svg"></a></div>
+<div class="card"><h2><a href="test4_slope.svg" target="_blank">test4_slope</a></h2><a href="test4_slope.svg" target="_blank"><img src="test4_slope.svg"></a></div>
+<div class="card"><h2><a href="test5_jump.svg" target="_blank">test5_jump</a></h2><a href="test5_jump.svg" target="_blank"><img src="test5_jump.svg"></a></div>
+<div class="card"><h2><a href="test6_crouchjump.svg" target="_blank">test6_crouchjump</a></h2><a href="test6_crouchjump.svg" target="_blank"><img src="test6_crouchjump.svg"></a></div>
+<div class="card"><h2><a href="test7_crouch.svg" target="_blank">test7_crouch</a></h2><a href="test7_crouch.svg" target="_blank"><img src="test7_crouch.svg"></a></div>
+<div class="card"><h2><a href="test8_smooth.svg" target="_blank">test8_smooth</a></h2><a href="test8_smooth.svg" target="_blank"><img src="test8_smooth.svg"></a></div>
+<div class="card"><h2><a href="test9_door.svg" target="_blank">test9_door</a></h2><a href="test9_door.svg" target="_blank"><img src="test9_door.svg"></a></div>
+<div class="card"><h2><a href="test10_doorbutton.svg" target="_blank">test10_doorbutton</a></h2><a href="test10_doorbutton.svg" target="_blank"><img src="test10_doorbutton.svg"></a></div>
+<div class="card"><h2><a href="test11_doorbutton2.svg" target="_blank">test11_doorbutton2</a></h2><a href="test11_doorbutton2.svg" target="_blank"><img src="test11_doorbutton2.svg"></a></div>
+<div class="card"><h2><a href="test12_ladder.svg" target="_blank">test12_ladder</a></h2><a href="test12_ladder.svg" target="_blank"><img src="test12_ladder.svg"></a></div>
+<div class="card"><h2><a href="test13_break.svg" target="_blank">test13_break (nav write overflows -- 469k raw portals, deferred)</a></h2><a href="test13_break.svg" target="_blank"><img src="test13_break.svg"></a></div>
+<div class="card"><h2><a href="test14_terrain.svg" target="_blank">test14_terrain</a></h2><a href="test14_terrain.svg" target="_blank"><img src="test14_terrain.svg"></a></div>
+<div class="card"><h2><a href="test15_staircase.svg" target="_blank">test15_staircase (large maze, deferred)</a></h2><a href="test15_staircase.svg" target="_blank"><img src="test15_staircase.svg"></a></div>
+<div class="card"><h2><a href="test16_float.svg" target="_blank">test16_float</a></h2><a href="test16_float.svg" target="_blank"><img src="test16_float.svg"></a></div>
+<div class="card"><h2><a href="test17_funcwall.svg" target="_blank">test17_funcwall</a></h2><a href="test17_funcwall.svg" target="_blank"><img src="test17_funcwall.svg"></a></div>
+<div class="card"><h2><a href="test18_elevator.svg" target="_blank">test18_elevator</a></h2><a href="test18_elevator.svg" target="_blank"><img src="test18_elevator.svg"></a></div>
+<div class="card"><h2><a href="test19_water.svg" target="_blank">test19_water</a></h2><a href="test19_water.svg" target="_blank"><img src="test19_water.svg"></a></div>
+<div class="card"><h2><a href="test20_doortrigger.svg" target="_blank">test20_doortrigger</a></h2><a href="test20_doortrigger.svg" target="_blank"><img src="test20_doortrigger.svg"></a></div>
+<div class="card"><h2><a href="test21_teleport.svg" target="_blank">test21_teleport</a></h2><a href="test21_teleport.svg" target="_blank"><img src="test21_teleport.svg"></a></div>
+<div class="card"><h2><a href="test22_gap.svg" target="_blank">test22_gap</a></h2><a href="test22_gap.svg" target="_blank"><img src="test22_gap.svg"></a></div>
+<div class="card"><h2><a href="test23_precise.svg" target="_blank">test23_precise</a></h2><a href="test23_precise.svg" target="_blank"><img src="test23_precise.svg"></a></div>
+<div class="card"><h2><a href="test24_precise2.svg" target="_blank">test24_precise2</a></h2><a href="test24_precise2.svg" target="_blank"><img src="test24_precise2.svg"></a></div>
+<div class="card"><h2><a href="test25_ladder2.svg" target="_blank">test25_ladder2</a></h2><a href="test25_ladder2.svg" target="_blank"><img src="test25_ladder2.svg"></a></div>
+<div class="card"><h2><a href="test26_maze.svg" target="_blank">test26_maze</a></h2><a href="test26_maze.svg" target="_blank"><img src="test26_maze.svg"></a></div>
+<div class="card"><h2><a href="test27_detail.svg" target="_blank">test27_detail</a></h2><a href="test27_detail.svg" target="_blank"><img src="test27_detail.svg"></a></div>
+<div class="card"><h2><a href="test28_slopecase.svg" target="_blank">test28_slopecase (17/23 one-way-pruned -- suspicious)</a></h2><a href="test28_slopecase.svg" target="_blank"><img src="test28_slopecase.svg"></a></div>
+<div class="card"><h2><a href="test29_ladder3.svg" target="_blank">test29_ladder3</a></h2><a href="test29_ladder3.svg" target="_blank"><img src="test29_ladder3.svg"></a></div>
+<div class="card"><h2><a href="test30_gravity.svg" target="_blank">test30_gravity</a></h2><a href="test30_gravity.svg" target="_blank"><img src="test30_gravity.svg"></a></div>
+<div class="card"><h2><a href="test31_push.svg" target="_blank">test31_push</a></h2><a href="test31_push.svg" target="_blank"><img src="test31_push.svg"></a></div>
+<div class="card"><h2><a href="test32_train.svg" target="_blank">test32_train</a></h2><a href="test32_train.svg" target="_blank"><img src="test32_train.svg"></a></div>
+<div class="card"><h2><a href="test33_strafe.svg" target="_blank">test33_strafe</a></h2><a href="test33_strafe.svg" target="_blank"><img src="test33_strafe.svg"></a></div>
+<div class="card"><h2><a href="test34_surf.svg" target="_blank">test34_surf</a></h2><a href="test34_surf.svg" target="_blank"><img src="test34_surf.svg"></a></div>
+</div>
+</body>
+</html>

@@ -1,0 +1,11 @@
+maps/test7_crouch.bsp: 7 hull-1 empty leaves (0 affected by 0 blocking entities: 0 fully removed, 0 split into multiple pieces), total volume 9633792 cu.units
+maps/test7_crouch.bsp: 2 additional crouch-only (hull-3) leaves found
+maps/test7_crouch.bsp: 4 raw portals -> 9 areas, 4 inter-area portals (MergeAreas disabled)
+maps/test7_crouch.bsp: 0 tiny-leaf-sliver areas absorbed into neighbors (9 areas remain)
+maps/test7_crouch.bsp: 1 spawn point(s) resolved, 9 areas reachable after first pass (0 void areas pruned)
+maps/test7_crouch.bsp: 9 areas reachable after direction-aware second pass (0 one-way-only areas pruned)
+maps/test7_crouch.bsp: 0 ladder edges, 0 door edges, 0 jump edges, 0 drop-off edges, 0 elevator edges
+maps/test7_crouch.bsp: tactical tagging -> 2 vantage, 3 camp, 2 chokepoint-cover areas (of 9)
+maps/test7_crouch.bsp: 2 areas require crouching (hull-3-only clearance)
+wrote nav_debug/test7_crouch.svg
+wrote nav_debug/test7_crouch_discard.nav (map "test7_crouch", checksum 0x42271B8A)

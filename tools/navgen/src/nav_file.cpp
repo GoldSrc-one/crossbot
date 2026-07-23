@@ -68,10 +68,11 @@ void WriteRaw(FILE *f, const void *data, size_t bytes, const char *what)
 void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t bspChecksum,
 	const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
 	const std::vector<TaggedSpecialEdge> &specialEdges, const std::vector<TacticalScore> &tacticalScores,
-	const std::vector<bool> &crouchAreas)
+	const std::vector<bool> &crouchAreas, const std::vector<DoorAreaInfo> &doorAreaInfo)
 {
 	bool haveTactical = tacticalScores.size() == areas.size();
 	bool haveCrouch = crouchAreas.size() == areas.size();
+	bool haveDoor = doorAreaInfo.size() == areas.size();
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
 		throw std::runtime_error("cannot open nav file for writing: " + path);
@@ -98,6 +99,25 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.gravityScale = 1.0f;
 		if (haveCrouch && crouchAreas[i])
 			rec.areaFlags |= NAV_AREA_CROUCH;
+		rec.doorActivation = DOOR_ACTIVATION_TOUCH;
+		rec.doorActivatorPos[0] = rec.doorActivatorPos[1] = rec.doorActivatorPos[2] = 0.0f;
+		rec.doorWaitTime = 0.0f;
+		if (haveDoor && doorAreaInfo[i].isDoor)
+		{
+			const DoorAreaInfo &d = doorAreaInfo[i];
+			rec.areaFlags |= NAV_AREA_DOOR;
+			rec.doorActivation = d.needsButton ? DOOR_ACTIVATION_BUTTON
+				: d.needsTrigger              ? DOOR_ACTIVATION_TRIGGER
+											   : DOOR_ACTIVATION_TOUCH;
+			rec.doorActivatorPos[0] = static_cast<float>(d.activatorPos.x);
+			rec.doorActivatorPos[1] = static_cast<float>(d.activatorPos.y);
+			rec.doorActivatorPos[2] = static_cast<float>(d.activatorPos.z);
+			// Not a reverse-engineered per-door value -- covers a typical
+			// func_door's open animation (sliding or a func_door_rotating's
+			// ~90-degree swing) with margin, matching this project's
+			// existing EDGE_ELEVATOR/button-door travelTime convention.
+			rec.doorWaitTime = 1.5f;
+		}
 		if (haveTactical)
 		{
 			const TacticalScore &t = tacticalScores[i];
@@ -162,19 +182,10 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.travelTime = static_cast<float>(p.travelTime);
 	}
 
-	// String table: flat NUL-separated targetnames referenced by Door
-	// special edges (empty string -> no targetname, i.e. no offset stored).
+	// String table is currently always empty (see NavSpecialEdgeRecord's own
+	// comment) -- reserved for a future producer, not written to by anything
+	// today.
 	std::vector<char> stringTable;
-	std::vector<int32_t> specialEdgeStringOffsets(specialEdges.size(), -1);
-	for (size_t i = 0; i < specialEdges.size(); ++i)
-	{
-		if (specialEdges[i].targetname.empty())
-			continue;
-		specialEdgeStringOffsets[i] = static_cast<int32_t>(stringTable.size());
-		const std::string &s = specialEdges[i].targetname;
-		stringTable.insert(stringTable.end(), s.begin(), s.end());
-		stringTable.push_back('\0');
-	}
 
 	std::vector<NavSpecialEdgeRecord> specialEdgeRecords(specialEdges.size());
 	for (size_t i = 0; i < specialEdges.size(); ++i)
@@ -190,7 +201,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.anchorTo[0] = static_cast<float>(e.anchorTo.x);
 		rec.anchorTo[1] = static_cast<float>(e.anchorTo.y);
 		rec.anchorTo[2] = static_cast<float>(e.anchorTo.z);
-		rec.stringTableOffset = specialEdgeStringOffsets[i];
+		rec.stringTableOffset = -1;
 	}
 
 	NavHeader header{};

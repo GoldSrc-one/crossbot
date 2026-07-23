@@ -1,0 +1,11 @@
+maps/test14_terrain.bsp: 64 hull-1 empty leaves (0 affected by 0 blocking entities: 0 fully removed, 0 split into multiple pieces), total volume 23258029 cu.units
+maps/test14_terrain.bsp: 44 additional crouch-only (hull-3) leaves found
+maps/test14_terrain.bsp: 351 raw portals -> 108 areas, 351 inter-area portals (MergeAreas disabled)
+maps/test14_terrain.bsp: 31 tiny-leaf-sliver areas absorbed into neighbors (77 areas remain)
+maps/test14_terrain.bsp: 1 spawn point(s) resolved, 77 areas reachable after first pass (0 void areas pruned)
+maps/test14_terrain.bsp: 77 areas reachable after direction-aware second pass (0 one-way-only areas pruned)
+maps/test14_terrain.bsp: 0 ladder edges, 0 door edges, 61 jump edges, 1 drop-off edges, 0 elevator edges
+maps/test14_terrain.bsp: tactical tagging -> 9 vantage, 11 camp, 5 chokepoint-cover areas (of 77)
+maps/test14_terrain.bsp: 32 areas require crouching (hull-3-only clearance)
+wrote nav_debug/test14_terrain.svg
+wrote nav_debug/test14_terrain_discard.nav (map "test14_terrain", checksum 0xB28F3EF9)

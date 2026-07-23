@@ -17,6 +17,13 @@ namespace navgen
 // possible, since a real map can rely on just one.
 std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas);
 
+// Resolves a single arbitrary world point (e.g. an info_target's origin, for
+// the --dump-svg path overlay) to the area containing it, with the same
+// point-in-convex-polytope-then-nearest-centroid-fallback behavior
+// FindSpawnAreas uses per spawn point above. Returns -1 only if `areas` is
+// empty.
+int FindAreaContainingPoint(const Vec3 &point, const std::vector<Area> &areas);
+
 // BFS-prunes `areas`/`portals` down to only areas reachable from
 // `seedAreas` via the portal-adjacency graph, re-indexing both to the
 // filtered ids. This is what discards the "void" leaves/areas noted since

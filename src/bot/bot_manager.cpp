@@ -211,6 +211,7 @@ bool SetGoalForAllBots(const Vector &point)
 		bot.goalPoint = point;
 		bot.hasGoal = true;
 		Bot_ResetNavPath(bot); // also clears elevator/jump/obstacle state and the ETA/area-trace diagnostics
+		bot.traceLog.clear();  // fresh origin recording for this goal (see CBot::traceLog)
 		any = true;
 	}
 	return any;
