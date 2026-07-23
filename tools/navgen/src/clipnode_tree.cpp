@@ -68,4 +68,18 @@ void WalkClipnodeTreeForContents(const BspFile &bsp, int headnode, int targetCon
 	WalkForContentsRecursive(bsp, headnode, targetContents, chain, callback);
 }
 
+int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point)
+{
+	int nodeIndex = headnode;
+	while (nodeIndex >= 0)
+	{
+		const dclipnode_t &node = bsp.Clipnodes()[static_cast<size_t>(nodeIndex)];
+		const dplane_t &plane = bsp.Planes()[static_cast<size_t>(node.planenum)];
+		double d = static_cast<double>(plane.normal[0]) * point.x + static_cast<double>(plane.normal[1]) * point.y +
+			static_cast<double>(plane.normal[2]) * point.z - plane.dist;
+		nodeIndex = (d >= 0.0) ? node.children[0] : node.children[1];
+	}
+	return nodeIndex;
+}
+
 } // namespace navgen

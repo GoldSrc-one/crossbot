@@ -93,7 +93,18 @@ Vector Bot_UpdateFacing(CBot &bot)
 	Vector smoothed(NormalizeAngle(current.x + pitchStep), NormalizeAngle(current.y + yawStep), 0.f);
 
 	pEdict->v.v_angle = smoothed;
-	pEdict->v.angles = Vector(0.f, smoothed.y, 0.f);
+	// v.angles (the model's visible orientation, sent to other clients --
+	// distinct from v_angle, the real aim direction used for movement) uses
+	// a different pitch convention than v_angle: GoldSrc's player model only
+	// has a narrow aim_pitch bone-controller range and expects the opposite
+	// sign, so the raw view pitch has to be negated and scaled down, not
+	// copied as-is. Confirmed against reference bots -- foxbot's
+	// BotChangePitch (bot_navigate.cpp) does `angles.x = v_angle.x / 3`
+	// after negating v_angle.x, and yapb's Bot::updateBodyAngles (vision.cpp)
+	// does `angles.x = -v_angle.x * (1/3)` directly. This is a purely
+	// cosmetic third-person fix (v_angle, not v.angles, drives actual
+	// movement via pfnRunPlayerMove), so it doesn't change bot behavior.
+	pEdict->v.angles = Vector(-smoothed.x / 3.f, smoothed.y, 0.f);
 
 	return smoothed;
 }

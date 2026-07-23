@@ -67,9 +67,11 @@ void WriteRaw(FILE *f, const void *data, size_t bytes, const char *what)
 
 void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t bspChecksum,
 	const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
-	const std::vector<TaggedSpecialEdge> &specialEdges, const std::vector<TacticalScore> &tacticalScores)
+	const std::vector<TaggedSpecialEdge> &specialEdges, const std::vector<TacticalScore> &tacticalScores,
+	const std::vector<bool> &crouchAreas)
 {
 	bool haveTactical = tacticalScores.size() == areas.size();
+	bool haveCrouch = crouchAreas.size() == areas.size();
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
 		throw std::runtime_error("cannot open nav file for writing: " + path);
@@ -85,6 +87,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 
 	std::vector<NavAreaRecord> areaRecords(areas.size());
 	std::vector<uint32_t> areaPortalIndex;
+	std::vector<NavAreaPlane> areaPlanes;
 
 	for (size_t i = 0; i < areas.size(); ++i)
 	{
@@ -93,6 +96,8 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		ComputeBounds(areas[i].polytope, rec.mins, rec.maxs, rec.centroid);
 		rec.areaFlags = NAV_AREA_NONE; // water/gravity flags land in later milestones (2g/2h)
 		rec.gravityScale = 1.0f;
+		if (haveCrouch && crouchAreas[i])
+			rec.areaFlags |= NAV_AREA_CROUCH;
 		if (haveTactical)
 		{
 			const TacticalScore &t = tacticalScores[i];
@@ -114,6 +119,19 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 
 		for (uint32_t idx : perArea[i])
 			areaPortalIndex.push_back(idx);
+
+		rec.planeOffset = ToU16Count(areaPlanes.size(), "area-plane offset");
+		rec.planeCount = ToU16Count(areas[i].polytope.faces.size(), "planes-per-area");
+
+		for (const Face &face : areas[i].polytope.faces)
+		{
+			NavAreaPlane plane;
+			plane.normal[0] = static_cast<float>(face.plane.normal.x);
+			plane.normal[1] = static_cast<float>(face.plane.normal.y);
+			plane.normal[2] = static_cast<float>(face.plane.normal.z);
+			plane.dist = static_cast<float>(face.plane.dist);
+			areaPlanes.push_back(plane);
+		}
 	}
 
 	std::vector<NavPortalRecord> portalRecords(portals.size());
@@ -133,7 +151,15 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.edgeFlags = p.edgeFlags;
 		// Jump edges are a proximity heuristic, not a validated path -- bias
 		// A* away from them when an equivalent walk edge exists elsewhere.
-		rec.traverseCost = (p.edgeType == EDGE_JUMP) ? 1.5f : 1.0f;
+		// Elevators carry a real wait-for-it/ride-it time cost on top of the
+		// raw centroid distance already counted, so they're weighted higher
+		// still -- prefer a walkable route when one exists, but still use
+		// the lift when it's the only (or genuinely better) option.
+		rec.traverseCost = (p.edgeType == EDGE_JUMP) ? 1.5f : (p.edgeType == EDGE_ELEVATOR) ? 2.0f : 1.0f;
+		rec.buttonPos[0] = static_cast<float>(p.buttonPos.x);
+		rec.buttonPos[1] = static_cast<float>(p.buttonPos.y);
+		rec.buttonPos[2] = static_cast<float>(p.buttonPos.z);
+		rec.travelTime = static_cast<float>(p.travelTime);
 	}
 
 	// String table: flat NUL-separated targetnames referenced by Door
@@ -179,6 +205,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	header.areaPortalIndexCount = static_cast<uint32_t>(areaPortalIndex.size());
 	header.specialEdgeCount = static_cast<uint32_t>(specialEdgeRecords.size());
 	header.stringTableSize = static_cast<uint32_t>(stringTable.size());
+	header.areaPlaneCount = static_cast<uint32_t>(areaPlanes.size());
 
 	WriteRaw(f, &header, sizeof(header), "header");
 	WriteRaw(f, areaRecords.data(), areaRecords.size() * sizeof(NavAreaRecord), "area records");
@@ -186,6 +213,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	WriteRaw(f, areaPortalIndex.data(), areaPortalIndex.size() * sizeof(uint32_t), "area-portal index");
 	WriteRaw(f, specialEdgeRecords.data(), specialEdgeRecords.size() * sizeof(NavSpecialEdgeRecord), "special edge records");
 	WriteRaw(f, stringTable.data(), stringTable.size(), "string table");
+	WriteRaw(f, areaPlanes.data(), areaPlanes.size() * sizeof(NavAreaPlane), "area planes");
 
 	std::fclose(f);
 }

@@ -1,6 +1,9 @@
 param(
     [string]$Map = "crossfire",
     [int]$WaitSeconds = 15,
+    # Non-default port -- avoids colliding with any other HLDS instance
+    # that might already be running on the machine's default 27015.
+    [int]$Port = 29015,
     # Console commands to run once the map has finished loading. Implemented
     # via a generated cfg file exec'd after +map, with a "wait" buffer first
     # -- game.cfg/server.cfg run too early (before the level is active), and
@@ -13,7 +16,7 @@ $exe = Join-Path $hldsDir "hlds.exe"
 
 Remove-Item (Join-Path $hldsDir "qconsole.log") -ErrorAction SilentlyContinue
 
-$launchArgs = "-console -condebug -insecure -game valve +sv_lan 1 +deathmatch 1 +developer 2 +maxplayers 16 +rcon_password crossbot_test +map $Map"
+$launchArgs = "-console -condebug -insecure -game valve +sv_lan 1 +deathmatch 1 +developer 2 +maxplayers 16 +rcon_password crossbot_test +port $Port +map $Map"
 
 if ($Commands.Count -gt 0) {
     $cfgName = "_crossbot_autotest.cfg"

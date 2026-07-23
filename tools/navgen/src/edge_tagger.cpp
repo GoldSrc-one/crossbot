@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <set>
 #include <utility>
+
+#include "clipnode_tree.h"
+#include "hull_defs.h"
 
 namespace navgen
 {
@@ -19,7 +23,20 @@ using namespace crossbot_nav;
 // cover," meant to be revisited once real bots (Milestone 2c) can exercise
 // them, not treated as ground truth.
 constexpr double kMaxJumpHorizontalDistance = 200.0;
-constexpr double kMaxJumpHeightDelta = 64.0;
+// GoldSrc's jump impulse IS reverse-engineered ground truth, unlike the
+// horizontal distance above: PM_Jump (pm_shared.c) always sets
+// velocity.z = sqrt(2 * 800 * 45.0) -- a fixed impulse, not scaled by
+// running speed -- which caps a plain standing jump's height gain at
+// v^2/(2*800) = 45 units. But a duck-jump reaches further still: ducking
+// mid-air shrinks the hull from the standing height down to the duck
+// hull's, and Bot_MoveNav already presses IN_DUCK once airborne
+// (bot_move_nav.cpp's needsJump branch) specifically for this. The real
+// ceiling confirmed by the user (a live player test, not a formula) is 63
+// units, not 45 -- matching 45 (the jump apex) plus roughly the
+// standing/duck hull height difference (a shorter hull's feet can be
+// that much higher while its head stays at the same absolute max the
+// jump reaches). 60 leaves a small margin below that confirmed ceiling.
+constexpr double kMaxJumpHeightDelta = 60.0;
 // GoldSrc's real auto-step height (HOSTAGE_STEPSIZE_DEFAULT in the HLSDK
 // is the one place it's spelled out as a named constant, 18 units, and
 // matches the well-known engine convention) -- anything taller than this
@@ -33,6 +50,49 @@ constexpr double kMaxJumpHeightDelta = 64.0;
 // forever, live-verified on crossfire.bsp.
 constexpr double kWalkableStepHeight = 18.0;
 constexpr double kAreaAabbMargin = 48.0; // ~1.5x a standing hull's radius; door/ladder proximity search slack
+
+// Classifies `point` against a hull's clipnode tree (same descent
+// WalkClipnodeTree's recursion does, just following one side instead of
+// both since a point has no "split" case): true if it lands in a
+// CONTENTS_SOLID leaf. Every other content type (empty, water, ...) counts
+// as passable for this coarse check -- it isn't trying to be a real
+// physics trace, just to answer "is there a wall in the way at all."
+bool PointInSolid(const BspFile &bsp, int headnode, const Vec3 &point)
+{
+	return ClassifyPoint(bsp, headnode, point) == CONTENTS_SOLID;
+}
+
+// Coarse straight-line occlusion check for a proximity-derived jump/drop
+// connection, sampled every kSampleSpacing units along the segment (hull-1
+// point classification, not a real swept-hull trace -- good enough to catch
+// "this connection runs straight through a wall," not meant to replace real
+// collision). ProbeJumpGaps/TagDropOffs otherwise only compare distance and
+// height between two areas' floor points, with no visibility check at all
+// (a known, documented limitation -- see ProbeJumpGaps' own header comment)
+// -- confirmed live on crossfire.bsp: without this, a jump edge got created
+// straight through a real solid wall between two rooms that don't actually
+// open into each other there, and a bot sent across it just walked into the
+// wall and bounced off it forever, never able to complete the "jump" at all
+// since there was never a real gap to jump across in the first place.
+constexpr double kOcclusionSampleSpacing = 8.0;
+
+bool SegmentClear(const BspFile &bsp, int headnode, const Vec3 &a, const Vec3 &b)
+{
+	double dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+	double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+	if (len < 1e-6)
+		return !PointInSolid(bsp, headnode, a);
+
+	int steps = std::max(1, static_cast<int>(len / kOcclusionSampleSpacing));
+	for (int i = 0; i <= steps; ++i)
+	{
+		double t = static_cast<double>(i) / steps;
+		Vec3 p(a.x + dx * t, a.y + dy * t, a.z + dz * t);
+		if (PointInSolid(bsp, headnode, p))
+			return false;
+	}
+	return true;
+}
 
 int ParseBrushModelIndex(const std::string &model)
 {
@@ -69,6 +129,93 @@ void AreaBounds(const Area &area, Vec3 &mins, Vec3 &maxs, Vec3 &centroid)
 	centroid = (count > 0) ? sum * (1.0 / count) : Vec3();
 }
 
+// GoldSrc's own real max walkable slope (matches the well-known
+// STEPSIZE/slope convention, dot(normal, up) >= ~0.7 -- steeper than that
+// counts as a wall, not a floor, for standing/walking purposes).
+constexpr double kFloorNormalThreshold = 0.7;
+
+// Hull-1 half-width (16 units, GoldSrc's standard human hull) plus a
+// couple of units of slop. See NearestFloorPoint's corner-inset comment.
+constexpr double kCornerInsetMargin = 18.0;
+
+// The nearest floor-face vertex within `area` to `target`, by real 3D
+// distance, nudged inward off the exact corner it was found at. Unlike
+// AreaBoundsCache's mins/maxs/centroid, which are reduced from every vertex
+// of a merged area's ENTIRE boundary (walls and ceiling included, and
+// averaged across however much unrelated geometry got folded into that one
+// area by MergeAreas -- which has no height/slope constraint at all, only
+// "shared face fully covers + stays convex"), this looks only at genuinely
+// floor-like faces and picks whichever specific point is actually closest
+// to the gap in question, so a room merged with some unrelated dip or
+// alcove elsewhere in its footprint can't drag the answer away from the
+// real local floor height. 3D distance (not just x/y) additionally keeps a
+// large merged area's own disconnected ledge/mezzanine at a very different
+// height from winning just because its x/y happens to line up.
+// Confirmed live: naively switching the jump-height check from centroid.z
+// to whole-area mins.z (still a single area-wide scalar) collapsed
+// crossfire.bsp's reachable areas from 780 to 615 and lost both ladder
+// edges -- a worse regression than the bug it was meant to fix, because
+// mins.z inherited the same "one scalar for a spatially-varying floor"
+// flaw centroid.z had, just in the other direction.
+//
+// The corner inset exists because the raw vertex is a literal polytope
+// corner -- exactly where several boundary planes (floor + one or more
+// walls) meet with zero slack, the worst-case spot to aim a real hull at.
+// Confirmed live on crossfire.bsp: a jump waypoint's target vertex was
+// simultaneously the area's floor AND its wall boundary (origin.x sitting
+// exactly hull-radius-distance from a real wall, origin.z exactly on the
+// floor) -- a bot placed there (even freshly spawned and teleported
+// straight to it, nothing else going on) never registered FL_ONGROUND and
+// never moved at all: v_angle stopped changing, velocity.z pinned near
+// zero tick after tick, zero displacement. Pulling the point toward the
+// area's own centroid (guaranteed interior, since every area is provably
+// convex) by a hull-radius-sized margin gives a real hull standing there
+// actual clearance from whichever wall(s) met at that corner.
+bool NearestFloorPoint(const Area &area, const Vec3 &target, Vec3 &outPoint)
+{
+	bool found = false;
+	double bestDist2 = 0.0;
+	Vec3 best;
+	for (const Face &f : area.polytope.faces)
+	{
+		if (f.plane.normal.z < kFloorNormalThreshold)
+			continue; // wall or ceiling face, not a standable floor
+
+		for (const Vec3 &v : f.winding)
+		{
+			double dx = v.x - target.x;
+			double dy = v.y - target.y;
+			double dz = v.z - target.z;
+			double dist2 = dx * dx + dy * dy + dz * dz;
+			if (!found || dist2 < bestDist2)
+			{
+				found = true;
+				bestDist2 = dist2;
+				best = v;
+			}
+		}
+	}
+
+	if (!found)
+		return false;
+
+	Vec3 centroid = area.polytope.Centroid();
+	double cdx = centroid.x - best.x;
+	double cdy = centroid.y - best.y;
+	double centroidDist = std::sqrt(cdx * cdx + cdy * cdy);
+	if (centroidDist > 1e-6)
+	{
+		// Capped at half the distance to the centroid so a small area
+		// can't send the point past its own middle and out the other side.
+		double inset = std::min(kCornerInsetMargin, centroidDist * 0.5);
+		best.x += cdx / centroidDist * inset;
+		best.y += cdy / centroidDist * inset;
+	}
+
+	outPoint = best;
+	return true;
+}
+
 struct AreaBoundsCache
 {
 	std::vector<Vec3> mins, maxs, centroid;
@@ -99,7 +246,33 @@ std::vector<int> FindOverlappingAreas(const Vec3 &boxMins, const Vec3 &boxMaxs, 
 	return found;
 }
 
-void TagLadder(const dmodel_t &model, const AreaBoundsCache &cache, std::vector<TaggedSpecialEdge> &out)
+// A brush entity built around an "origin" brush (the hlcsg convention for
+// giving a rotating/moving brush model a pivot point -- func_door_rotating,
+// func_rotating, func_train, ...) gets its solid geometry re-expressed by
+// the compiler in *local* space relative to that origin brush's centroid,
+// with the centroid itself written back into the compiled entity lump as an
+// "origin" keyvalue (confirmed live: test9_door's func_door_rotating has no
+// "origin" in its *source* .map at all -- the mapper only placed the origin
+// brush -- yet the compiled .bsp's entity text has "origin" "384 144 64",
+// hlcsg's own addition). dmodel_t::mins/maxs is that same local geometry, so
+// using it directly as a world-space box (as if it were an ordinary,
+// non-origin-brush entity like a plain func_door) undercounts by however far
+// the origin sits from world (0,0,0) -- confirmed live on test9_door: a
+// door's local box (-8,-64,-64)-(8,0,32) sitting near true world position
+// (384,144,64) found zero overlapping areas, when the real footprint (both
+// mins/maxs shifted by that origin) properly bridges both sides. Returns
+// (0,0,0) if the entity has no parseable "origin" key (the common case for
+// a brush entity with no origin brush at all, e.g. a plain func_door) --
+// adding a zero offset is a no-op, so this is safe to always apply.
+Vec3 ParseEntityOrigin(const std::string &origin)
+{
+	double x = 0, y = 0, z = 0;
+	std::sscanf(origin.c_str(), "%lf %lf %lf", &x, &y, &z);
+	return Vec3(x, y, z);
+}
+
+void TagLadder(const dmodel_t &model, const Vec3 &origin, const AreaBoundsCache &cache,
+	std::vector<TaggedSpecialEdge> &out)
 {
 	// Margin-expanded, same as TagDoor: a ladder's own climb-trigger brush
 	// is often only a few units thick (its footprint sits flush against a
@@ -108,8 +281,10 @@ void TagLadder(const dmodel_t &model, const AreaBoundsCache &cache, std::vector<
 	// brush bounds at all. Search nearby instead of requiring literal
 	// overlap (found via a real miss on crossfire.bsp: a ladder only 4
 	// units wide in Y produced zero overlapping areas without this margin).
-	Vec3 boxMins(model.mins[0] - kAreaAabbMargin, model.mins[1] - kAreaAabbMargin, model.mins[2] - kAreaAabbMargin);
-	Vec3 boxMaxs(model.maxs[0] + kAreaAabbMargin, model.maxs[1] + kAreaAabbMargin, model.maxs[2] + kAreaAabbMargin);
+	Vec3 boxMins(origin.x + model.mins[0] - kAreaAabbMargin, origin.y + model.mins[1] - kAreaAabbMargin,
+		origin.z + model.mins[2] - kAreaAabbMargin);
+	Vec3 boxMaxs(origin.x + model.maxs[0] + kAreaAabbMargin, origin.y + model.maxs[1] + kAreaAabbMargin,
+		origin.z + model.maxs[2] + kAreaAabbMargin);
 
 	std::vector<int> overlapping = FindOverlappingAreas(boxMins, boxMaxs, cache);
 	if (overlapping.size() < 2)
@@ -137,18 +312,67 @@ void TagLadder(const dmodel_t &model, const AreaBoundsCache &cache, std::vector<
 	out.push_back(edge);
 }
 
-void TagDoor(const dmodel_t &model, const std::string &targetname, const AreaBoundsCache &cache,
-	std::vector<TaggedSpecialEdge> &out)
+// Resolves which func_button (if any) opens a targetname'd door: either
+// directly (button.target == doorTargetname), or through one level of
+// indirection via a trigger_relay (relay.targetname == button.target &&
+// relay.target == doorTargetname) or a multi_manager (mm.targetname ==
+// button.target && mm has a keyvalue named doorTargetname -- multi_manager's
+// own keyvalues *are* its fire list, "<target> <delay>"). Only one level of
+// indirection is resolved, not arbitrary chains -- covers both patterns
+// confirmed live (test10_doorbutton's trigger_relay, test11_doorbutton2's
+// multi_manager), and going further would be speculative without another
+// real test case to validate against.
+const Entity *ResolveButtonForDoor(const std::vector<Entity> &entities, const std::string &doorTargetname)
 {
-	Vec3 boxMins(model.mins[0] - kAreaAabbMargin, model.mins[1] - kAreaAabbMargin, model.mins[2] - kAreaAabbMargin);
-	Vec3 boxMaxs(model.maxs[0] + kAreaAabbMargin, model.maxs[1] + kAreaAabbMargin, model.maxs[2] + kAreaAabbMargin);
+	for (const Entity &ent : entities)
+	{
+		if (ent.Get("classname") != "func_button")
+			continue;
+
+		std::string target = ent.Get("target");
+		if (target.empty())
+			continue;
+
+		if (target == doorTargetname)
+			return &ent;
+
+		for (const Entity &mid : entities)
+		{
+			std::string midClass = mid.Get("classname");
+			if (midClass == "trigger_relay")
+			{
+				if (mid.Get("targetname") == target && mid.Get("target") == doorTargetname)
+					return &ent;
+			}
+			else if (midClass == "multi_manager")
+			{
+				if (mid.Get("targetname") == target && !mid.Get(doorTargetname).empty())
+					return &ent;
+			}
+		}
+	}
+	return nullptr;
+}
+
+void TagDoor(const BspFile &bsp, const dmodel_t &model, const Vec3 &origin, const std::string &targetname,
+	const Entity *button, const AreaBoundsCache &cache, std::vector<TaggedSpecialEdge> &out)
+{
+	Vec3 boxMins(origin.x + model.mins[0] - kAreaAabbMargin, origin.y + model.mins[1] - kAreaAabbMargin,
+		origin.z + model.mins[2] - kAreaAabbMargin);
+	Vec3 boxMaxs(origin.x + model.maxs[0] + kAreaAabbMargin, origin.y + model.maxs[1] + kAreaAabbMargin,
+		origin.z + model.maxs[2] + kAreaAabbMargin);
 
 	std::vector<int> overlapping = FindOverlappingAreas(boxMins, boxMaxs, cache);
+	if (std::getenv("NAVGEN_DUMP_DOOR"))
+		std::printf("  door model mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) box mins=(%.1f,%.1f,%.1f) "
+			"maxs=(%.1f,%.1f,%.1f) overlapping=%zu\n",
+			model.mins[0], model.mins[1], model.mins[2], model.maxs[0], model.maxs[1], model.maxs[2], boxMins.x,
+			boxMins.y, boxMins.z, boxMaxs.x, boxMaxs.y, boxMaxs.z, overlapping.size());
 	if (overlapping.size() < 2)
 		return; // door's excluded footprint doesn't border enough navigable area to bridge
 
-	Vec3 doorCenter((model.mins[0] + model.maxs[0]) * 0.5, (model.mins[1] + model.maxs[1]) * 0.5,
-		(model.mins[2] + model.maxs[2]) * 0.5);
+	Vec3 doorCenter(origin.x + (model.mins[0] + model.maxs[0]) * 0.5, origin.y + (model.mins[1] + model.maxs[1]) * 0.5,
+		origin.z + (model.mins[2] + model.maxs[2]) * 0.5);
 
 	// Connect only the most-separated pair among the candidates (the
 	// polytope-diameter trick portal_builder already uses for portal
@@ -184,6 +408,21 @@ void TagDoor(const dmodel_t &model, const std::string &targetname, const AreaBou
 	edge.anchorFrom = doorCenter;
 	edge.anchorTo = doorCenter;
 	edge.targetname = targetname;
+
+	if (button)
+	{
+		int buttonModelIndex = ParseBrushModelIndex(button->Get("model"));
+		if (buttonModelIndex >= 0 && static_cast<size_t>(buttonModelIndex) < bsp.Models().size())
+		{
+			const dmodel_t &buttonModel = bsp.Models()[static_cast<size_t>(buttonModelIndex)];
+			Vec3 buttonOrigin = ParseEntityOrigin(button->Get("origin"));
+			edge.needsButton = true;
+			edge.buttonPos = Vec3(buttonOrigin.x + (buttonModel.mins[0] + buttonModel.maxs[0]) * 0.5,
+				buttonOrigin.y + (buttonModel.mins[1] + buttonModel.maxs[1]) * 0.5,
+				buttonOrigin.z + (buttonModel.mins[2] + buttonModel.maxs[2]) * 0.5);
+		}
+	}
+
 	out.push_back(edge);
 }
 
@@ -203,82 +442,183 @@ std::vector<TaggedSpecialEdge> TagSpecialEdges(const BspFile &bsp, const std::ve
 		if (!isLadder && !isDoor)
 			continue;
 
-		if (isDoor && !ent.Get("targetname").empty())
-			continue; // HL's own CBaseDoor::Spawn does SetTouch(NULL) whenever targetname is
-			          // set -- this door can only be opened by whatever targets it (a
-			          // func_button, a trigger, ...), never by a player/bot walking into it.
-			          // Tagging a crossable edge here would promise a route the bot can never
-			          // actually take; button-gated doors stay out of scope for this milestone
-			          // series (see the plan's "Button-gated doors, platforms, and pads" note),
-			          // so this footprint just stays excluded, the same as a func_wall.
+		std::string targetname = ent.Get("targetname");
+		const Entity *button = nullptr;
+		if (isDoor && !targetname.empty())
+		{
+			// HL's own CBaseDoor::Spawn does SetTouch(NULL) whenever
+			// targetname is set -- this door can only be opened by
+			// whatever targets it. Try to resolve a func_button that
+			// actually does (directly or via one level of trigger_relay/
+			// multi_manager indirection -- see ResolveButtonForDoor); if
+			// none exists, this footprint just stays excluded, the same
+			// as a func_wall, rather than tagging a crossable edge that
+			// promises a route the bot can never actually take.
+			button = ResolveButtonForDoor(entities, targetname);
+			if (!button)
+				continue;
+		}
 
 		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
 		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
 			continue;
 		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
+		Vec3 origin = ParseEntityOrigin(ent.Get("origin"));
 
 		if (isLadder)
-			TagLadder(model, cache, result);
+			TagLadder(model, origin, cache, result);
 		else
-			TagDoor(model, ent.Get("targetname"), cache, result);
+			TagDoor(bsp, model, origin, targetname, button, cache, result);
 	}
 
 	return result;
 }
 
-void ProbeJumpGaps(const std::vector<Area> &areas, std::vector<MergedPortal> &portals)
+namespace
+{
+// Plain union-find over area indices, used by ProbeJumpGaps to tell "these
+// two areas are already reachable from each other via some chain of real
+// walk portals" apart from "these two specific areas just don't happen to
+// share a direct portal" -- the two are very different questions. Checking
+// only direct-portal adjacency (a std::set of edge pairs) confirmed live to
+// under-count connectivity: on a staircase whose treads are each their own
+// area, area0 and area4 have no *direct* portal between them but are
+// already fully walkable via the intervening tread areas. Direct-adjacency
+// checking alone still added a proximity-derived "jump" edge straight
+// between them (nothing geometrically wrong with it -- open air, no wall in
+// the way -- just entirely redundant), and because A*'s edge cost is
+// centroid-to-centroid distance, that shortcut was often *cheaper* than the
+// real multi-hop walk chain, so the router picked it and sent the bot
+// jumping over a staircase it could have just walked up normally.
+struct DisjointSet
+{
+	std::vector<int> parent;
+	explicit DisjointSet(size_t n) : parent(n)
+	{
+		for (size_t i = 0; i < n; ++i)
+			parent[i] = static_cast<int>(i);
+	}
+	int Find(int x)
+	{
+		while (parent[static_cast<size_t>(x)] != x)
+		{
+			parent[static_cast<size_t>(x)] = parent[static_cast<size_t>(parent[static_cast<size_t>(x)])];
+			x = parent[static_cast<size_t>(x)];
+		}
+		return x;
+	}
+	void Union(int a, int b)
+	{
+		a = Find(a);
+		b = Find(b);
+		if (a != b)
+			parent[static_cast<size_t>(a)] = b;
+	}
+};
+} // namespace
+
+void ProbeJumpGaps(const BspFile &bsp, int headnode, const std::vector<Area> &areas,
+	std::vector<MergedPortal> &portals)
 {
 	AreaBoundsCache cache(areas);
 
-	std::set<std::pair<int, int>> connected;
+	DisjointSet components(areas.size());
 	for (const MergedPortal &p : portals)
-		connected.insert({std::min(p.areaA, p.areaB), std::max(p.areaA, p.areaB)});
+		components.Union(p.areaA, p.areaB);
 
 	size_t n = areas.size();
 	for (size_t i = 0; i < n; ++i)
 	{
 		for (size_t j = i + 1; j < n; ++j)
 		{
-			std::pair<int, int> key{static_cast<int>(i), static_cast<int>(j)};
-			if (connected.count(key))
-				continue;
+			if (components.Find(static_cast<int>(i)) == components.Find(static_cast<int>(j)))
+				continue; // already reachable via a real walk-portal chain -- no jump needed
 
 			const Vec3 &ci = cache.centroid[i];
 			const Vec3 &cj = cache.centroid[j];
-			double horizDist = std::sqrt((ci.x - cj.x) * (ci.x - cj.x) + (ci.y - cj.y) * (ci.y - cj.y));
-			double vertDelta = std::fabs(ci.z - cj.z);
+			// Cheap coarse reject first (whole-area centroids, generous
+			// slack) before paying for the real per-gap floor-vertex
+			// search below -- this pair is nowhere near jump range at all,
+			// no need to scan either area's polytope.
+			double coarseHorizDist = std::sqrt((ci.x - cj.x) * (ci.x - cj.x) + (ci.y - cj.y) * (ci.y - cj.y));
+			if (coarseHorizDist > kMaxJumpHorizontalDistance + kAreaAabbMargin)
+				continue;
+
+			// Refine using each area's actual nearest floor point to the
+			// other side, not the whole area's centroid/mins -- see
+			// NearestFloorPoint's comment for why a single area-wide
+			// scalar (either one) is unreliable once MergeAreas has folded
+			// unrelated geometry (a dip, an alcove, a ramp) into the same
+			// area as the part that's actually near this gap.
+			Vec3 nearA, nearB;
+			if (!NearestFloorPoint(areas[i], cj, nearA) || !NearestFloorPoint(areas[j], ci, nearB))
+				continue; // no floor-like face at all (shouldn't happen for a real walkable area)
+
+			double horizDist = std::sqrt((nearA.x - nearB.x) * (nearA.x - nearB.x) +
+				(nearA.y - nearB.y) * (nearA.y - nearB.y));
+			double vertDelta = std::fabs(nearA.z - nearB.z);
 
 			if (horizDist > kMaxJumpHorizontalDistance || vertDelta > kMaxJumpHeightDelta)
+				continue;
+
+			// Distance and height alone can't tell a real gap from a wall two
+			// rooms just happen to sit close across -- see SegmentClear's
+			// comment for the live crossfire.bsp case this caught. Sample at
+			// standing-origin height above each floor point (kHumanHullMaxZ,
+			// the same convention hull-1 itself uses -- see hull_defs.h),
+			// not the raw floor points themselves: a hull-1 origin classified
+			// right at its own floor sits exactly on the leaf boundary and
+			// can falsely read as solid, the same zero-clearance problem
+			// NearestFloorPoint's own corner-inset exists to avoid.
+			Vec3 clearanceA(nearA.x, nearA.y, nearA.z + kHumanHullMaxZ);
+			Vec3 clearanceB(nearB.x, nearB.y, nearB.z + kHumanHullMaxZ);
+			if (!SegmentClear(bsp, headnode, clearanceA, clearanceB))
 				continue;
 
 			MergedPortal jump;
 			jump.areaA = static_cast<int>(i);
 			jump.areaB = static_cast<int>(j);
-			jump.pointA = ci;
-			jump.pointB = cj;
+			jump.pointA = nearA;
+			jump.pointB = nearB;
 			jump.area = 0.0; // not a real shared-face overlap -- a proximity-derived edge
 			jump.edgeType = EDGE_JUMP;
 			portals.push_back(jump);
-			connected.insert(key);
+			components.Union(static_cast<int>(i), static_cast<int>(j));
 		}
 	}
 }
 
 void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &portals)
 {
-	AreaBoundsCache cache(areas);
-
 	for (MergedPortal &p : portals)
 	{
 		if (p.edgeType != EDGE_WALK)
 			continue; // don't reclassify jump/ladder/door edges as drops
 
-		double floorA = cache.mins[static_cast<size_t>(p.areaA)].z;
-		double floorB = cache.mins[static_cast<size_t>(p.areaB)].z;
-		double delta = std::fabs(floorA - floorB);
+		// Query near the shared boundary itself (real local geometry for a
+		// genuine walk portal), not each area's whole-area mins -- same
+		// reasoning as ProbeJumpGaps' NearestFloorPoint refinement above:
+		// an area's global lowest point can belong to unrelated geometry
+		// (a dip, alcove, ramp) folded into the same merged area by
+		// MergeAreas, far from this specific boundary.
+		Vec3 midpoint = (p.pointA + p.pointB) * 0.5;
+		Vec3 floorA, floorB;
+		if (!NearestFloorPoint(areas[static_cast<size_t>(p.areaA)], midpoint, floorA) ||
+			!NearestFloorPoint(areas[static_cast<size_t>(p.areaB)], midpoint, floorB))
+			continue; // no floor face at all -- leave classification alone
+
+		double delta = std::fabs(floorA.z - floorB.z);
 
 		if (delta <= kWalkableStepHeight)
 			continue; // genuinely walkable in either direction -- leave as EDGE_WALK
+
+		// From here on this edge needs a real floor point to aim at, not
+		// the shared-face's most-separated corners (portal_builder.cpp's
+		// PolygonDiameter picks those for area coverage purposes -- they
+		// can sit anywhere from floor to ceiling height on a tall shared
+		// wall, not necessarily either side's actual floor).
+		p.pointA = floorA;
+		p.pointB = floorB;
 
 		if (delta <= kMaxJumpHeightDelta)
 		{
@@ -303,10 +643,153 @@ void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &port
 		// fall and permitting a nonsensical "climb" instead). Ensure areaA
 		// is always the higher (from) side here, once, rather than push
 		// that assumption onto every consumer.
-		if (floorA < floorB)
+		if (floorA.z < floorB.z)
 		{
 			std::swap(p.areaA, p.areaB);
 			std::swap(p.pointA, p.pointB);
+		}
+	}
+}
+
+std::vector<bool> ComputeCrouchAreaFlags(const std::vector<Area> &areas, const std::vector<bool> &isCrouchLeaf)
+{
+	std::vector<bool> result(areas.size(), false);
+	for (size_t i = 0; i < areas.size(); ++i)
+	{
+		for (int leafId : areas[i].memberLeafIds)
+		{
+			if (static_cast<size_t>(leafId) < isCrouchLeaf.size() && isCrouchLeaf[static_cast<size_t>(leafId)])
+			{
+				result[i] = true;
+				break;
+			}
+		}
+	}
+	return result;
+}
+
+namespace
+{
+// Small horizontal search radius, unlike ProbeJumpGaps' 200-unit jump range
+// -- a crouch link is meant to stand in for a portal_builder shared face
+// that just happened not to match, i.e. two genuinely adjacent leaves, not
+// a real gap to cross. ~1.5x a standing hull's radius, same reasoning as
+// kAreaAabbMargin.
+constexpr double kCrouchLinkMaxHorizDistance = 48.0;
+
+// A small inward lift off the exact floor-face vertex NearestFloorPoint
+// returns, NOT a hull-height offset the way ProbeJumpGaps' clearance sample
+// uses (floor + kHumanHullMaxZ) -- that convention assumes the leaf's own
+// valid origin range comfortably spans a full hull height above its floor,
+// true for a hull1 leaf (guaranteed >=72 units tall by construction) but
+// false here: a hull-3-only leaf can be as little as a duck hull's own
+// ~12-unit clearance margin tall, so adding kDuckHullMaxZ (32) to its own
+// floor point overshoots clean past that leaf's own ceiling and always
+// misreads as solid. This just needs to clear the "exactly on the boundary
+// plane" epsilon problem NearestFloorPoint's own corner-inset comment
+// describes, not reconstruct a full hull height.
+constexpr double kCrouchProbeLift = 6.0;
+}
+
+void ProbeCrouchLinks(const BspFile &bsp, int duckHeadnode, const std::vector<Area> &areas,
+	const std::vector<bool> &isCrouchLeaf, std::vector<MergedPortal> &portals)
+{
+	std::vector<bool> isCrouchArea = ComputeCrouchAreaFlags(areas, isCrouchLeaf);
+
+	AreaBoundsCache cache(areas);
+
+	DisjointSet components(areas.size());
+	for (const MergedPortal &p : portals)
+		components.Union(p.areaA, p.areaB);
+
+	bool debugDump = std::getenv("NAVGEN_DUMP_CROUCH") != nullptr;
+
+	size_t n = areas.size();
+	for (size_t i = 0; i < n; ++i)
+	{
+		if (!isCrouchArea[i])
+			continue; // only bridging a crouch area to its neighbors -- plain hull1<->hull1 gaps are portal_builder's job
+
+		for (size_t j = 0; j < n; ++j)
+		{
+			if (i == j)
+				continue;
+			if (components.Find(static_cast<int>(i)) == components.Find(static_cast<int>(j)))
+				continue; // already reachable via some other chain
+
+			const Vec3 &ci = cache.centroid[i];
+			const Vec3 &cj = cache.centroid[j];
+			double coarseHorizDist = std::sqrt((ci.x - cj.x) * (ci.x - cj.x) + (ci.y - cj.y) * (ci.y - cj.y));
+			if (coarseHorizDist > kCrouchLinkMaxHorizDistance + kAreaAabbMargin)
+				continue; // cheap reject before the real per-gap floor-vertex search below
+
+			Vec3 nearA, nearB;
+			if (!NearestFloorPoint(areas[i], cj, nearA) || !NearestFloorPoint(areas[j], ci, nearB))
+			{
+				if (debugDump)
+					std::printf("  crouch-probe area%zu<->area%zu: no floor point found\n", i, j);
+				continue;
+			}
+
+			double horizDist = std::sqrt((nearA.x - nearB.x) * (nearA.x - nearB.x) +
+				(nearA.y - nearB.y) * (nearA.y - nearB.y));
+
+			// nearA/nearB are hull *origin* heights, not literal floor
+			// heights, and the two areas can come from different hulls
+			// (duck origin sits floor+18, standing origin sits floor+36) --
+			// subtracting the raw z values directly would compare apples to
+			// oranges, off by exactly the 18-unit gap between the two
+			// offsets whenever the real floors actually match. Converting
+			// each back to its own area's real floor height first (origin +
+			// that hull's own, negative, min-Z) before comparing is what
+			// vertDelta actually needs to mean here: "how different are the
+			// two real floor heights," not "how different are two
+			// differently-encoded coordinates that happen to share a unit."
+			double floorA = nearA.z + (isCrouchArea[i] ? kDuckHullMinZ : kHumanHullMinZ);
+			double floorB = nearB.z + (isCrouchArea[j] ? kDuckHullMinZ : kHumanHullMinZ);
+			double vertDelta = std::fabs(floorA - floorB);
+
+			if (debugDump)
+				std::printf("  crouch-probe area%zu<->area%zu: nearA=(%.1f,%.1f,%.1f) nearB=(%.1f,%.1f,%.1f) "
+					"floorA=%.1f floorB=%.1f horizDist=%.1f vertDelta=%.1f\n",
+					i, j, nearA.x, nearA.y, nearA.z, nearB.x, nearB.y, nearB.z, floorA, floorB, horizDist, vertDelta);
+
+			// Ducking through is still just walking, no jump input -- keep
+			// this to plain step-height range, not jump range.
+			if (horizDist > kCrouchLinkMaxHorizDistance || vertDelta > kWalkableStepHeight)
+				continue;
+
+			// Sampled against hull 3's own clipnode tree -- this is the whole
+			// reason this connection needs a separate probe instead of a
+			// normal portal in the first place. Both endpoints are placed at
+			// the SAME real-world height: each area's own true floor (just
+			// computed above) plus duck's own minimum valid origin offset
+			// (-kDuckHullMinZ) plus a small inward lift -- not nearA.z/
+			// nearB.z directly, which are raw hull-origin coordinates on two
+			// different scales (see floorA/floorB's own comment) and would
+			// put the two endpoints at two different absolute heights,
+			// turning a level duck-height clearance check into a spurious
+			// diagonal one that climbs straight into the low ceiling.
+			double duckOriginA = floorA - kDuckHullMinZ + kCrouchProbeLift;
+			double duckOriginB = floorB - kDuckHullMinZ + kCrouchProbeLift;
+			Vec3 clearanceA(nearA.x, nearA.y, duckOriginA);
+			Vec3 clearanceB(nearB.x, nearB.y, duckOriginB);
+			if (!SegmentClear(bsp, duckHeadnode, clearanceA, clearanceB))
+			{
+				if (debugDump)
+					std::printf("  crouch-probe area%zu<->area%zu: segment blocked\n", i, j);
+				continue;
+			}
+
+			MergedPortal link;
+			link.areaA = static_cast<int>(i);
+			link.areaB = static_cast<int>(j);
+			link.pointA = nearA;
+			link.pointB = nearB;
+			link.area = 0.0; // proximity-derived, not a real shared-face overlap
+			link.edgeType = EDGE_WALK;
+			portals.push_back(link);
+			components.Union(static_cast<int>(i), static_cast<int>(j));
 		}
 	}
 }

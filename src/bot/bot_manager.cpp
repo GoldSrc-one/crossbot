@@ -4,8 +4,12 @@
 #include "bot_manager.h"
 #include "bot.h"
 #include "bot_move.h"
+#include "bot_move_nav.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
+#include "../nav/nav_debug.h"
+
+#include <string>
 
 namespace
 {
@@ -66,6 +70,8 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
 	Nav::LoadForMap(mapName);
+
+	NavDebug::Precache();
 }
 
 void ServerDeactivate()
@@ -96,6 +102,8 @@ void ClientDisconnect(edict_t *pEntity)
 
 void StartFrame()
 {
+	NavDebug::Draw();
+
 	if (!g_pGameProfile)
 		return;
 
@@ -202,11 +210,69 @@ bool SetGoalForAllBots(const Vector &point)
 			continue;
 		bot.goalPoint = point;
 		bot.hasGoal = true;
-		bot.waypoints.clear();
-		bot.waypointIndex = 0;
+		Bot_ResetNavPath(bot); // also clears elevator/jump/obstacle state and the ETA/area-trace diagnostics
 		any = true;
 	}
 	return any;
+}
+
+bool TeleportAllBots(const Vector &point)
+{
+	bool any = false;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+		// SET_ORIGIN (not a raw v.origin write) so the engine properly
+		// relinks the edict's collision/PVS position -- a direct struct
+		// write leaves stale spatial-partition data until the next normal
+		// physics step touches it.
+		SET_ORIGIN(bot.pEdict, point);
+		bot.pEdict->v.velocity = Vector(0.f, 0.f, 0.f);
+		any = true;
+	}
+	return any;
+}
+
+namespace
+{
+	// Appends "<label>=[a,b,c,...]" to msg, capped at kMaxShown entries so a
+	// long corridor can't blow past qconsole's line-length handling. Planned
+	// paths are most useful shown from the *front* (what's still ahead);
+	// visited-history is most useful shown from the *back* (where the bot
+	// actually ended up just now) -- see the fromTail param.
+	void AppendAreaList(std::string &msg, const char *label, const std::vector<uint32_t> &ids, bool fromTail)
+	{
+		constexpr size_t kMaxShown = 24;
+		msg += " ";
+		msg += label;
+		msg += "=[";
+
+		size_t begin = 0;
+		size_t end = ids.size();
+		bool truncated = ids.size() > kMaxShown;
+		if (truncated)
+		{
+			if (fromTail)
+				begin = ids.size() - kMaxShown;
+			else
+				end = kMaxShown;
+		}
+
+		if (truncated && fromTail)
+			msg += "...,";
+		char idBuf[16];
+		for (size_t i = begin; i < end; ++i)
+		{
+			snprintf(idBuf, sizeof(idBuf), "%u", ids[i]);
+			msg += idBuf;
+			if (i + 1 < end)
+				msg += ",";
+		}
+		if (truncated && !fromTail)
+			msg += ",...";
+		msg += "]";
+	}
 }
 
 void PrintNavStatus()
@@ -223,16 +289,36 @@ void PrintNavStatus()
 		{
 			const Nav::Waypoint &wp = bot.waypoints[bot.waypointIndex];
 			snprintf(targetBuf, sizeof(targetBuf), "(%.0f,%.0f,%.0f)%s", wp.point.x, wp.point.y, wp.point.z,
-				wp.requiresJump ? "[JUMP]" : "");
+				wp.requiresJump ? "[JUMP]" : wp.requiresElevatorRide ? "[ELEVATOR]" : "");
 		}
-		char msg[400];
-		snprintf(msg, sizeof(msg),
+
+		bool onGround = (bot.pEdict->v.flags & FL_ONGROUND) != 0;
+
+		char line[400];
+		snprintf(line, sizeof(line),
 			"CrossBot: %s origin=(%.0f,%.0f,%.0f) vel=(%.0f,%.0f,%.0f) angles=(%.0f,%.0f) hasGoal=%d "
-			"goal=(%.0f,%.0f,%.0f) target=%s waypoint=%zu/%zu movetype=%d\n",
+			"goal=(%.0f,%.0f,%.0f) target=%s waypoint=%zu/%zu movetype=%d area=%d onground=%d",
 			bot.name, origin.x, origin.y, origin.z, vel.x, vel.y, vel.z, angles.x, angles.y,
 			bot.hasGoal ? 1 : 0, bot.goalPoint.x, bot.goalPoint.y, bot.goalPoint.z, targetBuf,
-			bot.waypointIndex, bot.waypoints.size(), bot.pEdict->v.movetype);
-		SERVER_PRINT(msg);
+			bot.waypointIndex, bot.waypoints.size(), bot.pEdict->v.movetype, bot.currentAreaId, onGround ? 1 : 0);
+		std::string msg = line;
+
+		// ETA only means anything once a real path has actually been found
+		// for the current goal (estimatedArrivalTime stays 0 until then).
+		if (bot.hasGoal && bot.estimatedArrivalTime > 0.f)
+		{
+			float elapsed = gpGlobals->time - bot.pathStartTime;
+			float budget = bot.estimatedArrivalTime - bot.pathStartTime;
+			bool overdue = gpGlobals->time > bot.estimatedArrivalTime;
+			snprintf(line, sizeof(line), " elapsed=%.1fs/eta=%.1fs%s", elapsed, budget, overdue ? " OVERDUE" : "");
+			msg += line;
+		}
+
+		AppendAreaList(msg, "planned", bot.plannedAreaPath, false);
+		AppendAreaList(msg, "actual", bot.visitedAreaPath, true);
+
+		msg += "\n";
+		SERVER_PRINT(msg.c_str());
 	}
 }
 
@@ -246,6 +332,20 @@ int GetOtherBotEdicts(edict_t *self, edict_t **outEdicts, int maxCount)
 		if (!bot.inUse || bot.pEdict == self)
 			continue;
 		outEdicts[count++] = bot.pEdict;
+	}
+	return count;
+}
+
+int GetBotsForDebug(const CBot **outBots, int maxCount)
+{
+	int count = 0;
+	for (auto &bot : g_bots)
+	{
+		if (count >= maxCount)
+			break;
+		if (!bot.inUse)
+			continue;
+		outBots[count++] = &bot;
 	}
 	return count;
 }

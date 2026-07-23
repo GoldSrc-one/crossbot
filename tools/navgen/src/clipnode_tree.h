@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "bsp_file.h"
+#include "polytope.h"
 
 namespace navgen
 {
@@ -33,5 +34,15 @@ void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const
 // CONTENTS_SOLID volume (its model's hull-1 tree) the same way
 // WalkClipnodeTree extracts worldspawn's CONTENTS_EMPTY leaves.
 void WalkClipnodeTreeForContents(const BspFile &bsp, int headnode, int targetContents, const LeafCallback &callback);
+
+// Classifies a single point against one hull's clipnode tree, descending
+// directly to the leaf it falls in (no chain accumulation needed, unlike
+// WalkClipnodeTree -- a point has no "other side" to also visit). Returns
+// the raw CONTENTS_* value of the leaf reached (CONTENTS_SOLID,
+// CONTENTS_EMPTY, ...). Used wherever a single yes/no "is this point
+// blocked in hull X" question is needed rather than a full leaf walk --
+// e.g. telling a hull-3-only (duck) leaf apart from space hull-1 already
+// covers, by checking whether that same point reads as solid under hull 1.
+int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point);
 
 } // namespace navgen

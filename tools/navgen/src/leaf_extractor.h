@@ -22,13 +22,18 @@ struct ExtractedLeaf
 // into a polytope," just for different content types and different models.
 Polytope BuildPolytopeFromChain(const BspFile &bsp, const std::vector<PlaneChainEntry> &chain, double mapRadius);
 
-// Walks hull 1 (human-size standing hull) of the given model's clipnode
-// tree and produces one convex polytope per CONTENTS_EMPTY leaf reached, via
-// bspc/AAS-style plane-chain intersection: each leaf's accumulated (plane,
-// side) chain is clipped against a huge bounding cube to recover its
-// bounded convex shape. mapRadius must exceed the map's actual extent
-// (GoldSrc maps are bounded to roughly +/-4096 units; pass headroom, e.g.
-// 8192).
+// Walks the given hull (hull_defs.h's kHullHuman/kHullDuck/...) of the given
+// model's clipnode tree and produces one convex polytope per CONTENTS_EMPTY
+// leaf reached, via bspc/AAS-style plane-chain intersection: each leaf's
+// accumulated (plane, side) chain is clipped against a huge bounding cube to
+// recover its bounded convex shape. mapRadius must exceed the map's actual
+// extent (GoldSrc maps are bounded to roughly +/-4096 units; pass headroom,
+// e.g. 8192).
+std::vector<ExtractedLeaf> ExtractHullLeaves(const BspFile &bsp, const dmodel_t &model, double mapRadius,
+	int hullIndex);
+
+// Convenience wrapper: hull 1 (human-size standing hull), the primary graph
+// hull every existing caller wants.
 std::vector<ExtractedLeaf> ExtractHull1Leaves(const BspFile &bsp, const dmodel_t &model, double mapRadius);
 
 } // namespace navgen

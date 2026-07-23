@@ -63,11 +63,12 @@ Polytope BuildPolytopeFromChain(const BspFile &bsp, const std::vector<PlaneChain
 	return poly;
 }
 
-std::vector<ExtractedLeaf> ExtractHull1Leaves(const BspFile &bsp, const dmodel_t &model, double mapRadius)
+std::vector<ExtractedLeaf> ExtractHullLeaves(const BspFile &bsp, const dmodel_t &model, double mapRadius,
+	int hullIndex)
 {
 	std::vector<ExtractedLeaf> leaves;
 
-	WalkClipnodeTree(bsp, model.headnode[kHullHuman], /*includeWater=*/false,
+	WalkClipnodeTree(bsp, model.headnode[hullIndex], /*includeWater=*/false,
 		[&](int /*leafContents*/, const std::vector<PlaneChainEntry> &chain)
 		{
 			Polytope poly = BuildPolytopeFromChain(bsp, chain, mapRadius);
@@ -81,6 +82,11 @@ std::vector<ExtractedLeaf> ExtractHull1Leaves(const BspFile &bsp, const dmodel_t
 		});
 
 	return leaves;
+}
+
+std::vector<ExtractedLeaf> ExtractHull1Leaves(const BspFile &bsp, const dmodel_t &model, double mapRadius)
+{
+	return ExtractHullLeaves(bsp, model, mapRadius, kHullHuman);
 }
 
 } // namespace navgen

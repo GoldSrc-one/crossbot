@@ -25,6 +25,38 @@ struct CBot
 	std::vector<Nav::Waypoint> waypoints;
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;
+	// Set once a bot arrives at an elevator's boarding waypoint (see
+	// Nav::Waypoint::requiresElevatorRide); while gpGlobals->time is before
+	// this, Bot_MoveNav holds the bot still instead of advancing, letting
+	// the engine's own ground-entity attachment carry it up/down. 0 means
+	// "not currently waiting for a ride."
+	float elevatorReadyTime = 0.f;
+	// Same idea as elevatorReadyTime, for a waypoint tagged requiresDoor
+	// (Nav::Waypoint, path_funnel.cpp): a func_door/func_door_rotating is
+	// still SOLID_BSP right up until touched, and stays solid (swinging or
+	// sliding) for a moment after that -- confirmed live on test9_door: a
+	// bot that just kept walking straight at the door the instant it got
+	// close ended up contesting the moving brush's own collision over and
+	// over, deflecting it back out of the doorway in a loop that never
+	// actually got through. Once close enough to have made contact (which
+	// is what triggers CBaseDoor's touch-to-open in the first place), the
+	// bot instead holds still for a fixed clearance window before finishing
+	// the approach, giving the door time to finish opening out of the way.
+	// 0 means "not currently waiting on a door."
+	float doorWaitUntil = 0.f;
+	// Set the frame a jump waypoint actually presses IN_JUMP; a jump
+	// waypoint can only be marked reached once this is true and the bot is
+	// grounded again, since the landing point is often already within the
+	// generic reached-distance of the takeoff point (that's what makes it a
+	// short hop) -- without this gate the waypoint would complete before
+	// the bot ever left the ground. See Bot_MoveNav.
+	bool jumpAttempted = false;
+	// Set the first frame Bot_MoveNav's dynamic-obstacle trace finds
+	// something in the way that the baked nav mesh doesn't know about (a
+	// player-built structure, a monster, any solid entity placed at
+	// runtime after navgen ran) -- 0 means "not currently blocked". Used
+	// to force an early repath if a dodge doesn't clear it soon enough.
+	float obstacleBlockedSince = 0.f;
 	// Last origin seen by Bot_MoveNav, used to detect a discontinuous jump
 	// (respawn, or -- once Milestone 2h's trigger_teleport lands -- a
 	// teleporter) and invalidate a now-meaningless stale path instead of
@@ -32,6 +64,36 @@ struct CBot
 	// no longer anywhere near.
 	Vector lastOrigin;
 	bool hasLastOrigin = false;
+
+	// Diagnostics (crossbot_nav_status / NavDebug, see src/nav/nav_debug.h):
+	// which nav area the bot's real origin resolves to right now, refreshed
+	// every Bot_MoveNav tick regardless of whether it currently has a goal.
+	// -1 when off the mesh entirely (FindAreaForPoint only returns nullptr
+	// when the mesh has zero areas, which can't happen once Nav::IsLoaded()
+	// is true, but stays a defensive sentinel rather than an assumption).
+	int currentAreaId = -1;
+	// The A* corridor's own area sequence for the path currently being
+	// followed (Nav::PathResult::areaPath, refreshed on every Repath --
+	// including mid-route safety repaths, since those replace the corridor
+	// from the bot's current position on) versus the areas the bot has
+	// actually passed through since the goal was assigned (appended in
+	// Bot_MoveNav whenever currentAreaId changes). Comparing the two after a
+	// stall shows exactly where the bot left the intended corridor instead
+	// of guessing from raw coordinates.
+	std::vector<uint32_t> plannedAreaPath;
+	std::vector<uint32_t> visitedAreaPath;
+	// Set once, the first time a fresh goal gets a path (not touched by
+	// later mid-route safety repaths, so the deadline below reflects the
+	// original goal assignment, not a repeatedly-pushed-back moving target).
+	float pathStartTime = 0.f;
+	// A straight-line-distance/speed estimate for the path found at
+	// pathStartTime, with a safety margin for turning/jumping/avoidance
+	// overhead a straight-line estimate can't see, plus any elevator ride
+	// time (spent motionless, not covered by the speed term at all). Once
+	// gpGlobals->time passes this while still short of the goal, the bot is
+	// running later than a normal traversal should -- see PrintNavStatus's
+	// OVERDUE flag.
+	float estimatedArrivalTime = 0.f;
 
 	// Desired facing, written by whichever movement mode is active this
 	// frame (wander or nav); Bot_UpdateFacing (bot_move.cpp) smooths the

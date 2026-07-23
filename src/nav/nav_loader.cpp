@@ -63,12 +63,14 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	std::vector<uint32_t> areaPortalIndex;
 	std::vector<NavSpecialEdgeRecord> specialEdgeRecords;
 	std::vector<char> stringTable;
+	std::vector<NavAreaPlane> areaPlanes;
 
 	bool ok = ReadArray(f, header.areaCount, areaRecords) &&
 		ReadArray(f, header.portalCount, portalRecords) &&
 		ReadArray(f, header.areaPortalIndexCount, areaPortalIndex) &&
 		ReadArray(f, header.specialEdgeCount, specialEdgeRecords) &&
-		ReadArray(f, header.stringTableSize, stringTable);
+		ReadArray(f, header.stringTableSize, stringTable) &&
+		ReadArray(f, header.areaPlaneCount, areaPlanes);
 	std::fclose(f);
 
 	if (!ok)
@@ -114,6 +116,16 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		area.portalIndices.reserve(rec.portalCount);
 		for (uint32_t k = 0; k < rec.portalCount; ++k)
 			area.portalIndices.push_back(areaPortalIndex[rec.portalOffset + k]);
+
+		area.planes.reserve(rec.planeCount);
+		for (uint32_t k = 0; k < rec.planeCount; ++k)
+		{
+			const NavAreaPlane &p = areaPlanes[rec.planeOffset + k];
+			AreaPlane plane;
+			plane.normal = Vector(p.normal[0], p.normal[1], p.normal[2]);
+			plane.dist = p.dist;
+			area.planes.push_back(plane);
+		}
 	}
 
 	mesh->portals.resize(portalRecords.size());
@@ -128,6 +140,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		portal.edgeType = rec.edgeType;
 		portal.edgeFlags = rec.edgeFlags;
 		portal.traverseCost = rec.traverseCost;
+		portal.buttonPos = Vector(rec.buttonPos[0], rec.buttonPos[1], rec.buttonPos[2]);
+		portal.travelTime = rec.travelTime;
 	}
 
 	mesh->specialEdges.resize(specialEdgeRecords.size());

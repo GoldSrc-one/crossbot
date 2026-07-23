@@ -15,7 +15,18 @@ namespace crossbot_nav
 {
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
-constexpr uint32_t kNavVersion = 2; // v2 (Milestone 2e): NavAreaRecord gained exposure/concealment/dangerScore
+// v4: NavAreaRecord gained planeOffset/planeCount into a new flat
+// AreaPlanes[] table -- each area's real convex-polytope boundary planes
+// (navgen::Area.polytope.faces, already computed and provably convex by
+// MergeAreas, just never serialized before). Lets the runtime test true
+// point-in-area containment instead of only the AABB+nearest-centroid
+// approximation, which was confirmed live to occasionally resolve a
+// bot's real position to the wrong (nearby, overlapping-AABB) area --
+// silently poisoning Repath's start/goal area choice and any "did I
+// actually arrive in the target area" check with a plausible-looking but
+// wrong answer, not a crash, so it went unnoticed until traced through
+// several layers of live testing on crossfire.bsp.
+constexpr uint32_t kNavVersion = 4;
 
 // AreaRecord.areaFlags bits.
 enum AreaFlags : uint32_t
@@ -39,6 +50,7 @@ enum EdgeType : uint8_t
 	EDGE_DOOR   = 3,
 	EDGE_DROP   = 4,
 	EDGE_LAUNCH = 5, // Milestone 2h: trigger_push
+	EDGE_ELEVATOR = 6, // button-gated vertical func_door lift, see tools/navgen/src/elevator_tagger.h
 };
 
 // PortalRecord.edgeFlags bits.
@@ -47,6 +59,14 @@ enum EdgeFlags : uint8_t
 	EDGE_FLAG_NONE          = 0,
 	EDGE_FLAG_ONE_WAY       = 1u << 0, // e.g. a drop-off you can't climb back up
 	EDGE_FLAG_NEEDS_CROUCH  = 1u << 1,
+	// A func_door/func_door_rotating with a targetname (so it can't be
+	// touch-opened -- CBaseDoor's SetTouch(NULL) whenever targetname is
+	// set) that edge_tagger.cpp's TagDoor still resolved a button for, via
+	// a func_button that targets it directly, or through one level of
+	// trigger_relay/multi_manager indirection. buttonPos/travelTime (below)
+	// carry where to walk to press it and how long to wait afterward,
+	// exactly like EDGE_ELEVATOR's button-then-ride fields.
+	EDGE_FLAG_NEEDS_BUTTON  = 1u << 2,
 };
 
 struct NavHeader
@@ -61,6 +81,7 @@ struct NavHeader
 	uint32_t areaPortalIndexCount;
 	uint32_t specialEdgeCount;
 	uint32_t stringTableSize;     // bytes
+	uint32_t areaPlaneCount;
 };
 
 struct NavAreaRecord
@@ -82,6 +103,17 @@ struct NavAreaRecord
 	float dangerScore;
 	uint16_t portalOffset; // slice into AreaPortalIndex[]
 	uint16_t portalCount;
+	uint16_t planeOffset; // slice into AreaPlanes[] -- this area's convex-polytope boundary
+	uint16_t planeCount;
+};
+
+// A half-space plane bounding one area's convex polytope: the area's
+// interior satisfies dot(normal, point) - dist >= 0 for every one of its
+// planes (matches navgen::Plane's convention exactly, see polytope.h).
+struct NavAreaPlane
+{
+	float normal[3];
+	float dist;
 };
 
 struct NavPortalRecord
@@ -93,6 +125,15 @@ struct NavPortalRecord
 	uint8_t edgeType;
 	uint8_t edgeFlags;
 	float traverseCost; // A* edge-cost multiplier
+	// Meaningful for edgeType == EDGE_ELEVATOR, or edgeType == EDGE_DOOR
+	// with edgeFlags & EDGE_FLAG_NEEDS_BUTTON set: where to walk to
+	// call/press the button, and how long to wait afterward (the ride
+	// time, or an estimated door-open wait). Zeroed for every other case --
+	// a few extra bytes on every portal record rather than a separate
+	// sparse table, matching this format's existing "flat POD, no
+	// per-type variants" philosophy.
+	float buttonPos[3];
+	float travelTime;
 };
 
 // Richer typed edges that aren't a natural convex-area adjacency (ladders/

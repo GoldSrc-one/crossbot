@@ -199,4 +199,136 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 	return result;
 }
 
+MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals)
+{
+	MergeResult result;
+	result.areas.reserve(leaves.size());
+	for (const ExtractedLeaf &leaf : leaves)
+	{
+		Area area;
+		area.id = static_cast<int>(result.areas.size());
+		area.memberLeafIds.push_back(leaf.id);
+		area.polytope = leaf.polytope; // already convex on its own -- no union needed
+		result.areas.push_back(std::move(area));
+	}
+
+	// main.cpp re-indexes leaves (see navigableLeaves.size() re-assignment)
+	// so each leaf's id already matches its position in `leaves`, which is
+	// exactly the area.id assigned above -- portal endpoints translate
+	// straight across with no re-keying pass needed, unlike MergeAreas'
+	// DSU-root lookup.
+	result.portals.reserve(portals.size());
+	for (const Portal &p : portals)
+	{
+		MergedPortal mp;
+		mp.areaA = p.leafA;
+		mp.areaB = p.leafB;
+		mp.pointA = p.pointA;
+		mp.pointB = p.pointB;
+		mp.area = p.area;
+		result.portals.push_back(mp);
+	}
+
+	return result;
+}
+
+MergeResult AbsorbTinyAreas(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
+	double minVolume)
+{
+	size_t n = areas.size();
+
+	std::vector<double> volume(n);
+	for (size_t i = 0; i < n; ++i)
+		volume[i] = areas[i].polytope.Volume();
+
+	std::vector<int> parent(n);
+	std::iota(parent.begin(), parent.end(), 0);
+	auto find = [&](int x)
+	{
+		while (parent[static_cast<size_t>(x)] != x)
+		{
+			parent[static_cast<size_t>(x)] = parent[static_cast<size_t>(parent[static_cast<size_t>(x)])];
+			x = parent[static_cast<size_t>(x)];
+		}
+		return x;
+	};
+
+	std::vector<std::vector<int>> adjacency(n); // area id -> portal indices touching it
+	for (size_t pi = 0; pi < portals.size(); ++pi)
+	{
+		adjacency[static_cast<size_t>(portals[pi].areaA)].push_back(static_cast<int>(pi));
+		adjacency[static_cast<size_t>(portals[pi].areaB)].push_back(static_cast<int>(pi));
+	}
+
+	// Repeat until stable: a tiny area might only border other tiny areas
+	// at first, but absorbing those into a growing union can surface a
+	// real (large-enough) neighbor a step or two later.
+	bool progress = true;
+	while (progress)
+	{
+		progress = false;
+		for (size_t i = 0; i < n; ++i)
+		{
+			int root = find(static_cast<int>(i));
+			if (volume[static_cast<size_t>(root)] >= minVolume)
+				continue;
+
+			int bestNeighbor = -1;
+			double bestVolume = -1.0;
+			for (int pi : adjacency[i])
+			{
+				const MergedPortal &p = portals[static_cast<size_t>(pi)];
+				int other = (p.areaA == static_cast<int>(i)) ? p.areaB : p.areaA;
+				int otherRoot = find(other);
+				if (otherRoot == root)
+					continue;
+				if (volume[static_cast<size_t>(otherRoot)] > bestVolume)
+				{
+					bestVolume = volume[static_cast<size_t>(otherRoot)];
+					bestNeighbor = otherRoot;
+				}
+			}
+
+			if (bestNeighbor < 0)
+				continue; // isolated tiny area with nothing to absorb into -- leave it alone
+
+			volume[static_cast<size_t>(bestNeighbor)] += volume[static_cast<size_t>(root)];
+			parent[static_cast<size_t>(root)] = bestNeighbor;
+			progress = true;
+		}
+	}
+
+	// Assemble surviving areas -- one per remaining DSU root, keeping the
+	// root's own polytope/shape as-is. Not a geometric union: an absorbed
+	// sliver contributes nothing meaningful to the survivor's shape, only
+	// its portal connectivity, which the re-key pass below folds in.
+	MergeResult result;
+	std::vector<int> rootToNewId(n, -1);
+	for (size_t i = 0; i < n; ++i)
+	{
+		int root = find(static_cast<int>(i));
+		if (rootToNewId[static_cast<size_t>(root)] != -1)
+			continue;
+		rootToNewId[static_cast<size_t>(root)] = static_cast<int>(result.areas.size());
+		Area a = areas[static_cast<size_t>(root)];
+		a.id = rootToNewId[static_cast<size_t>(root)];
+		result.areas.push_back(std::move(a));
+	}
+
+	for (const MergedPortal &p : portals)
+	{
+		int newA = rootToNewId[static_cast<size_t>(find(p.areaA))];
+		int newB = rootToNewId[static_cast<size_t>(find(p.areaB))];
+		if (newA == newB)
+			continue; // now-internal to one survivor -- drop
+
+		MergedPortal np = p;
+		np.areaA = newA;
+		np.areaB = newB;
+		result.portals.push_back(np);
+	}
+
+	return result;
+}
+
 } // namespace navgen

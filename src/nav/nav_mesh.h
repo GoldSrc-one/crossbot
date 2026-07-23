@@ -14,6 +14,14 @@
 namespace Nav
 {
 
+// A half-space plane bounding an area's convex polytope: interior points
+// satisfy dot(normal, point) - dist >= 0. See nav_format.h::NavAreaPlane.
+struct AreaPlane
+{
+	Vector normal;
+	float dist = 0.f;
+};
+
 struct Area
 {
 	uint32_t id = 0;
@@ -21,6 +29,14 @@ struct Area
 	uint32_t areaFlags = 0;
 	float gravityScale = 1.f;
 	std::vector<uint32_t> portalIndices; // indices into NavMesh::portals
+	// This area's real convex-polytope boundary (navgen::Area.polytope,
+	// carried through to the baked format since nav_format.h v4) -- lets
+	// Nav::FindAreaForPoint test true containment instead of only
+	// AABB-overlap + nearest-centroid guessing. Empty for a .nav file
+	// baked before v4 can't happen: the loader rejects anything but an
+	// exact version match, so this is always populated when an Area exists
+	// at all.
+	std::vector<AreaPlane> planes;
 };
 
 struct Portal
@@ -30,6 +46,9 @@ struct Portal
 	uint8_t edgeType = crossbot_nav::EDGE_WALK;
 	uint8_t edgeFlags = crossbot_nav::EDGE_FLAG_NONE;
 	float traverseCost = 1.f;
+	// Only meaningful when edgeType == EDGE_ELEVATOR -- see nav_format.h.
+	Vector buttonPos;
+	float travelTime = 0.f;
 };
 
 struct SpecialEdge

@@ -3,7 +3,7 @@ param(
     [string]$Command,
     [string]$RconPassword = "crossbot_test",
     [string]$ServerAddr = "127.0.0.1",
-    [int]$Port = 27015
+    [int]$Port = 29015
 )
 
 # GoldSrc out-of-band rcon protocol: request a challenge, then send the
