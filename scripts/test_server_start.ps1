@@ -8,22 +8,25 @@ param(
     # via a generated cfg file exec'd after +map, with a "wait" buffer first
     # -- game.cfg/server.cfg run too early (before the level is active), and
     # a per-map cfg wasn't observed to run at all on this dedicated server.
-    [string[]]$Commands = @()
+    [string[]]$Commands = @(),
+    # Unique config filename (default: _crossbot_autotest.cfg). Use map-specific
+    # name to avoid collisions when running parallel tests on different maps.
+    [string]$ConfigName = "_crossbot_autotest.cfg"
 )
 
 $hldsDir = "D:\projects\trash\crossbot\hlds"
 $exe = Join-Path $hldsDir "hlds.exe"
 
-Remove-Item (Join-Path $hldsDir "qconsole.log") -ErrorAction SilentlyContinue
+# qconsole.log is shared - don't delete it here, let the test orchestrator handle it
+# Remove-Item (Join-Path $hldsDir "qconsole.log") -ErrorAction SilentlyContinue
 
 $launchArgs = "-console -condebug -insecure -game valve +sv_lan 1 +deathmatch 1 +developer 2 +maxplayers 16 +rcon_password crossbot_test +port $Port +map $Map"
 
 if ($Commands.Count -gt 0) {
-    $cfgName = "_crossbot_autotest.cfg"
-    $cfgPath = Join-Path $hldsDir "valve\$cfgName"
+    $cfgPath = Join-Path $hldsDir "valve\$ConfigName"
     $waits = (@("wait") * 40) -join "`n"
     ($waits + "`n" + ($Commands -join "`n") + "`n") | Set-Content -Path $cfgPath -NoNewline
-    $launchArgs += " +exec $cfgName"
+    $launchArgs += " +exec $ConfigName"
 }
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo

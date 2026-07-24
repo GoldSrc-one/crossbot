@@ -101,10 +101,11 @@ std::pair<Vec3, Vec3> PolygonDiameter(const Winding &w)
 
 constexpr double kMinPortalArea = 1.0; // sq units; filters edge/point-touching slivers
 // Only create portals on roughly vertical faces (walls/doorways).
-// Horizontal faces (floors/ceilings, |normal.z| >= 0.7) are not walkable connections --
-// a walkway over a pit shares a horizontal face with the pit below, but that's a
-// fall-through, not a walkable portal. This matches GoldSrc's floor normal threshold.
-constexpr double kMaxFloorNormalForPortal = 0.7;
+// Horizontal faces (floors/ceilings, |normal.z| >= 0.95 ≈ 18°) are not walkable
+// connections -- a walkway over a pit shares a horizontal face with the pit
+// below, but that's a fall-through, not a walkable portal. Sloped walkways
+// (ramps, ~30-45°) have |normal.z| ≈ 0.7-0.85 and MUST form portals.
+constexpr double kMaxFloorNormalForPortal = 0.95;
 
 } // namespace
 

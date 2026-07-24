@@ -10,7 +10,7 @@ CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh
 
 ### Build
 ```powershell
-.\build.bat
+& .\build.bat
 ```
 `build.bat` calls vcvarsall and runs `cmake --build build --target navgen`.
 
@@ -46,15 +46,29 @@ Test maps live in `maps/`. See `--dump-leaves`, `--dump-tactical`, `--dump-plane
 ```powershell
 .\scripts\test_nav_goal.ps1 -Map maps\test1_simple.bsp
 ```
-Spins up HLDS on port 29015, adds a bot, auto-selects a goal (farthest spawn pair or `info_target`), drives the bot to the goal, collects the movement trace (`nav_trace.txt`), runs `navgen --dump-svg --trace` to produce `nav_debug/<map>.svg` with the recorded trajectory overlay, generates the `.nav` file, and shuts down HLDS. Exits 0 on goal reached, 1 on timeout/failure.
+Spins up HLDS on an auto-assigned port (29015-29100), adds a bot, auto-selects a goal (farthest spawn pair or `info_target`), drives the bot to the goal, collects the movement trace, runs `navgen --dump-svg --trace` to produce `nav_debug/<map>.svg` with the recorded trajectory overlay, generates the `.nav` file, and shuts down HLDS. Exits 0 on goal reached, 1 on timeout/failure.
+
+**Parallel-safe**: multiple instances can run simultaneously on different maps — each instance uses a unique port, map-specific trace file (`valve/crossbot_data/nav_trace_<map>.txt`), map-specific config (`_crossbot_autotest_<map>.cfg`), and map-specific output files (`nav_debug/<map>.svg`, `<map>.nav`, `nav_trace_<map>.txt`). The `crossbot_trace_path` cvar isolates trace logs per instance. Spawn/target discovery and goal detection use RCON instead of parsing shared `qconsole.log`.
 
 Options:
 - `-Timeout <seconds>` — absolute safety cap (default 60)
 - `-TimeoutMultiplier <float>` — multiplier on bot's reported ETA (default 2.0); test fails at min(ETA × multiplier, Timeout)
-- `-Port <port>` — HLDS port (default 29015)
+- `-Port <port>` — HLDS port (default: auto-assign 29015-29100)
 - `-NavGenPath <path>` — navgen.exe location (default `build\tools\navgen\navgen.exe`)
 - `-HLDSDir <path>` — HLDS install dir (default `D:\projects\trash\crossbot\hlds`)
 - `-OutputDir <path>` — output directory for SVG/NAV (default `nav_debug`)
+
+### Run parallel tests
+```powershell
+# Sequential (default)
+.\scripts\test_nav_goal.ps1 -Map maps\test1_simple.bsp
+.\scripts\test_nav_goal.ps1 -Map maps\test16_float.bsp
+
+# Parallel via background jobs
+Start-Job { .\scripts\test_nav_goal.ps1 -Map maps\test1_simple.bsp }
+Start-Job { .\scripts\test_nav_goal.ps1 -Map maps\test16_float.bsp }
+Get-Job | Wait-Job | Receive-Job
+```
 
 ## Code Style
 

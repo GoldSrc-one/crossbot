@@ -4,9 +4,16 @@
 #include "../bot/bot_manager.h"
 #include "../console/commands.h"
 
+cvar_t g_tracePathCvar = {
+	"crossbot_trace_path",
+	"valve/crossbot_data/nav_trace.txt",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	CrossBotCommands::Register();
+	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	RETURN_META(MRES_IGNORED);
 }
 

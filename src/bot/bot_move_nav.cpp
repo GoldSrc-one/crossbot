@@ -13,9 +13,9 @@
 
 namespace
 {
-	constexpr float kPi = 3.14159265f;
-	constexpr float kMoveSpeed = 250.f;
-	// Loose arrival radius for elevator/button/door approach; plain ground waypoints use shared steering controller (path_follower.h).
+		constexpr float kPi = 3.14159265f;
+		constexpr float kMoveSpeed = 250.f;
+		// Loose arrival radius for elevator/button/door approach; plain ground waypoints use shared steering controller (path_follower.h).
 		constexpr float kWaypointReachedDistance = 24.f;
 		// Jump only when close and facing within 20°; rate-limited turn smoothing (Bot_UpdateFacing) must catch up first.
 		constexpr float kJumpTriggerDistance = 100.f;
@@ -110,14 +110,22 @@ namespace
 	{
 		if (bot.traceLog.empty())
 			return;
-		FILE *f = fopen("valve/crossbot_data/nav_trace.txt", "w");
+		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_trace_path");
+		const char *path = (cvar && cvar->string && cvar->string[0]) ? cvar->string : "valve/crossbot_data/nav_trace.txt";
+		FILE *f = fopen(path, "w");
 		if (f)
 		{
 			for (const Vector &p : bot.traceLog)
 				fprintf(f, "%.1f %.1f %.1f\n", p.x, p.y, p.z);
 			fclose(f);
 			char msg[128];
-			snprintf(msg, sizeof(msg), "CrossBot: wrote nav_trace.txt (%zu points)\n", bot.traceLog.size());
+			snprintf(msg, sizeof(msg), "CrossBot: wrote nav_trace.txt (%zu points) to %s\n", bot.traceLog.size(), path);
+			SERVER_PRINT(msg);
+		}
+		else
+		{
+			char msg[256];
+			snprintf(msg, sizeof(msg), "CrossBot: FAILED to open trace file: %s\n", path);
 			SERVER_PRINT(msg);
 		}
 		bot.traceLog.clear();

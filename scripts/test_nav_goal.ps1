@@ -5,16 +5,17 @@
 
 .DESCRIPTION
     Input: a test map (.bsp). The script will:
-    1. Start HLDS on port 29015 with the given map
-    2. Add a bot via RCON
-    3. Auto-select a goal (farthest spawn pair, or info_target)
-    4. Send the bot to the goal via crossbot_nav_goal
-    5. Poll crossbot_nav_status until goal reached or timeout
+    1. Start HLDS on a unique port with the given map
+    2. Set crossbot_trace_path cvar to a map-specific trace file
+    3. Add a bot via RCON
+    4. Auto-select a goal (info_target preferred, else farthest spawn pair)
+    5. Send the bot to the goal via crossbot_nav_goal
+    6. Poll crossbot_nav_status until goal reached (hasGoal=0) or timeout
        - Timeout = min(2x bot's reported ETA, 60s absolute) [configurable]
-    6. Read trace log written by plugin (valve/crossbot_data/nav_trace.txt)
-    7. Run navgen --dump-svg --trace to produce nav_debug/<map>.svg with overlay
-    8. Also generate .nav file for runtime
-    9. Stop HLDS
+    7. Read trace log written by plugin (valve/crossbot_data/nav_trace_<map>.txt)
+    8. Run navgen --dump-svg --trace to produce nav_debug/<map>.svg with overlay
+    9. Also generate .nav file for runtime
+    10. Stop HLDS
     Exit code: 0 = PASS (goal reached), 1 = FAIL (timeout/error)
 
 .PARAMETER Map
@@ -27,7 +28,7 @@
     Multiplier on bot's reported ETA (default: 2.0)
 
 .PARAMETER Port
-    HLDS port (default: 29015)
+    HLDS port (default: auto-assign from 29015-29100)
 
 .PARAMETER NavGenPath
     Path to navgen.exe (default: build\tools\navgen\navgen.exe)
@@ -53,7 +54,7 @@ param(
 
     [double]$TimeoutMultiplier = 2.0,
 
-    [int]$Port = 29015,
+    [int]$Port = 0,  # 0 = auto-assign from 29015-29100
 
     [string]$NavGenPath = "build\tools\navgen\navgen.exe",
 
@@ -64,22 +65,83 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
+
+function Update-IndexHtml {
+    param(
+        [string]$MapName,
+        [string]$Result,
+        [string]$OutputDir
+    )
+
+    $indexHtml = Join-Path $OutputDir "index.html"
+    if (-not (Test-Path $indexHtml)) {
+        Write-Host "Index.html not found at $indexHtml, skipping update"
+        return
+    }
+
+    $html = Get-Content $indexHtml -Raw
+    $color = if ($Result -eq "PASS") { "#1a5c1a" } else { "#5c1a1a" }
+    $borderColor = if ($Result -eq "PASS") { "#2e8b2e" } else { "#8b2e2e" }
+    $label = if ($Result -eq "PASS") { "✓ PASS" } else { "✗ FAIL" }
+
+    # Match existing card format (single-line): <div class="card"><h2><a href="mapname.svg" target="_blank">mapname</a></h2>...
+    $pattern = '<div class="card"><h2><a href="' + [regex]::Escape($MapName) + '\.svg" target="_blank">' + [regex]::Escape($MapName) + '</a></h2>'
+
+    $newCard = '<div class="card" style="background: {0}; border-color: {1};"><h2><a href="{2}.svg" target="_blank">{2} <span style="float:right; color:{3};">{4}</span></a></h2><a href="{2}.svg" target="_blank"><img src="{2}.svg"></a></div>' -f $color, $borderColor, $MapName, $borderColor, $label
+
+    if ($html -match $pattern) {
+        # Replace existing card - use single-line regex mode for cross-line matching
+        $regex = [regex]::new($pattern + '.*?</div>', 'Singleline')
+        $html = $regex.Replace($html, $newCard)
+    } else {
+        # Add new card after the grid opening
+        $html = $html -replace '(<div class="grid">)', "`$1`n$newCard"
+    }
+
+    $html | Set-Content -Path $indexHtml -Encoding UTF8
+    Write-Host "Updated index.html: $MapName -> $label"
+}
 $repoRoot = Split-Path $scriptDir -Parent
 
 # Resolve paths
-$mapPath = if (Test-Path $Map) { $Map } elseif (Test-Path (Join-Path $repoRoot $Map)) { Join-Path $repoRoot $Map } elseif (Test-Path (Join-Path $repoRoot "maps\$Map")) { Join-Path $repoRoot "maps\$Map" } elseif (Test-Path (Join-Path $repoRoot "maps\$Map.bsp")) { Join-Path $repoRoot "maps\$Map.bsp" } else { Write-Error "Map not found: $Map"; exit 1 }
+$mapPath = if (Test-Path $Map) { $Map }
+elseif (Test-Path (Join-Path $repoRoot $Map)) { Join-Path $repoRoot $Map }
+elseif (Test-Path (Join-Path $repoRoot "maps\$Map")) { Join-Path $repoRoot "maps\$Map" }
+elseif (Test-Path (Join-Path $repoRoot "maps\$Map.bsp")) { Join-Path $repoRoot "maps\$Map.bsp" }
+else { Write-Error "Map not found: $Map"; exit 1 }
+
 $mapName = [System.IO.Path]::GetFileNameWithoutExtension($mapPath)
-$navGenExe = if (Test-Path $NavGenPath) { $NavGenPath } elseif (Test-Path (Join-Path $repoRoot $NavGenPath)) { Join-Path $repoRoot $NavGenPath } else { Write-Error "navgen.exe not found at $NavGenPath"; exit 1 }
+$navGenExe = if (Test-Path $NavGenPath) { $NavGenPath }
+elseif (Test-Path (Join-Path $repoRoot $NavGenPath)) { Join-Path $repoRoot $NavGenPath }
+else { Write-Error "navgen.exe not found at $NavGenPath"; exit 1 }
+
 $hldsExe = Join-Path $HLDSDir "hlds.exe"
 if (-not (Test-Path $hldsExe)) { Write-Error "hlds.exe not found at $hldsExe"; exit 1 }
-$outputDir = if (Test-Path $OutputDir) { $OutputDir } elseif (Test-Path (Join-Path $repoRoot $OutputDir)) { Join-Path $repoRoot $OutputDir } else { Join-Path $repoRoot $OutputDir }
+
+$outputDir = if (Test-Path $OutputDir) { $OutputDir }
+elseif (Test-Path (Join-Path $repoRoot $OutputDir)) { Join-Path $repoRoot $OutputDir }
+else { Join-Path $repoRoot $OutputDir }
 if (-not (Test-Path $outputDir)) { New-Item -ItemType Directory -Path $outputDir | Out-Null }
+
+# Auto-assign port if not provided
+if ($Port -eq 0) {
+    $Port = 29015 + (Get-Random -Maximum 85)  # 29015-29100
+}
+
+# Map-specific filenames for parallel isolation
+$configName = "_crossbot_autotest_$mapName.cfg"
+$traceCvarPath = "valve/crossbot_data/nav_trace_$mapName.txt"
+$traceLogPath = Join-Path $HLDSDir $traceCvarPath
+$svgOut = Join-Path $outputDir "$mapName.svg"
+$navOut = Join-Path $outputDir "$mapName.nav"
+$traceOut = Join-Path $outputDir "nav_trace_$mapName.txt"
 
 Write-Host "=== crossbot automatic nav goal test: $mapName ==="
 Write-Host "Map:      $mapPath"
 Write-Host "Output:   $outputDir"
 Write-Host "Timeout:  ${Timeout}s (${TimeoutMultiplier}x ETA)"
 Write-Host "Port:     $Port"
+Write-Host "Trace:    $traceCvarPath"
 Write-Host "navgen:   $navGenExe"
 Write-Host "HLDS:     $hldsExe"
 
@@ -92,20 +154,18 @@ if (-not (Test-Path $hldsMapPath) -or (Get-Item $mapPath).LastWriteTime -gt (Get
 
 # --- 1. Start HLDS ---
 $qconsoleLog = Join-Path $HLDSDir "qconsole.log"
-$traceLogPath = Join-Path $HLDSDir "valve\crossbot_data\nav_trace.txt"
-
-Remove-Item $qconsoleLog -ErrorAction SilentlyContinue
 Remove-Item $traceLogPath -ErrorAction SilentlyContinue
 
-# Boot commands: add bot, list spawns/targets
+# Boot commands: set trace path, add bot, list spawns/targets
 $bootCommands = @(
+    "crossbot_trace_path $traceCvarPath",
     "crossbot_add TestBot",
     "crossbot_list_spawns",
     "crossbot_list_targets"
 )
 
-Write-Host "Starting HLDS..."
-$startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands $bootCommands
+Write-Host "Starting HLDS on port $Port..."
+$startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands $bootCommands -ConfigName $configName
 
 if ($startResult -match "^EXITED") {
     Write-Host "FAIL: server failed to start ($startResult)"
@@ -118,14 +178,15 @@ Write-Host "Server started, PID=$serverPid"
 Start-Sleep -Seconds 10
 
 try {
-    # --- 2. Parse spawn points and targets from qconsole.log ---
-    function Parse-SpawnsAndTargets {
-        param([string]$LogPath)
-        $log = Get-Content $LogPath -Raw -ErrorAction SilentlyContinue
-        if (-not $log) { return @{ Spawns = @(); Targets = @() } }
+    # --- 2. Get spawn points and targets via RCON (not qconsole.log) ---
+    Write-Host "Querying spawn points and targets via RCON..."
 
-        $spawnMatches = [regex]::Matches($log, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-        $targetMatches = [regex]::Matches($log, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+    function Parse-SpawnsAndTargetsFromRcon($port) {
+        $spawnOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_spawns"
+        $targetOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_targets"
+
+        $spawnMatches = [regex]::Matches($spawnOut, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+        $targetMatches = [regex]::Matches($targetOut, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
 
         $spawns = @()
         foreach ($m in $spawnMatches) {
@@ -151,8 +212,7 @@ try {
         return @{ Spawns = $spawns; Targets = $targets }
     }
 
-    Write-Host "Parsing spawn points and targets from qconsole.log..."
-    $parsed = Parse-SpawnsAndTargets $qconsoleLog
+    $parsed = Parse-SpawnsAndTargetsFromRcon $Port
     $spawns = $parsed.Spawns
     $targets = $parsed.Targets
 
@@ -166,10 +226,10 @@ try {
     }
     elseif ($spawns.Count -ge 2) {
         # Find farthest pair
-            function Get-Dist3D($a, $b) {
-                $dx = $a.X - $b.X; $dy = $a.Y - $b.Y; $dz = $a.Z - $b.Z
-                return [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
-            }
+        function Get-Dist3D($a, $b) {
+            $dx = $a.X - $b.X; $dy = $a.Y - $b.Y; $dz = $a.Z - $b.Z
+            return [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
+        }
         $bestDist = -1
         $bestA = $null
         $bestB = $null
@@ -199,12 +259,10 @@ try {
     & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_goal $($goal.X) $($goal.Y) $($goal.Z)" | Out-Null
 
     # --- 5. Poll until arrival or timeout ---
-    $reachedPattern = ("CrossBot: \S+ reached goal \(\s*{0}\s*,\s*{1}\s*,\s*{2}\s*\)" -f `
-        [regex]::Escape(("{0:F1}" -f $goal.X)), [regex]::Escape(("{0:F1}" -f $goal.Y)), [regex]::Escape(("{0:F1}" -f $goal.Z)))
-
+    # Use hasGoal=0 from crossbot_nav_status as primary signal (more reliable than qconsole.log for short goals)
     $expectedEta = $null
     $elapsed = 0
-    $pollInterval = 3
+    $pollInterval = 2  # shorter interval to catch quick completions
     $result = "FAIL"
     $reason = "unknown"
 
@@ -217,17 +275,10 @@ try {
         Start-Sleep -Seconds $pollInterval
         $elapsed += $pollInterval
 
-        # Check qconsole.log for "reached goal" line (source of truth)
-        $log = Get-Content $qconsoleLog -Raw -ErrorAction SilentlyContinue
-        if ($log -and $log -match $reachedPattern) {
-            $result = "PASS"
-            $reason = "bot logged arrival at the target, t=${elapsed}s"
-            break
-        }
-
-        # Poll live status for ETA and progress visibility
+        # Poll live status for hasGoal, ETA, and progress
         $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
         $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
+
         if ($statusLine) {
             $etaMatch = [regex]::Match($statusLine, "eta=([\d.]+)s")
             $originMatch = [regex]::Match($statusLine, "origin=\(([-\d.]+),([-\d.]+),([-\d.]+)\)")
@@ -243,11 +294,18 @@ try {
                 $ox = [double]$originMatch.Groups[1].Value
                 $oy = [double]$originMatch.Groups[2].Value
                 $oz = [double]$originMatch.Groups[3].Value
-                            $dx = $ox - $goal.X; $dy = $oy - $goal.Y; $dz = $oz - $goal.Z
-                            $dist = [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
-                            $hasGoal = if ($hasGoalMatch.Success) { [int]$hasGoalMatch.Groups[1].Value } else { 0 }
-                            Write-Host ("t={0,4}s origin=({1:F0},{2:F0},{3:F0}) dist={4:F0} hasGoal={5}" -f $elapsed, $ox, $oy, $oz, $dist, $hasGoal)
-                        }
+                $dx = $ox - $goal.X; $dy = $oy - $goal.Y; $dz = $oz - $goal.Z
+                $dist = [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
+                $hasGoal = if ($hasGoalMatch.Success) { [int]$hasGoalMatch.Groups[1].Value } else { 0 }
+                Write-Host ("t={0,4}s origin=({1:F0},{2:F0},{3:F0}) dist={4:F0} hasGoal={5}" -f $elapsed, $ox, $oy, $oz, $dist, $hasGoal)
+            }
+
+            # Goal reached when hasGoal becomes 0
+            if ($hasGoalMatch.Success -and [int]$hasGoalMatch.Groups[1].Value -eq 0) {
+                $result = "PASS"
+                $reason = "bot reported hasGoal=0 (goal reached), t=${elapsed}s"
+                break
+            }
         }
 
         # Check timeout conditions
@@ -269,7 +327,7 @@ try {
     Write-Host "=== RESULT: $result -- $reason ==="
 
     # --- 6. Collect trace log ---
-    Write-Host "Collecting trace log..."
+    Write-Host "Collecting trace log from $traceLogPath..."
     Start-Sleep -Seconds 1  # Give plugin time to flush
 
     $tracePoints = @()
@@ -288,7 +346,7 @@ try {
                     }
                 }
             }
-            Write-Host "Read $($tracePoints.Count) trace points from nav_trace.txt"
+            Write-Host "Read $($tracePoints.Count) trace points from $traceLogPath"
         }
     } else {
         Write-Warning "Trace log not found at $traceLogPath (bot may not have reached goal or trace writing failed)"
@@ -296,16 +354,11 @@ try {
 
     # --- 7. Generate SVG with trace overlay ---
     Write-Host "Generating debug SVG..."
-    $svgOut = Join-Path $outputDir "$mapName.svg"
-    $navOut = Join-Path $outputDir "$mapName.nav"
-    $traceOut = Join-Path $outputDir "nav_trace.txt"
-
-    # Write trace to output dir for navgen
     if ($tracePoints.Count -gt 0) {
-            $tracePoints | ForEach-Object { "{0:F1} {1:F1} {2:F1}" -f $_.X, $_.Y, $_.Z } | Set-Content -Path $traceOut
+        $tracePoints | ForEach-Object { "{0:F1} {1:F1} {2:F1}" -f $_.X, $_.Y, $_.Z } | Set-Content -Path $traceOut
     } else {
         # Create empty trace file so navgen doesn't error
-            "" | Set-Content -Path $traceOut
+        "" | Set-Content -Path $traceOut
     }
 
     $navgenArgs = @($mapPath, "--dump-svg", $svgOut, "--trace", $traceOut, "-o", $navOut)
@@ -320,14 +373,17 @@ try {
     }
     if (Test-Path $navOut) { Write-Host "NAV written: $navOut" }
 
-}
-finally {
-    # --- 8. Cleanup ---
-    Write-Host "Stopping HLDS (PID=$serverPid)..."
-    & "$scriptDir\test_server_stop.ps1" -Id $serverPid | Out-Null
-    # Also kill any child processes just in case
-    Get-CimInstance Win32_Process -Filter "ParentProcessId=$serverPid" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-}
+        # Update index.html with test result
+        Update-IndexHtml -MapName $mapName -Result $result -OutputDir $outputDir
 
-if ($result -ne "PASS") { exit 1 }
-exit 0
+    }
+        finally {
+                    # --- Cleanup ---
+                    Write-Host "Stopping HLDS (PID=$serverPid)..."
+                    & "$scriptDir\test_server_stop.ps1" -Id $serverPid | Out-Null
+                    # Also kill any child processes just in case
+                    Get-CimInstance Win32_Process -Filter "ParentProcessId=$serverPid" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                }
+
+                if ($result -ne "PASS") { exit 1 }
+                exit 0

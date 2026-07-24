@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <unordered_set>
 
 namespace navgen
 {
@@ -212,6 +213,52 @@ MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vec
 	}
 
 	return result;
+}
+
+std::unordered_set<int> GetWalkReachableAreas(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
+	const std::vector<int> &seedAreas)
+{
+	std::unordered_set<int> reachable;
+	if (seedAreas.empty())
+		return reachable;
+
+	std::vector<std::vector<int>> adjacency(areas.size());
+	for (size_t pi = 0; pi < portals.size(); ++pi)
+	{
+		adjacency[static_cast<size_t>(portals[pi].areaA)].push_back(static_cast<int>(pi));
+		adjacency[static_cast<size_t>(portals[pi].areaB)].push_back(static_cast<int>(pi));
+	}
+
+	std::vector<int> queue;
+	for (int s : seedAreas)
+	{
+		if (s >= 0 && static_cast<size_t>(s) < areas.size() && reachable.insert(s).second)
+		{
+			queue.push_back(s);
+		}
+	}
+
+	for (size_t qi = 0; qi < queue.size(); ++qi)
+	{
+		int a = queue[qi];
+		for (int pi : adjacency[static_cast<size_t>(a)])
+		{
+			const MergedPortal &portal = portals[static_cast<size_t>(pi)];
+			bool isAreaA = (portal.areaA == a);
+
+			// Same one-way logic as PruneUnreachableAreas
+			if ((portal.edgeFlags & crossbot_nav::EDGE_FLAG_ONE_WAY) && !isAreaA)
+				continue;
+
+			int other = isAreaA ? portal.areaB : portal.areaA;
+			if (reachable.insert(other).second)
+			{
+				queue.push_back(other);
+			}
+		}
+	}
+
+	return reachable;
 }
 
 } // namespace navgen

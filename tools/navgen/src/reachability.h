@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <unordered_set>
 
 #include "area_merger.h"
 #include "entity_parser.h"
@@ -42,6 +43,13 @@ int FindAreaContainingPoint(const Vec3 &point, const std::vector<Area> &areas);
 // pruning with no valid seed would discard the entire graph, which is a
 // worse failure than leaving void areas in.
 MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
+	const std::vector<int> &seedAreas);
+
+// Performs a flood-fill from `seedAreas` using only portals whose edgeFlags
+// do NOT include EDGE_FLAG_ONE_WAY (i.e. treats the portal graph as
+// undirected, same as the first prune pass). Returns the set of reachable
+// area IDs. Does NOT modify or prune the input.
+std::unordered_set<int> GetWalkReachableAreas(const std::vector<Area> &areas, const std::vector<MergedPortal> &portals,
 	const std::vector<int> &seedAreas);
 
 } // namespace navgen
