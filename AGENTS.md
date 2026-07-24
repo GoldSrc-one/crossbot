@@ -75,6 +75,8 @@ Get-Job | Wait-Job | Receive-Job
 
 ## Code Style
 
+- **Main source: Use HLSDK style C++, use std if necessary**
+- **Tools and scripts: Use PowerShell! Don't use CMD! Use Powershell! Don't use Python! Use powershell! Don't use Node.JS!**
 - **Comments: only when they contain information not present in the code itself. Even then, keep brief (one sentence). No restating variable names, no section banners, no decorative dividers.**
 
 ## Testing

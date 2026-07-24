@@ -314,6 +314,51 @@ int main(int argc, char **argv)
 		std::vector<navgen::ExtractedLeaf> duckLeaves =
 			navgen::ExtractHullLeaves(bsp, worldModel, kMapRadius, navgen::kHullDuck);
 
+		// Precompute horizontal (XY) bounds of all human hull leaves for fast overlap testing.
+		struct HorizontalBounds
+		{
+			double minX, maxX, minY, maxY;
+		};
+		std::vector<HorizontalBounds> humanLeafBounds;
+		humanLeafBounds.reserve(leaves.size());
+		for (const navgen::ExtractedLeaf &leaf : leaves)
+		{
+			HorizontalBounds b{1e9, -1e9, 1e9, -1e9};
+			for (const navgen::Face &f : leaf.polytope.faces)
+			{
+				for (const navgen::Vec3 &v : f.winding)
+				{
+					b.minX = std::min(b.minX, v.x);
+					b.maxX = std::max(b.maxX, v.x);
+					b.minY = std::min(b.minY, v.y);
+					b.maxY = std::max(b.maxY, v.y);
+				}
+			}
+			humanLeafBounds.push_back(b);
+		}
+
+		auto overlapsHumanLeafHorizontally = [&](const navgen::Polytope &poly) -> bool
+		{
+			HorizontalBounds b{1e9, -1e9, 1e9, -1e9};
+			for (const navgen::Face &f : poly.faces)
+			{
+				for (const navgen::Vec3 &v : f.winding)
+				{
+					b.minX = std::min(b.minX, v.x);
+					b.maxX = std::max(b.maxX, v.x);
+					b.minY = std::min(b.minY, v.y);
+					b.maxY = std::max(b.maxY, v.y);
+				}
+			}
+			for (const HorizontalBounds &hb : humanLeafBounds)
+			{
+				if (b.maxX > hb.minX && b.minX < hb.maxX &&
+					b.maxY > hb.minY && b.minY < hb.maxY)
+					return true;
+			}
+			return false;
+		};
+
 		std::vector<bool> isCrouchLeaf(leaves.size(), false); // parallel to `leaves`, grows below
 		size_t crouchLeavesAdded = 0;
 		for (navgen::ExtractedLeaf &duckLeaf : duckLeaves)
@@ -328,7 +373,13 @@ int main(int argc, char **argv)
 			{
 				navgen::Vec3 c = piece.Centroid();
 				if (navgen::ClassifyPoint(bsp, worldModel.headnode[navgen::kHullHuman], c) != CONTENTS_SOLID)
-					continue; // hull1 already covers this space -- not a crouch-only passage
+					continue; // hull1 already covers this space at this height -- not a crouch-only passage
+
+				// Centroid is solid for hull1, but check horizontal overlap: if this duck leaf
+				// horizontally overlaps any hull1 leaf, it's the same navigable column at a
+				// different height (duck hull center is lower), not a crouch-only passage.
+				if (overlapsHumanLeafHorizontally(piece))
+					continue;
 
 				navgen::ExtractedLeaf added;
 				added.id = static_cast<int>(leaves.size());

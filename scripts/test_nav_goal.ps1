@@ -260,71 +260,76 @@ try {
 
     # --- 5. Poll until arrival or timeout ---
     # Use hasGoal=0 from crossbot_nav_status as primary signal (more reliable than qconsole.log for short goals)
-    $expectedEta = $null
-    $elapsed = 0
-    $pollInterval = 2  # shorter interval to catch quick completions
-    $result = "FAIL"
-    $reason = "unknown"
+        # Also collect bot positions during polling to build trajectory trace if test fails/times out
+        $expectedEta = $null
+        $elapsed = 0
+        $pollInterval = 2  # shorter interval to catch quick completions
+        $result = "FAIL"
+        $reason = "unknown"
+        $pollTracePoints = @()  # collect positions during polling for fallback trace
 
-    # Absolute deadline
-    $absoluteDeadline = (Get-Date).AddSeconds($Timeout)
+        # Absolute deadline
+        $absoluteDeadline = (Get-Date).AddSeconds($Timeout)
 
-    Write-Host "Polling for goal arrival (interval=${pollInterval}s)..."
+        Write-Host "Polling for goal arrival (interval=${pollInterval}s)..."
 
-    while ($elapsed -lt $Timeout) {
-        Start-Sleep -Seconds $pollInterval
-        $elapsed += $pollInterval
+        while ($elapsed -lt $Timeout) {
+            Start-Sleep -Seconds $pollInterval
+            $elapsed += $pollInterval
 
-        # Poll live status for hasGoal, ETA, and progress
-        $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
-        $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
+            # Poll live status for hasGoal, ETA, and progress
+            $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
+            $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
 
-        if ($statusLine) {
-            $etaMatch = [regex]::Match($statusLine, "eta=([\d.]+)s")
-            $originMatch = [regex]::Match($statusLine, "origin=\(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-            $hasGoalMatch = [regex]::Match($statusLine, "hasGoal=(\d)")
+            if ($statusLine) {
+                $etaMatch = [regex]::Match($statusLine, "eta=([\d.]+)s")
+                $originMatch = [regex]::Match($statusLine, "origin=\(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+                $hasGoalMatch = [regex]::Match($statusLine, "hasGoal=(\d)")
 
-            if ($etaMatch.Success -and -not $expectedEta) {
-                $expectedEta = [double]$etaMatch.Groups[1].Value
-                $etaDeadline = $expectedEta * $TimeoutMultiplier
-                Write-Host ("Bot reports ETA={0:N1}s -> timeout at {1:N1}s (or absolute {2}s)" -f $expectedEta, $etaDeadline, $Timeout)
+                if ($etaMatch.Success -and -not $expectedEta) {
+                    $expectedEta = [double]$etaMatch.Groups[1].Value
+                    $etaDeadline = $expectedEta * $TimeoutMultiplier
+                    Write-Host ("Bot reports ETA={0:N1}s -> timeout at {1:N1}s (or absolute {2}s)" -f $expectedEta, $etaDeadline, $Timeout)
+                }
+
+                if ($originMatch.Success) {
+                    $ox = [double]$originMatch.Groups[1].Value
+                    $oy = [double]$originMatch.Groups[2].Value
+                    $oz = [double]$originMatch.Groups[3].Value
+                    $dx = $ox - $goal.X; $dy = $oy - $goal.Y; $dz = $oz - $goal.Z
+                    $dist = [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
+                    $hasGoal = if ($hasGoalMatch.Success) { [int]$hasGoalMatch.Groups[1].Value } else { 0 }
+                    Write-Host ("t={0,4}s origin=({1:F0},{2:F0},{3:F0}) dist={4:F0} hasGoal={5}" -f $elapsed, $ox, $oy, $oz, $dist, $hasGoal)
+
+                    # Record position for fallback trace
+                    $pollTracePoints += [pscustomobject]@{ X = $ox; Y = $oy; Z = $oz }
+                }
+
+                # Goal reached when hasGoal becomes 0
+                if ($hasGoalMatch.Success -and [int]$hasGoalMatch.Groups[1].Value -eq 0) {
+                    $result = "PASS"
+                    $reason = "bot reported hasGoal=0 (goal reached), t=${elapsed}s"
+                    break
+                }
             }
 
-            if ($originMatch.Success) {
-                $ox = [double]$originMatch.Groups[1].Value
-                $oy = [double]$originMatch.Groups[2].Value
-                $oz = [double]$originMatch.Groups[3].Value
-                $dx = $ox - $goal.X; $dy = $oy - $goal.Y; $dz = $oz - $goal.Z
-                $dist = [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
-                $hasGoal = if ($hasGoalMatch.Success) { [int]$hasGoalMatch.Groups[1].Value } else { 0 }
-                Write-Host ("t={0,4}s origin=({1:F0},{2:F0},{3:F0}) dist={4:F0} hasGoal={5}" -f $elapsed, $ox, $oy, $oz, $dist, $hasGoal)
-            }
+            # Check timeout conditions
+            if ($expectedEta -and $elapsed -gt ($expectedEta * $TimeoutMultiplier)) {
+                $reason = ("exceeded {0:N1}s ({1}x the {2:N1}s ETA) without arriving" -f ($expectedEta * $TimeoutMultiplier), $TimeoutMultiplier, $expectedEta)
+            break
+        }
 
-            # Goal reached when hasGoal becomes 0
-            if ($hasGoalMatch.Success -and [int]$hasGoalMatch.Groups[1].Value -eq 0) {
-                $result = "PASS"
-                $reason = "bot reported hasGoal=0 (goal reached), t=${elapsed}s"
+            if ((Get-Date) -ge $absoluteDeadline) {
+                $reason = "hit absolute ${Timeout}s safety cap"
                 break
             }
         }
 
-        # Check timeout conditions
-        if ($expectedEta -and $elapsed -gt ($expectedEta * $TimeoutMultiplier)) {
-            $reason = ("exceeded {0:N1}s ({1}x the {2:N1}s ETA) without arriving" -f ($expectedEta * $TimeoutMultiplier), $TimeoutMultiplier, $expectedEta)
-            break
+        if ($result -ne "PASS" -and $elapsed -ge $Timeout) {
+            $reason = "hit absolute ${Timeout}s safety cap without arriving"
         }
 
-        if ((Get-Date) -ge $absoluteDeadline) {
-            $reason = "hit absolute ${Timeout}s safety cap"
-            break
-        }
-    }
-
-    if ($result -ne "PASS" -and $elapsed -ge $Timeout) {
-        $reason = "hit absolute ${Timeout}s safety cap without arriving"
-    }
-
-    Write-Host "=== RESULT: $result -- $reason ==="
+        Write-Host "=== RESULT: $result -- $reason ==="
 
     # --- 6. Collect trace log ---
     Write-Host "Collecting trace log from $traceLogPath..."
@@ -351,6 +356,12 @@ try {
     } else {
         Write-Warning "Trace log not found at $traceLogPath (bot may not have reached goal or trace writing failed)"
     }
+
+        # Fallback: use positions collected during polling if trace log is empty
+        if ($tracePoints.Count -eq 0 -and $pollTracePoints.Count -gt 0) {
+            Write-Host "Using $($pollTracePoints.Count) fallback trace points from polling"
+            $tracePoints = $pollTracePoints
+        }
 
     # --- 7. Generate SVG with trace overlay ---
     Write-Host "Generating debug SVG..."
