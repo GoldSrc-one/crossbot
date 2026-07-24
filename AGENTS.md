@@ -12,6 +12,9 @@ CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh
 ```powershell
 & .\build.bat
 ```
+
+Just do `& .\build.bat`, you are in powershell, so just do that. No fucking bullshit with cmd /c or trying to build it yourself. Enough of that shit!
+
 `build.bat` calls vcvarsall and runs `cmake --build build --target navgen`.
 
 ### Output

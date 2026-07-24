@@ -465,6 +465,13 @@ int main(int argc, char **argv)
 		std::printf("%s: %zu tiny-leaf-sliver areas absorbed into neighbors (%zu areas remain)\n",
 			bspPath.c_str(), areaCountBeforeAbsorb - merged.areas.size(), merged.areas.size());
 
+		// Connect ramp areas to their supporting flat floors. The portal
+		// builder skips horizontal faces, so a ramp sitting on a flat floor
+		// has no portal between them even though they're walkably connected.
+		// This must run before TagDropOffs/ProbeCrouchLinks so the new
+		// walk portals are considered in reachability.
+		navgen::ConnectRampAreasToFloors(merged.areas, merged.portals);
+
 		// Bridge crouch-only (hull-3) areas to their hull-1 neighbors before
 		// the first reachability pass runs, not after (unlike ProbeJumpGaps
 		// below): a crouch area starts with *zero* portals of its own --
@@ -507,6 +514,12 @@ int main(int argc, char **argv)
 		std::vector<navgen::DoorAreaInfo> earlyDoorAreaInfo =
 			navgen::ComputeDoorAreaInfo(merged.areas, doorInfoByLeafId);
 		navgen::TagDropOffs(merged.areas, merged.portals, earlyDoorAreaInfo);
+
+		// Connect ramp areas to the flat floor areas they sit on. Ramp areas
+		// and their supporting floors share a horizontal face (ramp bottom /
+		// floor top) which portal_builder skips because it filters horizontal
+		// faces. This creates a navigation gap. We connect them here.
+		navgen::ConnectRampAreasToFloors(merged.areas, merged.portals);
 
 		// Preliminary walk-only flood fill on the FULL area set (before pruning)
 		// to identify which areas are walk-reachable from spawn. We'll use this

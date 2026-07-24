@@ -193,6 +193,14 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		mp.pointA = p.pointA;
 		mp.pointB = p.pointB;
 		mp.area = p.area;
+		// Store the canonical portal plane normal from the shared face.
+		// Both faces lie on the same plane (opposite orientations), so
+		// either leaf's face normal works -- we canonicalize it to point
+		// "up" (positive Z) for consistent ramp detection in TagDropOffs.
+		const Face &fa = leaves[static_cast<size_t>(p.leafA)].polytope.faces[static_cast<size_t>(p.faceIndexA)];
+		mp.portalNormal = fa.plane.normal;
+		if (mp.portalNormal.z < 0)
+			mp.portalNormal = mp.portalNormal * -1.0;
 		result.portals.push_back(mp);
 	}
 
@@ -226,6 +234,11 @@ MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<
 		mp.pointA = p.pointA;
 		mp.pointB = p.pointB;
 		mp.area = p.area;
+		// Store the canonical portal plane normal from the shared face.
+		const Face &fa = leaves[static_cast<size_t>(p.leafA)].polytope.faces[static_cast<size_t>(p.faceIndexA)];
+		mp.portalNormal = fa.plane.normal;
+		if (mp.portalNormal.z < 0)
+			mp.portalNormal = mp.portalNormal * -1.0;
 		result.portals.push_back(mp);
 	}
 

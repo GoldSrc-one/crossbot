@@ -51,6 +51,27 @@ constexpr double kMaxJumpHeightDelta = 60.0;
 constexpr double kWalkableStepHeight = 18.0;
 constexpr double kAreaAabbMargin = 48.0; // ~1.5x a standing hull's radius; door/ladder proximity search slack
 
+// A "ramp area" has at least one floor face with normal.z in the ramp
+// range [0.7, 0.95) -- steep enough to walk on, not flat enough to be a
+// floor/ceiling. This matches kFloorNormalThreshold and portal_builder's
+// kMaxFloorNormalForPortal.
+constexpr double kRampFloorNormalZMin = 0.7;
+constexpr double kRampFloorNormalZMax = 0.95;
+
+// Returns true if `area` contains any floor face whose normal indicates a
+// walkable ramp (sloped walkway, not a flat floor or a wall).
+bool AreaHasRampFloor(const Area &area)
+{
+	for (const Face &f : area.polytope.faces)
+	{
+		// Floor faces point generally upward (positive Z in our convention
+		// where normals point into the navigable space).
+		if (f.plane.normal.z >= kRampFloorNormalZMin && f.plane.normal.z < kRampFloorNormalZMax)
+			return true;
+	}
+	return false;
+}
+
 // Classifies `point` against a hull's clipnode tree (same descent
 // WalkClipnodeTree's recursion does, just following one side instead of
 // both since a point has no "split" case): true if it lands in a
@@ -467,6 +488,16 @@ void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &port
 {
 	bool haveDoor = doorAreaInfo.size() == areas.size();
 
+	// A ramp portal connects a flat area to a sloped walkway (or two sloped
+	// walkways). The shared face's normal has a significant horizontal
+	// component (|normal.z| < 0.95) but is still steep enough to walk on
+	// (|normal.z| >= 0.7, matching kFloorNormalThreshold / portal_builder's
+	// kMaxFloorNormalForPortal). If we see such a portal, it is a walkable
+	// ramp -- do NOT reclassify it as a drop/jump based on floor height
+	// delta, because the height delta is exactly what the ramp is for.
+	constexpr double kRampNormalZMin = 0.7;  // matches kFloorNormalThreshold
+	constexpr double kRampNormalZMax = 0.95; // matches kMaxFloorNormalForPortal
+
 	for (MergedPortal &p : portals)
 	{
 		if (p.edgeType != EDGE_WALK)
@@ -478,6 +509,27 @@ void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &port
 		// comment for the full Minkowski-expansion-direction explanation.
 		if (haveDoor && (doorAreaInfo[static_cast<size_t>(p.areaA)].isDoor || doorAreaInfo[static_cast<size_t>(p.areaB)].isDoor))
 			continue;
+
+		// If this portal was created from a shared face (area > 0), check
+		// if that face is a ramp. Proximity-derived edges (jumps, ladders,
+		// elevators) have area == 0 and portalNormal == (0,0,0).
+		// Also check if either connected area has a ramp floor -- a vertical
+		// portal (wall) connecting a flat area to a ramp area is a ramp
+		// connection even though the shared face is vertical.
+		bool isRamp = false;
+		if (p.area > 0.0 && p.portalNormal.Length() > 1e-6)
+		{
+			double absNz = std::fabs(p.portalNormal.z);
+			if (absNz >= kRampNormalZMin && absNz < kRampNormalZMax)
+				isRamp = true;
+		}
+		// Vertical portal (wall) connecting to a ramp area = ramp connection.
+		if (!isRamp && p.area > 0.0 && p.portalNormal.Length() > 1e-6 && std::fabs(p.portalNormal.z) < 0.1)
+		{
+			if (AreaHasRampFloor(areas[static_cast<size_t>(p.areaA)]) ||
+				AreaHasRampFloor(areas[static_cast<size_t>(p.areaB)]))
+				isRamp = true;
+		}
 
 		// Query near the shared boundary itself (real local geometry for a
 		// genuine walk portal), not each area's whole-area mins -- same
@@ -495,6 +547,11 @@ void TagDropOffs(const std::vector<Area> &areas, std::vector<MergedPortal> &port
 
 		if (delta <= kWalkableStepHeight)
 			continue; // genuinely walkable in either direction -- leave as EDGE_WALK
+
+		// Ramps are walkable regardless of height delta -- the slope IS the
+		// walkable connection. Don't reclassify ramp portals as jumps/drops.
+		if (isRamp)
+			continue;
 
 		// From here on this edge needs a real floor point to aim at, not
 		// the shared-face's most-separated corners (portal_builder.cpp's
@@ -573,6 +630,174 @@ constexpr double kCrouchLinkMaxHorizDistance = 48.0;
 // plane" epsilon problem NearestFloorPoint's own corner-inset comment
 // describes, not reconstruct a full hull height.
 constexpr double kCrouchProbeLift = 6.0;
+}
+
+// Connects ramp areas (areas with sloped floors) to the flat floor areas
+// they sit on. Ramp areas and their supporting floors share a horizontal
+// face (the ramp's bottom / floor's top), which portal_builder skips
+// because it filters out horizontal faces. This creates a navigation gap
+// where the ramp area is isolated from the floor below. We detect this
+// by finding area pairs where one has a ramp floor and the other has a
+// flat floor, their horizontal projections overlap significantly, and
+// the ramp's bottom is at or near the floor's top.
+void ConnectRampAreasToFloors(const std::vector<Area> &areas, std::vector<MergedPortal> &portals)
+{
+	constexpr double kMinOverlapArea = 100.0; // minimum XY overlap area to consider
+	constexpr double kMaxHeightDiff = 16.0;   // max vertical gap between ramp bottom and floor top
+
+	// Precompute area bounds for fast overlap testing
+	struct AreaInfo
+	{
+		Vec3 mins, maxs;
+		bool hasRampFloor = false;
+		double floorZ = 1e9; // approximate floor height (min Z of floor faces)
+	};
+	std::vector<AreaInfo> info(areas.size());
+	for (size_t i = 0; i < areas.size(); ++i)
+	{
+		const Area &a = areas[i];
+		info[i].mins = Vec3(1e9, 1e9, 1e9);
+		info[i].maxs = Vec3(-1e9, -1e9, -1e9);
+		for (const Face &f : a.polytope.faces)
+		{
+			for (const Vec3 &v : f.winding)
+			{
+				info[i].mins.x = std::min(info[i].mins.x, v.x);
+				info[i].mins.y = std::min(info[i].mins.y, v.y);
+				info[i].mins.z = std::min(info[i].mins.z, v.z);
+				info[i].maxs.x = std::max(info[i].maxs.x, v.x);
+				info[i].maxs.y = std::max(info[i].maxs.y, v.y);
+				info[i].maxs.z = std::max(info[i].maxs.z, v.z);
+			}
+		}
+		info[i].hasRampFloor = AreaHasRampFloor(a);
+		// Approximate floor Z as the minimum Z of floor-like faces
+		for (const Face &f : a.polytope.faces)
+		{
+			if (f.plane.normal.z > 0.7) // floor face
+			{
+				for (const Vec3 &v : f.winding)
+					info[i].floorZ = std::min(info[i].floorZ, v.z);
+			}
+		}
+		// If no floor faces found, fall back to area bounds mins.z
+		if (info[i].floorZ > 1e8)
+			info[i].floorZ = info[i].mins.z;
+	}
+
+	// Find ramp areas and connect them to flat floor areas below
+	for (size_t i = 0; i < areas.size(); ++i)
+	{
+		if (!info[i].hasRampFloor)
+			continue; // only process ramp areas
+
+		for (size_t j = 0; j < areas.size(); ++j)
+		{
+			if (i == j || info[j].hasRampFloor)
+				continue; // only connect to flat floor areas
+
+			// Check horizontal overlap
+			double overlapX = std::max(0.0, std::min(info[i].maxs.x, info[j].maxs.x) - std::max(info[i].mins.x, info[j].mins.x));
+			double overlapY = std::max(0.0, std::min(info[i].maxs.y, info[j].maxs.y) - std::max(info[i].mins.y, info[j].mins.y));
+			double overlapArea = overlapX * overlapY;
+			if (overlapArea < kMinOverlapArea)
+				continue;
+
+			// Check vertical alignment: ramp bottom should be at/near floor top
+			// Ramp floorZ is the bottom of the ramp, floor floorZ is the top of the floor
+			double heightDiff = info[i].floorZ - info[j].floorZ;
+			if (heightDiff < -kMaxHeightDiff || heightDiff > kMaxHeightDiff)
+				continue; // not vertically aligned
+
+			// Check if already connected by a portal
+			bool alreadyConnected = false;
+			for (const MergedPortal &p : portals)
+			{
+				if ((p.areaA == static_cast<int>(i) && p.areaB == static_cast<int>(j)) ||
+					(p.areaA == static_cast<int>(j) && p.areaB == static_cast<int>(i)))
+				{
+					alreadyConnected = true;
+					break;
+				}
+			}
+			if (alreadyConnected)
+				continue;
+
+			// Create a walk portal at the center of the overlap
+			double cx = (std::max(info[i].mins.x, info[j].mins.x) + std::min(info[i].maxs.x, info[j].maxs.x)) * 0.5;
+			double cy = (std::max(info[i].mins.y, info[j].mins.y) + std::min(info[i].maxs.y, info[j].maxs.y)) * 0.5;
+
+			MergedPortal portal;
+			portal.areaA = static_cast<int>(i);
+			portal.areaB = static_cast<int>(j);
+			portal.pointA = Vec3(cx, cy, info[i].floorZ);
+			portal.pointB = Vec3(cx, cy, info[j].floorZ);
+			portal.area = overlapArea;
+			portal.edgeType = EDGE_WALK;
+			portals.push_back(portal);
+		}
+	}
+
+	// Also connect vertically adjacent ramp areas (ramp-to-ramp).
+	// The floor_splitter splits a continuous ramp into horizontal slices at different Z.
+	// Portal builder skips horizontal faces, so these slices don't get portals between them.
+	// We connect ramp areas that have horizontal overlap and are vertically adjacent.
+	constexpr double kMaxRampVerticalGap = 64.0; // max gap between stacked ramp slices
+	int rampToRampAdded = 0;
+	for (size_t i = 0; i < areas.size(); ++i)
+	{
+		if (!info[i].hasRampFloor)
+			continue;
+
+		for (size_t j = 0; j < areas.size(); ++j)
+		{
+			if (i == j || !info[j].hasRampFloor)
+				continue; // only connect ramp to ramp
+
+			// Check horizontal overlap
+			double overlapX = std::max(0.0, std::min(info[i].maxs.x, info[j].maxs.x) - std::max(info[i].mins.x, info[j].mins.x));
+			double overlapY = std::max(0.0, std::min(info[i].maxs.y, info[j].maxs.y) - std::max(info[i].mins.y, info[j].mins.y));
+			double overlapArea = overlapX * overlapY;
+			if (overlapArea < kMinOverlapArea)
+				continue;
+
+			// Check vertical adjacency: one's maxZ near other's minZ
+			// (they should be stacked with minimal gap)
+			double gap1 = info[j].mins.z - info[i].maxs.z; // j above i
+			double gap2 = info[i].mins.z - info[j].maxs.z; // i above j
+			double verticalGap = std::min(std::abs(gap1), std::abs(gap2));
+			if (verticalGap > kMaxRampVerticalGap)
+				continue; // not vertically adjacent
+
+			// Check if already connected
+			bool alreadyConnected = false;
+			for (const MergedPortal &p : portals)
+			{
+				if ((p.areaA == static_cast<int>(i) && p.areaB == static_cast<int>(j)) ||
+					(p.areaA == static_cast<int>(j) && p.areaB == static_cast<int>(i)))
+				{
+					alreadyConnected = true;
+					break;
+				}
+			}
+			if (alreadyConnected)
+				continue;
+
+			// Create walk portal at overlap center, at the midpoint of the Z gap
+			double cx = (std::max(info[i].mins.x, info[j].mins.x) + std::min(info[i].maxs.x, info[j].maxs.x)) * 0.5;
+			double cy = (std::max(info[i].mins.y, info[j].mins.y) + std::min(info[i].maxs.y, info[j].maxs.y)) * 0.5;
+			double portalZ = (info[i].maxs.z + info[j].mins.z) * 0.5; // midpoint between slices
+
+			MergedPortal portal;
+			portal.areaA = static_cast<int>(i);
+			portal.areaB = static_cast<int>(j);
+			portal.pointA = Vec3(cx, cy, portalZ);
+			portal.pointB = Vec3(cx, cy, portalZ);
+			portal.area = overlapArea;
+			portal.edgeType = EDGE_WALK;
+			portals.push_back(portal);
+		}
+	}
 }
 
 void ProbeCrouchLinks(const BspFile &bsp, int duckHeadnode, const std::vector<Area> &areas,

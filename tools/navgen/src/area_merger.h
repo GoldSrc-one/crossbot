@@ -28,6 +28,12 @@ struct MergedPortal
 	// TagDropOffs reclassify these in place once areas exist to tag.
 	uint8_t edgeType = crossbot_nav::EDGE_WALK;
 	uint8_t edgeFlags = crossbot_nav::EDGE_FLAG_NONE;
+	// The canonical normal of the shared face that created this portal.
+	// For vertical walls this is horizontal (Z≈0). For sloped walkways
+	// (ramps) it has a significant positive Z component (≈0.7-0.85).
+	// Normalized and always points "up" (Z >= 0) for consistent ramp
+	// detection in TagDropOffs.
+	Vec3 portalNormal = Vec3(0, 0, 0);
 	// Only meaningful for edgeType == EDGE_ELEVATOR (elevator_tagger.cpp):
 	// where to walk to call the lift, and how long the ride itself takes.
 	// Zeroed/unused for every other edge type.

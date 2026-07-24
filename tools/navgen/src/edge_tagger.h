@@ -102,4 +102,11 @@ std::vector<bool> ComputeCrouchAreaFlags(const std::vector<Area> &areas, const s
 void ProbeCrouchLinks(const BspFile &bsp, int duckHeadnode, const std::vector<Area> &areas,
 	const std::vector<bool> &isCrouchLeaf, std::vector<MergedPortal> &portals);
 
+// Connects ramp areas (areas with sloped floor faces) to the flat floor
+// areas directly beneath them. The portal builder skips horizontal faces
+// (|normal.z| >= 0.95), so a ramp sitting on a flat floor has no portal
+// between them even though they're walkably connected. This adds those
+// missing walk portals before reachability analysis.
+void ConnectRampAreasToFloors(const std::vector<Area> &areas, std::vector<MergedPortal> &portals);
+
 } // namespace navgen
