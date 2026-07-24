@@ -387,7 +387,18 @@ void ProbeJumpGaps(const BspFile &bsp, int headnode, const std::vector<Area> &ar
 
 	DisjointSet components(areas.size());
 	for (const MergedPortal &p : portals)
-		components.Union(p.areaA, p.areaB);
+	{
+		// Only union through bidirectional edges. Drop edges (EDGE_DROP) are
+		// one-way (EDGE_FLAG_ONE_WAY) and must not be treated as connectivity
+		// for jump-gap detection -- otherwise areas separated by a drop will
+		// appear "already connected" and no jump edge will be added.
+		if ((p.edgeType == EDGE_WALK || p.edgeType == EDGE_JUMP ||
+			 p.edgeType == EDGE_LADDER || p.edgeType == EDGE_ELEVATOR) &&
+			(p.edgeFlags & EDGE_FLAG_ONE_WAY) == 0)
+		{
+			components.Union(p.areaA, p.areaB);
+		}
+	}
 
 	size_t n = areas.size();
 	for (size_t i = 0; i < n; ++i)

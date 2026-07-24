@@ -510,25 +510,27 @@ int main(int argc, char **argv)
 		// 26, because most of those void areas picked up a spurious jump
 		// edge into the reachable set.
 		std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
-		std::vector<int> targetAreas = navgen::FindTargetAreas(entities, merged.areas);
-		std::vector<int> seedAreas = spawnAreas;
-		seedAreas.insert(seedAreas.end(), targetAreas.begin(), targetAreas.end());
 		size_t rawAreaCount = merged.areas.size();
-		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, seedAreas);
-		std::printf("%s: %zu spawn point(s) resolved, %zu target(s) resolved, %zu areas reachable after first pass (%zu void areas pruned)\n",
-			bspPath.c_str(), spawnAreas.size(), targetAreas.size(), merged.areas.size(), rawAreaCount - merged.areas.size());
+		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, spawnAreas);
+		std::printf("%s: %zu spawn point(s) resolved, %zu areas reachable after first pass (%zu void areas pruned)\n",
+			bspPath.c_str(), spawnAreas.size(), merged.areas.size(), rawAreaCount - merged.areas.size());
 
-		// ProbeJumpGaps/TagDropOffs run on the now-void-free area set, and
-		// set EDGE_FLAG_ONE_WAY (a one-way drop/jump-only connection).
-		navgen::ProbeJumpGaps(bsp, worldModel.headnode[navgen::kHullHuman], merged.areas, merged.portals);
+		// TagDropOffs runs first to classify walk portals as drops/jumps based on
+		// height deltas. This MUST run before ProbeJumpGaps so that the
+		// DisjointSet in ProbeJumpGaps only unions through truly bidirectional
+		// edges (walk/jump/ladder/elevator), not through one-way drops that
+		// only appear bidirectional before this classification.
 		// Computed against the *current* (post-first-prune) area indexing --
 		// memberLeafIds stays correct regardless of how many times areas get
-		// renumbered (same reasoning as the final crouch/door computations
-		// near the end of this function), so this is safe to (cheaply)
-		// recompute here rather than thread the final one back in time.
+		// renumbered, so this is safe to recompute here.
 		std::vector<navgen::DoorAreaInfo> earlyDoorAreaInfo =
 			navgen::ComputeDoorAreaInfo(merged.areas, doorInfoByLeafId);
 		navgen::TagDropOffs(merged.areas, merged.portals, earlyDoorAreaInfo);
+
+		// Now probe for jump gaps between areas NOT already connected by
+		// bidirectional edges. The DisjointSet will respect the updated edge
+		// types (drops excluded).
+		navgen::ProbeJumpGaps(bsp, worldModel.headnode[navgen::kHullHuman], merged.areas, merged.portals);
 
 		if (std::getenv("NAVGEN_DUMP_EDGES"))
 		{
@@ -582,11 +584,8 @@ int main(int argc, char **argv)
 		// old single-pass pruning yet A* permanently failed to route any
 		// bot toward it from the ground.
 		spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
-		targetAreas = navgen::FindTargetAreas(entities, merged.areas);
-		seedAreas = spawnAreas;
-		seedAreas.insert(seedAreas.end(), targetAreas.begin(), targetAreas.end());
 		size_t areaCountBeforeSecondPrune = merged.areas.size();
-		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, seedAreas);
+		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, spawnAreas);
 		std::printf("%s: %zu areas reachable after direction-aware second pass (%zu one-way-only areas pruned)\n",
 			bspPath.c_str(), merged.areas.size(), areaCountBeforeSecondPrune - merged.areas.size());
 
