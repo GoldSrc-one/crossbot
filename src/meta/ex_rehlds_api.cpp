@@ -49,19 +49,13 @@ bool rehlds_api_init(CSysModule* engineModule)
 bool meta_init_rehlds_api()
 {
 #ifdef _WIN32
-	// Find the most appropriate module handle from a list of DLL candidates
-	// Notes:
-	// - "swds.dll" is the library Dedicated Server
-	//
-	//    Let's also attempt to locate the ReHLDS API in the client's library
-	// - "sw.dll" is the client library for Software render, with a built-in listenserver
-	// - "hw.dll" is the client library for Hardware render, with a built-in listenserver
-	const char *dllNames[] = { "swds.dll", "hw.dll", "sw.dll" }; // List of DLL candidates to lookup for the ReHLDS API
-	CSysModule *engineModule = NULL; // The module handle of the selected DLL
+	// Find the most appropriate module handle from DLL candidates: swds.dll (dedicated server), hw.dll/sw.dll (client with built-in listen server).
+	const char *dllNames[] = { "swds.dll", "hw.dll", "sw.dll" };
+	CSysModule *engineModule = NULL;
 	for (const char *dllName : dllNames)
 	{
 		if (engineModule = Sys_GetModuleHandle(dllName))
-			break; // gotcha
+			break;
 	}
 
 #else

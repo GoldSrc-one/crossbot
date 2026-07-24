@@ -37,8 +37,7 @@ bool CHLDMProfile::IsDead(edict_t *pEdict) const
 
 void CHLDMProfile::Respawn(edict_t *pEdict) const
 {
-	// Standard GoldSrc convention: CBasePlayer::PlayerDeathThink() respawns
-	// a dead player once the fire button is pressed.
+	// Standard GoldSrc: CBasePlayer::PlayerDeathThink() respawns dead player on fire button press.
 	g_engfuncs.pfnRunPlayerMove(pEdict, pEdict->v.v_angle, 0.f, 0.f, 0.f, IN_ATTACK, 0, 1);
 }
 

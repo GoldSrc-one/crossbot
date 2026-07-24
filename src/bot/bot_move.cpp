@@ -12,7 +12,7 @@ namespace
 	constexpr float kMoveSpeed = 250.f;
 	constexpr float kDirChangeInterval = 3.f;
 	constexpr float kTraceDistance = 64.f;
-	constexpr float kMaxTurnRatePerSec = 300.f; // deg/sec -- fast but not instant, avoids the classic snap-to-target bot tell
+	constexpr float kMaxTurnRatePerSec = 300.f; // deg/sec -- fast but not instant, avoids classic snap-to-target bot tell
 
 	float NormalizeAngle(float a)
 	{
@@ -37,8 +37,7 @@ namespace
 			bot.nextDirChangeTime = gpGlobals->time + kDirChangeInterval;
 		}
 
-		// Wall avoidance: trace ahead, and if the path is blocked, pick a new
-		// random direction right away instead of walking into it.
+		// Wall avoidance: trace ahead, pick new random direction immediately if blocked.
 		Vector start = pEdict->v.origin;
 		Vector end = start + bot.moveDir * kTraceDistance;
 
@@ -60,15 +59,7 @@ namespace
 
 byte Bot_FrameMsec()
 {
-	// See the header comment: this must reflect real elapsed time, not a
-	// guessed constant -- confirmed against FoxBot/jk_botti/Parabot, which
-	// all derive it from gpGlobals->frametime (or an equivalent self-tracked
-	// delta) rather than hardcoding it, and confirmed the hard way here: a
-	// fixed msec that overstates the server's real ~10ms tick caused
-	// pfnRunPlayerMove to silently produce zero displacement, frame after
-	// frame, with no error -- GoldSrc's own timing bookkeeping appears to
-	// reject a fake client that consistently claims more elapsed time per
-	// move than actually passed.
+	// Must reflect real elapsed time, not a guessed constant -- all reference bots derive from gpGlobals->frametime. Confirmed the hard way: fixed msec overstating ~10ms tick caused pfnRunPlayerMove to silently produce zero displacement, no error -- GoldSrc's timing bookkeeping rejects fake client claiming more elapsed time per move than actually passed.
 	int msec = static_cast<int>(gpGlobals->frametime * 1000.f);
 	if (msec < 1)
 		msec = 1;
@@ -93,17 +84,7 @@ Vector Bot_UpdateFacing(CBot &bot)
 	Vector smoothed(NormalizeAngle(current.x + pitchStep), NormalizeAngle(current.y + yawStep), 0.f);
 
 	pEdict->v.v_angle = smoothed;
-	// v.angles (the model's visible orientation, sent to other clients --
-	// distinct from v_angle, the real aim direction used for movement) uses
-	// a different pitch convention than v_angle: GoldSrc's player model only
-	// has a narrow aim_pitch bone-controller range and expects the opposite
-	// sign, so the raw view pitch has to be negated and scaled down, not
-	// copied as-is. Confirmed against reference bots -- foxbot's
-	// BotChangePitch (bot_navigate.cpp) does `angles.x = v_angle.x / 3`
-	// after negating v_angle.x, and yapb's Bot::updateBodyAngles (vision.cpp)
-	// does `angles.x = -v_angle.x * (1/3)` directly. This is a purely
-	// cosmetic third-person fix (v_angle, not v.angles, drives actual
-	// movement via pfnRunPlayerMove), so it doesn't change bot behavior.
+	// v.angles (model's visible orientation, sent to other clients) uses different pitch convention: player model has narrow aim_pitch bone-controller range and expects opposite sign, so raw view pitch must be negated and scaled down, not copied as-is. Purely cosmetic third-person fix (v_angle drives movement via pfnRunPlayerMove).
 	pEdict->v.angles = Vector(-smoothed.x / 3.f, smoothed.y, 0.f);
 
 	return smoothed;

@@ -81,6 +81,16 @@ FloorSplitResult SplitUnsupportedColumns(const std::vector<ExtractedLeaf> &leave
 					if (overlap.size() < 3 || WindingArea(overlap, fU.plane.normal) < kMinHoleArea)
 						continue;
 
+					// If the overlap covers the ENTIRE bottom face of the upper leaf,
+					// it's not a hole -- it's a solid floor/ceiling between two stacked
+					// rooms (e.g. a thick walkway over a pit). A real hole is a partial
+					// opening in the floor. Check if the overlap area equals the upper
+					// leaf's bottom face area (within epsilon).
+					double upperBottomArea = WindingArea(fU.winding, fU.plane.normal);
+					double overlapArea = WindingArea(overlap, fU.plane.normal);
+					if (overlapArea > upperBottomArea - 1.0)
+						continue; // full coverage -> stacked rooms, not a hole
+
 					holes.push_back({u, l, overlap, fU.plane.normal});
 				}
 			}

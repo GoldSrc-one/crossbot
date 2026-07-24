@@ -232,4 +232,135 @@ Polytope TranslatePolytope(const Polytope &poly, const Vec3 &offset)
 	return result;
 }
 
+// CSG difference of two CONVEX polytopes: returns the set of convex pieces
+// resulting from subtracting `subtrahend` from `subject` (subject \ subtrahend).
+// Both inputs must be convex. The subtrahend's faces define the half-spaces
+// to remove; we split subject by each face plane and keep only pieces on the
+// outside (back side) of at least one face. This is exponentially faster
+// than walking the entity's clipnode tree for complex brushwork (e.g. curved
+// func_wall with many segments). Returns empty vector if subject is entirely
+// inside subtrahend.
+std::vector<Polytope> SubtractConvexPolytopes(const Polytope &subject,
+                                               const Polytope &subtrahend,
+                                               double mapRadius,
+                                               double epsilon)
+{
+    if (subject.Empty() || subtrahend.Empty())
+        return {};
+
+    // A point is inside `subtrahend` iff it is on the FRONT side of ALL
+    // its face planes. So a point is OUTSIDE subtrahend iff it is on the
+    // BACK side of AT LEAST ONE face plane.
+    // We split subject by each face plane of subtrahend, keeping both sides.
+    // After all splits, we filter: keep pieces that are on the back side of
+    // at least one subtrahend face plane.
+
+    std::vector<Polytope> pieces{subject};
+
+    for (const Face &face : subtrahend.faces)
+    {
+        // The face plane's "front" is the interior of subtrahend (by
+        // convention in this codebase). We want the BACK side (exterior).
+        Plane cutPlane = face.plane;
+
+        std::vector<Polytope> next;
+        next.reserve(pieces.size() * 2);
+
+        for (Polytope &piece : pieces)
+        {
+            if (piece.Empty())
+                continue;
+
+            // Check which side of the cut plane the piece is on
+            bool hasFront = false;
+            bool hasBack = false;
+            for (const Face &f : piece.faces)
+            {
+                for (const Vec3 &v : f.winding)
+                {
+                    double d = v.Dot(cutPlane.normal) - cutPlane.dist;
+                    if (d > epsilon)
+                        hasFront = true;
+                    else if (d < -epsilon)
+                        hasBack = true;
+                    if (hasFront && hasBack)
+                        break;
+                }
+                if (hasFront && hasBack)
+                    break;
+            }
+
+            if (hasFront && hasBack)
+            {
+                // Piece straddles the plane - split it
+                Polytope frontPiece = ClipPolytope(piece, cutPlane, /*keepFront=*/true, mapRadius, epsilon);
+                Polytope backPiece = ClipPolytope(piece, cutPlane, /*keepFront=*/false, mapRadius, epsilon);
+                if (!frontPiece.Empty())
+                    next.push_back(std::move(frontPiece));
+                if (!backPiece.Empty())
+                    next.push_back(std::move(backPiece));
+            }
+            else if (hasBack)
+            {
+                // Piece is entirely on the back side (outside subtrahend through this face)
+                // Keep it - it's already confirmed outside through this face
+                next.push_back(std::move(piece));
+            }
+            else if (hasFront)
+            {
+                // Piece is entirely on the front side (inside subtrahend through this face)
+                // But it might still be outside through OTHER faces - keep for now
+                // (will be filtered at the end if it's inside ALL faces)
+                next.push_back(std::move(piece));
+            }
+        }
+
+        pieces = std::move(next);
+        if (pieces.empty())
+            break; // subject completely inside subtrahend
+    }
+
+    // Now filter: keep only pieces that are on the back side of at least
+    // one subtrahend face plane (i.e., outside the subtrahend)
+    std::vector<Polytope> result;
+    for (Polytope &piece : pieces)
+    {
+        if (piece.Empty())
+            continue;
+
+        // Check if this piece is outside the subtrahend
+        bool outside = false;
+        for (const Face &face : subtrahend.faces)
+        {
+            // Check if piece is on the back side of this face
+            bool allBack = true;
+            for (const Face &f : piece.faces)
+            {
+                for (const Vec3 &v : f.winding)
+                {
+                    double d = v.Dot(face.plane.normal) - face.plane.dist;
+                    if (d > epsilon) // front side = inside
+                    {
+                        allBack = false;
+                        break;
+                    }
+                }
+                if (!allBack)
+                    break;
+            }
+            if (allBack)
+            {
+                outside = true;
+                break;
+            }
+        }
+
+        if (outside)
+            result.push_back(std::move(piece));
+        // else piece is entirely inside subtrahend - discard
+    }
+
+    return result;
+}
+
 } // namespace navgen

@@ -4,11 +4,6 @@
 #include "../bot/bot_manager.h"
 #include "../console/commands.h"
 
-// -- real hook implementations --------------------------------------------
-// Only the entry points CrossBot cares about are non-NULL below; every other
-// slot in the tables stays NULL so metamod leaves this plugin out of those
-// chains entirely and the engine calls the real game DLL directly.
-
 void GameDLLInit()
 {
 	CrossBotCommands::Register();
@@ -44,8 +39,6 @@ void StartFrame()
 	BotManager::StartFrame();
 	RETURN_META(MRES_IGNORED);
 }
-
-// -- hook tables ------------------------------------------------------------
 
 DLL_FUNCTIONS g_DllFunctionTable =
 {

@@ -6,13 +6,10 @@ endif()
 
 project(crossbot CXX)
 
-# GoldSrc dedicated servers don't ship the VC++ redistributable, so the
-# plugin must not depend on it -- link the CRT statically.
+# GoldSrc dedicated servers don't ship VC++ redistributable -- link CRT statically.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# GoldSrc is a 32-bit-only engine (Windows and Linux). On MSVC this must be
-# enforced by configuring with the Win32 generator (cmake -B build -A Win32);
-# on GCC/Clang we force it directly via compile/link flags below.
+# GoldSrc is 32-bit-only (Windows and Linux). On MSVC, enforce with Win32 generator (cmake -B build -A Win32); on GCC/Clang, force via compile/link flags.
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR
         "crossbot must be built 32-bit (GoldSrc requirement). "
@@ -56,9 +53,7 @@ if(MSVC)
     target_compile_options(crossbot_mm PRIVATE /W3 /GR-)
     target_compile_definitions(crossbot_mm PRIVATE _CRT_SECURE_NO_WARNINGS)
 
-    # GiveFnptrsToDll is __stdcall (WINAPI); without a .def file MSVC would
-    # export it under its decorated name (_GiveFnptrsToDll@8), which the
-    # engine's GetProcAddress("GiveFnptrsToDll") lookup can't find.
+    # GiveFnptrsToDll is __stdcall (WINAPI); without .def file MSVC would export decorated name (_GiveFnptrsToDll@8), which engine's GetProcAddress("GiveFnptrsToDll") can't find.
     target_sources(crossbot_mm PRIVATE ${CMAKE_SOURCE_DIR}/src/meta/crossbot.def)
 else()
     target_compile_options(crossbot_mm PRIVATE -m32 -Wall -fno-rtti)
@@ -70,6 +65,5 @@ if(WIN32)
     target_compile_definitions(crossbot_mm PRIVATE _WINDOWS WIN32)
 endif()
 
-# Offline BSP nav-graph compiler (Milestone 2) -- a standalone tool, not
-# linked against Metamod/engine headers. See tools/navgen/CMakeLists.txt.
+# Offline BSP nav-graph compiler (Milestone 2) -- standalone tool, not linked against Metamod/engine headers. See tools/navgen/CMakeLists.txt.
 add_subdirectory(tools/navgen)

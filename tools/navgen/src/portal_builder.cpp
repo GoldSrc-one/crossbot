@@ -100,6 +100,11 @@ std::pair<Vec3, Vec3> PolygonDiameter(const Winding &w)
 }
 
 constexpr double kMinPortalArea = 1.0; // sq units; filters edge/point-touching slivers
+// Only create portals on roughly vertical faces (walls/doorways).
+// Horizontal faces (floors/ceilings, |normal.z| >= 0.7) are not walkable connections --
+// a walkway over a pit shares a horizontal face with the pit below, but that's a
+// fall-through, not a walkable portal. This matches GoldSrc's floor normal threshold.
+constexpr double kMaxFloorNormalForPortal = 0.7;
 
 } // namespace
 
@@ -122,6 +127,10 @@ std::vector<Portal> BuildPortals(const std::vector<ExtractedLeaf> &leaves)
 	for (const auto &entry : buckets)
 	{
 		const std::vector<FaceRef> &refs = entry.second;
+
+		// Skip horizontal faces (floors/ceilings) -- they don't form walkable portals
+		if (std::fabs(entry.first.nz) >= static_cast<long long>(std::llround(kMaxFloorNormalForPortal * 100.0)))
+			continue;
 
 		std::vector<const FaceRef *> pos, neg;
 		for (const FaceRef &r : refs)

@@ -17,6 +17,11 @@ namespace navgen
 // possible, since a real map can rely on just one.
 std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas);
 
+// Resolves every info_target entity to the area containing its origin.
+// Used to ensure target areas survive reachability pruning so bots can
+// navigate to/from them even if only connected via one-way drops.
+std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas);
+
 // Resolves a single arbitrary world point (e.g. an info_target's origin, for
 // the --dump-svg path overlay) to the area containing it, with the same
 // point-in-convex-polytope-then-nearest-centroid-fallback behavior

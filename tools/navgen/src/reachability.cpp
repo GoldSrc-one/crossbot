@@ -18,6 +18,11 @@ bool IsSpawnClassname(const std::string &classname)
 		classname == "info_player_coop" || classname == "info_player_teamspawn";
 }
 
+bool IsTargetClassname(const std::string &classname)
+{
+	return classname == "info_target";
+}
+
 bool ParseOrigin(const std::string &origin, Vec3 &out)
 {
 	double x = 0, y = 0, z = 0;
@@ -89,6 +94,27 @@ std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::
 	for (const Entity &ent : entities)
 	{
 		if (!IsSpawnClassname(ent.Get("classname")))
+			continue;
+
+		Vec3 origin;
+		if (!ParseOrigin(ent.Get("origin"), origin))
+			continue;
+
+		int found = FindAreaContainingPoint(origin, areas);
+		if (found >= 0)
+			result.push_back(found);
+	}
+
+	return result;
+}
+
+std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas)
+{
+	std::vector<int> result;
+
+	for (const Entity &ent : entities)
+	{
+		if (!IsTargetClassname(ent.Get("classname")))
 			continue;
 
 		Vec3 origin;

@@ -15,56 +15,23 @@ namespace
 {
 	constexpr float kPi = 3.14159265f;
 	constexpr float kMoveSpeed = 250.f;
-	// Loose arrival radius for the elevator/button/door approach branches
-	// below. Plain ground waypoints don't use this anymore -- their
-	// switching (tight corner radius + passed-the-perpendicular test),
-	// pure-pursuit aiming, and speed caps all live in the shared steering
-	// controller (src/nav/path_follower.h, NavFollow::Steer), the same code
-	// tools/navgen's offline movement simulation runs. The hard-won
-	// reasoning behind each rule (thin-beam corner cuts, drift bows,
-	// V-turn half-space traps -- all confirmed live on test23_precise/
-	// test24_precise2) is documented there.
-	constexpr float kWaypointReachedDistance = 24.f;
-	// Distance/facing gates before committing to a jump, matching FoxBot's
-	// precedent (bot_navigate.cpp): jump only once reasonably close and
-	// roughly lined up, rather than jk_botti's simpler "press jump the
-	// instant you're within a small radius" -- CrossBot already does
-	// rate-limited turn smoothing (Bot_UpdateFacing), so jumping before
-	// that smoothing has caught up would send the bot off at the wrong
-	// angle.
-	constexpr float kJumpTriggerDistance = 100.f;
-	constexpr float kJumpFacingToleranceDeg = 20.f;
-	// How close counts as "made contact" with a func_door/func_door_rotating
-	// waypoint -- bigger than kWaypointReachedDistance since a door waypoint
-	// aims at the door's own center, and the goal here is "close enough for
-	// the bot's hull to be touching the brush and have triggered its
-	// touch-to-open," not "arrived at a point." A door's own footprint runs
-	// tens of units across, so a tight radius could read "not there yet"
-	// while the bot is already pressed up against it.
-	constexpr float kDoorWaitTriggerDistance = 64.f;
+	// Loose arrival radius for elevator/button/door approach; plain ground waypoints use shared steering controller (path_follower.h).
+		constexpr float kWaypointReachedDistance = 24.f;
+		// Jump only when close and facing within 20°; rate-limited turn smoothing (Bot_UpdateFacing) must catch up first.
+		constexpr float kJumpTriggerDistance = 100.f;
+		constexpr float kJumpFacingToleranceDeg = 20.f;
+		// Door waypoint aims at door center; radius bigger than kWaypointReachedDistance so bot's hull touches brush and triggers touch-to-open.
+		constexpr float kDoorWaitTriggerDistance = 64.f;
 
-	// GoldSrc hull convention (dlls/extdef.h): point_hull=0, human_hull=1,
-	// large_hull=2, head_hull=3. Duplicated here rather than sharing a
-	// constant across files, matching this codebase's existing convention
-	// (see tools/navgen/src/hull_defs.h's own independent copy).
-	constexpr int kHullHuman = 1;
-	constexpr int kHullPoint = 0;
-	// How far below a dodge candidate's endpoint ground must exist for the
-	// dodge to be allowed (FindClearDirection) -- a clear forward trace over
-	// a pit is clear precisely BECAUSE there's nothing there.
-	constexpr float kDodgeFloorProbeDepth = 90.f;
-	// Baked nav data only reflects static geometry from whenever navgen ran
-	// -- a player-built structure, a monster, or any other solid entity
-	// placed at runtime isn't in it at all, so the waypoint direction can't
-	// just be trusted blindly. Shorter lookahead than Bot_MoveWander's 64u
-	// since nav mode already has a real heading to check, not explore
-	// blindly.
-	constexpr float kObstacleTraceDistance = 48.f;
-	// If a dodge hasn't cleared the obstacle by this long, stop waiting on
-	// the periodic repath interval and get a fresh route now -- a dodge
-	// that isn't working means this might be a permanent blockage
-	// (something built there, not just passing through).
-	constexpr float kObstacleStuckRepathDelay = 1.5f;
+		// GoldSrc hull convention duplicated here per codebase convention (tools/navgen/src/hull_defs.h has its own copy).
+		constexpr int kHullHuman = 1;
+		constexpr int kHullPoint = 0;
+		// Dodge candidate needs ground under endpoint; clear trace over a pit is clear because there's nothing there.
+		constexpr float kDodgeFloorProbeDepth = 90.f;
+		// Shorter than Bot_MoveWander's 64u since nav mode has a real heading to check.
+		constexpr float kObstacleTraceDistance = 48.f;
+		// If dodge hasn't cleared obstacle by this delay, force early repath (may be permanent blockage).
+		constexpr float kObstacleStuckRepathDelay = 1.5f;
 
 	float NormalizeAngle(float a)
 	{
@@ -73,17 +40,8 @@ namespace
 		return a;
 	}
 
-	// Tries a fan of candidate headings around `dir2D` (unit-length,
-	// horizontal) and returns whichever gives the clearest kObstacleTrace-
-	// Distance hull trace from the bot's current origin, closest-to-original
-	// first. Replaces an earlier single-perpendicular-to-the-hit-normal
-	// dodge guess, which could itself point straight into a *second* nearby
-	// wall -- confirmed live on crossfire.bsp: a bot wedged in a right-angle
-	// corner (two walls, each exactly one hull-radius away, on adjacent
-	// sides) computed a dodge off the first wall that pointed directly into
-	// the second, leaving it completely frozen (zero velocity, zero
-	// displacement) instead of escaping.
-	Vector FindClearDirection(edict_t *pEdict, const Vector &dir2D, float traceDistance)
+	// Tries fan of headings around `dir2D`; returns clearest hull trace, closest-to-original first. Replaces single-perpendicular dodge which could point into a second wall (confirmed on crossfire.bsp: bot wedged in right-angle corner computed dodge off first wall into second, freezing).
+		Vector FindClearDirection(edict_t *pEdict, const Vector &dir2D, float traceDistance)
 	{
 		static constexpr float kCandidateAngles[] = {0.f, 45.f, -45.f, 90.f, -90.f, 135.f, -135.f, 180.f};
 
@@ -100,14 +58,8 @@ namespace
 			Vector traceEnd = pEdict->v.origin + candidate * traceDistance;
 			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
 
-			// A clear (or clearest) forward trace is NOT enough: over a pit
-			// edge the trace is clear precisely because there's nothing
-			// there. Require actual ground under the point this candidate
-			// would reach, or the dodge itself becomes the fall -- confirmed
-			// live on test24_precise2: the feeler deflected the bot
-			// "clear"-ward off a thin beam's edge, straight into the pit the
-			// planned route was carefully threading around.
-			Vector reach = pEdict->v.origin + candidate * (traceDistance * tr.flFraction);
+			// A clear (or clearest) forward trace is NOT enough: over a pit edge the trace is clear because there's nothing there. Require ground under the candidate's reach point, or the dodge itself becomes the fall.
+				Vector reach = pEdict->v.origin + candidate * (traceDistance * tr.flFraction);
 			TraceResult down;
 			g_engfuncs.pfnTraceHull(reach, reach - Vector(0.f, 0.f, kDodgeFloorProbeDepth), ignore_monsters,
 				kHullPoint, pEdict, &down);
@@ -126,32 +78,12 @@ namespace
 
 		return best; // nothing fully clear (or nothing floored) -- least-bad candidate
 	}
-	// More than any single tick's max travel at kMoveSpeed, even at
-	// Bot_FrameMsec()'s 100ms clamp ceiling (250 u/s -> 25 u/tick) -- a jump
-	// this big means something moved the bot behind our back (respawn, or a
-	// trigger_teleport once Milestone 2h lands), not normal movement. See
-	// the plan's "Detecting respawn and teleport" note.
-	constexpr float kTeleportJumpThreshold = 150.f;
-	// Periodic safety re-path -- cheap at the area counts seen so far, but
-	// confirmed live to have a real downside too: recomputing the whole
-	// corridor (A* + funnel simplification) from scratch every interval can
-	// flip-flop between two similar-cost routes near a tie, especially
-	// funnel simplification's hull-trace string-pull through a narrow
-	// doorway-width area, which can go either way depending on the bot's
-	// exact position that tick. A bot stuck cycling through the same 4-5
-	// small areas near a doorway on crossfire.bsp, actively moving the
-	// whole time (not frozen) yet never making net progress, is consistent
-	// with this. Longer interval doesn't fix the underlying tie, but gives
-	// each attempt more time to either finish or reveal it's genuinely
-	// stuck (kObstacleStuckRepathDelay's early-repath-on-blockage path
-	// still fires independently of this for real obstacles).
-	constexpr float kRepathInterval = 10.f;
-	// Straight-line distance/kMoveSpeed is a floor, not a real estimate --
-	// it can't see turning, jump run-ups/landings, or avoidance detours
-	// around other bots. This margin is a rough correction factor, not a
-	// measured constant; tighten it once enough live runs establish a real
-	// ratio between this estimate and actual arrival times.
-	constexpr float kEtaSafetyMargin = 1.6f;
+	// Threshold > max single-tick travel; discontinuous jump means respawn/teleport, invalidate path.
+		constexpr float kTeleportJumpThreshold = 150.f;
+		// Periodic safety repath; longer interval gives tie-flopping corridors more time to settle.
+		constexpr float kRepathInterval = 10.f;
+		// Straight-line distance/speed is a floor; margin corrects for turns, jumps, avoidance not in estimate.
+		constexpr float kEtaSafetyMargin = 1.6f;
 
 	void ResetPath(CBot &bot)
 	{
@@ -258,35 +190,15 @@ void Bot_MoveNav(CBot &bot)
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
 	if (!bot.hasGoal)
-	{
-		// No goal -> stand idle. This used to pick a random area centroid to
-		// wander toward, which caused constant trouble in practice: bots
-		// strolled off ledges into inescapable pits before a scripted test's
-		// teleport+goal even arrived, and the resulting "reached goal" spam
-		// buried real arrivals in the log. A future combat/objective layer
-		// is what should be assigning goals, not a coin flip here.
-		Vector angles = Bot_UpdateFacing(bot);
+		{
+			// No goal -> stand idle. Random wandering caused bots to stroll off ledges before scripted test goals arrived, burying real arrivals in log spam.
+			Vector angles = Bot_UpdateFacing(bot);
 		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
 		return;
 	}
 
-	// Suppressed while actively waiting for/riding an elevator, holding at a
-	// button/trigger/door (bot.doorWaitUntil, shared by all three -- see
-	// bot.h), or still walking toward an unconsumed button/trigger waypoint
-	// later in the plan: BuildWaypointPath has no memory of "already fired,"
-	// so any repath before that crossing is actually behind the bot just
-	// re-inserts a fresh activation waypoint for the same portal and sends
-	// it walking all the way back -- confirmed live on test20_doortrigger.bsp,
-	// twice: first with only the doorWaitUntil guard (fixed the in-place-hold
-	// case), but the trigger volume sits far from both spawn and the door
-	// (~384 and ~163 units respectively), so the walk *to* it and the walk
-	// *from* it to the door each routinely outlasted kRepathInterval (10s) on
-	// their own -- a periodic repath mid-walk (not mid-hold) reinserted the
-	// same trigger waypoint over and over, forever, since the crossing was
-	// still ahead of the bot's waypointIndex every time. Once the bot's
-	// actually past that waypoint (index advanced beyond it), a repath is
-	// safe again -- by then the activation has already happened.
-	bool hasPendingActivation = false;
+	// Suppressed while waiting for/riding elevator, holding at button/trigger/door (bot.doorWaitUntil), or walking toward unconsumed activation waypoint. BuildWaypointPath has no "already fired" memory, so repath before crossing re-inserts same trigger waypoint and bot walks back -- confirmed on test20_doortrigger.bsp: trigger far from spawn/door, mid-walk periodic repath reinserted it forever.
+		bool hasPendingActivation = false;
 	for (size_t wi = bot.waypointIndex; wi < bot.waypoints.size(); ++wi)
 	{
 		if (bot.waypoints[wi].requiresButtonUse || bot.waypoints[wi].requiresTriggerTouch)
@@ -303,15 +215,8 @@ void Bot_MoveNav(CBot &bot)
 		bot.lastProgressTime = gpGlobals->time;
 	}
 
-	// A mid-route repath happens only when something is actually wrong:
-	// either the obstacle-dodge branch forced one (bot.nextRepathTime set to
-	// "now"), or no waypoint has been completed for kRepathInterval (a
-	// stall). The old blind periodic timer repathed even while the bot was
-	// hitting every waypoint on schedule -- rebuilding the waypoint list
-	// mid-segment moved the pursuit line out from under the bot right as it
-	// threaded precise geometry (see CBot::lastProgressTime's comment for
-	// the confirmed test24_precise2 case).
-	bool forcedRepath = bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
+	// Mid-route repath only when something is actually wrong: obstacle-dodge forced it, or no waypoint completed for kRepathInterval (stall). Old blind periodic timer repathed even while hitting every waypoint -- rebuilding mid-segment moved pursuit line out from under bot threading precise geometry (see CBot::lastProgressTime for confirmed test24_precise2 case).
+		bool forcedRepath = bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
 	bool stalled = !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
 	if (bot.elevatorReadyTime <= 0.f && bot.doorWaitUntil <= 0.f && !hasPendingActivation &&
@@ -319,11 +224,7 @@ void Bot_MoveNav(CBot &bot)
 	{
 		if (!bot.waypoints.empty())
 		{
-			// Permanent telemetry, same spirit as the fall/arrival lines: a
-			// mid-route repath replaces the corridor from the current
-			// position on, which is a meaningful (and historically
-			// bug-prone) event worth being able to correlate with recorded
-			// trajectories after the fact.
+			// Mid-route repath replaces corridor from current position on; meaningful event for post-hoc trajectory correlation.
 			char msg[160];
 			snprintf(msg, sizeof(msg), "CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
 				bot.name, forcedRepath ? "obstacle-forced" : "stalled", pEdict->v.origin.x, pEdict->v.origin.y,
@@ -382,11 +283,7 @@ void Bot_MoveNav(CBot &bot)
 	Vector toTarget = waypoint.point - pEdict->v.origin;
 	float horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
 
-	// Fall telemetry: log the exact origin the first frame of an unplanned
-	// airborne drop (not a jump waypoint's own deliberate hop). rcon polling
-	// is far too slow to catch where a bot actually stepped off a thin
-	// walkway -- by the next poll it's already at the bottom of the pit with
-	// its momentum gone.
+	// Fall telemetry: log origin first frame of unplanned airborne drop (not a jump waypoint's hop). RCON polling too slow -- by next poll bot's at bottom with momentum gone.
 	{
 		bool onGroundNow = (pEdict->v.flags & FL_ONGROUND) != 0;
 		if (onGroundNow)
@@ -406,64 +303,48 @@ void Bot_MoveNav(CBot &bot)
 	}
 
 	if (waypoint.requiresElevatorRide)
-	{
-		if (horizDist >= kWaypointReachedDistance)
 		{
-			// Not at the boarding point yet -- walk there normally. No
-			// avoidance/jump logic needed, same reasoning as lining up for
-			// a jump: committing to the lift shouldn't get nudged sideways.
-			bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
+			// Not at boarding point yet -- walk there; no avoidance/jump logic (committing to lift shouldn't get nudged sideways).
+			if (horizDist >= kWaypointReachedDistance)
+			{
+				bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
+				Vector angles = Bot_UpdateFacing(bot);
+				g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
+				return;
+			}
+
+			// At boarding point -- hold still; engine's ground-entity attachment carries bot up/down like a player on moving platform.
+			if (bot.elevatorReadyTime <= 0.f)
+				bot.elevatorReadyTime = gpGlobals->time + waypoint.elevatorTravelTime;
+
 			Vector angles = Bot_UpdateFacing(bot);
-			g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
+			g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
+
+			if (gpGlobals->time >= bot.elevatorReadyTime)
+			{
+				bot.elevatorReadyTime = 0.f;
+				++bot.waypointIndex;
+			}
 			return;
 		}
 
-		// At the boarding point -- hold still and let the engine's own
-		// ground-entity attachment carry the bot up/down, the same as a
-		// real player just standing on a moving platform. No forward
-		// input at all while waiting.
-		if (bot.elevatorReadyTime <= 0.f)
-			bot.elevatorReadyTime = gpGlobals->time + waypoint.elevatorTravelTime;
+		if (waypoint.requiresButtonUse)
+			{
+				if (horizDist >= kWaypointReachedDistance)
+				{
+					// Walk to button normally; same approach-then-commit logic as other waypoints.
+					bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
+					Vector angles = Bot_UpdateFacing(bot);
+					g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
+					return;
+				}
 
-		Vector angles = Bot_UpdateFacing(bot);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
+				// At button -- face it and hold +USE. CBaseButton without SF_BUTTON_TOUCH_ONLY needs PlayerUse's forward-facing search; hold for buttonWaitTime so relay chain fires door before bot walks toward it.
+				bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
+				Vector angles = Bot_UpdateFacing(bot);
+				g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, IN_USE, 0, Bot_FrameMsec());
 
-		if (gpGlobals->time >= bot.elevatorReadyTime)
-		{
-			bot.elevatorReadyTime = 0.f;
-			++bot.waypointIndex;
-		}
-		return;
-	}
-
-	if (waypoint.requiresButtonUse)
-	{
-		if (horizDist >= kWaypointReachedDistance)
-		{
-			// Not at the button yet -- walk there normally, same reasoning
-			// as every other approach-then-commit waypoint.
-			bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-			Vector angles = Bot_UpdateFacing(bot);
-			g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
-			return;
-		}
-
-		// At the button -- face it and hold +USE. CBaseButton only wires up
-		// a Touch function when SF_BUTTON_TOUCH_ONLY is set on the entity;
-		// none of the buttons door_extractor.cpp's ResolveButtonForDoor
-		// resolves have that flag (the ones confirmed live on
-		// test10_doorbutton/test11_doorbutton2 don't), so simply touching
-		// it does nothing -- CBasePlayer::PlayerUse's own forward-facing
-		// search is what actually finds and activates it, the same as a
-		// real player pressing the use key while looking at it. Held for
-		// buttonWaitTime (baked as the door's own open-time estimate) so
-		// the relay/multi_manager chain fires and the door starts moving
-		// before the bot walks toward it.
-		bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-		Vector angles = Bot_UpdateFacing(bot);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, IN_USE, 0, Bot_FrameMsec());
-
-		if (bot.doorWaitUntil <= 0.f)
+				if (bot.doorWaitUntil <= 0.f)
 			bot.doorWaitUntil = gpGlobals->time + waypoint.buttonWaitTime;
 
 		if (gpGlobals->time >= bot.doorWaitUntil)
@@ -478,26 +359,16 @@ void Bot_MoveNav(CBot &bot)
 	{
 		if (horizDist >= kDoorWaitTriggerDistance)
 		{
-			// Not close enough yet to have made contact -- walk there
-			// normally, no avoidance: a closed door reads as an ordinary
-			// solid obstacle to the avoidance trace, and deflecting away
-			// from the one obstacle the bot actually needs to touch to
-			// open it would defeat the whole point of this waypoint.
-			bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-			Vector angles = Bot_UpdateFacing(bot);
-			g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
-			return;
-		}
+			// Not close enough to have triggered door -- walk normally, no avoidance (closed door reads as solid obstacle; dodging it defeats the waypoint's purpose).
+					bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
+					Vector angles = Bot_UpdateFacing(bot);
+					g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
+					return;
+				}
 
-		// Close enough to have made contact and triggered the door's
-		// touch-to-open -- hold still rather than keep contesting the
-		// still-moving brush's own collision. Confirmed live on
-		// test9_door: continuing to walk straight at it the whole time
-		// fought the swinging/sliding door's own collision and deflected
-		// the bot back out of the doorway in a loop that never actually
-		// finished going through.
-		if (bot.doorWaitUntil <= 0.f)
-			bot.doorWaitUntil = gpGlobals->time + waypoint.doorWaitTime;
+				// Close enough to have triggered touch-to-open -- hold still instead of contesting still-moving brush collision (test9_door: walking straight at it fought door's collision, deflected bot back out of doorway in infinite loop).
+				if (bot.doorWaitUntil <= 0.f)
+					bot.doorWaitUntil = gpGlobals->time + waypoint.doorWaitTime;
 
 		Vector angles = Bot_UpdateFacing(bot);
 		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
@@ -514,50 +385,25 @@ void Bot_MoveNav(CBot &bot)
 	bool needsJump = !onLadder && waypoint.requiresJump;
 
 	if (needsJump)
-	{
-		// A jump waypoint's landing point is often already within the
-		// generic reached-distance of the takeoff point -- that's what
-		// makes it a short hop rather than a long walk. Checking distance
-		// alone (like every other waypoint) would mark it reached before
-		// the bot ever left the ground. Confirmed live: a bot approaching
-		// a lift1-side gap oscillated in place forever, vel.z always
-		// exactly 0. So completion instead requires an actual jump to have
-		// been pressed for this waypoint (bot.jumpAttempted, set below,
-		// checked here a frame later so this can't fire the same tick it's
-		// set) and the bot to be back on solid ground near the target.
-		// horizDist/height-to-point isn't enough either: a jump waypoint's
-		// point is just the destination area's raw centroid (see
-		// path_funnel.cpp), which for a large or oddly-shaped area can be
-		// a real walk away from the gap's edge, behind obstructions the
-		// straight-line jump approach never accounted for. Confirmed live
-		// both ways: pure horizDist<32 completed the waypoint at the lip
-		// of the chasm before ever jumping; requiring the point's exact
-		// height too just moved the failure to bots walking dead into a
-		// wall trying to reach a centroid buried deep in the destination
-		// room. The actual question is the one that matters for
-		// correctness: did the bot really arrive in the destination area,
-		// not "is it close to this one representative point" -- so ask
-		// Nav::FindAreaForPoint about the bot's real origin instead.
-		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
-		bool inTargetArea = waypoint.targetAreaId < 0; // no area recorded -- fall back to trusting the gate below
-		if (!inTargetArea)
 		{
-			const Nav::Area *actualArea = Nav::FindAreaForPoint(*mesh, pEdict->v.origin);
-			inTargetArea = actualArea && actualArea->id == static_cast<uint32_t>(waypoint.targetAreaId);
+			// Jump waypoint landing point often within generic reached-dist of takeoff -> would complete before bot leaves ground. Require actual jump pressed (bot.jumpAttempted) and bot back on ground in target area (via FindAreaForPoint, not just distance to centroid -- centroid can be deep in room behind obstructions).
+			bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
+			bool inTargetArea = waypoint.targetAreaId < 0;
+			if (!inTargetArea)
+			{
+				const Nav::Area *actualArea = Nav::FindAreaForPoint(*mesh, pEdict->v.origin);
+				inTargetArea = actualArea && actualArea->id == static_cast<uint32_t>(waypoint.targetAreaId);
+			}
+			if (bot.jumpAttempted && onGround && inTargetArea)
+			{
+				bot.jumpAttempted = false;
+				++bot.waypointIndex;
+				return;
+			}
 		}
-		if (bot.jumpAttempted && onGround && inTargetArea)
-		{
-			bot.jumpAttempted = false;
-			++bot.waypointIndex;
-			return;
-		}
-	}
 
-	// Shared steering decision (waypoint switching, pursuit aim point, and
-	// the plan-encoded speed cap) -- see path_follower.h. Only consulted for
-	// plain ground movement; the jump branch above and the ladder/commit
-	// branches below keep their own aiming.
-	NavFollow::Decision steer;
+	// Shared steering (waypoint switching, pursuit aim, plan-encoded speed cap) -- see path_follower.h. Only for plain ground; jump/ladder branches have own aiming.
+		NavFollow::Decision steer;
 	if (!needsJump)
 	{
 		steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin);
@@ -605,35 +451,22 @@ void Bot_MoveNav(CBot &bot)
 		// top: avoidance deflection and the obstacle feeler.
 		Vector aimTarget = steer.aimPoint - pEdict->v.origin;
 
-		// Avoidance only applies to normal ground steering -- deflecting a
-		// bot mid-climb would fight the ladder's precise alignment needs.
-		Vector steerDir = NavAvoid::Deflect(bot, aimTarget);
+		// Avoidance for ground steering only -- deflecting mid-climb would fight ladder alignment.
+				Vector steerDir = NavAvoid::Deflect(bot, aimTarget);
 
-		// Don't blindly trust the baked path -- trace ahead the same way
-		// Bot_MoveWander already does, and dodge if something's actually in
-		// the way that the nav mesh doesn't know about.
-		float dirLen2D = sqrtf(steerDir.x * steerDir.x + steerDir.y * steerDir.y);
-		if (dirLen2D > 1.f)
-		{
-			Vector dir2D(steerDir.x / dirLen2D, steerDir.y / dirLen2D, 0.f);
-			Vector traceEnd = pEdict->v.origin + dir2D * kObstacleTraceDistance;
+				// Trace ahead for dynamic obstacles nav mesh doesn't know about; dodge if hit.
+				float dirLen2D = sqrtf(steerDir.x * steerDir.x + steerDir.y * steerDir.y);
+				if (dirLen2D > 1.f)
+				{
+					Vector dir2D(steerDir.x / dirLen2D, steerDir.y / dirLen2D, 0.f);
+					Vector traceEnd = pEdict->v.origin + dir2D * kObstacleTraceDistance;
 
-			TraceResult tr;
-			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
+					TraceResult tr;
+					g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
 
-			// The feeler exists for obstacles the baked nav data can't know
-			// about -- and those are entities (players, monsters, pushables,
-			// func_walls...), never worldspawn itself. Static world brushes
-			// are exactly what the plan already routes around, so a
-			// worldspawn hit must NOT trigger a dodge: near a tight neck
-			// (test24_precise2's razor beam junction, walls one hull-radius
-			// away) the forward trace brushes the wall every tick, and the
-			// old unconditional dodge deflected the bot toward the "clear"
-			// side -- which was clear because it was the open air above the
-			// pit. Recorded-trajectory overlay confirmed the eastward drift
-			// beginning exactly one feeler-length before the junction.
-			bool hitDynamicObstacle = tr.flFraction < 1.0f && tr.pHit &&
-				g_engfuncs.pfnIndexOfEdict(tr.pHit) != 0;
+					// Feelers catch dynamic entities (players, monsters, pushables), NOT worldspawn. Static brushes are already routed around; worldspawn hit must NOT dodge (tight neck: feeler brushes wall every tick, old dodge deflected toward "clear" side -- which was open air over pit).
+					bool hitDynamicObstacle = tr.flFraction < 1.0f && tr.pHit &&
+						g_engfuncs.pfnIndexOfEdict(tr.pHit) != 0;
 
 			if (hitDynamicObstacle)
 			{
@@ -679,27 +512,13 @@ void Bot_MoveNav(CBot &bot)
 			bot.jumpAttempted = true;
 		}
 
-		// Stock HL duck-jumping doesn't add jump velocity -- PM_Jump's
-		// ducking branch produces the identical sqrt(2*800*45) impulse as
-		// the non-ducking case, it only shrinks the hull (VEC_DUCK_HULL_MIN/
-		// MAX). So this is purely for clearance once airborne through a
-		// tight gap, the same technique FoxBot and yapb both use, not an
-		// attempt to jump higher or further. (A future GameProfile-driven
-		// long-jump-module upgrade, per HLSDK's item_longjump/PM_Jump "slj"
-		// check, is a real distance boost -- tracked separately, not this.)
-		if (pEdict->v.velocity.z > 0.f)
-			buttons |= IN_DUCK;
+		// Stock HL duck-jump: same impulse, only shrinks hull -- clearance for tight gaps, not height boost. Long-jump module (GameProfile/slj) is separate.
+			if (pEdict->v.velocity.z > 0.f)
+				buttons |= IN_DUCK;
 	}
 
-	// Speed: the shared controller's plan-encoded cap for plain ground
-	// movement (jump approaches/commits keep full run-up speed), then
-	// heading-error scaling (turn in place / creep / run -- see
-	// path_follower.h's Config). Ladder climbing is exempt: facing
-	// deliberately pitches steeply there and MOVETYPE_FLY motion is slow
-	// already; a jump commit is also effectively exempt (IN_JUMP only fires
-	// within kJumpFacingToleranceDeg, at or under the slowdown threshold,
-	// so the run-up keeps full speed).
-	float moveSpeed = (!needsJump && !onLadder) ? steer.baseSpeed : kMoveSpeed;
+	// Speed: shared controller's plan-encoded cap for plain ground; heading-error scaling (turn/creep/run -- see path_follower.h Config). Ladder exempt: facing pitches steeply, MOVETYPE_FLY slow already. Jump commit exempt: IN_JUMP only fires within kJumpFacingToleranceDeg, at/below slowdown threshold, so run-up keeps full speed.
+		float moveSpeed = (!needsJump && !onLadder) ? steer.baseSpeed : kMoveSpeed;
 	if (!onLadder)
 	{
 		float headingError = fabsf(NormalizeAngle(angles.y - bot.desiredAngles.y));

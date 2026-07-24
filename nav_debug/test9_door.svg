@@ -23,8 +23,8 @@
 <line x1="456.0" y1="-200.0" x2="456.0" y2="-72.0" stroke="#98a6b3" stroke-width="1.68"/>
 <line x1="64.0" y1="-200.0" x2="64.0" y2="-72.0" stroke="#98a6b3" stroke-width="1.68"/>
 <line x1="264.0" y1="-112.0" x2="144.0" y2="-112.0" stroke="#98a6b3" stroke-width="1.68"/>
-<line x1="384.0" y1="-112.0" x2="264.0" y2="-112.0" stroke="#98a6b3" stroke-width="1.68"/>
 <line x1="456.0" y1="-72.0" x2="384.0" y2="-112.0" stroke="#98a6b3" stroke-width="1.68"/>
+<line x1="384.0" y1="-112.0" x2="264.0" y2="-112.0" stroke="#98a6b3" stroke-width="1.68"/>
 <line x1="144.0" y1="-112.0" x2="64.0" y2="-72.0" stroke="#98a6b3" stroke-width="1.68"/>
 </g>
 <g fill="#0b1220" text-anchor="middle" font-size="15.36">
@@ -54,9 +54,10 @@
 <circle cx="432.0" cy="-128.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
 <circle cx="432.0" cy="-272.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
 <circle cx="400.0" cy="-384.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<polyline fill="none" stroke="#e67e22" stroke-width="1.68" stroke-opacity="0.9" stroke-linecap="round" stroke-linejoin="round" points="128.0,-384.0 126.9,-380.3 124.5,-371.8 121.1,-360.0 117.7,-348.0 114.3,-336.0 110.8,-324.0 107.4,-311.9 104.0,-299.9 100.5,-287.9 97.1,-275.9 94.1,-263.4 91.7,-250.8 90.0,-238.1 88.9,-225.3 88.4,-212.6 88.3,-199.9 88.6,-187.3 89.2,-174.7 90.0,-162.2 91.1,-149.7 92.6,-137.2 94.0,-126.2 95.1,-117.3 96.0,-110.0 97.8,-103.8 100.9,-98.4 105.2,-94.3 110.8,-91.7 120.4,-91.6 133.0,-93.5 145.8,-96.4 158.5,-100.5 170.6,-105.5 181.0,-109.8 192.7,-114.4 205.3,-118.4 218.4,-121.2 231.5,-123.0 244.6,-124.0 257.6,-124.2 270.3,-123.8 283.0,-122.9 295.5,-121.7 308.0,-120.2 320.4,-118.6 332.8,-117.0 345.2,-115.2 357.6,-113.4 370.0,-111.8 382.6,-110.5 395.2,-109.7 408.2,-109.5 421.9,-110.9 435.0,-113.6 445.6,-115.7 454.3,-117.7 461.5,-120.8 466.3,-127.8 467.7,-138.7 465.7,-152.0 462.5,-165.0 458.8,-177.4 454.7,-189.4 450.4,-201.1 446.1,-212.9 441.9,-224.7 438.0,-236.7 434.5,-248.8 431.3,-261.1 428.5,-273.3 425.7,-285.5 423.0,-297.7 420.1,-309.9 417.2,-322.0 414.2,-334.2 411.2,-346.3 408.0,-358.4 "/>
 <circle cx="128.0" cy="-384.0" r="7.68" fill="#2ecc71" stroke="#0b1220" stroke-width="0.96"/>
 <circle cx="400.0" cy="-384.0" r="7.68" fill="#e74c3c" stroke="#0b1220" stroke-width="0.96"/>
-<rect x="-12.8" y="-524.8" width="163.2" height="254.6" fill="#0b1220" fill-opacity="0.85" stroke="#4a5a6a" stroke-width="0.72"/>
+<rect x="-12.8" y="-524.8" width="163.2" height="270.9" fill="#0b1220" fill-opacity="0.85" stroke="#4a5a6a" stroke-width="0.72"/>
 <text x="-8.0" y="-515.2" font-size="16.32" fill="#ffffff" font-weight="bold">test9_door</text>
 <rect x="-8.0" y="-503.5" width="14.40" height="8.64" fill="#c9d6e3"/>
 <text x="11.2" y="-495.8" font-size="12.48" fill="#e8eef4">area (normal)</text>
@@ -75,8 +76,10 @@
 <line x1="-8.0" y1="-384.9" x2="6.4" y2="-384.9" stroke="#27ae60" stroke-width="2.40"/>
 <text x="11.2" y="-381.6" font-size="12.48" fill="#e8eef4">elevator</text>
 <line x1="-8.0" y1="-368.6" x2="6.4" y2="-368.6" stroke="#f1c40f" stroke-width="2.40"/>
-<text x="11.2" y="-365.2" font-size="12.48" fill="#e8eef4">A* path (spawn->target)</text>
-<text x="-8.0" y="-348.9" font-size="11.52" fill="#e8eef4">V=vantage C=camp K=chokepoint-cover</text>
-<text x="-8.0" y="-332.6" font-size="11.52" fill="#e8eef4">door area: T=touch B=button G=trigger</text>
-<circle cx="-0.8" cy="-319.6" r="7.68" fill="#2ecc71"/><text x="11.2" y="-316.3" font-size="12.48" fill="#e8eef4">spawn</text><circle cx="59.2" cy="-319.6" r="7.68" fill="#e74c3c"/><text x="71.2" y="-316.3" font-size="12.48" fill="#e8eef4">target</text>
+<text x="11.2" y="-365.2" font-size="12.48" fill="#e8eef4">planned path (spawn->target)</text>
+<line x1="-8.0" y1="-352.3" x2="6.4" y2="-352.3" stroke="#e67e22" stroke-width="2.40"/>
+<text x="11.2" y="-348.9" font-size="12.48" fill="#e8eef4">simulated drive (momentum)</text>
+<text x="-8.0" y="-332.6" font-size="11.52" fill="#e8eef4">V=vantage C=camp K=chokepoint-cover</text>
+<text x="-8.0" y="-316.3" font-size="11.52" fill="#e8eef4">door area: T=touch B=button G=trigger</text>
+<circle cx="-0.8" cy="-303.3" r="7.68" fill="#2ecc71"/><text x="11.2" y="-300.0" font-size="12.48" fill="#e8eef4">spawn</text><circle cx="59.2" cy="-303.3" r="7.68" fill="#e74c3c"/><text x="71.2" y="-300.0" font-size="12.48" fill="#e8eef4">target</text>
 </svg>

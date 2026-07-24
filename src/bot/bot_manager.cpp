@@ -54,13 +54,7 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	g_pGameProfile = GameProfile_Detect();
 
-	// SERVER_PRINT (pfnServerPrint), not ALERT(at_logged, ...): at_logged
-	// routes to the server's *.log file (sv_logfile), not the console --
-	// confirmed the hard way debugging this milestone's live test (every
-	// ALERT(at_logged, ...) call was silently invisible in qconsole.log
-	// even with `developer 2`, while pfnServerPrint always showed up).
-	// Dev-facing status like this needs to reliably show up wherever
-	// someone's actually looking.
+	// SERVER_PRINT (pfnServerPrint), not ALERT(at_logged, ...): at_logged routes to server's *.log file (sv_logfile), not console -- confirmed hard way debugging this milestone's live test (every ALERT(at_logged, ...) was silently invisible in qconsole.log even with `developer 2`, while pfnServerPrint always showed up). Dev-facing status needs to show up where someone's actually looking.
 	char msg[256];
 	if (g_pGameProfile)
 		snprintf(msg, sizeof(msg), "CrossBot: detected game profile '%s'.\n", g_pGameProfile->GetName());
@@ -85,11 +79,7 @@ void ServerDeactivate()
 
 void ClientPutInServer(edict_t *pEntity)
 {
-	// Bots are put in the server directly by AddBot() below (via the
-	// MDLL_ macros, which bypass this metamod chain), so this only fires
-	// for human players joining through the normal engine path. No
-	// behavior needed for this milestone; kept as an extension point for
-	// future auto-fill / team-balance logic.
+	// Bots added directly by AddBot() below (via MDLL_ macros bypassing this metamod chain), so this only fires for human players joining through normal engine path. No behavior needed for this milestone; extension point for future auto-fill/team-balance logic.
 	(void)pEntity;
 }
 
@@ -149,10 +139,8 @@ bool AddBot(const char *name)
 		return false;
 	}
 
-	// Bots don't go through the engine's normal client-connect path, so we
-	// have to replay it ourselves. MDLL_* talks directly to the gamedll,
-	// bypassing metamod's hook chain (see meta_api.h).
-	char rejectReason[128] = {};
+	// Bots don't go through engine's normal client-connect path, so we replay it ourselves. MDLL_* talks directly to gamedll, bypassing metamod's hook chain (see meta_api.h).
+		char rejectReason[128] = {};
 	MDLL_ClientConnect(pEdict, botName, "127.0.0.1", rejectReason);
 
 	if (rejectReason[0])
@@ -210,7 +198,7 @@ bool SetGoalForAllBots(const Vector &point)
 			continue;
 		bot.goalPoint = point;
 		bot.hasGoal = true;
-		Bot_ResetNavPath(bot); // also clears elevator/jump/obstacle state and the ETA/area-trace diagnostics
+		Bot_ResetNavPath(bot); // also clears elevator/jump/obstacle state and ETA/area-trace diagnostics
 		bot.traceLog.clear();  // fresh origin recording for this goal (see CBot::traceLog)
 		any = true;
 	}
@@ -224,10 +212,7 @@ bool TeleportAllBots(const Vector &point)
 	{
 		if (!bot.inUse)
 			continue;
-		// SET_ORIGIN (not a raw v.origin write) so the engine properly
-		// relinks the edict's collision/PVS position -- a direct struct
-		// write leaves stale spatial-partition data until the next normal
-		// physics step touches it.
+		// SET_ORIGIN (not raw v.origin write) so engine properly relinks edict's collision/PVS position -- direct struct write leaves stale spatial-partition data until next physics step touches it.
 		SET_ORIGIN(bot.pEdict, point);
 		bot.pEdict->v.velocity = Vector(0.f, 0.f, 0.f);
 		any = true;
@@ -237,11 +222,7 @@ bool TeleportAllBots(const Vector &point)
 
 namespace
 {
-	// Appends "<label>=[a,b,c,...]" to msg, capped at kMaxShown entries so a
-	// long corridor can't blow past qconsole's line-length handling. Planned
-	// paths are most useful shown from the *front* (what's still ahead);
-	// visited-history is most useful shown from the *back* (where the bot
-	// actually ended up just now) -- see the fromTail param.
+	// Appends "<label>=[a,b,c,...]" to msg, capped at kMaxShown entries so long corridor can't blow past qconsole's line-length handling. Planned paths shown from *front* (what's still ahead); visited-history from *back* (where bot ended up) -- see fromTail param.
 	void AppendAreaList(std::string &msg, const char *label, const std::vector<uint32_t> &ids, bool fromTail)
 	{
 		constexpr size_t kMaxShown = 24;

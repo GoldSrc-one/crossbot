@@ -2,9 +2,7 @@
 
 #include "nav_mesh.h"
 
-// Facade over the loaded nav graph, matching the existing GameProfile_Detect()
-// free-function convention (src/game/game_profile.h) rather than introducing
-// a new interface hierarchy for what is, for now, a single global resource.
+// Facade over loaded nav graph, matching GameProfile_Detect() free-function convention (game_profile.h) rather than new interface hierarchy for single global resource.
 namespace Nav
 {
 

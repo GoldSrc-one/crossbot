@@ -5,52 +5,23 @@
 #include "mathlib.h" // vec_t -- vector.h's Vector needs this typedef and doesn't include it itself
 #include "vector.h"
 
-// Engine-independent Simple Stupid Funnel Algorithm (SSFA) over a corridor
-// of portal "gates" -- shared verbatim between the runtime plugin
-// (path_funnel.cpp) and tools/navgen (main.cpp's --dump-svg path overlay),
-// exactly like astar_graph.h/.cpp: the offline debug view draws literally
-// the same string-pulled line a live bot walks, because it runs this same
-// code. Pure geometry, no engine traces at all -- runtime obstacle handling
-// stays where it belongs, in bot_move_nav.cpp's live feeler traces
-// (kObstacleTraceDistance + FindClearDirection), which exist to catch
-// what baked nav data can't know about, not to re-derive the path.
+// Engine-independent Simple Stupid Funnel Algorithm (SSFA) over corridor of portal gates -- shared verbatim between runtime plugin (path_funnel.cpp) and tools/navgen (--dump-svg path overlay), like astar_graph.h/.cpp. Offline debug view draws same string-pulled line live bot walks because it runs same code. Pure geometry, no engine traces -- runtime obstacle handling in bot_move_nav.cpp (kObstacleTraceDistance + FindClearDirection) catches what baked nav can't know, doesn't re-derive path.
 namespace NavFunnel
 {
 
-// One portal crossing's walkable extent, oriented relative to the direction
-// of travel: `left` is the crossing's leftmost passable point as seen by an
-// agent walking through it, `right` the rightmost. Build these with
-// MakeGate below rather than by hand -- navgen's baked portal points are
-// just "the two most separated points of the shared-face overlap"
-// (portal_builder.cpp's PolygonDiameter) with no orientation guarantee,
-// and MakeGate is what fixes that up (and shrinks the gate by the agent's
-// half-width so the pulled string can't hug an edge).
+// One portal crossing's walkable extent, oriented relative to travel direction: `left` = leftmost passable point as seen by agent walking through, `right` = rightmost. Build with MakeGate -- navgen's baked portal points are just "two most separated points of shared-face overlap" (portal_builder.cpp PolygonDiameter) with no orientation guarantee; MakeGate fixes that (and shrinks gate by agent half-width so pulled string can't hug edge).
 struct PortalGate
 {
 	Vector left, right;
 };
 
-// Half of the player hull's 32-unit width: the funnel pulls the path tight
-// against gate endpoints, and an endpoint sitting exactly on a doorframe or
-// on a walkway's rim is somewhere the hull *center* can't actually be --
-// confirmed live on test23_precise's thin walkways ringing a pit, where a
-// path hugging the inner rim leaves zero margin for steering error.
+// Half of player hull's 32u width: funnel pulls path tight against gate endpoints; endpoint on doorframe/walkway rim is where hull *center* can't be -- confirmed live on test23_precise's thin walkways over pit, where path hugging inner rim leaves zero margin for steering error.
 constexpr float kGateShrinkDistance = 16.f;
 
-// Builds an oriented, shrunk gate from a portal's two stored points.
-// travelDir2D is the horizontal direction of travel through the crossing
-// (typically nextAreaCentroid - currentAreaCentroid; z is ignored) and is
-// what disambiguates which stored point is "left". Each endpoint is pulled
-// kGateShrinkDistance toward the other, clamped so a gate narrower than
-// twice that still keeps a degenerate-but-ordered pair at its midpoint.
+// Builds oriented, shrunk gate from portal's two stored points. travelDir2D = horizontal direction of travel through crossing (typically nextAreaCentroid - currentAreaCentroid; z ignored) disambiguates which stored point is "left". Each endpoint pulled kGateShrinkDistance toward other, clamped so gate narrower than 2*kGateShrinkDistance still keeps degenerate-but-ordered pair at its midpoint.
 PortalGate MakeGate(const Vector &pointA, const Vector &pointB, const Vector &travelDir2D);
 
-// String-pulls start -> goal through `gates` (in crossing order) and
-// returns the taut polyline: start, each funnel corner, goal. Corners land
-// on (shrunk) gate endpoints, and keep that endpoint's z -- the funnel
-// itself is a 2D (x/y) algorithm, same planar simplification the rest of
-// the nav pipeline already makes (see svg_debug.h's top-down view).
-// With no gates at all this is just {start, goal}.
+// String-pulls start -> goal through `gates` (in crossing order) and returns taut polyline: start, each funnel corner, goal. Corners land on (shrunk) gate endpoints, keeping endpoint's z -- funnel is 2D (x/y) algorithm, same planar simplification as rest of nav pipeline (see svg_debug.h top-down view). With no gates: {start, goal}.
 std::vector<Vector> StringPull(const Vector &start, const Vector &goal, const std::vector<PortalGate> &gates);
 
 } // namespace NavFunnel

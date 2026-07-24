@@ -48,9 +48,11 @@
 <circle cx="416.0" cy="-192.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
 <circle cx="416.0" cy="-288.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
 <circle cx="400.0" cy="-384.0" r="2.88" fill="#f1c40f" stroke="#7a5c00" stroke-width="0.58"/>
+<polyline fill="none" stroke="#e67e22" stroke-width="1.68" stroke-opacity="0.9" stroke-linecap="round" stroke-linejoin="round" points="128.0,-384.0 126.9,-380.3 124.5,-371.8 121.1,-360.0 117.7,-348.0 114.3,-336.0 110.8,-324.0 107.4,-311.9 104.0,-299.9 100.5,-287.9 97.1,-275.9 94.1,-263.4 92.2,-250.0 91.7,-236.3 92.5,-222.7 94.8,-208.9 99.5,-195.1 105.7,-182.3 111.3,-171.0 117.1,-159.9 122.6,-148.4 127.6,-136.7 132.1,-124.8 136.1,-112.8 139.7,-100.6 142.8,-88.4 145.6,-76.1 148.2,-63.8 150.3,-51.3 152.0,-38.9 153.3,-28.6 154.4,-20.2 155.3,-13.4 156.2,-7.7 158.3,-2.5 161.6,2.0 166.1,5.5 173.8,6.6 184.9,4.2 197.4,-1.5 209.4,-9.1 220.4,-18.6 229.5,-26.8 236.9,-33.4 242.9,-38.7 247.7,-43.1 255.7,-46.8 267.9,-48.8 281.2,-49.4 294.5,-48.9 308.0,-47.1 321.7,-43.4 333.7,-39.5 345.0,-35.7 357.1,-31.8 370.0,-28.8 383.5,-27.2 394.8,-26.0 404.1,-25.0 412.1,-25.2 419.0,-27.1 424.4,-31.8 427.2,-41.2 426.9,-53.9 425.3,-67.0 423.2,-79.6 420.7,-92.0 418.1,-104.2 415.6,-116.5 413.4,-128.9 411.6,-141.4 410.3,-154.1 409.6,-167.0 409.8,-180.0 411.0,-193.0 412.2,-205.5 413.5,-217.9 414.6,-230.4 415.6,-242.9 416.4,-255.4 417.0,-267.9 417.4,-280.5 417.3,-293.2 416.7,-305.8 415.6,-318.5 414.2,-331.0 412.4,-343.5 410.2,-355.9 "/>
+<line x1="147.9" y1="-19.1" x2="163.2" y2="-3.7" stroke="#ff2222" stroke-width="1.92"/><line x1="147.9" y1="-3.7" x2="163.2" y2="-19.1" stroke="#ff2222" stroke-width="1.92"/>
 <circle cx="128.0" cy="-384.0" r="7.68" fill="#2ecc71" stroke="#0b1220" stroke-width="0.96"/>
 <circle cx="400.0" cy="-384.0" r="7.68" fill="#e74c3c" stroke="#0b1220" stroke-width="0.96"/>
-<rect x="-12.8" y="-524.8" width="163.2" height="254.6" fill="#0b1220" fill-opacity="0.85" stroke="#4a5a6a" stroke-width="0.72"/>
+<rect x="-12.8" y="-524.8" width="163.2" height="270.9" fill="#0b1220" fill-opacity="0.85" stroke="#4a5a6a" stroke-width="0.72"/>
 <text x="-8.0" y="-515.2" font-size="16.32" fill="#ffffff" font-weight="bold">test5_jump</text>
 <rect x="-8.0" y="-503.5" width="14.40" height="8.64" fill="#c9d6e3"/>
 <text x="11.2" y="-495.8" font-size="12.48" fill="#e8eef4">area (normal)</text>
@@ -69,8 +71,10 @@
 <line x1="-8.0" y1="-384.9" x2="6.4" y2="-384.9" stroke="#27ae60" stroke-width="2.40"/>
 <text x="11.2" y="-381.6" font-size="12.48" fill="#e8eef4">elevator</text>
 <line x1="-8.0" y1="-368.6" x2="6.4" y2="-368.6" stroke="#f1c40f" stroke-width="2.40"/>
-<text x="11.2" y="-365.2" font-size="12.48" fill="#e8eef4">A* path (spawn->target)</text>
-<text x="-8.0" y="-348.9" font-size="11.52" fill="#e8eef4">V=vantage C=camp K=chokepoint-cover</text>
-<text x="-8.0" y="-332.6" font-size="11.52" fill="#e8eef4">door area: T=touch B=button G=trigger</text>
-<circle cx="-0.8" cy="-319.6" r="7.68" fill="#2ecc71"/><text x="11.2" y="-316.3" font-size="12.48" fill="#e8eef4">spawn</text><circle cx="59.2" cy="-319.6" r="7.68" fill="#e74c3c"/><text x="71.2" y="-316.3" font-size="12.48" fill="#e8eef4">target</text>
+<text x="11.2" y="-365.2" font-size="12.48" fill="#e8eef4">planned path (spawn->target)</text>
+<line x1="-8.0" y1="-352.3" x2="6.4" y2="-352.3" stroke="#e67e22" stroke-width="2.40"/>
+<text x="11.2" y="-348.9" font-size="12.48" fill="#e8eef4">simulated drive (X = predicted fall)</text>
+<text x="-8.0" y="-332.6" font-size="11.52" fill="#e8eef4">V=vantage C=camp K=chokepoint-cover</text>
+<text x="-8.0" y="-316.3" font-size="11.52" fill="#e8eef4">door area: T=touch B=button G=trigger</text>
+<circle cx="-0.8" cy="-303.3" r="7.68" fill="#2ecc71"/><text x="11.2" y="-300.0" font-size="12.48" fill="#e8eef4">spawn</text><circle cx="59.2" cy="-303.3" r="7.68" fill="#e74c3c"/><text x="71.2" y="-300.0" font-size="12.48" fill="#e8eef4">target</text>
 </svg>

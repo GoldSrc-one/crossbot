@@ -510,10 +510,13 @@ int main(int argc, char **argv)
 		// 26, because most of those void areas picked up a spurious jump
 		// edge into the reachable set.
 		std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
+		std::vector<int> targetAreas = navgen::FindTargetAreas(entities, merged.areas);
+		std::vector<int> seedAreas = spawnAreas;
+		seedAreas.insert(seedAreas.end(), targetAreas.begin(), targetAreas.end());
 		size_t rawAreaCount = merged.areas.size();
-		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, spawnAreas);
-		std::printf("%s: %zu spawn point(s) resolved, %zu areas reachable after first pass (%zu void areas pruned)\n",
-			bspPath.c_str(), spawnAreas.size(), merged.areas.size(), rawAreaCount - merged.areas.size());
+		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, seedAreas);
+		std::printf("%s: %zu spawn point(s) resolved, %zu target(s) resolved, %zu areas reachable after first pass (%zu void areas pruned)\n",
+			bspPath.c_str(), spawnAreas.size(), targetAreas.size(), merged.areas.size(), rawAreaCount - merged.areas.size());
 
 		// ProbeJumpGaps/TagDropOffs run on the now-void-free area set, and
 		// set EDGE_FLAG_ONE_WAY (a one-way drop/jump-only connection).
@@ -579,8 +582,11 @@ int main(int argc, char **argv)
 		// old single-pass pruning yet A* permanently failed to route any
 		// bot toward it from the ground.
 		spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
+		targetAreas = navgen::FindTargetAreas(entities, merged.areas);
+		seedAreas = spawnAreas;
+		seedAreas.insert(seedAreas.end(), targetAreas.begin(), targetAreas.end());
 		size_t areaCountBeforeSecondPrune = merged.areas.size();
-		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, spawnAreas);
+		merged = navgen::PruneUnreachableAreas(merged.areas, merged.portals, seedAreas);
 		std::printf("%s: %zu areas reachable after direction-aware second pass (%zu one-way-only areas pruned)\n",
 			bspPath.c_str(), merged.areas.size(), areaCountBeforeSecondPrune - merged.areas.size());
 

@@ -103,4 +103,17 @@ Polytope ClipPolytope(const Polytope &poly, const Plane &plane, bool keepFront, 
 // apply, even to an entity with no origin brush at all.
 Polytope TranslatePolytope(const Polytope &poly, const Vec3 &offset);
 
+// CSG difference of two CONVEX polytopes: returns the set of convex pieces
+// resulting from subtracting `subtrahend` from `subject` (subject \ subtrahend).
+// Both inputs must be convex. The subtrahend's faces define the half-spaces
+// to remove; we split subject by each face plane and keep only pieces on the
+// outside (back side) of at least one face. This is exponentially faster
+// than walking the entity's clipnode tree for complex brushwork (e.g. curved
+// func_wall with many segments). Returns empty vector if subject is entirely
+// inside subtrahend.
+std::vector<Polytope> SubtractConvexPolytopes(const Polytope &subject,
+                                               const Polytope &subtrahend,
+                                               double mapRadius,
+                                               double epsilon = 0.01);
+
 } // namespace navgen

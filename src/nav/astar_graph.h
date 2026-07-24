@@ -6,15 +6,7 @@
 #include "mathlib.h" // vec_t -- vector.h's Vector needs this typedef and doesn't include it itself
 #include "vector.h"
 
-// Engine-independent A* over a plain area/portal adjacency graph -- shared
-// verbatim between the runtime plugin (path_astar.cpp, a thin wrapper around
-// this) and tools/navgen (main.cpp's --dump-svg path overlay, so the offline
-// debug tool computes literally the same route a live bot's FindPath would,
-// not a hand-reimplemented approximation that could quietly drift out of
-// sync with the real thing). Uses the real HLSDK Vector type (self-contained,
-// no engine linkage) rather than a hand-rolled lookalike, so both the
-// engine-linked crossbot_mm build and the standalone navgen build compile
-// this one file completely unmodified.
+// Engine-independent A* over plain area/portal adjacency graph -- shared verbatim between runtime plugin (path_astar.cpp wrapper) and tools/navgen (--dump-svg path overlay), so offline debug computes literally same route as live bot's FindPath, not a hand-reimplemented approximation that could drift. Uses real HLSDK Vector (self-contained, no engine linkage) so both crossbot_mm (engine-linked) and standalone navgen compile this one file unmodified.
 namespace NavAStar
 {
 

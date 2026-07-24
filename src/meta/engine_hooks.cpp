@@ -1,11 +1,6 @@
 #include <extdll.h>
 #include <meta_api.h>
 
-// Pure passthrough for this milestone: every entry is NULL, so metamod
-// leaves us out of every engine-function chain and the engine talks to the
-// game DLL directly. Intercepting engine calls (e.g. usermessages) is a
-// documented future extension point, not needed for the bot skeleton.
-
 enginefuncs_t g_EngineFunctionsTable =
 {
 	NULL,		// pfnPrecacheModel()

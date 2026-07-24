@@ -102,11 +102,8 @@ namespace
 		NavDebug::SetAreaBeamsEnabled(atoi(CMD_ARGV(1)) != 0);
 	}
 
-	// Dev/testing hook: prints every info_player_start/info_player_deathmatch
-	// entity's coordinates so an external test driver (scripts/*.ps1) can
-	// pick spawn pairs without needing its own separate BSP entity parser --
-	// this is the exact same live world the bot itself spawns/navigates in.
-	void Cmd_CrossBotListSpawns()
+	// Dev/testing hook: prints every info_player_start/info_player_deathmatch entity's coordinates so external test driver can pick spawn pairs without separate BSP entity parser -- this is the exact same live world bot spawns/navigates in.
+		void Cmd_CrossBotListSpawns()
 	{
 		static const char *kSpawnClassnames[] = {"info_player_start", "info_player_deathmatch"};
 		for (const char *classname : kSpawnClassnames)
@@ -116,7 +113,7 @@ namespace
 			{
 				ent = FIND_ENTITY_BY_STRING(ent, "classname", classname);
 				if (!ent || g_engfuncs.pfnIndexOfEdict(ent) == 0)
-					break; // FIND_ENTITY_BY_STRING wraps back to the world entity (index 0) when exhausted
+					break; // wraps back to world entity (index 0) when exhausted
 
 				char msg[128];
 				snprintf(msg, sizeof(msg), "CrossBot: spawn %s (%.1f,%.1f,%.1f)\n", classname,
@@ -126,11 +123,8 @@ namespace
 		}
 	}
 
-	// Same idea as Cmd_CrossBotListSpawns, but for info_target -- the goal
-	// marker used by simple single-target test maps (e.g. test1_simple),
-	// so a test driver can discover the coordinate to hand to
-	// crossbot_nav_goal without needing its own BSP entity parser either.
-	void Cmd_CrossBotListTargets()
+	// Same idea as Cmd_CrossBotListSpawns, but for info_target -- the goal marker used by simple single-target test maps (e.g. test1_simple), so test driver can discover coordinate for crossbot_nav_goal without its own BSP entity parser.
+		void Cmd_CrossBotListTargets()
 	{
 		edict_t *ent = nullptr;
 		while (true)

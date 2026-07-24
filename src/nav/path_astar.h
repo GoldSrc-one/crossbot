@@ -15,12 +15,7 @@ struct PathResult
 	std::vector<uint32_t> portalPath; // portal indices crossed, one shorter than areaPath
 };
 
-// Thin wrapper around the engine-independent NavAStar::FindPath (src/nav/
-// astar_graph.h/.cpp), which is shared verbatim with tools/navgen so the
-// offline debug SVG's path overlay matches a live bot's route exactly. This
-// wrapper just adapts NavMesh's Area/Portal shape into the plain graph
-// NavAStar expects. See astar_graph.h for the actual algorithm and its
-// documented behavior (one-way edges, heuristic admissibility, etc).
+// Thin wrapper around engine-independent NavAStar::FindPath (astar_graph.h/.cpp), shared verbatim with tools/navgen so offline debug SVG path overlay matches live bot route exactly. Just adapts NavMesh's Area/Portal shape into plain graph NavAStar expects. See astar_graph.h for algorithm and behavior (one-way edges, heuristic admissibility, etc.).
 PathResult FindPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea);
 
 } // namespace Nav

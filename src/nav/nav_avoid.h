@@ -4,11 +4,7 @@
 
 struct CBot;
 
-// Milestone 2d: per-bot local avoidance. Strictly a steering-layer add-on --
-// it runs after Bot_MoveNav has already picked the current waypoint (i.e.
-// after the A*/funnel corridor), and only ever perturbs *how* a bot heads
-// toward that waypoint, never *which* area-level path it's following. See
-// the plan's "Multi-agent local avoidance" architecture note.
+// Per-bot local avoidance (steering-layer add-on). Runs after Bot_MoveNav picks current waypoint (after A*/funnel corridor), only perturbs *how* bot heads toward waypoint, never *which* area-level path. See plan's "Multi-agent local avoidance" architecture note.
 namespace NavAvoid
 {
 

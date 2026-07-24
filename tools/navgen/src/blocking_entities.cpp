@@ -1,10 +1,11 @@
 #include "blocking_entities.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
-#include "clipnode_tree.h"
 #include "hull_defs.h"
+#include "polytope.h"
 
 namespace navgen
 {
@@ -207,23 +208,156 @@ bool OverlapsAnyBlockingVolume(const ExtractedLeaf &leaf, const std::vector<Bloc
 	return false;
 }
 
+namespace
+{
+	// Subtract the UNION of multiple convex polytopes from a subject polytope.
+	// We split the subject by ALL face planes of ALL subtrahends at once,
+	// then keep only fragments that are outside EVERY subtrahend.
+	// This gives order-independent results (unlike sequential subtraction).
+	std::vector<Polytope> SubtractUnion(const Polytope &subject,
+		const std::vector<const Polytope*> &subtrahends,
+		double mapRadius, double epsilon)
+	{
+		if (subtrahends.empty())
+			return {subject};
+
+		// Collect all unique face planes from all subtrahends
+		struct PlaneWithNormal { Plane plane; Vec3 normal; };
+		std::vector<PlaneWithNormal> allPlanes;
+		for (const Polytope *sub : subtrahends)
+		{
+			for (const Face &f : sub->faces)
+			{
+				bool duplicate = false;
+				for (const auto &pwn : allPlanes)
+				{
+					if (std::fabs(f.plane.normal.x - pwn.plane.normal.x) < epsilon &&
+						std::fabs(f.plane.normal.y - pwn.plane.normal.y) < epsilon &&
+						std::fabs(f.plane.normal.z - pwn.plane.normal.z) < epsilon &&
+						std::fabs(f.plane.dist - pwn.plane.dist) < epsilon)
+					{
+						duplicate = true;
+						break;
+					}
+				}
+				if (!duplicate)
+					allPlanes.push_back({f.plane, f.plane.normal});
+			}
+		}
+
+		if (allPlanes.empty())
+			return {subject};
+
+		// Recursively split subject by all planes
+		std::function<void(const Polytope&, size_t, std::vector<Polytope>&)> carveRecursive;
+		carveRecursive = [&](const Polytope &poly, size_t planeIdx, std::vector<Polytope> &out)
+		{
+			if (poly.Empty() || planeIdx >= allPlanes.size())
+			{
+				// Leaf fragment: keep if outside ALL subtrahends
+				for (const Polytope *sub : subtrahends)
+				{
+					if (ConvexOverlap(poly, *sub, epsilon))
+						return; // inside at least one subtrahend, discard
+				}
+				out.push_back(poly);
+				return;
+			}
+
+			const Plane &plane = allPlanes[planeIdx].plane;
+			const Vec3 &normal = allPlanes[planeIdx].normal;
+
+			// Classify poly vertices against this plane
+			bool hasFront = false, hasBack = false;
+			for (const Face &f : poly.faces)
+			{
+				for (const Vec3 &v : f.winding)
+				{
+					double d = v.Dot(normal) - plane.dist;
+					if (d > epsilon) hasFront = true;
+					else if (d < -epsilon) hasBack = true;
+					if (hasFront && hasBack) break;
+				}
+				if (hasFront && hasBack) break;
+			}
+
+			if (hasFront && hasBack)
+			{
+				// Straddles - split
+				Polytope frontPoly, backPoly;
+				for (const Face &f : poly.faces)
+				{
+					const auto &w = f.winding;
+					std::vector<double> faceDists;
+					faceDists.reserve(w.size());
+					for (const Vec3 &v : w)
+						faceDists.push_back(v.Dot(normal) - plane.dist);
+
+					std::vector<Vec3> frontW, backW;
+					for (size_t i = 0; i < w.size(); ++i)
+					{
+						size_t j = (i + 1) % w.size();
+						double di = faceDists[i], dj = faceDists[j];
+						const Vec3 &vi = w[i], &vj = w[j];
+
+						if (di >= -epsilon) frontW.push_back(vi);
+						if (di <= epsilon) backW.push_back(vi);
+
+						if ((di > epsilon && dj < -epsilon) || (di < -epsilon && dj > epsilon))
+						{
+							double t = di / (di - dj);
+							Vec3 inter = vi + (vj - vi) * t;
+							frontW.push_back(inter);
+							backW.push_back(inter);
+						}
+					}
+
+					if (frontW.size() >= 3)
+					{
+						Face nf = f;
+						nf.winding = std::move(frontW);
+						frontPoly.faces.push_back(std::move(nf));
+					}
+					if (backW.size() >= 3)
+					{
+						Face nf = f;
+						nf.winding = std::move(backW);
+						backPoly.faces.push_back(std::move(nf));
+					}
+				}
+
+				if (!frontPoly.Empty())
+					carveRecursive(frontPoly, planeIdx + 1, out);
+				if (!backPoly.Empty())
+					carveRecursive(backPoly, planeIdx + 1, out);
+			}
+			else if (hasBack)
+			{
+				// Entirely on back side (outside this plane's subtrahend half-space)
+				carveRecursive(poly, planeIdx + 1, out);
+			}
+			else
+			{
+				// Entirely on front side (inside this plane's subtrahend half-space)
+				// Continue to test against other planes
+				carveRecursive(poly, planeIdx + 1, out);
+			}
+		};
+
+		std::vector<Polytope> result;
+		carveRecursive(subject, 0, result);
+		return result;
+	}
+}
+
 std::vector<Polytope> SubtractBlockingVolumes(const BspFile &bsp, const Polytope &leafPolytope,
 	const std::vector<BlockingVolume> &blockers, double mapRadius, double epsilon)
 {
 	std::vector<Polytope> pieces{leafPolytope};
 	Aabb leafBox = ComputeAabb(leafPolytope);
 
-	// Carve against each distinct blocking ENTITY's clipnode tree, at most
-	// once per entity: after one carve every surviving piece is already
-	// wholly outside that entity's solid, so its remaining volumes have
-	// nothing left to remove. The previous design subtracted the entity's
-	// extracted convex solid volumes one at a time instead -- those are
-	// hull-Minkowski-expanded leaves that overlap each other heavily, so
-	// each subtraction re-fragmented everything the previous one produced;
-	// on test35_smoothwall's many-segment curved func_wall that fragmented
-	// combinatorially all the way to std::bad_alloc. See
-	// CarvePolytopeAgainstTree's own comment.
-	std::vector<std::pair<int, Vec3>> carvedEntities;
+	// Collect all blockers that overlap this leaf
+	std::vector<const BlockingVolume*> overlappingBlockers;
 	for (const BlockingVolume &blocker : blockers)
 	{
 		if (blocker.headnode < 0)
@@ -231,57 +365,50 @@ std::vector<Polytope> SubtractBlockingVolumes(const BspFile &bsp, const Polytope
 		Aabb blockerBox = ComputeAabb(blocker.polytope);
 		if (!AabbOverlap(leafBox, blockerBox, kOverlapEpsilon))
 			continue;
+		overlappingBlockers.push_back(&blocker);
+	}
 
-		bool alreadyCarved = false;
-		for (const auto &[headnode, origin] : carvedEntities)
+	if (overlappingBlockers.empty())
+		return pieces;
+
+	// Sort for deterministic behavior regardless of entity grouping
+	struct BlockingVolumeWithKey { const BlockingVolume *vol; Vec3 center; };
+	std::vector<BlockingVolumeWithKey> sorted;
+	sorted.reserve(overlappingBlockers.size());
+	for (const BlockingVolume *bv : overlappingBlockers)
+	{
+		Aabb box = ComputeAabb(bv->polytope);
+		Vec3 center = (box.mins + box.maxs) * 0.5;
+		sorted.push_back({bv, center});
+	}
+	std::sort(sorted.begin(), sorted.end(),
+		[](const BlockingVolumeWithKey &a, const BlockingVolumeWithKey &b)
 		{
-			if (headnode == blocker.headnode && std::fabs(origin.x - blocker.origin.x) < 0.01 &&
-				std::fabs(origin.y - blocker.origin.y) < 0.01 && std::fabs(origin.z - blocker.origin.z) < 0.01)
-			{
-				alreadyCarved = true;
-				break;
-			}
-		}
-		if (alreadyCarved)
-			continue;
+			if (std::fabs(a.center.x - b.center.x) > 0.001)
+				return a.center.x < b.center.x;
+			if (std::fabs(a.center.y - b.center.y) > 0.001)
+				return a.center.y < b.center.y;
+			return a.center.z < b.center.z;
+		});
 
+	// Subtract all overlapping blockers sequentially in sorted order
+	for (const auto &sv : sorted)
+	{
+		const BlockingVolume &blocker = *sv.vol;
 		std::vector<Polytope> next;
-		bool carvedAny = false;
 		for (Polytope &piece : pieces)
 		{
-			// Pieces nowhere near this entity pass through untouched --
-			// carving them anyway would still be geometrically correct
-			// (every fragment lands in an EMPTY leaf and survives) but
-			// would fragment them along the tree's planes for no reason.
-			bool overlapsEntity = false;
-			for (const BlockingVolume &other : blockers)
-			{
-				if (other.headnode != blocker.headnode)
-					continue;
-				if (ConvexOverlap(piece, other.polytope, kOverlapEpsilon))
-				{
-					overlapsEntity = true;
-					break;
-				}
-			}
-			if (!overlapsEntity)
+			if (!ConvexOverlap(piece, blocker.polytope, kOverlapEpsilon))
 			{
 				next.push_back(std::move(piece));
 				continue;
 			}
 
-			carvedAny = true;
-			// The entity's clipnode planes are in its own local space when
-			// an origin brush is involved (see ParseEntityOrigin) -- carve
-			// in local space, then translate the survivors back.
-			Vec3 negOrigin(-blocker.origin.x, -blocker.origin.y, -blocker.origin.z);
-			Polytope local = TranslatePolytope(piece, negOrigin);
-			for (Polytope &carved : CarvePolytopeAgainstTree(bsp, blocker.headnode, local, CONTENTS_SOLID, mapRadius))
-				next.push_back(TranslatePolytope(carved, blocker.origin));
+			std::vector<Polytope> carved = SubtractConvexPolytopes(piece, blocker.polytope, mapRadius, epsilon);
+			for (Polytope &c : carved)
+				next.push_back(std::move(c));
 		}
 		pieces = std::move(next);
-		if (carvedAny)
-			carvedEntities.push_back({blocker.headnode, blocker.origin});
 	}
 
 	return pieces;

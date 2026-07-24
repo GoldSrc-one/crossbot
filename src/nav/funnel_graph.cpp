@@ -8,9 +8,7 @@ namespace NavFunnel
 namespace
 {
 
-// Twice the signed area of triangle (a,b,c) in the XY plane -- positive
-// when c lies to the left of the a->b direction (counter-clockwise). The
-// standard SSFA predicate (same form as Recast's dtTriArea2D).
+// Twice signed area of triangle (a,b,c) in XY plane -- positive when c lies to left of a->b (counter-clockwise). Standard SSFA predicate (same as Recast's dtTriArea2D).
 float TriArea2(const Vector &a, const Vector &b, const Vector &c)
 {
 	float abx = b.x - a.x, aby = b.y - a.y;
@@ -20,9 +18,7 @@ float TriArea2(const Vector &a, const Vector &b, const Vector &c)
 
 bool SamePoint2D(const Vector &a, const Vector &b)
 {
-	// Generous epsilon by geometry standards, but these are portal-endpoint
-	// coordinates tens/hundreds of units apart -- anything this close is
-	// the same funnel vertex for taut-path purposes.
+	// Generous epsilon for portal-endpoint coordinates tens/hundreds of units apart -- anything this close is same funnel vertex for taut-path purposes.
 	constexpr float kEps = 0.001f;
 	return std::fabs(a.x - b.x) < kEps && std::fabs(a.y - b.y) < kEps;
 }

@@ -5,39 +5,22 @@
 
 #include "waypoint_plan.h"
 
-// Engine-independent waypoint-following steering controller, shared between
-// the runtime bot (bot_move_nav.cpp's plain ground steering) and
-// tools/navgen's offline movement simulation -- the same Steer() decides
-// waypoint switching, the pursuit aim point, and the speed cap on both
-// sides, so the simulated trajectory drawn in the debug SVG is the same
-// control law the live bot runs, just integrated against a model of
-// GoldSrc's ground physics instead of the real engine. What this module
-// deliberately does NOT cover: engine-side reactions (obstacle feelers,
-// avoidance deflection, jump/door/elevator special handling) -- those stay
-// in bot_move_nav.cpp, layered on top of the Steer decision.
+// Engine-independent waypoint-following steering controller, shared between runtime bot (bot_move_nav.cpp plain ground steering) and tools/navgen offline movement simulation. Same Steer() decides waypoint switching, pursuit aim, and speed cap on both sides -- simulated trajectory in debug SVG matches live bot control law, just integrated against GoldSrc ground physics model instead of real engine. Does NOT cover engine-side reactions (obstacle feelers, avoidance deflection, jump/door/elevator specials) -- those stay in bot_move_nav.cpp layered on top.
 namespace NavFollow
 {
 
 struct Config
 {
-	// Matches bot_move.cpp's kMaxTurnRatePerSec exactly -- the simulation's
-	// fidelity depends on it.
+	// Matches bot_move.cpp's kMaxTurnRatePerSec exactly -- simulation fidelity depends on it.
 	float turnRateDegPerSec = 300.f;
 	float runSpeed = 250.f;
-	// Intermediate funnel corners are walked THROUGH (tight radius, or
-	// passing the corner's perpendicular along the current segment); only
-	// the final waypoint keeps a loose arrival radius. See bot_move_nav.cpp's
-	// kWaypointCornerRadius comment for the confirmed-live reasoning.
+	// Intermediate funnel corners walked THROUGH (tight radius or passing corner's perpendicular along current segment); only final waypoint keeps loose arrival radius. See bot_move_nav.cpp kWaypointCornerRadius for live reasoning.
 	float cornerRadius = 12.f;
 	float finalRadius = 24.f;
-	// Pure-pursuit line following: aim this far ahead of the bot's own
-	// projection onto the current planned segment (tighter when the
-	// waypoint carries a careful maxSpeed), so drift and corner cuts get
-	// pulled back onto the line instead of compounding.
+	// Pure-pursuit line following: aim this far ahead of bot's projection on current segment (tighter when waypoint carries careful maxSpeed), so drift and corner cuts get pulled back onto line instead of compounding.
 	float lookahead = 48.f;
 	float lookaheadCareful = 24.f;
-	// Turn-then-run speed scaling thresholds (see bot_move_nav.cpp's
-	// kTurnInPlaceErrorDeg comment).
+	// Turn-then-run speed scaling thresholds (see bot_move_nav.cpp kTurnInPlaceErrorDeg comment).
 	float turnInPlaceErrorDeg = 60.f;
 	float turnSlowdownErrorDeg = 20.f;
 	float turnSlowdownFactor = 0.3f;
@@ -68,15 +51,7 @@ Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpInd
 // headingErrorDeg is |normalized(currentYaw - desiredYaw)|.
 float ScaleSpeedByHeadingError(float baseSpeed, float headingErrorDeg, const Config &cfg = {});
 
-// Offline movement simulation (navgen's --dump-svg): integrates Steer()
-// against a model of GoldSrc's ground physics (PM_Friction/PM_Accelerate
-// with the stock sv_friction 4 / sv_accelerate 10 / sv_stopspeed 100, and
-// the turn-rate-limited facing bot_move.cpp applies), producing the
-// trajectory a live bot would actually drive -- momentum, corner
-// overshoot, convergence lag and all. Special waypoints are followed as
-// plain points (the simulation has no doors/lifts to wait on); z is
-// carried along the planned segments purely so a fall-check against
-// floor-supported footprints can compare heights.
+// Offline movement simulation (navgen --dump-svg): integrates Steer() against GoldSrc ground physics model (PM_Friction/PM_Accelerate with stock sv_friction 4 / sv_accelerate 10 / sv_stopspeed 100, and turn-rate-limited facing from bot_move.cpp), producing trajectory live bot would drive -- momentum, corner overshoot, convergence lag. Special waypoints followed as plain points (simulation has no doors/lifts to wait on); z carried along planned segments for fall-check against floor-supported footprints.
 struct SimResult
 {
 	std::vector<Vector> points; // one per tick, starting at `start`

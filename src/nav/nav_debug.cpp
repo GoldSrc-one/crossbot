@@ -14,29 +14,7 @@
 
 namespace
 {
-	// Real bounded-polygon reconstruction for one plane of a convex
-	// polytope, the same "start with a huge quad on the plane, clip it
-	// against every other bounding plane" technique navgen's own offline
-	// leaf-extraction uses (tools/navgen/src/leaf_extractor.cpp's
-	// BuildPolytopeFromChain) -- ported here because a live player pointed
-	// out, correctly, that a real BSP clip face can be an arbitrary polygon
-	// (triangle, L-shape, whatever the brush geometry produced), not just a
-	// rectangle, and an earlier version of this draw call was projecting
-	// the area's XY *AABB* corners onto the floor plane's equation instead
-	// of finding the plane's actual bounded face.
-	//
-	// Plain Vector (float), same as everywhere else in this file -- an
-	// earlier version of this used double, on the theory that a 16384-unit
-	// starting quad left too little mantissa for a room only tens/hundreds
-	// of units across. That diagnosis was wrong: the *actual* bug was that
-	// the starting quad was centered at the plane's closest approach to the
-	// world origin (`normal * dist`), nowhere near the real room, so no
-	// amount of precision would have helped -- clipping something centered
-	// 1400 units away just fails cleanly regardless of float vs double.
-	// Once BaseWindingForPlane took the area's own centroid as its center
-	// point, plain float coordinates (in the same few-thousand-unit range
-	// as the map itself) resolve well below kClipEpsilon -- double was
-	// solving a problem that centering, not precision, actually had.
+	// Real bounded-polygon reconstruction for one plane of a convex polytope. Earlier version projected area's XY AABB corners onto floor plane; BSP clip faces can be arbitrary polygons (triangle, L-shape, etc.), not just rectangles. Bug was centering start quad at plane's closest point to world origin (`normal * dist`) instead of area's own centroid.
 	struct Winding
 	{
 		std::vector<Vector> points;
