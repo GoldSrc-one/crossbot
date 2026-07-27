@@ -1,4 +1,4 @@
-#include <extdll.h>
+﻿#include <extdll.h>
 #include <meta_api.h>
 
 #include "bot_manager.h"
@@ -54,7 +54,6 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	g_pGameProfile = GameProfile_Detect();
 
-	// SERVER_PRINT (pfnServerPrint), not ALERT(at_logged, ...): at_logged routes to server's *.log file (sv_logfile), not console -- confirmed hard way debugging this milestone's live test (every ALERT(at_logged, ...) was silently invisible in qconsole.log even with `developer 2`, while pfnServerPrint always showed up). Dev-facing status needs to show up where someone's actually looking.
 	char msg[256];
 	if (g_pGameProfile)
 		snprintf(msg, sizeof(msg), "CrossBot: detected game profile '%s'.\n", g_pGameProfile->GetName());
@@ -79,7 +78,7 @@ void ServerDeactivate()
 
 void ClientPutInServer(edict_t *pEntity)
 {
-	// Bots added directly by AddBot() below (via MDLL_ macros bypassing this metamod chain), so this only fires for human players joining through normal engine path. No behavior needed for this milestone; extension point for future auto-fill/team-balance logic.
+
 	(void)pEntity;
 }
 
@@ -139,7 +138,6 @@ bool AddBot(const char *name)
 		return false;
 	}
 
-	// Bots don't go through engine's normal client-connect path, so we replay it ourselves. MDLL_* talks directly to gamedll, bypassing metamod's hook chain (see meta_api.h).
 		char rejectReason[128] = {};
 	MDLL_ClientConnect(pEdict, botName, "127.0.0.1", rejectReason);
 
@@ -198,8 +196,8 @@ bool SetGoalForAllBots(const Vector &point)
 			continue;
 		bot.goalPoint = point;
 		bot.hasGoal = true;
-		Bot_ResetNavPath(bot); // also clears elevator/jump/obstacle state and ETA/area-trace diagnostics
-		bot.traceLog.clear();  // fresh origin recording for this goal (see CBot::traceLog)
+		Bot_ResetNavPath(bot);
+		bot.traceLog.clear();
 		any = true;
 	}
 	return any;
@@ -212,9 +210,12 @@ bool TeleportAllBots(const Vector &point)
 	{
 		if (!bot.inUse)
 			continue;
-		// SET_ORIGIN (not raw v.origin write) so engine properly relinks edict's collision/PVS position -- direct struct write leaves stale spatial-partition data until next physics step touches it.
+
 		SET_ORIGIN(bot.pEdict, point);
 		bot.pEdict->v.velocity = Vector(0.f, 0.f, 0.f);
+		bot.pEdict->v.v_angle = Vector(0.f, 0.f, 0.f);
+		bot.pEdict->v.angles = Vector(0.f, 0.f, 0.f);
+		Bot_ResetNavPath(bot);
 		any = true;
 	}
 	return any;
@@ -222,7 +223,7 @@ bool TeleportAllBots(const Vector &point)
 
 namespace
 {
-	// Appends "<label>=[a,b,c,...]" to msg, capped at kMaxShown entries so long corridor can't blow past qconsole's line-length handling. Planned paths shown from *front* (what's still ahead); visited-history from *back* (where bot ended up) -- see fromTail param.
+
 	void AppendAreaList(std::string &msg, const char *label, const std::vector<uint32_t> &ids, bool fromTail)
 	{
 		constexpr size_t kMaxShown = 24;
@@ -285,8 +286,6 @@ void PrintNavStatus()
 			bot.waypointIndex, bot.waypoints.size(), bot.pEdict->v.movetype, bot.currentAreaId, onGround ? 1 : 0);
 		std::string msg = line;
 
-		// ETA only means anything once a real path has actually been found
-		// for the current goal (estimatedArrivalTime stays 0 until then).
 		if (bot.hasGoal && bot.estimatedArrivalTime > 0.f)
 		{
 			float elapsed = gpGlobals->time - bot.pathStartTime;
@@ -299,9 +298,53 @@ void PrintNavStatus()
 		AppendAreaList(msg, "planned", bot.plannedAreaPath, false);
 		AppendAreaList(msg, "actual", bot.visitedAreaPath, true);
 
+		if (bot.hasGoal && !bot.waypoints.empty())
+		{
+			msg += " waypoints=[";
+			for (size_t i = 0; i < bot.waypoints.size(); ++i)
+			{
+				const Nav::Waypoint &wp = bot.waypoints[i];
+				char wpBuf[128];
+							snprintf(wpBuf, sizeof(wpBuf), "(wp%zu:(%.0f,%.0f,%.0f)%s%s%s%s%s",
+					i, wp.point.x, wp.point.y, wp.point.z,
+					wp.requiresJump ? " J" : "",
+					wp.requiresElevatorRide ? " E" : "",
+					wp.requiresTeleport ? " T" : "",
+					wp.requiresLaunch ? " L" : "",
+					wp.requiresDrop ? " D" : "");
+				msg += wpBuf;
+				if (i + 1 < bot.waypoints.size())
+					msg += ",";
+			}
+			msg += "]";
+		}
+
 		msg += "\n";
 		SERVER_PRINT(msg.c_str());
 	}
+}
+
+void PrintWaypoints()
+{
+		for (auto &bot : g_bots)
+		{
+			if (!bot.inUse)
+				continue;
+			char line[512];
+			snprintf(line, sizeof(line), "CrossBot: %s waypoints (%zu):\n", bot.name, bot.waypoints.size());
+			SERVER_PRINT(line);
+			for (size_t i = 0; i < bot.waypoints.size(); ++i)
+			{
+				const Nav::Waypoint &wp = bot.waypoints[i];
+				snprintf(line, sizeof(line),
+					"  wp[%zu]=(%.1f,%.1f,%.1f) jump=%d elev=%d tele=%d launch=%d drop=%d btn=%d trig=%d door=%d crouch=%d targArea=%d maxSpeed=%.1f\n",
+					i, wp.point.x, wp.point.y, wp.point.z,
+					wp.requiresJump, wp.requiresElevatorRide, wp.requiresTeleport,
+					wp.requiresLaunch, wp.requiresDrop, wp.requiresButtonUse, wp.requiresTriggerTouch,
+					wp.requiresDoor, wp.requiresCrouch, wp.targetAreaId, wp.maxSpeed);
+				SERVER_PRINT(line);
+			}
+		}
 }
 
 int GetOtherBotEdicts(edict_t *self, edict_t **outEdicts, int maxCount)
@@ -332,4 +375,5 @@ int GetBotsForDebug(const CBot **outBots, int maxCount)
 	return count;
 }
 
-} // namespace BotManager
+}
+

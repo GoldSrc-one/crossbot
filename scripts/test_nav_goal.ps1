@@ -152,6 +152,19 @@ if (-not (Test-Path $hldsMapPath) -or (Get-Item $mapPath).LastWriteTime -gt (Get
     Copy-Item $mapPath $hldsMapPath -Force
 }
 
+# --- 0. Run navgen FIRST to generate fresh .nav file ---
+$botNavDir = Join-Path $HLDSDir "valve\crossbot_data\nav"
+if (-not (Test-Path $botNavDir)) { New-Item -ItemType Directory -Path $botNavDir | Out-Null }
+$botNavPath = Join-Path $botNavDir "$mapName.nav"
+
+Write-Host "Running navgen to generate fresh nav file..."
+$navgenResult = & $navGenExe $mapPath -o $botNavPath 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARNING: navgen failed: $navgenResult"
+} else {
+    Write-Host "navgen succeeded, nav file: $botNavPath"
+}
+
 # --- 1. Start HLDS ---
 $qconsoleLog = Join-Path $HLDSDir "qconsole.log"
 Remove-Item $traceLogPath -ErrorAction SilentlyContinue
@@ -182,41 +195,44 @@ try {
     Write-Host "Querying spawn points and targets via RCON..."
 
     function Parse-SpawnsAndTargetsFromRcon($port) {
-        $spawnOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_spawns"
-        $targetOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_targets"
+            $spawnOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_spawns"
+            $targetOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_targets"
 
-        $spawnMatches = [regex]::Matches($spawnOut, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-        $targetMatches = [regex]::Matches($targetOut, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+            Write-Host "Raw spawn output: '$spawnOut'"
+            Write-Host "Raw target output: '$targetOut'"
 
-        $spawns = @()
-        foreach ($m in $spawnMatches) {
-            $spawns += [pscustomobject]@{
-                Classname = $m.Groups[1].Value
-                X = [double]$m.Groups[2].Value
-                Y = [double]$m.Groups[3].Value
-                Z = [double]$m.Groups[4].Value
+            $spawnMatches = [regex]::Matches($spawnOut, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+            $targetMatches = [regex]::Matches($targetOut, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+
+            $spawns = @()
+            foreach ($m in $spawnMatches) {
+                $spawns += [pscustomobject]@{
+                    Classname = $m.Groups[1].Value
+                    X = [double]$m.Groups[2].Value
+                    Y = [double]$m.Groups[3].Value
+                    Z = [double]$m.Groups[4].Value
+                }
             }
-        }
-        $spawns = $spawns | Sort-Object X,Y,Z -Unique
+            $spawns = $spawns | Sort-Object X,Y,Z -Unique
 
-        $targets = @()
-        foreach ($m in $targetMatches) {
-            $targets += [pscustomobject]@{
-                Name = $m.Groups[1].Value
-                X = [double]$m.Groups[2].Value
-                Y = [double]$m.Groups[3].Value
-                Z = [double]$m.Groups[4].Value
+            $targets = @()
+            foreach ($m in $targetMatches) {
+                $targets += [pscustomobject]@{
+                    Name = $m.Groups[1].Value
+                    X = [double]$m.Groups[2].Value
+                    Y = [double]$m.Groups[3].Value
+                    Z = [double]$m.Groups[4].Value
+                }
             }
+
+            return @{ Spawns = $spawns; Targets = $targets }
         }
 
-        return @{ Spawns = $spawns; Targets = $targets }
-    }
+        $parsed = Parse-SpawnsAndTargetsFromRcon $Port
+        $spawns = $parsed.Spawns
+        $targets = $parsed.Targets
 
-    $parsed = Parse-SpawnsAndTargetsFromRcon $Port
-    $spawns = $parsed.Spawns
-    $targets = $parsed.Targets
-
-    Write-Host "Found $($spawns.Count) spawn point(s), $($targets.Count) target(s)"
+        Write-Host "Found $($spawns.Count) spawn point(s), $($targets.Count) target(s)"
 
     # --- 3. Select goal ---
     $goal = $null
@@ -248,17 +264,40 @@ try {
         exit 1
     }
 
-    # --- 4. Teleport bot to start (if using spawn pair) and set goal ---
-    if ($targets.Count -eq 0 -and $spawns.Count -ge 2) {
-        # Teleport to the first spawn of the pair
-        & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_teleport $($bestA.X) $($bestA.Y) $($bestA.Z)" | Out-Null
+    # --- 4. Teleport bot to start (use first spawn point) and set goal ---
+        $startSpawn = $spawns[0]
+        Write-Host "Teleporting bot to first spawn: ($($startSpawn.X), $($startSpawn.Y), $($startSpawn.Z))"
+        & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_teleport $($startSpawn.X) $($startSpawn.Y) $($startSpawn.Z)"
         Start-Sleep -Milliseconds 500
-    }
+
+        # Verify teleport worked
+        $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
+        Write-Host "After teleport status: $status"
 
     Write-Host ("Setting nav goal to ({0:F1},{1:F1},{2:F1})..." -f $goal.X, $goal.Y, $goal.Z)
     & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_goal $($goal.X) $($goal.Y) $($goal.Z)" | Out-Null
 
-    # --- 5. Poll until arrival or timeout ---
+        # Wait for Repath to run and waypoints to be generated (poll until we have waypoints)
+        Write-Host "Waiting for path planning..."
+        $waypointsReady = $false
+        for ($i = 0; $i -lt 20; $i++) {  # up to 2 seconds
+            Start-Sleep -Milliseconds 100
+            $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
+            if ($status -match "waypoint=\d+/(\d+)") {
+                $wpCount = [int]$matches[1]
+                if ($wpCount -gt 0) {
+                    $waypointsReady = $true
+                    break
+                }
+            }
+        }
+
+        # Dump waypoints for debugging
+        $wpDump = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_waypoints"
+        Write-Host "Waypoints dump:"
+        Write-Host $wpDump
+
+        # --- 5. Poll until arrival or timeout ---
     # Use hasGoal=0 from crossbot_nav_status as primary signal (more reliable than qconsole.log for short goals)
         # Also collect bot positions during polling to build trajectory trace if test fails/times out
         $expectedEta = $null
@@ -279,12 +318,17 @@ try {
 
             # Poll live status for hasGoal, ETA, and progress
             $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
-            $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
+                        Write-Host "Full status: $status"
+                        $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
 
             if ($statusLine) {
-                $etaMatch = [regex]::Match($statusLine, "eta=([\d.]+)s")
-                $originMatch = [regex]::Match($statusLine, "origin=\(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-                $hasGoalMatch = [regex]::Match($statusLine, "hasGoal=(\d)")
+                            # Print full status line if it contains waypoints
+                            if ($statusLine -match "waypoints=") {
+                                Write-Host "Full status: $statusLine"
+                            }
+                            $etaMatch = [regex]::Match($statusLine, "eta=([\d.]+)s")
+                            $originMatch = [regex]::Match($statusLine, "origin=\(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+                            $hasGoalMatch = [regex]::Match($statusLine, "hasGoal=(\d)")
 
                 if ($etaMatch.Success -and -not $expectedEta) {
                     $expectedEta = [double]$etaMatch.Groups[1].Value

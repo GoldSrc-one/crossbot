@@ -1,4 +1,4 @@
-#include "nav.h"
+﻿#include "nav.h"
 
 #include "nav_loader.h"
 
@@ -30,4 +30,5 @@ const NavMesh *Get()
 	return g_mesh.get();
 }
 
-} // namespace Nav
+}
+

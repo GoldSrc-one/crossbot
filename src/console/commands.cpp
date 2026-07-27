@@ -1,4 +1,4 @@
-#include <extdll.h>
+﻿#include <extdll.h>
 #include <meta_api.h>
 
 #include "commands.h"
@@ -66,6 +66,11 @@ namespace
 		BotManager::PrintNavStatus();
 	}
 
+	void Cmd_CrossBotNavWaypoints()
+	{
+		BotManager::PrintWaypoints();
+	}
+
 	void Cmd_CrossBotNavAvoid()
 	{
 		if (CMD_ARGC() < 2)
@@ -102,8 +107,7 @@ namespace
 		NavDebug::SetAreaBeamsEnabled(atoi(CMD_ARGV(1)) != 0);
 	}
 
-	// Dev/testing hook: prints every info_player_start/info_player_deathmatch entity's coordinates so external test driver can pick spawn pairs without separate BSP entity parser -- this is the exact same live world bot spawns/navigates in.
-		void Cmd_CrossBotListSpawns()
+	void Cmd_CrossBotListSpawns()
 	{
 		static const char *kSpawnClassnames[] = {"info_player_start", "info_player_deathmatch"};
 		for (const char *classname : kSpawnClassnames)
@@ -113,7 +117,7 @@ namespace
 			{
 				ent = FIND_ENTITY_BY_STRING(ent, "classname", classname);
 				if (!ent || g_engfuncs.pfnIndexOfEdict(ent) == 0)
-					break; // wraps back to world entity (index 0) when exhausted
+					break;
 
 				char msg[128];
 				snprintf(msg, sizeof(msg), "CrossBot: spawn %s (%.1f,%.1f,%.1f)\n", classname,
@@ -123,8 +127,7 @@ namespace
 		}
 	}
 
-	// Same idea as Cmd_CrossBotListSpawns, but for info_target -- the goal marker used by simple single-target test maps (e.g. test1_simple), so test driver can discover coordinate for crossbot_nav_goal without its own BSP entity parser.
-		void Cmd_CrossBotListTargets()
+	void Cmd_CrossBotListTargets()
 	{
 		edict_t *ent = nullptr;
 		while (true)
@@ -157,6 +160,8 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_nav_debug_area", Cmd_CrossBotNavDebugArea);
 	ADD_SERVER_COMMAND("crossbot_list_spawns", Cmd_CrossBotListSpawns);
 	ADD_SERVER_COMMAND("crossbot_list_targets", Cmd_CrossBotListTargets);
+	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
 }
 
 }
+

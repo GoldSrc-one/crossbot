@@ -1,4 +1,4 @@
-#include <extdll.h>
+﻿#include <extdll.h>
 #include <meta_api.h>
 #include <in_buttons.h>
 
@@ -12,7 +12,7 @@ namespace
 	constexpr float kMoveSpeed = 250.f;
 	constexpr float kDirChangeInterval = 3.f;
 	constexpr float kTraceDistance = 64.f;
-	constexpr float kMaxTurnRatePerSec = 300.f; // deg/sec -- fast but not instant, avoids classic snap-to-target bot tell
+	constexpr float kMaxTurnRatePerSec = 300.f;
 
 	float NormalizeAngle(float a)
 	{
@@ -37,7 +37,6 @@ namespace
 			bot.nextDirChangeTime = gpGlobals->time + kDirChangeInterval;
 		}
 
-		// Wall avoidance: trace ahead, pick new random direction immediately if blocked.
 		Vector start = pEdict->v.origin;
 		Vector end = start + bot.moveDir * kTraceDistance;
 
@@ -59,7 +58,7 @@ namespace
 
 byte Bot_FrameMsec()
 {
-	// Must reflect real elapsed time, not a guessed constant -- all reference bots derive from gpGlobals->frametime. Confirmed the hard way: fixed msec overstating ~10ms tick caused pfnRunPlayerMove to silently produce zero displacement, no error -- GoldSrc's timing bookkeeping rejects fake client claiming more elapsed time per move than actually passed.
+
 	int msec = static_cast<int>(gpGlobals->frametime * 1000.f);
 	if (msec < 1)
 		msec = 1;
@@ -84,7 +83,7 @@ Vector Bot_UpdateFacing(CBot &bot)
 	Vector smoothed(NormalizeAngle(current.x + pitchStep), NormalizeAngle(current.y + yawStep), 0.f);
 
 	pEdict->v.v_angle = smoothed;
-	// v.angles (model's visible orientation, sent to other clients) uses different pitch convention: player model has narrow aim_pitch bone-controller range and expects opposite sign, so raw view pitch must be negated and scaled down, not copied as-is. Purely cosmetic third-person fix (v_angle drives movement via pfnRunPlayerMove).
+
 	pEdict->v.angles = Vector(-smoothed.x / 3.f, smoothed.y, 0.f);
 
 	return smoothed;
@@ -97,3 +96,4 @@ void Bot_Move(CBot &bot)
 	else
 		Bot_MoveWander(bot);
 }
+

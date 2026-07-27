@@ -1,4 +1,4 @@
-#include "astar_graph.h"
+﻿#include "astar_graph.h"
 
 #include <algorithm>
 #include <limits>
@@ -26,10 +26,15 @@ float Heuristic(const std::vector<AreaNode> &areas, uint32_t a, uint32_t b)
 	return (areas[a].centroid - areas[b].centroid).Length();
 }
 
-} // namespace
+static Vector ConnMid(const Conn &c)
+{
+	return (c.pointA + c.pointB) * 0.5f;
+}
 
-GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::vector<uint32_t>> &areaPortalIndices,
-	const std::vector<PortalEdge> &portals, uint32_t startArea, uint32_t goalArea)
+}
+
+GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::vector<uint32_t>> &areaConnIndices,
+	const std::vector<Conn> &conns, uint32_t startArea, uint32_t goalArea)
 {
 	GraphResult result;
 
@@ -46,7 +51,7 @@ GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::
 	size_t n = areas.size();
 	std::vector<float> gScore(n, std::numeric_limits<float>::max());
 	std::vector<int64_t> cameFromArea(n, -1);
-	std::vector<int64_t> cameFromPortal(n, -1);
+	std::vector<int64_t> cameFromConn(n, -1);
 	std::vector<bool> closed(n, false);
 
 	std::priority_queue<OpenEntry, std::vector<OpenEntry>, OpenEntryCompare> open;
@@ -60,56 +65,60 @@ GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::
 		open.pop();
 
 		if (closed[current])
-			continue; // stale duplicate entry (lazy-deletion, standard for this priority-queue A* shape)
+			continue;
 		closed[current] = true;
 
 		if (current == goalArea)
 			break;
 
-		for (uint32_t portalIdx : areaPortalIndices[current])
+		for (uint32_t connIdx : areaConnIndices[current])
 		{
-			const PortalEdge &portal = portals[portalIdx];
-			uint32_t neighbor = (portal.areaA == current) ? portal.areaB : portal.areaA;
+			const Conn &conn = conns[connIdx];
+			uint32_t neighbor = (conn.areaA == current) ? conn.areaB : conn.areaA;
 
-			if (portal.oneWay && portal.areaA != current)
-				continue; // one-way edge (e.g. a drop-off) crossed against its only valid direction
+			if (conn.oneWay && conn.areaA != current)
+				continue;
 
 			if (closed[neighbor])
 				continue;
 
-			float edgeCost = (areas[current].centroid - areas[neighbor].centroid).Length() * portal.traverseCost;
+			Vector connMid = (conn.pointA + conn.pointB) * 0.5f;
+			float approachCost = (areas[current].centroid - connMid).Length();
+			float crossCost = (connMid - areas[neighbor].centroid).Length() * conn.traverseCost;
+			float edgeCost = approachCost + crossCost;
 			float tentativeG = gScore[current] + edgeCost;
 
 			if (tentativeG < gScore[neighbor])
 			{
 				gScore[neighbor] = tentativeG;
 				cameFromArea[neighbor] = current;
-				cameFromPortal[neighbor] = portalIdx;
+				cameFromConn[neighbor] = connIdx;
 				open.push({tentativeG + Heuristic(areas, neighbor, goalArea), neighbor});
 			}
 		}
 	}
 
 	if (!closed[goalArea] || gScore[goalArea] >= std::numeric_limits<float>::max())
-		return result; // unreachable
+		return result;
 
-	std::vector<uint32_t> areaPath, portalPath;
+	std::vector<uint32_t> areaPath, connPath;
 	uint32_t cur = goalArea;
 	while (cur != startArea)
 	{
 		areaPath.push_back(cur);
-		portalPath.push_back(static_cast<uint32_t>(cameFromPortal[cur]));
+		connPath.push_back(static_cast<uint32_t>(cameFromConn[cur]));
 		cur = static_cast<uint32_t>(cameFromArea[cur]);
 	}
 	areaPath.push_back(startArea);
 
 	std::reverse(areaPath.begin(), areaPath.end());
-	std::reverse(portalPath.begin(), portalPath.end());
+	std::reverse(connPath.begin(), connPath.end());
 
 	result.found = true;
 	result.areaPath = std::move(areaPath);
-	result.portalPath = std::move(portalPath);
+	result.connPath = std::move(connPath);
 	return result;
 }
 
-} // namespace NavAStar
+}
+

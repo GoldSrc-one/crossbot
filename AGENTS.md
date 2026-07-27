@@ -31,7 +31,11 @@ cd d:\projects\trash\crossbot
 ```powershell
 .\build\tools\navgen\navgen.exe maps\test35_smoothwall.bsp --dump-svg test35_smoothwall.svg
 ```
-Add `--trace <nav_trace.txt>` to overlay a recorded bot trajectory (written by the runtime plugin when a goal ends).
+Areas are flat grey; areas flagged `NAV_AREA_CROUCH` get a light blue tint. Connections are white (walk), dashed red (air move) and green (teleport).
+
+The SVG overlays the A* route from the first spawn area to the `info_target` area (falling back to the farthest area when there is no usable target) as a single orange polyline, with a green dot at the start and a red dot at the goal. The route is computed with the same `NavAStar::FindPath`, traverse costs and `NavPlan::BuildWaypointPlan` funnel the runtime uses, so it shows the string-pulled waypoints a bot would actually follow — straight across open areas, hugging corners through corridors — not the raw portal endpoints.
+
+Add `--dump-conns` to print every final connection with its type, flags, endpoints and air-move parameters.
 
 ### Batch generate SVGs for all maps
 ```powershell
@@ -49,7 +53,7 @@ Test maps live in `maps/`. See `--dump-leaves`, `--dump-tactical`, `--dump-plane
 ```powershell
 .\scripts\test_nav_goal.ps1 -Map maps\test1_simple.bsp
 ```
-Spins up HLDS on an auto-assigned port (29015-29100), adds a bot, auto-selects a goal (farthest spawn pair or `info_target`), drives the bot to the goal, collects the movement trace, runs `navgen --dump-svg --trace` to produce `nav_debug/<map>.svg` with the recorded trajectory overlay, generates the `.nav` file, and shuts down HLDS. Exits 0 on goal reached, 1 on timeout/failure.
+Spins up HLDS on an auto-assigned port (29015-29100), adds a bot, auto-selects a goal (farthest spawn pair or `info_target`), drives the bot to the goal, collects the movement trace, runs `navgen --dump-svg` to produce `nav_debug/<map>.svg`, generates the `.nav` file, and shuts down HLDS. Exits 0 on goal reached, 1 on timeout/failure.
 
 **Parallel-safe**: multiple instances can run simultaneously on different maps — each instance uses a unique port, map-specific trace file (`valve/crossbot_data/nav_trace_<map>.txt`), map-specific config (`_crossbot_autotest_<map>.cfg`), and map-specific output files (`nav_debug/<map>.svg`, `<map>.nav`, `nav_trace_<map>.txt`). The `crossbot_trace_path` cvar isolates trace logs per instance. Spawn/target discovery and goal detection use RCON instead of parsing shared `qconsole.log`.
 
@@ -77,9 +81,17 @@ Get-Job | Wait-Job | Receive-Job
 
 - **Main source: Use HLSDK style C++, use std if necessary**
 - **Tools and scripts: Use PowerShell! Don't use CMD! Use Powershell! Don't use Python! Use powershell! Don't use Node.JS!**
-- **Comments: only when they contain information not present in the code itself. Even then, keep brief (one sentence). No restating variable names, no section banners, no decorative dividers.**
+- **Comments: Do not add comments. All comments will be deleted!**
 
 ## Testing
 
 - `scripts/nav_target_test.ps1` greps qconsole.log for "CrossBot: <name> reached goal" lines (a short goal can complete within one rcon poll interval)
 - Debug visualization: `NavDebug::Draw()` emits `TE_BEAMPOINTS` temp entities; toggled via `crossbot_nav_debug_path` / `crossbot_nav_debug_area`
+
+## Important Notes
+
+- **DO NOT include target areas (info_target) as seed areas in navgen.** The targets are for debugging/validation only. The navgen must discover reachability through normal connectivity (walk, jump, elevator, teleport, launch edges). Using targets as seeds would artificially keep unreachable areas.
+
+- **Coordinate conventions (GoldSrc / Hammer):**
+  - X = East, Y = North, Z = Up (right-handed)
+  - SVG debug view: Y is flipped (screen Y down), so world Y+ = North = SVG Y-

@@ -1,4 +1,4 @@
-#include "path_funnel.h"
+﻿#include "path_funnel.h"
 
 namespace Nav
 {
@@ -17,31 +17,22 @@ std::vector<Waypoint> BuildWaypointPath(const NavMesh &mesh, const PathResult &p
 		pa.doorActivation = a.doorActivation;
 		pa.doorActivatorPos = a.doorActivatorPos;
 		pa.doorWaitTime = a.doorWaitTime;
-		for (uint32_t pi : a.portalIndices)
-		{
-			if (mesh.portals[pi].edgeType == crossbot_nav::EDGE_DROP)
-			{
-				pa.hasDropPortal = true;
-				break;
-			}
-		}
 	}
 
-	std::vector<NavPlan::PlanPortal> planPortals(mesh.portals.size());
-	for (size_t i = 0; i < mesh.portals.size(); ++i)
+	std::vector<NavPlan::PlanConnection> planPortals(mesh.connections.size());
+	for (size_t i = 0; i < mesh.connections.size(); ++i)
 	{
-		const Portal &p = mesh.portals[i];
-		NavPlan::PlanPortal &pp = planPortals[i];
-		pp.areaA = p.areaA;
-		pp.areaB = p.areaB;
-		pp.pointA = p.pointA;
-		pp.pointB = p.pointB;
-		pp.edgeType = p.edgeType;
-		pp.buttonPos = p.buttonPos;
-		pp.travelTime = p.travelTime;
+		const Connection &c = mesh.connections[i];
+		NavPlan::PlanConnection &pp = planPortals[i];
+		pp.areaA = c.areaA;
+		pp.areaB = c.areaB;
+		pp.pointA = c.pointA;
+		pp.pointB = c.pointB;
+		pp.connType = c.connType;
 	}
 
-	return NavPlan::BuildWaypointPlan(planAreas, planPortals, path.areaPath, path.portalPath, startPoint, goalPoint);
+	return NavPlan::BuildWaypointPlan(planAreas, planPortals, path.areaPath, path.connPath, startPoint, goalPoint);
 }
 
-} // namespace Nav
+}
+

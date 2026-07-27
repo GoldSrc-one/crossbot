@@ -1,8 +1,7 @@
-#pragma once
+﻿#pragma once
 
 #include "game_profile.h"
 
-// Half-Life Deathmatch: the base "valve" game dir running with mp_deathmatch on.
 class CHLDMProfile : public IGameProfile
 {
 public:
@@ -13,3 +12,4 @@ public:
 	bool IsDead(edict_t *pEdict) const override;
 	void Respawn(edict_t *pEdict) const override;
 };
+

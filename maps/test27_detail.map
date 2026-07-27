@@ -61,7 +61,7 @@
 {
 "classname" "info_target"
 "targetname" ""
-"origin" "400.000 384.000 32.000"
+"origin" "400.000 384.000 48.000"
 }
 {
 "classname" "light"

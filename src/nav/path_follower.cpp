@@ -1,4 +1,4 @@
-#include "path_follower.h"
+﻿#include "path_follower.h"
 
 #include <cmath>
 
@@ -25,7 +25,7 @@ float HorizDist(const Vector &a, const Vector &b)
 	return std::sqrt(dx * dx + dy * dy);
 }
 
-} // namespace
+}
 
 Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpIndex, const Vector &pos,
 	const Config &cfg)
@@ -42,13 +42,6 @@ Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpInd
 	float horizDist = HorizDist(pos, wp.point);
 	bool isFinal = wpIndex + 1 >= waypoints.size();
 
-	// Reached? Final waypoint: loose radius. Intermediate corner: tight
-	// radius, or passing the corner's perpendicular along the CURRENT
-	// segment. Deliberately not a "crossed into the next segment's
-	// half-space" test -- on a sharp V-turn (more than 90 degrees) the
-	// whole incoming segment already lies in that half-space and it would
-	// fire instantly. Skip-proof at any speed: whatever the tick step,
-	// some frame lands at-or-past the perpendicular.
 	bool reached = horizDist < (isFinal ? cfg.finalRadius : cfg.cornerRadius);
 	if (!reached && !isFinal && wpIndex > 0)
 	{
@@ -67,13 +60,6 @@ Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpInd
 
 	d.baseSpeed = (wp.maxSpeed < cfg.runSpeed) ? wp.maxSpeed : cfg.runSpeed;
 
-	// Pure-pursuit line following: aim at a point on the planned segment
-	// ahead of our own projection onto it, so drift/corner cuts get
-	// corrected back onto the line instead of compounding (endpoint-homing
-	// converges along a bowed arc -- confirmed live on test23_precise's
-	// beams, where that bow was the difference between crossing and
-	// falling). waypoints[0] is always the path's own start point, so any
-	// waypoint being walked toward has a real segment behind it.
 	float lookahead = (d.baseSpeed < cfg.runSpeed) ? cfg.lookaheadCareful : cfg.lookahead;
 	d.aimPoint = wp.point;
 	if (wpIndex > 0)
@@ -108,9 +94,7 @@ float ScaleSpeedByHeadingError(float baseSpeed, float headingErrorDeg, const Con
 SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Vector &start, float dt,
 	float maxTime, const Config &cfg)
 {
-	// Stock GoldSrc ground-movement constants (PM_Friction/PM_Accelerate,
-	// pm_shared/pm_math): the default dedicated-server cvar values every
-	// test run uses. Not configurable until a real need shows up.
+
 	constexpr float kFriction = 4.f;
 	constexpr float kAccelerate = 10.f;
 	constexpr float kStopSpeed = 100.f;
@@ -123,8 +107,7 @@ SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Ve
 	float velX = 0.f, velY = 0.f;
 	float yaw = 0.f;
 	{
-		// Start facing the first real steering target, like a bot that just
-		// finished turning toward its route before setting off.
+
 		size_t aimIdx = (waypoints.size() > 1) ? 1 : 0;
 		yaw = std::atan2(waypoints[aimIdx].point.y - pos.y, waypoints[aimIdx].point.x - pos.x) * (180.f / kPi);
 	}
@@ -135,7 +118,7 @@ SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Ve
 
 	for (int tick = 0; tick < maxTicks; ++tick)
 	{
-		// Waypoint switching first, exactly like Bot_MoveNav's frame order.
+
 		Decision d = Steer(waypoints, wpIndex, pos, cfg);
 		while (d.advance)
 		{
@@ -148,7 +131,6 @@ SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Ve
 			d = Steer(waypoints, wpIndex, pos, cfg);
 		}
 
-		// Turn-rate-limited facing (bot_move.cpp's Bot_UpdateFacing).
 		float desiredYaw = std::atan2(d.aimPoint.y - pos.y, d.aimPoint.x - pos.x) * (180.f / kPi);
 		float yawDelta = NormalizeAngle(desiredYaw - yaw);
 		float maxStep = cfg.turnRateDegPerSec * dt;
@@ -158,7 +140,6 @@ SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Ve
 		float headingError = std::fabs(NormalizeAngle(desiredYaw - yaw));
 		float wishSpeed = ScaleSpeedByHeadingError(d.baseSpeed, headingError, cfg);
 
-		// PM_Friction.
 		float speed = std::sqrt(velX * velX + velY * velY);
 		if (speed > 0.1f)
 		{
@@ -171,8 +152,6 @@ SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Ve
 			velY *= scale;
 		}
 
-		// PM_Accelerate toward the facing direction (IN_FORWARD only, like
-		// the real bot's pfnRunPlayerMove input).
 		if (wishSpeed > 0.f)
 		{
 			float yawRad = yaw * (kPi / 180.f);
@@ -192,9 +171,6 @@ SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Ve
 		pos.x += velX * dt;
 		pos.y += velY * dt;
 
-		// Carry z along the current planned segment (closest-point
-		// interpolation) -- the simulation has no gravity; z exists purely
-		// so a caller's fall-check can compare against floor heights.
 		if (wpIndex > 0)
 		{
 			const Vector &segStart = waypoints[wpIndex - 1].point;
@@ -218,4 +194,5 @@ SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Ve
 	return result;
 }
 
-} // namespace NavFollow
+}
+

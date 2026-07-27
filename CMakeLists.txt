@@ -27,14 +27,20 @@ endif()
 set(HLSDK_DIR ${CMAKE_SOURCE_DIR}/external/hlsdk)
 set(METAMOD_DIR ${CMAKE_SOURCE_DIR}/external/metamod)
 
-file(GLOB_RECURSE CROSSBOT_SOURCES CONFIGURE_DEPENDS
+file(GLOB CROSSBOT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/console/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/bot/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/meta/*.cpp
 )
 
 add_library(crossbot_mm SHARED ${CROSSBOT_SOURCES})
 
 target_include_directories(crossbot_mm PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/navgen
     ${HLSDK_DIR}/common
     ${HLSDK_DIR}/dlls
     ${HLSDK_DIR}/engine
@@ -65,5 +71,34 @@ if(WIN32)
     target_compile_definitions(crossbot_mm PRIVATE _WINDOWS WIN32)
 endif()
 
-# Offline BSP nav-graph compiler (Milestone 2) -- standalone tool, not linked against Metamod/engine headers. See tools/navgen/CMakeLists.txt.
-add_subdirectory(tools/navgen)
+file(GLOB NAVGEN_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/src/navgen/*.cpp
+)
+
+add_executable(navgen ${NAVGEN_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/nav/astar_graph.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/funnel_graph.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/waypoint_plan.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/path_follower.cpp
+)
+
+# Keep the historical build\tools\navgen\navgen.exe output path so scripts and
+# docs that pre-date the move from tools/ continue to resolve the binary.
+set_target_properties(navgen PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tools/navgen
+)
+
+target_include_directories(navgen PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/navgen
+    ${CMAKE_SOURCE_DIR}/src/nav
+    ${HLSDK_DIR}/common
+    ${HLSDK_DIR}/engine
+    ${HLSDK_DIR}/dlls
+)
+
+if(MSVC)
+    target_compile_options(navgen PRIVATE /W3)
+    target_compile_definitions(navgen PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_compile_options(navgen PRIVATE -Wall)
+endif()

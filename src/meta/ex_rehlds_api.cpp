@@ -1,4 +1,4 @@
-#include <extdll.h>
+﻿#include <extdll.h>
 #include <meta_api.h>
 #include "ex_rehlds_api.h"
 
@@ -49,7 +49,7 @@ bool rehlds_api_init(CSysModule* engineModule)
 bool meta_init_rehlds_api()
 {
 #ifdef _WIN32
-	// Find the most appropriate module handle from DLL candidates: swds.dll (dedicated server), hw.dll/sw.dll (client with built-in listen server).
+
 	const char *dllNames[] = { "swds.dll", "hw.dll", "sw.dll" };
 	CSysModule *engineModule = NULL;
 	for (const char *dllName : dllNames)
@@ -68,3 +68,4 @@ bool meta_init_rehlds_api()
 
 	return true;
 }
+

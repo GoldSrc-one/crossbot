@@ -6,5 +6,5 @@ if errorlevel 1 exit /b 1
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo .
 if errorlevel 1 exit /b 1
 
-cmake --build build
+cmake --build build --target navgen
 if errorlevel 1 exit /b 1

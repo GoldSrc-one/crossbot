@@ -24,7 +24,7 @@ function Send-Raw([byte[]]$bytes) {
 function Recv-Raw() {
     $remote = New-Object System.Net.IPEndPoint ([System.Net.IPAddress]::Any, 0)
     $data = $udp.Receive([ref]$remote)
-    return [System.Text.Encoding]::ASCII.GetString($data)
+    return [System.Text.Encoding]::GetEncoding(1252).GetString($data)
 }
 
 $prefix = [byte[]](0xFF,0xFF,0xFF,0xFF)
@@ -49,4 +49,6 @@ try {
 } catch {}
 
 $udp.Close()
-$out -replace "^\xFF\xFF\xFF\xFFl", ""
+# Strip GoldSrc RCON response prefix: 0xFF 0xFF 0xFF 0xFF 'l' (4 bytes + 'l')
+$out = $out -replace "^....l", ""
+$out

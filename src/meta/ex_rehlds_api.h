@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <rehlds_api.h>
 
@@ -8,3 +8,4 @@ extern IRehldsHookchains* g_RehldsHookchains;
 extern IRehldsServerStatic* g_RehldsSvs;
 
 extern bool meta_init_rehlds_api();
+
