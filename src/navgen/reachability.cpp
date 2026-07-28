@@ -86,7 +86,8 @@ int FindAreaContainingPoint(const Vec3 &point, const std::vector<Area> &areas)
 	return found;
 }
 
-std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas)
+std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas,
+	std::vector<Vec3> *originsOut)
 {
 	std::vector<int> result;
 
@@ -101,13 +102,18 @@ std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::
 
 		int found = FindAreaContainingPoint(origin, areas);
 		if (found >= 0)
+		{
 			result.push_back(found);
+			if (originsOut)
+				originsOut->push_back(origin);
+		}
 	}
 
 	return result;
 }
 
-std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas)
+std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas,
+	std::vector<Vec3> *originsOut)
 {
 	std::vector<int> result;
 
@@ -122,7 +128,11 @@ std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std:
 
 		int found = FindAreaContainingPoint(origin, areas);
 		if (found >= 0)
+		{
 			result.push_back(found);
+			if (originsOut)
+				originsOut->push_back(origin);
+		}
 	}
 
 	return result;

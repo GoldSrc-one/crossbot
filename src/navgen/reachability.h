@@ -9,9 +9,11 @@
 namespace navgen
 {
 
-std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas);
+std::vector<int> FindSpawnAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas,
+	std::vector<Vec3> *originsOut = nullptr);
 
-std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas);
+std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std::vector<Area> &areas,
+	std::vector<Vec3> *originsOut = nullptr);
 
 int FindAreaContainingPoint(const Vec3 &point, const std::vector<Area> &areas);
 

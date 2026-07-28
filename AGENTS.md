@@ -33,7 +33,7 @@ cd d:\projects\trash\crossbot
 ```
 Areas are flat grey; areas flagged `NAV_AREA_CROUCH` get a light blue tint. Connections are white (walk), dashed red (air move) and green (teleport).
 
-The SVG overlays the A* route from the first spawn area to the `info_target` area (falling back to the farthest area when there is no usable target) as a single orange polyline, with a green dot at the start and a red dot at the goal. The route is computed with the same `NavAStar::FindPath`, traverse costs and `NavPlan::BuildWaypointPlan` funnel the runtime uses, so it shows the string-pulled waypoints a bot would actually follow — straight across open areas, hugging corners through corridors — not the raw portal endpoints.
+The SVG overlays the A* route from the first spawn point to the `info_target` origin (falling back to the farthest area's centroid when there is no usable target) as a single orange polyline, with a green dot at the start and a red dot at the goal. The endpoints are the real entity origins, not the containing areas' centroids; the goal is clamped into its area's bounds the same way the runtime's `Repath` clamps it. The route is computed with the same `NavAStar::FindPath`, traverse costs and `NavPlan::BuildWaypointPlan` funnel the runtime uses, so it shows the string-pulled waypoints a bot would actually follow — straight across open areas, hugging corners through corridors — not the raw portal endpoints.
 
 Add `--dump-conns` to print every final connection with its type, flags, endpoints and air-move parameters.
 

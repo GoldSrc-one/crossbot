@@ -40,7 +40,8 @@ void PrintUsage(const char *argv0)
 		"  --dump-areas      print per-area (post-merge) id/faces/volume/centroid/portal stats\n"
 		"  --dump-conns      print every final connection: type, flags, endpoints, air-move parameters\n"
 		"  --dump-planes <id> print one final area's exact plane list (normal+dist) and face windings\n"
-		"  --dump-obj <path> write all merged area polytopes as an OBJ mesh, for spot-checking\n"
+		"  --dump-obj <path> write the walkable floor of every area as an OBJ mesh (plus a sidecar\n"
+		"                    .mtl): crouch areas are coloured apart, the planned route is a ribbon\n"
 		"  --dump-svg <path> write a top-down SVG of the final area/portal graph, for offline inspection\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
 		"                    edge gets 128 samples; 0.5 halves it; 0 disables air-move sampling)\n"
@@ -52,42 +53,162 @@ void PrintUsage(const char *argv0)
 		argv0);
 }
 
-struct ObjGroup
+// Area polytopes carry inward-facing plane normals, so the walkable floor of an area
+// is the face whose normal points up. Same threshold as floor_support/airmove_sampler.
+constexpr double kFloorNormalZ = 0.7;
+
+struct ObjMaterial
 {
-	std::string name;
-	const navgen::Polytope *polytope;
+	const char *name;
+	double r, g, b;
 };
 
-void WriteObj(const std::string &path, const std::vector<ObjGroup> &groups)
+const ObjMaterial kObjMaterials[] = {
+	{"nav_floor", 0.35, 0.55, 0.78},
+	{"nav_floor_crouch", 0.92, 0.58, 0.18},
+	{"nav_path", 0.20, 0.85, 0.35},
+};
+
+std::string ReplaceExtension(const std::string &path, const char *ext)
 {
+	size_t slash = path.find_last_of("/\\");
+	size_t dot = path.find_last_of('.');
+	if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+		return path + ext;
+	return path.substr(0, dot) + ext;
+}
+
+std::string BaseName(const std::string &path)
+{
+	size_t slash = path.find_last_of("/\\");
+	return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+void WriteObjMaterialLib(const std::string &path)
+{
+	FILE *f = std::fopen(path.c_str(), "w");
+	if (!f)
+		throw std::runtime_error("cannot open output MTL file: " + path);
+
+	for (const ObjMaterial &m : kObjMaterials)
+	{
+		std::fprintf(f, "newmtl %s\n", m.name);
+		std::fprintf(f, "Ka %.3f %.3f %.3f\n", m.r * 0.3, m.g * 0.3, m.b * 0.3);
+		std::fprintf(f, "Kd %.3f %.3f %.3f\n", m.r, m.g, m.b);
+		std::fprintf(f, "Ks 0.000 0.000 0.000\nd 1.0\nillum 1\n\n");
+	}
+
+	std::fclose(f);
+}
+
+// True when the stored vertex order winds the other way round the plane normal, in which
+// case the OBJ face has to be reversed so it renders facing up rather than down.
+bool WindingOpposesNormal(const navgen::Face &face)
+{
+	navgen::Vec3 sum(0, 0, 0);
+	for (size_t i = 1; i + 1 < face.winding.size(); ++i)
+	{
+		navgen::Vec3 a = face.winding[i] - face.winding[0];
+		navgen::Vec3 b = face.winding[i + 1] - face.winding[0];
+		sum = sum + a.Cross(b);
+	}
+	return sum.Dot(face.plane.normal) < 0.0;
+}
+
+struct ObjStats
+{
+	size_t floorFaces = 0;
+	size_t crouchAreas = 0;
+	size_t pathSegments = 0;
+};
+
+ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> &areas,
+	const std::vector<navgen::Vec3> &pathPoints)
+{
+	std::string mtlPath = ReplaceExtension(path, ".mtl");
+	WriteObjMaterialLib(mtlPath);
+
 	FILE *f = std::fopen(path.c_str(), "w");
 	if (!f)
 		throw std::runtime_error("cannot open output OBJ file: " + path);
 
+	std::fprintf(f, "mtllib %s\n", BaseName(mtlPath).c_str());
+
+	ObjStats stats;
 	int nextVertexIndex = 1;
 
-	for (const ObjGroup &group : groups)
+	for (const navgen::Area &area : areas)
 	{
-		std::fprintf(f, "g %s\n", group.name.c_str());
+		bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		bool opened = false;
 
-		for (const navgen::Face &face : group.polytope->faces)
+		for (const navgen::Face &face : area.polytope.faces)
 		{
-			if (face.winding.size() < 3)
+			if (face.plane.normal.z <= kFloorNormalZ || face.winding.size() < 3)
 				continue;
+
+			if (!opened)
+			{
+				std::fprintf(f, "g area_%d%s\nusemtl %s\n", area.id, crouch ? "_crouch" : "",
+					crouch ? "nav_floor_crouch" : "nav_floor");
+				opened = true;
+				if (crouch)
+					++stats.crouchAreas;
+			}
 
 			for (const navgen::Vec3 &v : face.winding)
 				std::fprintf(f, "v %.3f %.3f %.3f\n", v.x, v.y, v.z);
 
+			bool flip = WindingOpposesNormal(face);
+			size_t count = face.winding.size();
 			std::fprintf(f, "f");
-			for (size_t i = 0; i < face.winding.size(); ++i)
-				std::fprintf(f, " %d", nextVertexIndex + static_cast<int>(i));
+			for (size_t i = 0; i < count; ++i)
+			{
+				size_t idx = flip ? count - 1 - i : i;
+				std::fprintf(f, " %d", nextVertexIndex + static_cast<int>(idx));
+			}
 			std::fprintf(f, "\n");
 
-			nextVertexIndex += static_cast<int>(face.winding.size());
+			nextVertexIndex += static_cast<int>(count);
+			++stats.floorFaces;
+		}
+	}
+
+	// The planned route as a flat ribbon: waypoints sit at area centroid height, well
+	// above the floor polygons, so it reads as a line hovering over the walkable set.
+	if (pathPoints.size() >= 2)
+	{
+		constexpr double kPathHalfWidth = 3.0;
+
+		std::fprintf(f, "g path\nusemtl nav_path\n");
+
+		for (size_t i = 0; i + 1 < pathPoints.size(); ++i)
+		{
+			const navgen::Vec3 &a = pathPoints[i];
+			const navgen::Vec3 &b = pathPoints[i + 1];
+
+			navgen::Vec3 dir = b - a;
+			navgen::Vec3 side(-dir.y, dir.x, 0.0);
+			double len = side.Length();
+			if (len < 1e-6)
+				side = navgen::Vec3(kPathHalfWidth, 0.0, 0.0);
+			else
+				side = side * (kPathHalfWidth / len);
+
+			const navgen::Vec3 quad[4] = {a - side, b - side, b + side, a + side};
+			for (const navgen::Vec3 &v : quad)
+				std::fprintf(f, "v %.3f %.3f %.3f\n", v.x, v.y, v.z);
+
+			std::fprintf(f, "f %d %d %d %d\n", nextVertexIndex, nextVertexIndex + 1,
+				nextVertexIndex + 2, nextVertexIndex + 3);
+
+			nextVertexIndex += 4;
+			++stats.pathSegments;
 		}
 	}
 
 	std::fclose(f);
+	return stats;
 }
 
 double WorstConcavity(const navgen::Polytope &poly)
@@ -185,6 +306,26 @@ std::vector<navgen::Vec3> CollectTargetPoints(const std::vector<navgen::Entity> 
 	return points;
 }
 
+Vector ClampToAreaBounds(const Vector &point, const navgen::Polytope &poly)
+{
+	navgen::Vec3 mins(1e9, 1e9, 1e9), maxs(-1e9, -1e9, -1e9);
+	for (const navgen::Face &f : poly.faces)
+	{
+		for (const navgen::Vec3 &v : f.winding)
+		{
+			mins.x = std::min(mins.x, v.x); mins.y = std::min(mins.y, v.y); mins.z = std::min(mins.z, v.z);
+			maxs.x = std::max(maxs.x, v.x); maxs.y = std::max(maxs.y, v.y); maxs.z = std::max(maxs.z, v.z);
+		}
+	}
+
+	auto clamp = [](float v, double lo, double hi)
+	{
+		return static_cast<float>(std::max(lo, std::min(hi, static_cast<double>(v))));
+	};
+
+	return Vector(clamp(point.x, mins.x, maxs.x), clamp(point.y, mins.y, maxs.y), clamp(point.z, mins.z, maxs.z));
+}
+
 std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &entities,
 	const navgen::MergeResult &merged)
 {
@@ -192,7 +333,8 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	if (merged.areas.empty())
 		return points;
 
-	std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
+	std::vector<navgen::Vec3> spawnPoints;
+	std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas, &spawnPoints);
 	if (spawnAreas.empty())
 		return points;
 
@@ -241,13 +383,21 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	}
 
 	uint32_t startArea = static_cast<uint32_t>(spawnAreas.front());
+	Vector startPoint = ToVector(spawnPoints.front());
 
-	std::vector<int> targetAreas = navgen::FindTargetAreas(entities, merged.areas);
+	std::vector<navgen::Vec3> targetPoints;
+	std::vector<int> targetAreas = navgen::FindTargetAreas(entities, merged.areas, &targetPoints);
 	uint32_t goalArea = startArea;
+	bool goalFromTarget = false;
+	Vector goalPoint = nodes[startArea].centroid;
 	if (!targetAreas.empty() && targetAreas.front() != static_cast<int>(startArea))
+	{
 		goalArea = static_cast<uint32_t>(targetAreas.front());
+		goalPoint = ToVector(targetPoints.front());
+		goalFromTarget = true;
+	}
 
-	if (goalArea == startArea)
+	if (!goalFromTarget)
 	{
 		double best = -1.0;
 		for (size_t i = 0; i < merged.areas.size(); ++i)
@@ -261,6 +411,7 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 				goalArea = static_cast<uint32_t>(i);
 			}
 		}
+		goalPoint = nodes[goalArea].centroid;
 	}
 
 	if (goalArea == startArea)
@@ -273,8 +424,7 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		return points;
 	}
 
-	const Vector &startPoint = nodes[startArea].centroid;
-	const Vector &goalPoint = nodes[goalArea].centroid;
+	goalPoint = ClampToAreaBounds(goalPoint, merged.areas[goalArea].polytope);
 
 	std::vector<NavPlan::PlanWaypoint> plan = NavPlan::BuildWaypointPlan(planAreas, planConns, result.areaPath,
 		result.connPath, startPoint, goalPoint);
@@ -678,22 +828,21 @@ int main(int argc, char **argv)
 				std::fprintf(stderr, "--dump-planes: no area with id %d in the final area set\n", dumpPlanesAreaId);
 		}
 
+		std::vector<navgen::Vec3> pathPoints;
+		if (!objPath.empty() || !svgPath.empty())
+			pathPoints = BuildDebugPath(entities, merged);
+
 		if (!objPath.empty())
 		{
-			std::vector<ObjGroup> groups;
-			groups.reserve(merged.areas.size());
-			for (const navgen::Area &area : merged.areas)
-				groups.push_back({"area_" + std::to_string(area.id), &area.polytope});
-			WriteObj(objPath, groups);
-			std::printf("wrote %s\n", objPath.c_str());
+			ObjStats stats = WriteFloorObj(objPath, merged.areas, pathPoints);
+			std::printf("wrote %s (+ %s): %zu floor faces, %zu crouch areas, %zu path segments\n",
+				objPath.c_str(), BaseName(ReplaceExtension(objPath, ".mtl")).c_str(),
+				stats.floorFaces, stats.crouchAreas, stats.pathSegments);
 		}
 
 		if (!svgPath.empty())
 		{
 			std::string mapName = DeriveMapName(bspPath);
-
-			std::vector<navgen::Vec3> pathPoints = BuildDebugPath(entities, merged);
-
 			navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
 				CollectTargetPoints(entities));
 			std::printf("wrote %s\n", svgPath.c_str());
