@@ -35,8 +35,10 @@ bool ParseOrigin(const std::string &origin, Vec3 &out)
 
 bool PointInArea(const Vec3 &point, const Area &area, double epsilon)
 {
-	for (const Face &f : area.polytope.faces)
-		if (point.Dot(f.plane.normal) - f.plane.dist < -epsilon)
+	if (area.boundPlanes.empty())
+		return false;
+	for (const Plane &p : area.boundPlanes)
+		if (point.Dot(p.normal) - p.dist < -epsilon)
 			return false;
 	return true;
 }

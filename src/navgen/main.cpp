@@ -48,7 +48,8 @@ void PrintUsage(const char *argv0)
 		"  --no-floor-split  keep leaves whose floor is not solid (debug: pre-floor-support behaviour)\n"
 		"  --no-merge        skip MergeAreas (debug only): each BSP hull-3 leaf becomes its own area\n"
 		"  --no-prune        skip PruneUnreachableAreas (debug only): keep areas unreachable from any spawn\n"
-		"  --validate-areas  report any final area that is non-convex or overlaps another area\n"
+		"  --validate-areas  report any final area that is non-convex, overlaps another area, or holds\n"
+		"                    an internal floor step taller than a bot can climb\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
 		argv0);
 }
@@ -211,33 +212,67 @@ ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> 
 	return stats;
 }
 
-double WorstConcavity(const navgen::Polytope &poly)
+struct ExportRegion
+{
+	std::vector<navgen::Plane> planes;
+	std::vector<navgen::Vec3> verts;
+};
+
+ExportRegion BuildExportRegion(const navgen::Area &area)
+{
+	ExportRegion region;
+	region.planes = area.boundPlanes;
+
+	navgen::Vec3 mn(1e30, 1e30, 1e30), mx(-1e30, -1e30, -1e30);
+	for (const navgen::Face &f : area.polytope.faces)
+	{
+		for (const navgen::Vec3 &v : f.winding)
+		{
+			mn.z = std::min(mn.z, v.z);
+			mx.z = std::max(mx.z, v.z);
+		}
+	}
+
+	for (const navgen::Face &f : area.polytope.faces)
+	{
+		for (const navgen::Vec3 &v : f.winding)
+		{
+			if (area.prism)
+			{
+				region.verts.push_back(navgen::Vec3(v.x, v.y, mn.z));
+				region.verts.push_back(navgen::Vec3(v.x, v.y, mx.z));
+			}
+			else
+			{
+				region.verts.push_back(v);
+			}
+		}
+	}
+
+	return region;
+}
+
+double WorstConcavity(const ExportRegion &region)
 {
 	double worst = 0.0;
-	for (const navgen::Face &f : poly.faces)
-		for (const navgen::Face &g : poly.faces)
-			for (const navgen::Vec3 &v : g.winding)
-				worst = std::max(worst, -(v.Dot(f.plane.normal) - f.plane.dist));
+	for (const navgen::Plane &p : region.planes)
+		for (const navgen::Vec3 &v : region.verts)
+			worst = std::max(worst, -(v.Dot(p.normal) - p.dist));
 	return worst;
 }
 
-bool SeparatedBy(const navgen::Polytope &a, const navgen::Polytope &b, double epsilon)
+bool SeparatedBy(const ExportRegion &a, const ExportRegion &b, double epsilon)
 {
-	for (const navgen::Face &f : a.faces)
+	for (const navgen::Plane &p : a.planes)
 	{
 		bool allOutside = true;
-		for (const navgen::Face &g : b.faces)
+		for (const navgen::Vec3 &v : b.verts)
 		{
-			for (const navgen::Vec3 &v : g.winding)
+			if (v.Dot(p.normal) - p.dist > epsilon)
 			{
-				if (v.Dot(f.plane.normal) - f.plane.dist > epsilon)
-				{
-					allOutside = false;
-					break;
-				}
-			}
-			if (!allOutside)
+				allOutside = false;
 				break;
+			}
 		}
 		if (allOutside)
 			return true;
@@ -245,20 +280,66 @@ bool SeparatedBy(const navgen::Polytope &a, const navgen::Polytope &b, double ep
 	return false;
 }
 
+double WorstInternalStep(const navgen::Area &area)
+{
+	const double kAdjacencyEpsilon = 0.5;
+
+	std::vector<const navgen::Face *> floors;
+	for (const navgen::Face &f : area.polytope.faces)
+		if (f.plane.normal.z > kFloorNormalZ && f.winding.size() >= 3)
+			floors.push_back(&f);
+
+	double worst = 0.0;
+	for (const navgen::Face *f : floors)
+	{
+		for (const navgen::Face *g : floors)
+		{
+			if (f == g)
+				continue;
+			for (const navgen::Vec3 &v : g->winding)
+			{
+				if (navgen::Distance2DToWinding(f->winding, v.x, v.y) > kAdjacencyEpsilon)
+					continue;
+				worst = std::max(worst, std::fabs(navgen::FloorHeightAt(*f, v.x, v.y) - v.z));
+			}
+		}
+	}
+	return worst;
+}
+
 void ValidateAreas(const std::vector<navgen::Area> &areas)
 {
 	const double kConcaveTolerance = 1.0;
 	const double kOverlapTolerance = 1.0;
 
-	size_t concaveCount = 0;
+	std::vector<ExportRegion> regions;
+	regions.reserve(areas.size());
 	for (const navgen::Area &area : areas)
+		regions.push_back(BuildExportRegion(area));
+
+	size_t prismCount = 0;
+	size_t concaveCount = 0;
+	size_t steepCount = 0;
+	double worstStep = 0.0;
+	for (size_t i = 0; i < areas.size(); ++i)
 	{
-		double worst = WorstConcavity(area.polytope);
+		if (areas[i].prism)
+			++prismCount;
+
+		double step = WorstInternalStep(areas[i]);
+		worstStep = std::max(worstStep, step);
+		if (step > navgen::kStepHeight + kConcaveTolerance)
+		{
+			++steepCount;
+			std::printf("  UNCLIMBABLE area %d: internal floor step of %.2f units\n", areas[i].id, step);
+		}
+
+		double worst = WorstConcavity(regions[i]);
 		if (worst > kConcaveTolerance)
 		{
 			++concaveCount;
-			std::printf("  NON-CONVEX area %d: %zu leaves, %zu faces, vertex %.2f units behind a face plane\n",
-				area.id, area.memberLeafIds.size(), area.polytope.faces.size(), worst);
+			std::printf("  NON-CONVEX area %d: %zu leaves, %zu planes, vertex %.2f units behind a bound plane\n",
+				areas[i].id, areas[i].memberLeafIds.size(), regions[i].planes.size(), worst);
 		}
 	}
 
@@ -267,9 +348,9 @@ void ValidateAreas(const std::vector<navgen::Area> &areas)
 	{
 		for (size_t j = i + 1; j < areas.size(); ++j)
 		{
-			if (SeparatedBy(areas[i].polytope, areas[j].polytope, kOverlapTolerance))
+			if (SeparatedBy(regions[i], regions[j], kOverlapTolerance))
 				continue;
-			if (SeparatedBy(areas[j].polytope, areas[i].polytope, kOverlapTolerance))
+			if (SeparatedBy(regions[j], regions[i], kOverlapTolerance))
 				continue;
 			++overlapCount;
 			if (overlapCount <= 20)
@@ -277,8 +358,9 @@ void ValidateAreas(const std::vector<navgen::Area> &areas)
 		}
 	}
 
-	std::printf("validate: %zu areas, %zu non-convex, %zu overlapping pairs\n",
-		areas.size(), concaveCount, overlapCount);
+	std::printf("validate: %zu areas (%zu prism), %zu non-convex, %zu overlapping pairs, "
+		"%zu with unclimbable internal steps (worst %.2f units)\n",
+		areas.size(), prismCount, concaveCount, overlapCount, steepCount, worstStep);
 }
 
 std::string DeriveMapName(const std::string &bspPath)
@@ -732,8 +814,12 @@ int main(int argc, char **argv)
 		if (airmoveSamplesPerUnit <= 0.0f)
 			std::printf("air move sampling skipped (--airmove-samples 0)\n");
 		else
-			navgen::ProbeAirMoves(bsp, worldModel.headnode[navgen::kHullDuck], blockers, merged.areas,
-				merged.conns, physics, airmoveParams);
+		{
+			navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers};
+			navgen::HullContext standHull{worldModel.headnode[navgen::kHullHuman], &standBlockers};
+			navgen::ProbeAirMoves(bsp, duckHull, standHull, merged.areas, merged.conns, physics,
+				airmoveParams);
+		}
 
 		size_t rawAreaCount = merged.areas.size();
 		std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
@@ -788,7 +874,11 @@ int main(int argc, char **argv)
 		{
 			for (const navgen::Area &area : merged.areas)
 			{
-				const char *areaKind = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) ? " crouch" : "";
+				std::string areaKind;
+				if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
+					areaKind += " crouch";
+				if (area.prism)
+					areaKind += " prism";
 				navgen::Vec3 c = area.polytope.Centroid();
 				navgen::Vec3 mn(1e9, 1e9, 1e9), mx(-1e9, -1e9, -1e9);
 				for (const navgen::Face &f : area.polytope.faces)
@@ -802,7 +892,7 @@ int main(int argc, char **argv)
 				std::printf("  area %4d: %2zu leaves, %2zu faces, volume %10.0f, centroid (%.1f, %.1f, %.1f), "
 					"mins (%.1f, %.1f, %.1f) maxs (%.1f, %.1f, %.1f)%s\n",
 					area.id, area.memberLeafIds.size(), area.polytope.faces.size(),
-					area.polytope.Volume(), c.x, c.y, c.z, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z, areaKind);
+					area.polytope.Volume(), c.x, c.y, c.z, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z, areaKind.c_str());
 			}
 		}
 
@@ -814,6 +904,12 @@ int main(int argc, char **argv)
 				if (area.id != dumpPlanesAreaId)
 					continue;
 				found = true;
+				std::printf("area %d: %zu exported bound planes%s\n", area.id, area.boundPlanes.size(),
+					area.prism ? " (prism)" : "");
+				for (const navgen::Plane &p : area.boundPlanes)
+					std::printf("  bound: normal (%.6f, %.6f, %.6f) dist %.3f\n",
+						p.normal.x, p.normal.y, p.normal.z, p.dist);
+
 				std::printf("area %d: %zu faces\n", area.id, area.polytope.faces.size());
 				for (size_t fi = 0; fi < area.polytope.faces.size(); ++fi)
 				{

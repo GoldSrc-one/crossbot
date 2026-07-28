@@ -33,9 +33,44 @@ cd d:\projects\trash\crossbot
 ```
 Areas are flat grey; areas flagged `NAV_AREA_CROUCH` get a light blue tint. Connections are white (walk), dashed red (air move) and green (teleport).
 
+### Prism areas
+
+`MergeAreas` merges leaves whose union is 3D-convex, and also leaves whose union is only a **vertical prism**: a
+convex X-Y footprint extruded over a z-slab. That is what lets a staircase or a ramp become one area instead of
+one area per step. A merge is allowed into a prism when the union's X-Y footprint stays convex, the merged floor
+has no internal step taller than `kStepHeight`, and no leaf outside the group lives inside the resulting slab.
+The slab test is evaluated against *leaves*, never groups, so an earlier prism can never be invalidated by a
+later merge. When the slab test does fail, the merge absorbs the conflicting group if a candidate portal reaches
+it and retries — a ramp only closes as a whole, so every pairwise step along it conflicts with the neighbour the
+finished area would have swallowed anyway.
+
+`Area::polytope` keeps the true multi-tread surface, so floor lookups, the step filter and air-move sampling all
+see real treads. `Area::boundPlanes` is the convex region written to the `.nav` file: the polytope's own planes
+for a convex area, the footprint's vertical planes plus a z-slab for a prism. **Any point-in-area test must use
+`boundPlanes`** — a prism's raw face list is not a convex halfspace set, and intersecting it yields nothing.
+`--dump-areas` marks these areas `prism`, and `--validate-areas` judges every area by its exported region. Areas are drawn as the 2D convex hull of their vertices, which for a prism area is exactly its footprint.
+
 The SVG overlays the A* route from the first spawn point to the `info_target` origin (falling back to the farthest area's centroid when there is no usable target) as a single orange polyline, with a green dot at the start and a red dot at the goal. The endpoints are the real entity origins, not the containing areas' centroids; the goal is clamped into its area's bounds the same way the runtime's `Repath` clamps it. The route is computed with the same `NavAStar::FindPath`, traverse costs and `NavPlan::BuildWaypointPlan` funnel the runtime uses, so it shows the string-pulled waypoints a bot would actually follow — straight across open areas, hugging corners through corridors — not the raw portal endpoints.
 
 Add `--dump-conns` to print every final connection with its type, flags, endpoints and air-move parameters.
+
+### Prism areas
+
+An area is normally a convex polytope, and the nav file exports its face planes verbatim. Stairs and
+ramp/floor junctions are not convex in 3D, so `MergeAreas` also accepts a merge when the union's **X-Y
+footprint stays convex**, its **z-slab is free of every leaf outside the group**, and its **floor stays
+walkable** (no internal step over 18 units). Such an area is flagged `prism`: `Area::polytope` keeps the true
+multi-tread surface for floor lookups, air-move launches and the OBJ/SVG dumps, while `Area::boundPlanes`
+exports the footprint hull plus a z-slab — a convex region the runtime's `ContainsPoint` can test unchanged.
+The z-slab check is what makes the two interchangeable for point lookup.
+
+Anything in navgen that asks "is this point in this area" must use `boundPlanes`, never `polytope.faces`: for a
+prism the faces include interior risers, and their halfspace intersection is empty.
+
+`--validate-areas` reports the prism count, plus any area that is non-convex, overlaps another, or contains an
+unclimbable internal floor step. All three must be zero.
+
+`--dump-planes <id>` prints the exported bound planes first, then the true face windings.
 
 ### Batch generate SVGs for all maps
 ```powershell

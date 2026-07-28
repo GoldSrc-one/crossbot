@@ -15,7 +15,9 @@ struct Area
 	int id = 0;
 	std::vector<int> memberLeafIds;
 	Polytope polytope;
+	std::vector<Plane> boundPlanes;
 	uint32_t areaFlags = crossbot_nav::NAV_AREA_NONE;
+	bool prism = false;
 };
 
 struct MergedConnection
@@ -31,8 +33,8 @@ struct MergedConnection
 
 	double exitSpeed = 0.0;
 	double exitAngle = 0.0;
-	// Run-up distance behind the launch edge. Not yet computed -- the sampler
-	// launches from a fixed inset. See "airmove plan.md" acceptance criterion 3.
+	// How far behind the launch edge the jump was initiated. Zero for drops, and for reverse
+	// jumps inferred from a drop rather than simulated.
 	double jumpBackDist = 0.0;
 	double fallDamage = 0.0;
 	double flightTime = 0.0;

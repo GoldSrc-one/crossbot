@@ -23,6 +23,8 @@ bool OnWindingBoundary(const Vec3 &p, const Winding &w);
 
 bool VerticalPlaneThroughEdge(const Vec3 &a, const Vec3 &b, Plane &out);
 
+double Distance2DToWinding(const Winding &w, double x, double y);
+
 bool PointInSolid(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers, const Vec3 &p);
 
 const Face *LowestFloorFace(const Polytope &poly);

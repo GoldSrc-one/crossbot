@@ -99,15 +99,15 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 			areaConnIndex.push_back(idx);
 
 		rec.planeOffset = ToU16Count(areaPlanes.size(), "area-plane offset");
-		rec.planeCount = ToU16Count(areas[i].polytope.faces.size(), "planes-per-area");
+		rec.planeCount = ToU16Count(areas[i].boundPlanes.size(), "planes-per-area");
 
-		for (const Face &face : areas[i].polytope.faces)
+		for (const Plane &src : areas[i].boundPlanes)
 		{
 			NavAreaPlane plane;
-			plane.normal[0] = static_cast<float>(face.plane.normal.x);
-			plane.normal[1] = static_cast<float>(face.plane.normal.y);
-			plane.normal[2] = static_cast<float>(face.plane.normal.z);
-			plane.dist = static_cast<float>(face.plane.dist);
+			plane.normal[0] = static_cast<float>(src.normal.x);
+			plane.normal[1] = static_cast<float>(src.normal.y);
+			plane.normal[2] = static_cast<float>(src.normal.z);
+			plane.dist = static_cast<float>(src.dist);
 			areaPlanes.push_back(plane);
 		}
 	}

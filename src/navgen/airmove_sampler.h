@@ -16,6 +16,9 @@ struct PhysicsParams
 	float gravity = 800.0f;
 	float airAccelerate = 10.0f;
 	float friction = 1.0f;
+	// HL's PLAYER_DUCKING_MULTIPLIER. Scales maxSpeed for a ducked player, which feeds the
+	// wish-speed clamp and PreventMegaBunnyJumping just as pmove->maxspeed does in game.
+	float duckSpeedMultiplier = 0.333f;
 };
 
 struct AirmoveSampleParams
@@ -47,6 +50,16 @@ struct AirmoveTrajectory
 	float flightTime = 0.0f;
 	bool jumped = false;
 	bool landed = false;
+	// Traced against the duck clipnode hull, so the move needs a crouch to fit.
+	bool duckHull = false;
+};
+
+// One clipnode hull plus the blocking volumes expanded for it. The two hulls disagree about
+// what fits, so a trace is only meaningful against a matched pair.
+struct HullContext
+{
+	int headnode = -1;
+	const std::vector<BlockingVolume> *blockers = nullptr;
 };
 
 class PM_MoveSimulator
@@ -55,8 +68,12 @@ public:
 	PM_MoveSimulator(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 		const AirmoveSampleParams &params, const PhysicsParams &physics);
 
+	// launchPos is in this simulator's hull space. navZAdjust is added to simulated positions to
+	// express them in nav space (the hull-3 space the areas live in) -- a hull-1 origin sits
+	// kStandProbeLift above a hull-3 one over the same floor, so area lookups and the returned
+	// launch/landing points would be that far off without it.
 	AirmoveTrajectory Simulate(const Vec3 &launchPos, float yawDegrees, float commandedSpeed, bool jump,
-		const std::vector<Area> &areas, int sourceArea, int &landingArea) const;
+		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust = 0.0) const;
 
 private:
 	void AddCorrectGravity(float *velocity) const;
@@ -84,7 +101,7 @@ private:
 	Vec3 m_worldMaxs;
 };
 
-void ProbeAirMoves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
 	const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
 	const PhysicsParams &physics, const AirmoveSampleParams &params = AirmoveSampleParams());
 

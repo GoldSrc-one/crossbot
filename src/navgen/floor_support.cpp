@@ -33,9 +33,8 @@ double DistanceToSegment(const Vec3 &p, const Vec3 &a, const Vec3 &b)
 	return (p - (a + ab * t)).Length();
 }
 
-// Zero when (x,y) is inside the winding's XY projection, otherwise the 2D distance
-// to its boundary. Floor faces have normal.z > kFloorNormalZ, so the projection is
-// never degenerate.
+}
+
 double Distance2DToWinding(const Winding &w, double x, double y)
 {
 	bool inside = false;
@@ -54,8 +53,6 @@ double Distance2DToWinding(const Winding &w, double x, double y)
 	}
 
 	return inside ? 0.0 : best;
-}
-
 }
 
 void CarveWindingAgainstTree(const BspFile &bsp, int nodeIndex, Winding w, std::vector<Winding> &solid,

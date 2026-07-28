@@ -41,6 +41,8 @@ double WindingArea(const Winding &winding, const Vec3 &normal);
 
 Winding IntersectCoplanarPolygons(const Winding &subject, const Winding &clip, const Vec3 &planeNormal);
 
+Winding ConvexHullXY(const std::vector<Vec3> &points);
+
 struct Face
 {
 	Plane plane;

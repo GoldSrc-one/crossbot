@@ -16,6 +16,7 @@ struct Portal
 	int faceIndexB = -1;
 	Vec3 pointA;
 	Vec3 pointB;
+	Winding winding;
 	double area = 0.0;
 };
 

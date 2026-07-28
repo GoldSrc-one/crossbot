@@ -75,6 +75,19 @@ constexpr const char *kRouteGoal = "#e74c3c";
 constexpr const char *kTargetEntity = "#c86bd8";
 constexpr const char *kLabelText = "#e8eef4";
 
+// Areas are see-through so a floor stacked over another still reveals what is beneath it.
+constexpr double kAreaFillOpacity = 0.7;
+
+// Lowest point of an area, i.e. its floor height -- the sort key for the painter's order.
+double AreaFloorZ(const Area &area)
+{
+	double lowest = 1e30;
+	for (const Face &f : area.polytope.faces)
+		for (const Vec3 &v : f.winding)
+			lowest = std::min(lowest, v.z);
+	return lowest < 1e29 ? lowest : 0.0;
+}
+
 struct EdgeStyle
 {
 	const char *color;
@@ -169,8 +182,22 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		centroids[i] = {c.x, -c.y};
 	}
 
-	std::fprintf(f, "<g stroke=\"%s\" stroke-width=\"%.2f\">\n", kBackground, unit * 0.2);
+	// Painter's order: this is a top-down view, so the lowest floors have to be laid down
+	// first and higher ones paint over them. The natural order is area id, which drops
+	// basements on top of the rooms above them at random.
+	std::vector<size_t> drawOrder(areas.size());
+	std::vector<double> floorZ(areas.size(), 0.0);
 	for (size_t i = 0; i < areas.size(); ++i)
+	{
+		drawOrder[i] = i;
+		floorZ[i] = AreaFloorZ(areas[i]);
+	}
+	std::stable_sort(drawOrder.begin(), drawOrder.end(),
+		[&](size_t a, size_t b) { return floorZ[a] < floorZ[b]; });
+
+	std::fprintf(f, "<g stroke=\"%s\" stroke-width=\"%.2f\" fill-opacity=\"%.2f\">\n", kBackground, unit * 0.2,
+		kAreaFillOpacity);
+	for (size_t i : drawOrder)
 	{
 		std::vector<Pt2> hull = AreaFootprint(areas[i]);
 		if (hull.size() >= 3)
@@ -270,8 +297,8 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		};
 		auto SwatchRow = [&](const char *color, const char *label)
 		{
-			std::fprintf(f, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\"/>\n",
-				lx, ly - unit * 1.9, swatchW, unit * 2.2, color);
+			std::fprintf(f, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\" fill-opacity=\"%.2f\"/>\n",
+				lx, ly - unit * 1.9, swatchW, unit * 2.2, color, kAreaFillOpacity);
 			Label(label);
 		};
 		auto LineRow = [&](const char *color, const char *dash, double widthMul, const char *label)

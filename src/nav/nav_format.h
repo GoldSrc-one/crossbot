@@ -7,7 +7,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 7;
+constexpr uint32_t kNavVersion = 8;
 
 enum AreaFlags : uint32_t
 {

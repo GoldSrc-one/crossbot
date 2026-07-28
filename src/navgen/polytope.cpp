@@ -1,5 +1,6 @@
 ﻿#include "polytope.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace navgen
@@ -98,6 +99,51 @@ double WindingArea(const Winding &winding, const Vec3 &normal)
 		sum = sum + a.Cross(b);
 	}
 	return std::fabs(sum.Dot(normal.Normalized())) * 0.5;
+}
+
+Winding ConvexHullXY(const std::vector<Vec3> &points)
+{
+	Winding pts;
+	pts.reserve(points.size());
+	for (const Vec3 &p : points)
+		pts.push_back(Vec3(p.x, p.y, 0.0));
+
+	std::sort(pts.begin(), pts.end(), [](const Vec3 &a, const Vec3 &b)
+		{ return a.x < b.x || (a.x == b.x && a.y < b.y); });
+	pts.erase(std::unique(pts.begin(), pts.end(),
+			[](const Vec3 &a, const Vec3 &b) { return a.x == b.x && a.y == b.y; }),
+		pts.end());
+
+	int n = static_cast<int>(pts.size());
+	if (n < 3)
+		return pts;
+
+	auto cross = [](const Vec3 &o, const Vec3 &a, const Vec3 &b)
+	{
+		return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+	};
+
+	Winding hull(2 * static_cast<size_t>(n));
+	int k = 0;
+	for (int i = 0; i < n; ++i)
+	{
+		while (k >= 2 && cross(hull[static_cast<size_t>(k - 2)], hull[static_cast<size_t>(k - 1)],
+			pts[static_cast<size_t>(i)]) <= 0.0)
+			--k;
+		hull[static_cast<size_t>(k++)] = pts[static_cast<size_t>(i)];
+	}
+
+	int lower = k + 1;
+	for (int i = n - 2; i >= 0; --i)
+	{
+		while (k >= lower && cross(hull[static_cast<size_t>(k - 2)], hull[static_cast<size_t>(k - 1)],
+			pts[static_cast<size_t>(i)]) <= 0.0)
+			--k;
+		hull[static_cast<size_t>(k++)] = pts[static_cast<size_t>(i)];
+	}
+
+	hull.resize(static_cast<size_t>(k - 1));
+	return hull;
 }
 
 Winding IntersectCoplanarPolygons(const Winding &subject, const Winding &clip, const Vec3 &planeNormal)

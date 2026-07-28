@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "hull_defs.h"
 #include "nav_format.h"
 
 namespace navgen
@@ -126,9 +127,9 @@ int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas)
 	for (const Area &area : areas)
 	{
 		bool inside = true;
-		for (const Face &f : area.polytope.faces)
+		for (const Plane &p : area.boundPlanes)
 		{
-			if (point.Dot(f.plane.normal) - f.plane.dist < -1.0)
+			if (point.Dot(p.normal) - p.dist < -1.0)
 			{
 				inside = false;
 				break;
@@ -152,6 +153,58 @@ bool BetterTrajectory(const AirmoveTrajectory &candidate, const AirmoveTrajector
 	if (candidate.fallDamage > current.fallDamage + 0.01f)
 		return false;
 	return candidate.flightTime < current.flightTime;
+}
+
+// Candidate moves are binned per area pair, and the first non-empty bin in this order wins: the
+// standing hull before the duck hull, and within a hull a drop before a jump.
+enum Bin
+{
+	kBinStandDrop = 0,
+	kBinStandJump,
+	kBinDuckDrop,
+	kBinDuckJump,
+	kBinCount,
+};
+
+int BinFor(bool duckHull, bool jumped)
+{
+	return (duckHull ? kBinDuckDrop : kBinStandDrop) + (jumped ? 1 : 0);
+}
+
+// One launch configuration. probeZ and launchZ are offsets from the area's own floor z, which is a
+// duck-hull origin; they differ only for the crouch jump, which takes off from standing height.
+struct SweepMode
+{
+	const PM_MoveSimulator *sim = nullptr;
+	const char *name = "";
+	double probeZ = 0.0;     // edge filtering and the ground-support test happen here
+	double launchZ = 0.0;    // the simulated origin starts here
+	double navZAdjust = 0.0; // added to simulated positions to express them in nav space
+	float maxSpeed = 0.0f;
+	bool duckHull = false;
+	bool drop = true;
+	bool jump = true;
+};
+
+// The perimeter edges that face void for this hull at this height. The answer differs per hull, so
+// each sweep needs its own list.
+std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Area &area, double probeZ,
+	const AirmoveSampleParams &params)
+{
+	std::vector<LaunchEdge> edges;
+
+	for (const LaunchEdge &edge : CollectPerimeterEdges(area))
+	{
+		Vec3 mid = (edge.a + edge.b) * 0.5;
+		mid.z += params.lift + probeZ;
+
+		if (!sim.VoidAhead(mid, edge.outward))
+			continue;
+
+		edges.push_back(edge);
+	}
+
+	return edges;
 }
 
 }
@@ -384,10 +437,10 @@ bool PM_MoveSimulator::CatagorizePosition(const float *origin, const float *velo
 }
 
 AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDegrees, float commandedSpeed,
-	bool jump, const std::vector<Area> &areas, int sourceArea, int &landingArea) const
+	bool jump, const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust) const
 {
 	AirmoveTrajectory result;
-	result.launchPos = launchPos;
+	result.launchPos = Vec3(launchPos.x, launchPos.y, launchPos.z + navZAdjust);
 	result.exitSpeed = commandedSpeed;
 	result.exitYaw = yawDegrees;
 	result.jumped = jump;
@@ -442,7 +495,7 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 		{
 			vel[2] = 0.0f;
 
-			Vec3 landing(pos[0], pos[1], pos[2]);
+			Vec3 landing(pos[0], pos[1], pos[2] + navZAdjust);
 			int area = FindAreaStrict(landing, areas);
 
 			if (area != sourceArea)
@@ -473,7 +526,7 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 	return result;
 }
 
-void ProbeAirMoves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
 	const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
 	const PhysicsParams &physics, const AirmoveSampleParams &params)
 {
@@ -484,34 +537,50 @@ void ProbeAirMoves(const BspFile &bsp, int headnode, const std::vector<BlockingV
 		existingPairs.insert(PairKey(c.areaB, c.areaA));
 	}
 
-	PM_MoveSimulator sim(bsp, headnode, blockers, params, physics);
+	PhysicsParams duckPhysics = physics;
+	duckPhysics.maxSpeed = physics.maxSpeed * physics.duckSpeedMultiplier;
+
+	// Standing: hull 1 all the way. Crouch-jumping: the duck hull, but entered out of a standing
+	// run, so still standing speed. Ducked: the duck hull at ducked speed.
+	PM_MoveSimulator standSim(bsp, standHull.headnode, *standHull.blockers, params, physics);
+	PM_MoveSimulator crouchJumpSim(bsp, duckHull.headnode, *duckHull.blockers, params, physics);
+	PM_MoveSimulator duckSim(bsp, duckHull.headnode, *duckHull.blockers, params, duckPhysics);
+
+	SweepMode standSweep;
+	standSweep.sim = &standSim;
+	standSweep.name = "stand";
+	standSweep.probeZ = kStandProbeLift;
+	standSweep.launchZ = kStandProbeLift;
+	standSweep.navZAdjust = -kStandProbeLift;
+	standSweep.maxSpeed = physics.maxSpeed;
+
+	// Ducking in mid-air shrinks the hull around an unchanged origin, so the feet rise by
+	// kStandProbeLift -- that is the whole crouch-jump boost. There is no drop variant: ducking
+	// on the ground does not lift you, gravity re-settles you at duck origin and the game clamps
+	// you to duck speed, which is the ducked sweep below.
+	SweepMode crouchJumpSweep;
+	crouchJumpSweep.sim = &crouchJumpSim;
+	crouchJumpSweep.name = "crouchjump";
+	crouchJumpSweep.launchZ = kStandProbeLift;
+	crouchJumpSweep.maxSpeed = physics.maxSpeed;
+	crouchJumpSweep.duckHull = true;
+	crouchJumpSweep.drop = false;
+
+	SweepMode duckSweep;
+	duckSweep.sim = &duckSim;
+	duckSweep.name = "duck";
+	duckSweep.maxSpeed = duckPhysics.maxSpeed;
+	duckSweep.duckHull = true;
+
 	std::mt19937 rng(params.seed);
 	std::uniform_real_distribution<float> unit(0.0f, 1.0f);
 
-	std::map<long long, AirmoveTrajectory> best;
-	std::map<long long, AirmoveTrajectory> bestDrop;
+	std::map<long long, AirmoveTrajectory> bins[kBinCount];
 	size_t simulated = 0;
-	size_t areasWithEdges = 0;
+	std::unordered_set<int> sourceAreas;
 
-	for (const Area &area : areas)
+	auto runSweep = [&](const SweepMode &mode, const Area &area, const std::vector<LaunchEdge> &edges)
 	{
-		std::vector<LaunchEdge> edges;
-		for (const LaunchEdge &edge : CollectPerimeterEdges(area))
-		{
-			Vec3 mid = (edge.a + edge.b) * 0.5;
-			mid.z += params.lift;
-
-			if (!sim.VoidAhead(mid, edge.outward))
-				continue;
-
-			edges.push_back(edge);
-		}
-
-		if (edges.empty())
-			continue;
-
-		bool produced = false;
-
 		for (const LaunchEdge &edge : edges)
 		{
 			int edgeSamples = static_cast<int>(std::lround(edge.length * static_cast<double>(params.samplesPerUnit)));
@@ -522,118 +591,176 @@ void ProbeAirMoves(const BspFile &bsp, int headnode, const std::vector<BlockingV
 
 			for (int s = 0; s < edgeSamples; ++s)
 			{
-				bool jump = unit(rng) < 0.5f;
-
-				// Pure falls step off at the edge; jumps may be initiated further back,
-				// clearing the remaining ground on the way out.
-				float jumpBack = jump ? unit(rng) * params.jumpBackMax : 0.0f;
-
 				double t = unit(rng);
-				Vec3 launchPos = edge.a + (edge.b - edge.a) * t -
-					edge.outward * (params.inset + static_cast<double>(jumpBack));
-				launchPos.z += params.lift;
-
-				if (!sim.IsSupported(launchPos))
-					continue;
-
 				float yaw = baseYaw + (unit(rng) * 2.0f - 1.0f) * params.yawSpread;
-				float speed = unit(rng) * physics.maxSpeed;
+				float speed = unit(rng) * mode.maxSpeed;
+				// Only the jump variant uses this, but it is drawn unconditionally so a sweep's
+				// random stream does not depend on which variants it happens to run.
+				float jumpBack = unit(rng) * params.jumpBackMax;
 
-				int landingArea = -1;
-				AirmoveTrajectory traj = sim.Simulate(launchPos, yaw, speed, jump, areas, area.id, landingArea);
-				traj.jumpBackDist = jumpBack;
-				++simulated;
+				Vec3 edgePos = edge.a + (edge.b - edge.a) * t;
 
-				if (!traj.landed || landingArea < 0)
-					continue;
-
-				long long key = PairKey(area.id, landingArea);
-				if (existingPairs.count(key))
-					continue;
-
-				auto it = best.find(key);
-				if (it == best.end())
+				// Both variants share position, yaw and speed; only the jump may start further
+				// back, clearing the remaining ground on the way out.
+				for (int variant = 0; variant < 2; ++variant)
 				{
-					best.emplace(key, traj);
-					produced = true;
-				}
-				else if (BetterTrajectory(traj, it->second))
-				{
-					it->second = traj;
-				}
+					bool jump = (variant == 1);
+					if (jump ? !mode.jump : !mode.drop)
+						continue;
 
-				if (!traj.jumped)
-				{
-					auto dropIt = bestDrop.find(key);
-					if (dropIt == bestDrop.end())
-						bestDrop.emplace(key, traj);
-					else if (BetterTrajectory(traj, dropIt->second))
-						dropIt->second = traj;
+					double setBack = params.inset + (jump ? static_cast<double>(jumpBack) : 0.0);
+					Vec3 launchPos = edgePos - edge.outward * setBack;
+					launchPos.z += params.lift;
+
+					// The support test belongs at probe z: a duck hull parked at the standing
+					// origin has nothing within reach below it.
+					if (!mode.sim->IsSupported(Vec3(launchPos.x, launchPos.y, launchPos.z + mode.probeZ)))
+						continue;
+
+					launchPos.z += mode.launchZ;
+
+					int landingArea = -1;
+					AirmoveTrajectory traj = mode.sim->Simulate(launchPos, yaw, speed, jump, areas,
+						area.id, landingArea, mode.navZAdjust);
+					traj.jumpBackDist = jump ? jumpBack : 0.0f;
+					traj.duckHull = mode.duckHull;
+					// Report the standable point on the floor, not the airborne crouch-jump
+					// origin -- the bot has to be able to run to pointA.
+					traj.launchPos.z -= mode.launchZ - mode.probeZ;
+					++simulated;
+
+					if (!traj.landed || landingArea < 0)
+						continue;
+
+					long long key = PairKey(area.id, landingArea);
+					if (existingPairs.count(key))
+						continue;
+
+					std::map<long long, AirmoveTrajectory> &bin = bins[BinFor(mode.duckHull, jump)];
+					auto it = bin.find(key);
+					if (it == bin.end())
+						bin.emplace(key, traj);
+					else if (BetterTrajectory(traj, it->second))
+						it->second = traj;
+
+					sourceAreas.insert(area.id);
 				}
 			}
 		}
+	};
 
-		if (produced)
-			++areasWithEdges;
-	}
-
-	for (const auto &entry : best)
+	for (const Area &area : areas)
 	{
-		int from = static_cast<int>(entry.first / 1000000LL);
-		int to = static_cast<int>(entry.first % 1000000LL);
-		const AirmoveTrajectory &traj = entry.second;
+		if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
+		{
+			// Nothing stands here, so the duck hull is the only thing to simulate.
+			std::vector<LaunchEdge> edges = FilterLaunchEdges(duckSim, area, duckSweep.probeZ, params);
+			runSweep(duckSweep, area, edges);
+			continue;
+		}
 
-		MergedConnection conn;
-		conn.areaA = from;
-		conn.areaB = to;
-		conn.pointA = traj.launchPos;
-		conn.pointB = traj.landingPos;
-		conn.area = 0.0;
-		conn.connType = crossbot_nav::CONN_AIRMOVE;
-		conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
-		conn.exitSpeed = traj.exitSpeed;
-		conn.exitAngle = traj.exitYaw;
-		conn.jumpBackDist = traj.jumpBackDist;
-		conn.fallDamage = traj.fallDamage;
-		conn.flightTime = traj.flightTime;
-		conns.push_back(conn);
+		std::vector<LaunchEdge> standEdges = FilterLaunchEdges(standSim, area, standSweep.probeZ, params);
+		runSweep(standSweep, area, standEdges);
+
+		// A separate list: a low overhang the standing hull cannot pass may still be open to a
+		// crouch-jump, so the two hulls disagree about which perimeter edges face void.
+		std::vector<LaunchEdge> crouchEdges = FilterLaunchEdges(crouchJumpSim, area, crouchJumpSweep.probeZ, params);
+		runSweep(crouchJumpSweep, area, crouchEdges);
 	}
 
+	// Hull before drop-vs-jump: a pair a standing bot can reach never gets flagged crouch-only,
+	// even where a ducked move would be cheaper.
+	std::map<long long, bool> emitted; // pair key -> whether the winning move needs a crouch
+	for (int bin = 0; bin < kBinCount; ++bin)
+	{
+		for (const auto &entry : bins[bin])
+		{
+			if (emitted.count(entry.first))
+				continue;
+
+			const AirmoveTrajectory &traj = entry.second;
+			emitted.emplace(entry.first, traj.duckHull);
+
+			MergedConnection conn;
+			conn.areaA = static_cast<int>(entry.first / 1000000LL);
+			conn.areaB = static_cast<int>(entry.first % 1000000LL);
+			conn.pointA = traj.launchPos;
+			conn.pointB = traj.landingPos;
+			conn.area = 0.0;
+			conn.connType = crossbot_nav::CONN_AIRMOVE;
+			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
+			if (traj.duckHull)
+				conn.connFlags |= crossbot_nav::CONN_FLAG_NEEDS_CROUCH;
+			conn.exitSpeed = traj.exitSpeed;
+			conn.exitAngle = traj.exitYaw;
+			conn.jumpBackDist = traj.jumpBackDist;
+			conn.fallDamage = traj.fallDamage;
+			conn.flightTime = traj.flightTime;
+			conns.push_back(conn);
+		}
+	}
+
+	// A short enough drop implies the jump back up. Standing drops first, so a reverse that both
+	// hulls can serve is not needlessly flagged crouch-only.
+	//
+	// params.maxJumpHeight is the crouch-jump reach; anything above a plain jump's apex can only
+	// be climbed by ducking at the top, so the reverse needs a crouch even out of a standing drop.
+	double plainJumpHeight = static_cast<double>(kJumpImpulse) * static_cast<double>(kJumpImpulse) /
+		(2.0 * static_cast<double>(physics.gravity));
 	size_t derived = 0;
-	for (const auto &entry : bestDrop)
+	for (int bin : {kBinStandDrop, kBinDuckDrop})
 	{
-		int from = static_cast<int>(entry.first / 1000000LL);
-		int to = static_cast<int>(entry.first % 1000000LL);
-		const AirmoveTrajectory &drop = entry.second;
+		for (const auto &entry : bins[bin])
+		{
+			int from = static_cast<int>(entry.first / 1000000LL);
+			int to = static_cast<int>(entry.first % 1000000LL);
+			const AirmoveTrajectory &drop = entry.second;
 
-		double rise = drop.launchPos.z - drop.landingPos.z;
-		if (rise <= 0.0 || rise > params.maxJumpHeight)
-			continue;
+			double rise = drop.launchPos.z - drop.landingPos.z;
+			if (rise <= 0.0 || rise > params.maxJumpHeight)
+				continue;
 
-		long long reverseKey = PairKey(to, from);
-		if (existingPairs.count(reverseKey) || best.count(reverseKey))
-			continue;
+			long long reverseKey = PairKey(to, from);
+			if (existingPairs.count(reverseKey) || emitted.count(reverseKey))
+				continue;
 
-		MergedConnection conn;
-		conn.areaA = to;
-		conn.areaB = from;
-		conn.pointA = drop.landingPos;
-		conn.pointB = drop.launchPos;
-		conn.area = 0.0;
-		conn.connType = crossbot_nav::CONN_AIRMOVE;
-		conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
-		conn.exitSpeed = drop.exitSpeed;
-		conn.exitAngle = (drop.exitYaw >= 180.0f) ? drop.exitYaw - 180.0f : drop.exitYaw + 180.0f;
-		conn.fallDamage = 0.0;
-		conn.flightTime = drop.flightTime;
-		conns.push_back(conn);
-		++derived;
+			bool needsCrouch = drop.duckHull || rise > plainJumpHeight;
+			emitted.emplace(reverseKey, needsCrouch);
+
+			MergedConnection conn;
+			conn.areaA = to;
+			conn.areaB = from;
+			conn.pointA = drop.landingPos;
+			conn.pointB = drop.launchPos;
+			conn.area = 0.0;
+			conn.connType = crossbot_nav::CONN_AIRMOVE;
+			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
+			if (needsCrouch)
+				conn.connFlags |= crossbot_nav::CONN_FLAG_NEEDS_CROUCH;
+			conn.exitSpeed = drop.exitSpeed;
+			conn.exitAngle = (drop.exitYaw >= 180.0f) ? drop.exitYaw - 180.0f : drop.exitYaw + 180.0f;
+			// Inferred rather than simulated, so there is no sampled run-up and no fall to take
+			// damage from.
+			conn.fallDamage = 0.0;
+			conn.flightTime = drop.flightTime;
+			conns.push_back(conn);
+			++derived;
+		}
 	}
 
-	std::printf("air move sampling: %zu trajectories at %.2f samples/unit from %zu areas -> %zu edges "
-		"(%zu source areas), %zu reverse jumps derived from drops under %.0f units\n",
-		simulated, params.samplesPerUnit, areas.size(), best.size(), areasWithEdges, derived,
-		params.maxJumpHeight);
+	size_t crouchOnly = 0;
+	for (const auto &entry : emitted)
+		if (entry.second)
+			++crouchOnly;
+
+	std::printf("air move sampling: %zu trajectories at %.2f samples/unit from %zu areas (%zu launched), "
+		"%zu pairs [stand drop %zu, stand jump %zu, duck drop %zu, duck jump %zu] -> %zu connections "
+		"(%zu crouch-only, %zu reverse jumps derived from drops under %.0f units)\n",
+		simulated, params.samplesPerUnit, areas.size(), sourceAreas.size(),
+		bins[kBinStandDrop].size() + bins[kBinStandJump].size() + bins[kBinDuckDrop].size() +
+			bins[kBinDuckJump].size(),
+		bins[kBinStandDrop].size(), bins[kBinStandJump].size(), bins[kBinDuckDrop].size(),
+		bins[kBinDuckJump].size(), emitted.size(), crouchOnly, derived, params.maxJumpHeight);
 }
 
 }

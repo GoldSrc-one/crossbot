@@ -143,6 +143,7 @@ std::vector<Portal> BuildPortals(const std::vector<ExtractedLeaf> &leaves)
 				portal.faceIndexB = nr->faceIndex;
 				portal.pointA = pointA;
 				portal.pointB = pointB;
+				portal.winding = std::move(overlap);
 				portal.area = area;
 				portals.push_back(portal);
 			}
