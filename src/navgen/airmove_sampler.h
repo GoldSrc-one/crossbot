@@ -6,6 +6,7 @@
 #include "blocking_entities.h"
 #include "bsp_file.h"
 #include "clipnode_tree.h"
+#include "pm_sim.h"
 
 namespace navgen
 {
@@ -75,20 +76,16 @@ public:
 	AirmoveTrajectory Simulate(const Vec3 &launchPos, float yawDegrees, float commandedSpeed, bool jump,
 		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust = 0.0) const;
 
-private:
-	void AddCorrectGravity(float *velocity) const;
-	void FixupGravityVelocity(float *velocity) const;
-	void PreventMegaBunnyJumping(float *velocity) const;
-	void AirAccelerate(const float *wishdir, float wishspeed, float *velocity) const;
-	int FlyMove(float *origin, float *velocity, float dt) const;
-	bool CatagorizePosition(const float *origin, const float *velocity) const;
-
-public:
 	bool IsSupported(const Vec3 &origin) const;
 	bool VoidAhead(const Vec3 &origin, const Vec3 &dir) const;
 	bool BlockedAhead(const Vec3 &origin, const Vec3 &dir) const;
 	bool GroundAhead(const Vec3 &origin, const Vec3 &dir) const;
 	TraceResult Trace(const Vec3 &start, const Vec3 &end) const;
+
+	// This simulator's hull and blockers, as the shared movement core wants them. Hand this to
+	// anything that needs to replay a move against the same geometry.
+	PmSim::PmTraceFn TraceFn() const;
+	const PmSim::PmPhysics &Physics() const { return m_pmPhysics; }
 
 private:
 
@@ -96,7 +93,7 @@ private:
 	int m_headnode;
 	const std::vector<BlockingVolume> &m_blockers;
 	AirmoveSampleParams m_params;
-	PhysicsParams m_physics;
+	PmSim::PmPhysics m_pmPhysics;
 	Vec3 m_worldMins;
 	Vec3 m_worldMaxs;
 };

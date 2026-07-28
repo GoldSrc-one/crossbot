@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.16)
 
 if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
@@ -80,6 +80,7 @@ add_executable(navgen ${NAVGEN_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/nav/funnel_graph.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/waypoint_plan.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/path_follower.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/pm_sim.cpp
 )
 
 # Keep the historical build\tools\navgen\navgen.exe output path so scripts and

@@ -70,6 +70,11 @@ constexpr const char *kConnWalk = "#e8eef4";
 constexpr const char *kConnAirmove = "#e74c3c";
 constexpr const char *kConnTeleport = "#27ae60";
 constexpr const char *kRoute = "#f39c12";
+// Distinct from kConnAirmove and kRouteGoal, which are also reds, so the route overlay stays
+// readable on top of the connection layer.
+constexpr const char *kRouteAirmoveSim = "#2ecc71";
+constexpr const char *kRouteAirmoveStored = "#ff3b30";
+constexpr const char *kRouteAirmoveMissed = "#f5d020";
 constexpr const char *kRouteStart = "#27ae60";
 constexpr const char *kRouteGoal = "#e74c3c";
 constexpr const char *kTargetEntity = "#c86bd8";
@@ -131,7 +136,8 @@ void WriteHeader(FILE *f, const std::string &mapName, double minX, double minY, 
 
 void WriteDebugSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
 	const std::vector<MergedConnection> &conns, const std::vector<Vec3> &pathPoints,
-	const std::vector<Vec3> &targetPoints)
+	const std::vector<Vec3> &targetPoints, const std::vector<uint8_t> &pathSegmentKinds,
+	const std::vector<FailedAirmove> &failedAirmoves)
 {
 	FILE *f = std::fopen(path.c_str(), "w");
 	if (!f)
@@ -243,6 +249,35 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 			std::fprintf(f, "%.1f,%.1f ", p.x, -p.y);
 		std::fprintf(f, "\"/>\n");
 
+		// Overdraw the air moves so it is obvious which jumps the planner re-simulated from the
+		// funnelled launch point and which fell back to the baked one.
+		for (size_t i = 0; i + 1 < pathPoints.size() && i < pathSegmentKinds.size(); ++i)
+		{
+			if (pathSegmentKinds[i] == PATH_SEG_WALK)
+				continue;
+
+			const char *colour = (pathSegmentKinds[i] == PATH_SEG_AIRMOVE_SIMULATED)
+				? kRouteAirmoveSim : kRouteAirmoveStored;
+			const Vec3 &a = pathPoints[i];
+			const Vec3 &b = pathPoints[i + 1];
+			std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"%s\" "
+				"stroke-width=\"%.2f\" stroke-linecap=\"round\"/>\n",
+				a.x, -a.y, b.x, -b.y, colour, unit * 1.3);
+		}
+
+		// Where a re-simulated jump was tried and missed: dashed from the launch it was tried from
+		// to where it actually came down, with a ring on the bad landing.
+		for (const FailedAirmove &fa : failedAirmoves)
+		{
+			std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"%s\" "
+				"stroke-width=\"%.2f\" stroke-dasharray=\"%.1f %.1f\" stroke-linecap=\"round\"/>\n",
+				fa.launch.x, -fa.launch.y, fa.landing.x, -fa.landing.y, kRouteAirmoveMissed,
+				unit * 0.8, unit * 2.0, unit * 1.5);
+			std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"none\" stroke=\"%s\" "
+				"stroke-width=\"%.2f\"/>\n",
+				fa.landing.x, -fa.landing.y, unit * 1.6, kRouteAirmoveMissed, unit * 0.6);
+		}
+
 		const Vec3 &pathStart = pathPoints.front();
 		const Vec3 &pathEnd = pathPoints.back();
 		std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"%s\"/>\n",
@@ -340,6 +375,9 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		LineRow(kConnWalk, nullptr, 1.0, "walk");
 		LineRow(kConnAirmove, "4,2", 1.3, "air move");
 		LineRow(kRoute, nullptr, 1.8, "planned route");
+		LineRow(kRouteAirmoveSim, nullptr, 1.8, "air move, launch re-simulated");
+		LineRow(kRouteAirmoveStored, nullptr, 1.8, "air move, stored launch");
+		LineRow(kRouteAirmoveMissed, nullptr, 1.8, "air move, re-simulation missed");
 		DotRow(kRouteStart, "route start");
 		DotRow(kRouteGoal, "route goal");
 		CrosshairRow(kTargetEntity, "info_target");

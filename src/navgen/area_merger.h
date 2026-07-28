@@ -51,6 +51,12 @@ float TraverseCostFor(const MergedConnection &conn);
 size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
 	double maxStep);
 
+// Portal endpoints come off the shared face as a diagonal -- one corner on the floor, the other up
+// at the ceiling -- so anything reading their z gets a sawtooth. Drops both endpoints of every
+// connection onto the floor beneath them, which is also the pair of heights a waypoint on the
+// connection interpolates between. Returns how many connections were resolved.
+size_t SnapConnectionsToFloor(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
+
 MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
 	const std::vector<bool> &isCrouchLeaf);
 

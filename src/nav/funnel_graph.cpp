@@ -31,29 +31,18 @@ PortalGate MakeGate(const Vector &pointA, const Vector &pointB, const Vector &tr
 	PortalGate gate;
 	gate.left = (side > 0.f) ? pointA : pointB;
 	gate.right = (side > 0.f) ? pointB : pointA;
-
-	Vector span = gate.right - gate.left;
-	float len2D = std::sqrt(span.x * span.x + span.y * span.y);
-	if (len2D > 0.001f)
-	{
-		float shrink = kGateShrinkDistance;
-		if (shrink > len2D * 0.5f)
-			shrink = len2D * 0.5f;
-		Vector step = span * (shrink / len2D);
-		gate.left = gate.left + step;
-		gate.right = gate.right - step;
-	}
 	return gate;
 }
 
-std::vector<Vector> StringPull(const Vector &start, const Vector &goal, const std::vector<PortalGate> &gates)
+std::vector<PulledPoint> StringPull(const Vector &start, const Vector &goal,
+	const std::vector<PortalGate> &gates)
 {
-	std::vector<Vector> path;
-	path.push_back(start);
+	std::vector<PulledPoint> path;
+	path.push_back({start, kNoGate});
 
 	if (gates.empty())
 	{
-		path.push_back(goal);
+		path.push_back({goal, kNoGate});
 		return path;
 	}
 
@@ -76,7 +65,7 @@ std::vector<Vector> StringPull(const Vector &start, const Vector &goal, const st
 			else
 			{
 
-				path.push_back(funnelLeft);
+				path.push_back({funnelLeft, leftIndex});
 				apex = funnelLeft;
 				apexIndex = leftIndex;
 				funnelLeft = apex;
@@ -97,7 +86,7 @@ std::vector<Vector> StringPull(const Vector &start, const Vector &goal, const st
 			}
 			else
 			{
-				path.push_back(funnelRight);
+				path.push_back({funnelRight, rightIndex});
 				apex = funnelRight;
 				apexIndex = rightIndex;
 				funnelLeft = apex;
@@ -110,7 +99,7 @@ std::vector<Vector> StringPull(const Vector &start, const Vector &goal, const st
 		}
 	}
 
-	path.push_back(goal);
+	path.push_back({goal, kNoGate});
 	return path;
 }
 

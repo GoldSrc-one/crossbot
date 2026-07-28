@@ -409,7 +409,8 @@ Vector ClampToAreaBounds(const Vector &point, const navgen::Polytope &poly)
 }
 
 std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &entities,
-	const navgen::MergeResult &merged)
+	const navgen::MergeResult &merged, const NavPlan::PlanTraceContext *traces,
+	std::vector<uint8_t> *segmentKindsOut, std::vector<navgen::FailedAirmove> *failedAirmovesOut)
 {
 	std::vector<navgen::Vec3> points;
 	if (merged.areas.empty())
@@ -434,6 +435,16 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		planAreas[i].centroid = centroid;
 		planAreas[i].crouch = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		planAreas[i].door = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
+
+		planAreas[i].boundPlanes.reserve(merged.areas[i].boundPlanes.size());
+		for (const navgen::Plane &p : merged.areas[i].boundPlanes)
+		{
+			NavPlan::PlanPlane pp;
+			pp.normal = Vector(static_cast<float>(p.normal.x), static_cast<float>(p.normal.y),
+				static_cast<float>(p.normal.z));
+			pp.dist = static_cast<float>(p.dist);
+			planAreas[i].boundPlanes.push_back(pp);
+		}
 	}
 
 	std::vector<NavAStar::Conn> graphConns(merged.conns.size());
@@ -459,6 +470,11 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		pc.pointA = pointA;
 		pc.pointB = pointB;
 		pc.connType = c.connType;
+		pc.connFlags = c.connFlags;
+		pc.exitSpeed = static_cast<float>(c.exitSpeed);
+		pc.exitAngle = static_cast<float>(c.exitAngle);
+		pc.jumpBackDist = static_cast<float>(c.jumpBackDist);
+		pc.flightTime = static_cast<float>(c.flightTime);
 
 		areaConnIndices[static_cast<size_t>(c.areaA)].push_back(static_cast<uint32_t>(i));
 		areaConnIndices[static_cast<size_t>(c.areaB)].push_back(static_cast<uint32_t>(i));
@@ -508,8 +524,9 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 
 	goalPoint = ClampToAreaBounds(goalPoint, merged.areas[goalArea].polytope);
 
+	NavPlan::PlanStats planStats;
 	std::vector<NavPlan::PlanWaypoint> plan = NavPlan::BuildWaypointPlan(planAreas, planConns, result.areaPath,
-		result.connPath, startPoint, goalPoint);
+		result.connPath, startPoint, goalPoint, traces, &planStats);
 
 	for (const NavPlan::PlanWaypoint &wp : plan)
 	{
@@ -517,10 +534,109 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		if (!points.empty() && (p - points.back()).Length() < 0.5)
 			continue;
 		points.push_back(p);
+
+		if (segmentKindsOut)
+		{
+			uint8_t kind = navgen::PATH_SEG_WALK;
+			if (wp.airmoveLaunch)
+				kind = wp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
+					: navgen::PATH_SEG_AIRMOVE_STORED;
+			segmentKindsOut->push_back(kind);
+		}
+
+		if (failedAirmovesOut && wp.launchSimFailed)
+		{
+			navgen::FailedAirmove fa;
+			fa.launch = navgen::Vec3(wp.launchSimFrom.x, wp.launchSimFrom.y, wp.launchSimFrom.z);
+			fa.landing = navgen::Vec3(wp.launchSimTo.x, wp.launchSimTo.y, wp.launchSimTo.z);
+			failedAirmovesOut->push_back(fa);
+		}
 	}
 
-	std::printf("debug path: area %u -> %u via %zu connections, %zu waypoints\n", startArea, goalArea,
-		result.connPath.size(), points.size());
+	// The route is only trustworthy if every step of it lies over an area. Air-move segments are
+	// skipped: those are meant to leave the floor.
+	size_t offMesh = 0;
+	{
+		auto overSomeArea = [&](const Vector &p)
+		{
+			for (const NavPlan::PlanArea &a : planAreas)
+			{
+				if (a.boundPlanes.empty())
+					continue;
+				bool inside = true;
+				for (const NavPlan::PlanPlane &pl : a.boundPlanes)
+				{
+					if (std::fabs(pl.normal.z) > 0.3f)
+						continue;
+					if (p.x * pl.normal.x + p.y * pl.normal.y - pl.dist < -0.05f)
+					{
+						inside = false;
+						break;
+					}
+				}
+				if (inside)
+					return true;
+			}
+			return false;
+		};
+
+		for (size_t i = 0; i + 1 < plan.size(); ++i)
+		{
+			if (plan[i].airmoveLaunch || plan[i].requiresTeleport)
+				continue;
+			const Vector &a = plan[i].point;
+			const Vector &b = plan[i + 1].point;
+			for (int s = 1; s <= 16; ++s)
+			{
+				float t = static_cast<float>(s) / 17.0f;
+				if (!overSomeArea(Vector(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, 0.f)))
+				{
+					++offMesh;
+					break;
+				}
+			}
+		}
+	}
+
+	std::printf("debug path: area %u -> %u via %zu connections, %zu waypoints "
+		"(%zu air moves re-simulated, %zu from stored, %zu with run-up; %zu corners, "
+		"%zu gates short of full clearance, %zu segments leaving the mesh)\n",
+		startArea, goalArea, result.connPath.size(), points.size(), planStats.airmovesSimulated,
+		planStats.airmovesFromStored, planStats.airmoveRunups, planStats.corners,
+		planStats.gatesClamped, offMesh);
+
+	if (std::getenv("NAVGEN_DUMP_PATH"))
+	{
+		for (size_t i = 0; i < plan.size(); ++i)
+		{
+			const NavPlan::PlanWaypoint &wp = plan[i];
+			const char *kind = "corner";
+			if (i == 0)
+				kind = "start";
+			else if (i + 1 == plan.size())
+				kind = "goal";
+			else if (wp.requiresButtonUse)
+				kind = "button";
+			else if (wp.requiresTriggerTouch)
+				kind = "trigger";
+			else if (wp.requiresTeleport)
+				kind = "teleport";
+			else if (wp.airmoveLaunch)
+				kind = wp.requiresJump ? "jump" : "dropoff";
+			else if (i > 0 && plan[i - 1].airmoveLaunch)
+				kind = "landing";
+			else if (wp.requiresDoor)
+				kind = "door";
+
+			std::printf("  wp[%2zu] %-8s (%8.1f, %8.1f, %8.1f) area %3d%s%s speed %.0f",
+				i, kind, wp.point.x, wp.point.y, wp.point.z, wp.targetAreaId,
+				wp.requiresCrouch ? " crouch" : "", wp.requiresJump ? " JUMP" : "", wp.maxSpeed);
+			if (wp.airmoveLaunch)
+				std::printf(" launch %.0f yaw %.1f jumpBack %.1f", wp.launchSpeed, wp.launchYaw,
+					wp.jumpBackDist);
+			std::printf("\n");
+		}
+	}
 
 	return points;
 }
@@ -821,6 +937,11 @@ int main(int argc, char **argv)
 				airmoveParams);
 		}
 
+		size_t snappedConns = navgen::SnapConnectionsToFloor(merged.areas, merged.conns);
+		if (snappedConns != merged.conns.size())
+			std::printf("%s: floor-snapped %zu of %zu connection endpoints pairs (%zu had no floor beneath)\n",
+				bspPath.c_str(), snappedConns, merged.conns.size(), merged.conns.size() - snappedConns);
+
 		size_t rawAreaCount = merged.areas.size();
 		std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
 		if (noPrune)
@@ -861,6 +982,9 @@ int main(int argc, char **argv)
 
 				if (c.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH)
 					std::printf("  [crouch]");
+
+				if (c.connFlags & crossbot_nav::CONN_FLAG_JUMP)
+					std::printf("  [jump]");
 
 				if (c.connType == crossbot_nav::CONN_AIRMOVE)
 					std::printf("  speed %.0f yaw %.1f jumpBack %.1f fallDamage %.1f flightTime %.2f",
@@ -925,8 +1049,24 @@ int main(int argc, char **argv)
 		}
 
 		std::vector<navgen::Vec3> pathPoints;
+		std::vector<uint8_t> pathSegmentKinds;
+		std::vector<navgen::FailedAirmove> failedAirmoves;
 		if (!objPath.empty() || !svgPath.empty())
-			pathPoints = BuildDebugPath(entities, merged);
+		{
+			// The same two hulls the air-move sampler launched from, so a replayed jump is
+			// checked against exactly the geometry that proved it.
+			navgen::PM_MoveSimulator duckSim(bsp, worldModel.headnode[navgen::kHullDuck], blockers,
+				airmoveParams, physics);
+			navgen::PM_MoveSimulator standSim(bsp, worldModel.headnode[navgen::kHullHuman], standBlockers,
+				airmoveParams, physics);
+
+			NavPlan::PlanTraceContext traces;
+			traces.duckTrace = duckSim.TraceFn();
+			traces.standTrace = standSim.TraceFn();
+			traces.physics = standSim.Physics();
+
+			pathPoints = BuildDebugPath(entities, merged, &traces, &pathSegmentKinds, &failedAirmoves);
+		}
 
 		if (!objPath.empty())
 		{
@@ -940,7 +1080,7 @@ int main(int argc, char **argv)
 		{
 			std::string mapName = DeriveMapName(bspPath);
 			navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
-				CollectTargetPoints(entities));
+				CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves);
 			std::printf("wrote %s\n", svgPath.c_str());
 		}
 

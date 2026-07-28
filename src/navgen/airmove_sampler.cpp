@@ -19,52 +19,13 @@ namespace
 
 constexpr double kPi = 3.14159265358979323846;
 
-constexpr float kJumpImpulse = 268.328156f;
-constexpr float kBunnyJumpMaxSpeedFactor = 1.7f;
-constexpr float kAirAccelWishSpeedCap = 30.0f;
-constexpr float kMaxOnGroundVelocityZ = 180.0f;
-constexpr float kGroundNormalZ = 0.7f;
-constexpr float kGroundTraceDist = 2.0f;
+// The movement constants themselves live with the shared core in pm_sim.h.
+using PmSim::kGroundNormalZ;
+using PmSim::kGroundTraceDist;
+using PmSim::kJumpImpulse;
 
-constexpr float kPlayerFatalFallSpeed = 1024.0f;
-constexpr float kPlayerMaxSafeFallSpeed = 580.0f;
-constexpr float kDamageForFallSpeed = 100.0f / (kPlayerFatalFallSpeed - kPlayerMaxSafeFallSpeed);
-
-constexpr int kMaxClipPlanes = 5;
 constexpr double kFloorNormalZ = 0.7;
 constexpr double kWorldBoundsSlop = 64.0;
-
-inline void VectorCopy(const float *in, float *out)
-{
-	out[0] = in[0];
-	out[1] = in[1];
-	out[2] = in[2];
-}
-
-inline float DotProduct(const float *a, const float *b)
-{
-	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-inline void CrossProduct(const float *a, const float *b, float *out)
-{
-	out[0] = a[1] * b[2] - a[2] * b[1];
-	out[1] = a[2] * b[0] - a[0] * b[2];
-	out[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-inline float VectorNormalize(float *v)
-{
-	float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-	if (len > 0.0f)
-	{
-		float ilen = 1.0f / len;
-		v[0] *= ilen;
-		v[1] *= ilen;
-		v[2] *= ilen;
-	}
-	return len;
-}
 
 struct LaunchEdge
 {
@@ -215,8 +176,13 @@ PM_MoveSimulator::PM_MoveSimulator(const BspFile &bsp, int headnode, const std::
 	, m_headnode(headnode)
 	, m_blockers(blockers)
 	, m_params(params)
-	, m_physics(physics)
 {
+	m_pmPhysics.maxSpeed = physics.maxSpeed;
+	m_pmPhysics.gravity = physics.gravity;
+	m_pmPhysics.airAccelerate = physics.airAccelerate;
+	m_pmPhysics.friction = physics.friction;
+	m_pmPhysics.frameTime = params.frameTime;
+
 	const dmodel_t &world = bsp.Models()[0];
 	m_worldMins = Vec3(world.mins[0] - kWorldBoundsSlop, world.mins[1] - kWorldBoundsSlop,
 		world.mins[2] - kWorldBoundsSlop);
@@ -229,158 +195,27 @@ TraceResult PM_MoveSimulator::Trace(const Vec3 &start, const Vec3 &end) const
 	return TraceHullWithEntities(m_bsp, m_headnode, m_blockers, start, end);
 }
 
-void PM_MoveSimulator::AddCorrectGravity(float *velocity) const
+PmSim::PmTraceFn PM_MoveSimulator::TraceFn() const
 {
-	velocity[2] -= m_physics.gravity * 0.5f * m_params.frameTime;
-}
+	const BspFile *bsp = &m_bsp;
+	int headnode = m_headnode;
+	const std::vector<BlockingVolume> *blockers = &m_blockers;
 
-void PM_MoveSimulator::FixupGravityVelocity(float *velocity) const
-{
-	velocity[2] -= m_physics.gravity * 0.5f * m_params.frameTime;
-}
-
-void PM_MoveSimulator::PreventMegaBunnyJumping(float *velocity) const
-{
-	float maxScaledSpeed = kBunnyJumpMaxSpeedFactor * m_physics.maxSpeed;
-	if (maxScaledSpeed <= 0.0f)
-		return;
-
-	float spd = std::sqrt(DotProduct(velocity, velocity));
-	if (spd <= maxScaledSpeed)
-		return;
-
-	float fraction = (maxScaledSpeed / spd) * 0.65f;
-	velocity[0] *= fraction;
-	velocity[1] *= fraction;
-	velocity[2] *= fraction;
-}
-
-void PM_MoveSimulator::AirAccelerate(const float *wishdir, float wishspeed, float *velocity) const
-{
-	float wishspd = wishspeed;
-	if (wishspd > kAirAccelWishSpeedCap)
-		wishspd = kAirAccelWishSpeedCap;
-
-	float currentspeed = DotProduct(velocity, wishdir);
-	float addspeed = wishspd - currentspeed;
-	if (addspeed <= 0.0f)
-		return;
-
-	float accelspeed = m_physics.airAccelerate * wishspeed * m_params.frameTime * m_physics.friction;
-	if (accelspeed > addspeed)
-		accelspeed = addspeed;
-
-	velocity[0] += accelspeed * wishdir[0];
-	velocity[1] += accelspeed * wishdir[1];
-	velocity[2] += accelspeed * wishdir[2];
-}
-
-int PM_MoveSimulator::FlyMove(float *origin, float *velocity, float dt) const
-{
-	int numplanes = 0;
-	float planes[kMaxClipPlanes][3] = {{0}};
-	float original_velocity[3], new_velocity[3];
-	float end[3];
-	float time_left = dt;
-	int blocked = 0;
-
-	VectorCopy(velocity, original_velocity);
-
-	for (int bumpcount = 0; bumpcount < 4; ++bumpcount)
+	return [bsp, headnode, blockers](const Vector &start, const Vector &end)
 	{
-		if (velocity[0] == 0.0f && velocity[1] == 0.0f && velocity[2] == 0.0f)
-			break;
+		TraceResult tr = TraceHullWithEntities(*bsp, headnode, *blockers,
+			Vec3(start.x, start.y, start.z), Vec3(end.x, end.y, end.z));
 
-		for (int i = 0; i < 3; ++i)
-			end[i] = origin[i] + time_left * velocity[i];
-
-		TraceResult trace = Trace(Vec3(origin[0], origin[1], origin[2]), Vec3(end[0], end[1], end[2]));
-
-		if (trace.allsolid)
-		{
-			velocity[0] = velocity[1] = velocity[2] = 0.0f;
-			return 4;
-		}
-
-		if (trace.fraction > 0.0f)
-		{
-			origin[0] = static_cast<float>(trace.endpos.x);
-			origin[1] = static_cast<float>(trace.endpos.y);
-			origin[2] = static_cast<float>(trace.endpos.z);
-			VectorCopy(velocity, original_velocity);
-			numplanes = 0;
-		}
-
-		if (trace.fraction == 1.0f)
-			break;
-
-		if (trace.planeNormal.z > kGroundNormalZ)
-			blocked |= 1;
-		if (trace.planeNormal.z == 0.0)
-			blocked |= 2;
-
-		time_left -= time_left * trace.fraction;
-
-		if (numplanes >= kMaxClipPlanes)
-		{
-			velocity[0] = velocity[1] = velocity[2] = 0.0f;
-			break;
-		}
-
-		planes[numplanes][0] = static_cast<float>(trace.planeNormal.x);
-		planes[numplanes][1] = static_cast<float>(trace.planeNormal.y);
-		planes[numplanes][2] = static_cast<float>(trace.planeNormal.z);
-		numplanes++;
-
-		int i;
-		for (i = 0; i < numplanes; ++i)
-		{
-			float backoff = DotProduct(original_velocity, planes[i]);
-			if (backoff < 0.0f)
-			{
-				for (int j = 0; j < 3; ++j)
-					new_velocity[j] = original_velocity[j] - backoff * planes[i][j];
-			}
-			else
-			{
-				for (int j = 0; j < 3; ++j)
-					new_velocity[j] = original_velocity[j];
-			}
-
-			int k;
-			for (k = 0; k < numplanes; ++k)
-			{
-				if (k != i && DotProduct(new_velocity, planes[k]) < 0.0f)
-					break;
-			}
-
-			if (k == numplanes)
-			{
-				VectorCopy(new_velocity, velocity);
-				VectorCopy(new_velocity, original_velocity);
-				break;
-			}
-		}
-
-		if (i != numplanes)
-		{
-			if (numplanes == 2)
-			{
-				float dir[3];
-				CrossProduct(planes[0], planes[1], dir);
-				float d = DotProduct(dir, velocity);
-				for (int k = 0; k < 3; ++k)
-					velocity[k] = dir[k] * d;
-			}
-			else
-			{
-				velocity[0] = velocity[1] = velocity[2] = 0.0f;
-				break;
-			}
-		}
-	}
-
-	return blocked;
+		PmSim::PmTrace out;
+		out.endpos = Vector(static_cast<float>(tr.endpos.x), static_cast<float>(tr.endpos.y),
+			static_cast<float>(tr.endpos.z));
+		out.planeNormal = Vector(static_cast<float>(tr.planeNormal.x), static_cast<float>(tr.planeNormal.y),
+			static_cast<float>(tr.planeNormal.z));
+		out.fraction = tr.fraction;
+		out.allsolid = tr.allsolid;
+		out.startsolid = tr.startsolid;
+		return out;
+	};
 }
 
 bool PM_MoveSimulator::IsSupported(const Vec3 &origin) const
@@ -421,21 +256,6 @@ bool PM_MoveSimulator::GroundAhead(const Vec3 &origin, const Vec3 &dir) const
 	return trace.fraction < 1.0f && trace.planeNormal.z >= kGroundNormalZ;
 }
 
-bool PM_MoveSimulator::CatagorizePosition(const float *origin, const float *velocity) const
-{
-	if (velocity[2] > kMaxOnGroundVelocityZ)
-		return false;
-
-	Vec3 start(origin[0], origin[1], origin[2]);
-	Vec3 end(origin[0], origin[1], origin[2] - kGroundTraceDist);
-	TraceResult trace = Trace(start, end);
-
-	if (trace.fraction >= 1.0f)
-		return false;
-
-	return trace.planeNormal.z >= kGroundNormalZ;
-}
-
 AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDegrees, float commandedSpeed,
 	bool jump, const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust) const
 {
@@ -446,56 +266,20 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 	result.jumped = jump;
 	landingArea = -1;
 
-	float yawRad = static_cast<float>(yawDegrees * kPi / 180.0);
-	float forward[3] = { std::cos(yawRad), std::sin(yawRad), 0.0f };
+	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics);
+	sim.Begin(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
+		static_cast<float>(launchPos.z)), yawDegrees, commandedSpeed, jump);
 
-	float pos[3] = { static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
-		static_cast<float>(launchPos.z) };
-	float vel[3] = { forward[0] * commandedSpeed, forward[1] * commandedSpeed, 0.0f };
-
-	bool onGround = true;
-	bool jumpPending = jump;
-	float fallVelocity = 0.0f;
-	float totalTime = 0.0f;
-
-	while (totalTime < m_params.maxSimulationTime)
+	while (sim.Time() < m_params.maxSimulationTime)
 	{
-		if (!onGround)
-			fallVelocity = -vel[2];
-
-		AddCorrectGravity(vel);
-
-		if (jumpPending && onGround)
-		{
-			PreventMegaBunnyJumping(vel);
-			vel[2] = kJumpImpulse;
-			FixupGravityVelocity(vel);
-			jumpPending = false;
-			onGround = false;
-		}
-
-		float wishvel[3] = { forward[0] * commandedSpeed, forward[1] * commandedSpeed, 0.0f };
-		float wishdir[3] = { wishvel[0], wishvel[1], wishvel[2] };
-		float wishspeed = VectorNormalize(wishdir);
-		if (wishspeed > m_physics.maxSpeed)
-			wishspeed = m_physics.maxSpeed;
-
-		AirAccelerate(wishdir, wishspeed, vel);
-
-		if (FlyMove(pos, vel, m_params.frameTime) == 4)
+		if (!sim.Step())
 			return result;
 
-		onGround = CatagorizePosition(pos, vel);
+		const Vector &pos = sim.Origin();
 
-		FixupGravityVelocity(vel);
-
-		totalTime += m_params.frameTime;
-
-		if (onGround)
+		if (sim.OnGround())
 		{
-			vel[2] = 0.0f;
-
-			Vec3 landing(pos[0], pos[1], pos[2] + navZAdjust);
+			Vec3 landing(pos.x, pos.y, pos.z + navZAdjust);
 			int area = FindAreaStrict(landing, areas);
 
 			if (area != sourceArea)
@@ -504,22 +288,23 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 					return result;
 
 				result.landingPos = landing;
-				result.flightTime = totalTime;
+				result.flightTime = sim.Time();
 				result.landed = true;
-				if (fallVelocity > kPlayerMaxSafeFallSpeed)
-					result.fallDamage = (fallVelocity - kPlayerMaxSafeFallSpeed) * kDamageForFallSpeed;
+				result.fallDamage = PmSim::FallDamageFor(sim.FallSpeed());
 				landingArea = area;
 				return result;
 			}
 
-			if (totalTime > m_params.groundGraceTime)
+			if (sim.Time() > m_params.groundGraceTime)
 				return result;
 
-			fallVelocity = 0.0f;
+			// Touching down inside the source area is a scuff on the way out, not a landing --
+			// the next fall is measured from here.
+			sim.ResetFallSpeed();
 		}
 
-		if (pos[0] < m_worldMins.x || pos[1] < m_worldMins.y || pos[2] < m_worldMins.z ||
-			pos[0] > m_worldMaxs.x || pos[1] > m_worldMaxs.y || pos[2] > m_worldMaxs.z)
+		if (pos.x < m_worldMins.x || pos.y < m_worldMins.y || pos.z < m_worldMins.z ||
+			pos.x > m_worldMaxs.x || pos.y > m_worldMaxs.y || pos.z > m_worldMaxs.z)
 			return result;
 	}
 
@@ -691,6 +476,8 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
 			if (traj.duckHull)
 				conn.connFlags |= crossbot_nav::CONN_FLAG_NEEDS_CROUCH;
+			if (traj.jumped)
+				conn.connFlags |= crossbot_nav::CONN_FLAG_JUMP;
 			conn.exitSpeed = traj.exitSpeed;
 			conn.exitAngle = traj.exitYaw;
 			conn.jumpBackDist = traj.jumpBackDist;
@@ -734,13 +521,19 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			conn.pointB = drop.launchPos;
 			conn.area = 0.0;
 			conn.connType = crossbot_nav::CONN_AIRMOVE;
-			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
+			// Climbing back up what was dropped down is a jump by definition, whatever the drop was.
+			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY | crossbot_nav::CONN_FLAG_JUMP;
 			if (needsCrouch)
 				conn.connFlags |= crossbot_nav::CONN_FLAG_NEEDS_CROUCH;
 			conn.exitSpeed = drop.exitSpeed;
 			conn.exitAngle = (drop.exitYaw >= 180.0f) ? drop.exitYaw - 180.0f : drop.exitYaw + 180.0f;
-			// Inferred rather than simulated, so there is no sampled run-up and no fall to take
-			// damage from.
+
+			// Standing where the drop came down, the lip to clear is where the drop left from, so
+			// the jump is initiated exactly that far back from it.
+			Vec3 back = drop.launchPos - drop.landingPos;
+			conn.jumpBackDist = std::sqrt(back.x * back.x + back.y * back.y);
+
+			// Climbing, not falling, so there is nothing to take fall damage from.
 			conn.fallDamage = 0.0;
 			conn.flightTime = drop.flightTime;
 			conns.push_back(conn);

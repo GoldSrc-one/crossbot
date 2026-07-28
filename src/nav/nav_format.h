@@ -31,6 +31,10 @@ enum ConnFlags : uint8_t
 	CONN_FLAG_NONE         = 0,
 	CONN_FLAG_ONE_WAY      = 1u << 0,
 	CONN_FLAG_NEEDS_CROUCH = 1u << 1,
+	// The air move leaves the ground under jump impulse rather than by walking off. Not derivable
+	// from jumpBackDist: a reverse jump inferred from a drop carries no run-up, and a sampled jump
+	// may have drawn one close to zero.
+	CONN_FLAG_JUMP         = 1u << 2,
 
 };
 

@@ -66,6 +66,48 @@ size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<M
 	return removed;
 }
 
+size_t SnapConnectionsToFloor(const std::vector<Area> &areas, std::vector<MergedConnection> &conns)
+{
+	size_t snapped = 0;
+
+	auto snap = [&](Vec3 &p, int areaId)
+	{
+		if (static_cast<size_t>(areaId) >= areas.size())
+			return false;
+		const Face *floor = FloorFaceUnder(areas[static_cast<size_t>(areaId)].polytope, p.x, p.y);
+		if (!floor)
+			return false;
+		p.z = FloorHeightAt(*floor, p.x, p.y);
+		return true;
+	};
+
+	for (MergedConnection &c : conns)
+	{
+		bool ok = false;
+
+		if (c.connType == crossbot_nav::CONN_WALK)
+		{
+			// Both endpoints are corners of the one shared face, so they take their height from
+			// the same area -- resolving each against its own side would tilt the gate by the
+			// step between the two floors for no geometric reason.
+			ok = snap(c.pointA, c.areaA);
+			ok = snap(c.pointB, c.areaA) || ok;
+		}
+		else
+		{
+			// Only the launch: the landing is where the simulation actually put the player down,
+			// and re-deriving it from the destination area would move it whenever the landing
+			// grazes an area boundary.
+			ok = snap(c.pointA, c.areaA);
+		}
+
+		if (ok)
+			++snapped;
+	}
+
+	return snapped;
+}
+
 namespace
 {
 
