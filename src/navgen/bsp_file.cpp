@@ -87,24 +87,5 @@ uint32_t BspFile::Checksum() const
 		m_models.data(), m_models.size() * sizeof(dmodel_t));
 }
 
-uint32_t BspChecksumLumps(const void *planes, size_t planesBytes,
-	const void *clipnodes, size_t clipnodesBytes,
-	const void *models, size_t modelsBytes)
-{
-	std::vector<unsigned char> buf;
-	buf.reserve(planesBytes + clipnodesBytes + modelsBytes);
-
-	auto append = [&](const void *data, size_t bytes)
-	{
-		const unsigned char *p = static_cast<const unsigned char *>(data);
-		buf.insert(buf.end(), p, p + bytes);
-	};
-	append(planes, planesBytes);
-	append(clipnodes, clipnodesBytes);
-	append(models, modelsBytes);
-
-	return Crc32(buf.data(), buf.size());
-}
-
 }
 

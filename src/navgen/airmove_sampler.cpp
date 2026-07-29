@@ -35,6 +35,144 @@ struct LaunchEdge
 	double length = 0.0;
 };
 
+struct AirmoveSample
+{
+	Vec3 launchPos;
+	Vec3 landingPos;
+	LaunchEdge edge;
+	float yaw = 0.f;
+	float speed = 0.f;
+};
+
+struct GatePoint
+{
+	Vec3 pos;
+	float yaw = 0.f;
+	float speed = 0.f;
+};
+
+struct SampleGate
+{
+	Vec3 left, right;
+	float yaw[2] = {0.f, 0.f};
+	float speed[2] = {0.f, 0.f};
+	bool valid = false;
+};
+
+struct BinEntry
+{
+	AirmoveTrajectory best;
+	LaunchEdge bestEdge;
+	std::vector<AirmoveSample> samples;
+};
+
+bool SameLaunchEdge(const LaunchEdge &a, const LaunchEdge &b)
+{
+	double dot = a.outward.x * b.outward.x + a.outward.y * b.outward.y;
+	if (dot < 0.999)
+		return false;
+
+	double da = a.outward.x * a.a.x + a.outward.y * a.a.y;
+	double db = b.outward.x * b.a.x + b.outward.y * b.a.y;
+	return std::fabs(da - db) < 0.1;
+}
+
+// A gate straight off the samples that proved the move: it runs across `normal`, as wide as the
+// points spread, and sits at their mean depth along `normal`. Nothing is guessed from geometry, so
+// nothing needs a clearance inset -- every one of these points was traced with the real hull. The
+// extreme samples hand over their own yaw and speed, since one pair does not fly from every point
+// on the span.
+SampleGate GateAcross(const std::vector<GatePoint> &points, const Vec3 &normal)
+{
+	SampleGate gate;
+	if (points.empty())
+		return gate;
+
+	Vec3 along(-normal.y, normal.x, 0.0);
+
+	double lo = 1e30, hi = -1e30, depthSum = 0.0;
+	size_t loIdx = 0, hiIdx = 0;
+
+	for (size_t i = 0; i < points.size(); ++i)
+	{
+		const Vec3 &p = points[i].pos;
+		double s = p.x * along.x + p.y * along.y;
+		if (s < lo)
+		{
+			lo = s;
+			loIdx = i;
+		}
+		if (s > hi)
+		{
+			hi = s;
+			hiIdx = i;
+		}
+		depthSum += p.x * normal.x + p.y * normal.y;
+	}
+
+	Vec3 base = normal * (depthSum / static_cast<double>(points.size()));
+
+	gate.left = Vec3(base.x + along.x * lo, base.y + along.y * lo, points[loIdx].pos.z);
+	gate.right = Vec3(base.x + along.x * hi, base.y + along.y * hi, points[hiIdx].pos.z);
+	gate.yaw[0] = points[loIdx].yaw;
+	gate.yaw[1] = points[hiIdx].yaw;
+	gate.speed[0] = points[loIdx].speed;
+	gate.speed[1] = points[hiIdx].speed;
+	gate.valid = true;
+	return gate;
+}
+
+// Exit gate: the launch points, across the edge they left from. Entry gate: the landing points,
+// across the mean flight direction -- an arrival window rather than anything tied to a wall, since
+// a landing cloud sits wherever it sits inside the destination area.
+void BuildSampledGates(const BinEntry &entry, MergedConnection &conn)
+{
+	std::vector<GatePoint> launches, landings;
+	Vec3 flightSum(0.0, 0.0, 0.0);
+
+	for (const AirmoveSample &s : entry.samples)
+	{
+		if (!SameLaunchEdge(s.edge, entry.bestEdge))
+			continue;
+
+		launches.push_back({s.launchPos, s.yaw, s.speed});
+		landings.push_back({s.landingPos, s.yaw, s.speed});
+
+		Vec3 flight = s.landingPos - s.launchPos;
+		flight.z = 0.0;
+		double len = std::sqrt(flight.x * flight.x + flight.y * flight.y);
+		if (len > 1e-6)
+			flightSum = flightSum + flight * (1.0 / len);
+	}
+
+	if (launches.empty())
+		return;
+
+	SampleGate exitGate = GateAcross(launches, entry.bestEdge.outward * -1.0);
+	if (exitGate.valid)
+	{
+		conn.gateAValid = true;
+		conn.gateALeft = exitGate.left;
+		conn.gateARight = exitGate.right;
+		conn.gateAYaw[0] = exitGate.yaw[0];
+		conn.gateAYaw[1] = exitGate.yaw[1];
+		conn.gateASpeed[0] = exitGate.speed[0];
+		conn.gateASpeed[1] = exitGate.speed[1];
+	}
+
+	double flightLen = std::sqrt(flightSum.x * flightSum.x + flightSum.y * flightSum.y);
+	if (flightLen < 1e-6)
+		return;
+
+	SampleGate entryGate = GateAcross(landings, flightSum * (1.0 / flightLen));
+	if (entryGate.valid)
+	{
+		conn.gateBValid = true;
+		conn.gateBLeft = entryGate.left;
+		conn.gateBRight = entryGate.right;
+	}
+}
+
 std::vector<LaunchEdge> CollectPerimeterEdges(const Area &area)
 {
 	std::vector<LaunchEdge> edges;
@@ -360,7 +498,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	std::mt19937 rng(params.seed);
 	std::uniform_real_distribution<float> unit(0.0f, 1.0f);
 
-	std::map<long long, AirmoveTrajectory> bins[kBinCount];
+	std::map<long long, BinEntry> bins[kBinCount];
 	size_t simulated = 0;
 	std::unordered_set<int> sourceAreas;
 
@@ -421,12 +559,21 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 					if (existingPairs.count(key))
 						continue;
 
-					std::map<long long, AirmoveTrajectory> &bin = bins[BinFor(mode.duckHull, jump)];
-					auto it = bin.find(key);
-					if (it == bin.end())
-						bin.emplace(key, traj);
-					else if (BetterTrajectory(traj, it->second))
-						it->second = traj;
+					std::map<long long, BinEntry> &bin = bins[BinFor(mode.duckHull, jump)];
+					BinEntry &entry = bin[key];
+					if (entry.samples.empty() || BetterTrajectory(traj, entry.best))
+					{
+						entry.best = traj;
+						entry.bestEdge = edge;
+					}
+
+					AirmoveSample sample;
+					sample.launchPos = traj.launchPos;
+					sample.landingPos = traj.landingPos;
+					sample.edge = edge;
+					sample.yaw = traj.exitYaw;
+					sample.speed = traj.exitSpeed;
+					entry.samples.push_back(sample);
 
 					sourceAreas.insert(area.id);
 				}
@@ -463,7 +610,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			if (emitted.count(entry.first))
 				continue;
 
-			const AirmoveTrajectory &traj = entry.second;
+			const AirmoveTrajectory &traj = entry.second.best;
 			emitted.emplace(entry.first, traj.duckHull);
 
 			MergedConnection conn;
@@ -471,6 +618,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			conn.areaB = static_cast<int>(entry.first % 1000000LL);
 			conn.pointA = traj.launchPos;
 			conn.pointB = traj.landingPos;
+			BuildSampledGates(entry.second, conn);
 			conn.area = 0.0;
 			conn.connType = crossbot_nav::CONN_AIRMOVE;
 			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
@@ -501,7 +649,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		{
 			int from = static_cast<int>(entry.first / 1000000LL);
 			int to = static_cast<int>(entry.first % 1000000LL);
-			const AirmoveTrajectory &drop = entry.second;
+			const AirmoveTrajectory &drop = entry.second.best;
 
 			double rise = drop.launchPos.z - drop.landingPos.z;
 			if (rise <= 0.0 || rise > params.maxJumpHeight)
@@ -519,6 +667,23 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			conn.areaB = from;
 			conn.pointA = drop.landingPos;
 			conn.pointB = drop.launchPos;
+
+			// Climbing back up the way the drop came down: the drop's landing spread is where this
+			// jump starts, and its launch spread is where it arrives.
+			MergedConnection dropConn;
+			dropConn.areaA = from;
+			dropConn.areaB = to;
+			dropConn.pointA = drop.launchPos;
+			dropConn.pointB = drop.landingPos;
+			BuildSampledGates(entry.second, dropConn);
+
+			conn.gateAValid = dropConn.gateBValid;
+			conn.gateALeft = dropConn.gateBLeft;
+			conn.gateARight = dropConn.gateBRight;
+			conn.gateBValid = dropConn.gateAValid;
+			conn.gateBLeft = dropConn.gateALeft;
+			conn.gateBRight = dropConn.gateARight;
+
 			conn.area = 0.0;
 			conn.connType = crossbot_nav::CONN_AIRMOVE;
 			// Climbing back up what was dropped down is a jump by definition, whatever the drop was.
@@ -527,6 +692,11 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 				conn.connFlags |= crossbot_nav::CONN_FLAG_NEEDS_CROUCH;
 			conn.exitSpeed = drop.exitSpeed;
 			conn.exitAngle = (drop.exitYaw >= 180.0f) ? drop.exitYaw - 180.0f : drop.exitYaw + 180.0f;
+
+			// No samples exist for the climb itself, so both ends of its gate carry the one
+			// reversed set of parameters the drop implies.
+			conn.gateAYaw[0] = conn.gateAYaw[1] = static_cast<float>(conn.exitAngle);
+			conn.gateASpeed[0] = conn.gateASpeed[1] = static_cast<float>(conn.exitSpeed);
 
 			// Standing where the drop came down, the lip to clear is where the drop left from, so
 			// the jump is initiated exactly that far back from it.

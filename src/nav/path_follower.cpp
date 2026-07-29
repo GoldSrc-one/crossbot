@@ -1,4 +1,4 @@
-﻿#include "path_follower.h"
+#include "path_follower.h"
 
 #include <cmath>
 
@@ -8,27 +8,25 @@ namespace NavFollow
 namespace
 {
 
-constexpr float kPi = 3.14159265f;
-
-float NormalizeAngle(float a)
-{
-	while (a > 180.f)
-		a -= 360.f;
-	while (a < -180.f)
-		a += 360.f;
-	return a;
-}
-
 float HorizDist(const Vector &a, const Vector &b)
 {
 	float dx = b.x - a.x, dy = b.y - a.y;
 	return std::sqrt(dx * dx + dy * dy);
 }
 
+// Unit length in the xy plane, zero if the input has no horizontal extent.
+Vector Norm2D(const Vector &v)
+{
+	float len = std::sqrt(v.x * v.x + v.y * v.y);
+	if (len < 0.0001f)
+		return Vector(0.f, 0.f, 0.f);
+	return Vector(v.x / len, v.y / len, 0.f);
+}
+
 }
 
 Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpIndex, const Vector &pos,
-	const Config &cfg)
+	float speed, const Config &cfg)
 {
 	Decision d;
 	if (wpIndex >= waypoints.size())
@@ -79,119 +77,35 @@ Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpInd
 			d.aimPoint = segStart + seg * tAhead;
 		}
 	}
+
+	// Pre-steer into the corner. A mover at speed cannot turn on the spot -- HL ground accel needs
+	// a couple of tenths to redirect 250 u/s -- so holding the aim on the corner until it is
+	// reached carries it wide into whatever is on the far side. Instead start bending toward the
+	// outgoing segment while still short of the corner.
+	//
+	// The aim never leaves a disc of cornerCut around the corner, so the turn bites at most that
+	// far into the inside of it -- which is the clearance the planner reserved when it pushed the
+	// waypoint off the wall. An air-move launch has to be hit squarely, so it is left alone.
+	if (!isFinal && !wp.airmoveLaunch)
+	{
+		float cut = cfg.cornerCut * (speed / cfg.runSpeed);
+		if (cut > cfg.cornerCut)
+			cut = cfg.cornerCut;
+
+		if (cut > 0.1f && horizDist < cut + cfg.cornerRadius)
+		{
+			Vector outDir = Norm2D(waypoints[wpIndex + 1].point - wp.point);
+			if (outDir.x != 0.f || outDir.y != 0.f)
+			{
+				float blend = (cut + cfg.cornerRadius - horizDist) / cut;
+				if (blend > 1.f)
+					blend = 1.f;
+				d.aimPoint = wp.point + outDir * (cut * blend);
+			}
+		}
+	}
+
 	return d;
-}
-
-float ScaleSpeedByHeadingError(float baseSpeed, float headingErrorDeg, const Config &cfg)
-{
-	if (headingErrorDeg > cfg.turnInPlaceErrorDeg)
-		return 0.f;
-	if (headingErrorDeg > cfg.turnSlowdownErrorDeg)
-		return baseSpeed * cfg.turnSlowdownFactor;
-	return baseSpeed;
-}
-
-SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Vector &start, float dt,
-	float maxTime, const Config &cfg)
-{
-
-	constexpr float kFriction = 4.f;
-	constexpr float kAccelerate = 10.f;
-	constexpr float kStopSpeed = 100.f;
-
-	SimResult result;
-	if (waypoints.empty())
-		return result;
-
-	Vector pos = start;
-	float velX = 0.f, velY = 0.f;
-	float yaw = 0.f;
-	{
-
-		size_t aimIdx = (waypoints.size() > 1) ? 1 : 0;
-		yaw = std::atan2(waypoints[aimIdx].point.y - pos.y, waypoints[aimIdx].point.x - pos.x) * (180.f / kPi);
-	}
-	size_t wpIndex = 0;
-
-	int maxTicks = static_cast<int>(maxTime / dt);
-	result.points.push_back(pos);
-
-	for (int tick = 0; tick < maxTicks; ++tick)
-	{
-
-		Decision d = Steer(waypoints, wpIndex, pos, cfg);
-		while (d.advance)
-		{
-			++wpIndex;
-			if (wpIndex >= waypoints.size())
-			{
-				result.finished = true;
-				return result;
-			}
-			d = Steer(waypoints, wpIndex, pos, cfg);
-		}
-
-		float desiredYaw = std::atan2(d.aimPoint.y - pos.y, d.aimPoint.x - pos.x) * (180.f / kPi);
-		float yawDelta = NormalizeAngle(desiredYaw - yaw);
-		float maxStep = cfg.turnRateDegPerSec * dt;
-		float yawStep = (yawDelta > maxStep) ? maxStep : (yawDelta < -maxStep ? -maxStep : yawDelta);
-		yaw = NormalizeAngle(yaw + yawStep);
-
-		float headingError = std::fabs(NormalizeAngle(desiredYaw - yaw));
-		float wishSpeed = ScaleSpeedByHeadingError(d.baseSpeed, headingError, cfg);
-
-		float speed = std::sqrt(velX * velX + velY * velY);
-		if (speed > 0.1f)
-		{
-			float control = (speed < kStopSpeed) ? kStopSpeed : speed;
-			float newSpeed = speed - control * kFriction * dt;
-			if (newSpeed < 0.f)
-				newSpeed = 0.f;
-			float scale = newSpeed / speed;
-			velX *= scale;
-			velY *= scale;
-		}
-
-		if (wishSpeed > 0.f)
-		{
-			float yawRad = yaw * (kPi / 180.f);
-			float wishX = std::cos(yawRad), wishY = std::sin(yawRad);
-			float currentSpeed = velX * wishX + velY * wishY;
-			float addSpeed = wishSpeed - currentSpeed;
-			if (addSpeed > 0.f)
-			{
-				float accelSpeed = kAccelerate * dt * wishSpeed;
-				if (accelSpeed > addSpeed)
-					accelSpeed = addSpeed;
-				velX += accelSpeed * wishX;
-				velY += accelSpeed * wishY;
-			}
-		}
-
-		pos.x += velX * dt;
-		pos.y += velY * dt;
-
-		if (wpIndex > 0)
-		{
-			const Vector &segStart = waypoints[wpIndex - 1].point;
-			const Vector &segEnd = waypoints[wpIndex].point;
-			Vector seg = segEnd - segStart;
-			float segLen2DSq = seg.x * seg.x + seg.y * seg.y;
-			if (segLen2DSq > 1.f)
-			{
-				float t = ((pos.x - segStart.x) * seg.x + (pos.y - segStart.y) * seg.y) / segLen2DSq;
-				if (t < 0.f)
-					t = 0.f;
-				if (t > 1.f)
-					t = 1.f;
-				pos.z = segStart.z + seg.z * t;
-			}
-		}
-
-		result.points.push_back(pos);
-	}
-
-	return result;
 }
 
 }

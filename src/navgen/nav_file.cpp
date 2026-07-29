@@ -119,14 +119,29 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		NavConnectionRecord &rec = connRecords[i];
 		rec.areaA = static_cast<uint32_t>(c.areaA);
 		rec.areaB = static_cast<uint32_t>(c.areaB);
-		rec.pointA[0] = static_cast<float>(c.pointA.x);
-		rec.pointA[1] = static_cast<float>(c.pointA.y);
-		rec.pointA[2] = static_cast<float>(c.pointA.z);
-		rec.pointB[0] = static_cast<float>(c.pointB.x);
-		rec.pointB[1] = static_cast<float>(c.pointB.y);
-		rec.pointB[2] = static_cast<float>(c.pointB.z);
 		rec.connType = c.connType;
 		rec.connFlags = c.connFlags;
+		rec.gateValid = static_cast<uint8_t>((c.gateAValid ? GATE_VALID_A : 0) |
+			(c.gateBValid ? GATE_VALID_B : 0) | (c.gateAClamped ? GATE_CLAMPED_A : 0) |
+			(c.gateBClamped ? GATE_CLAMPED_B : 0));
+		rec.pad = 0;
+
+		auto storeGate = [](float (&dst)[2][3], const Vec3 &left, const Vec3 &right)
+		{
+			dst[0][0] = static_cast<float>(left.x);
+			dst[0][1] = static_cast<float>(left.y);
+			dst[0][2] = static_cast<float>(left.z);
+			dst[1][0] = static_cast<float>(right.x);
+			dst[1][1] = static_cast<float>(right.y);
+			dst[1][2] = static_cast<float>(right.z);
+		};
+		storeGate(rec.gateA, c.gateALeft, c.gateARight);
+		storeGate(rec.gateB, c.gateBLeft, c.gateBRight);
+		for (int k = 0; k < 2; ++k)
+		{
+			rec.gateAYaw[k] = static_cast<float>(c.gateAYaw[k]);
+			rec.gateASpeed[k] = static_cast<float>(c.gateASpeed[k]);
+		}
 
 		rec.traverseCost = TraverseCostFor(c);
 
@@ -135,6 +150,12 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.jumpBackDist = static_cast<float>(c.jumpBackDist);
 		rec.fallDamage = static_cast<float>(c.fallDamage);
 		rec.flightTime = static_cast<float>(c.flightTime);
+		rec.launchPos[0] = static_cast<float>(c.pointA.x);
+		rec.launchPos[1] = static_cast<float>(c.pointA.y);
+		rec.launchPos[2] = static_cast<float>(c.pointA.z);
+		rec.landingPos[0] = static_cast<float>(c.pointB.x);
+		rec.landingPos[1] = static_cast<float>(c.pointB.y);
+		rec.landingPos[2] = static_cast<float>(c.pointB.z);
 	}
 
 	NavHeader header{};

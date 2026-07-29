@@ -7,7 +7,9 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 8;
+constexpr uint32_t kNavVersion = 9;
+
+constexpr uint8_t kNoAreaPlane = 0xFF;
 
 enum AreaFlags : uint32_t
 {
@@ -81,21 +83,43 @@ struct NavAreaPlane
 	float dist;
 };
 
+// gateA and gateB are the funnel gates on each side of the crossing, baked by navgen with the
+// player radius already applied: inset at both ends and pushed that far into the owning area. A
+// zero-length gate means the opening was too narrow to inset and the midpoint is the only way
+// through. gateValid says which sides carry one; a teleport carries neither.
 struct NavConnectionRecord
 {
 	uint32_t areaA;
 	uint32_t areaB;
-	float pointA[3];
-	float pointB[3];
 	uint8_t connType;
 	uint8_t connFlags;
+	uint8_t gateValid;
+	uint8_t pad;
 	float traverseCost;
+
+	float gateA[2][3];
+	float gateB[2][3];
+	// Launch parameters at gateA's two ends, to be interpolated across it: the samples that set
+	// each end flew with their own yaw and speed, and one pair does not serve the whole span.
+	float gateAYaw[2];
+	float gateASpeed[2];
 
 	float exitSpeed;
 	float exitAngle;
 	float jumpBackDist;
 	float fallDamage;
 	float flightTime;
+	float launchPos[3];
+	float landingPos[3];
+};
+
+enum GateValidFlags : uint8_t
+{
+	GATE_VALID_NONE = 0,
+	GATE_VALID_A    = 1u << 0,
+	GATE_VALID_B    = 1u << 1,
+	GATE_CLAMPED_A  = 1u << 2,
+	GATE_CLAMPED_B  = 1u << 3,
 };
 
 }

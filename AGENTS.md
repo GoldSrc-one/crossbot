@@ -15,7 +15,12 @@ CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh
 
 Just do `& .\build.bat`, you are in powershell, so just do that. No fucking bullshit with cmd /c or trying to build it yourself. Enough of that shit!
 
-`build.bat` calls vcvarsall and runs `cmake --build build --target navgen`.
+`build.bat` calls vcvarsall and runs `cmake --build build`, which builds **both** targets. Build
+them together — the plugin once sat broken for several commits because only `navgen` was built.
+
+It then copies `crossbot_mm.dll` into `hlds\valve\addons\crossbot\`, so `test_nav_goal.ps1` always
+runs the DLL that was just built rather than whatever was deployed last. The copy is skipped when
+`hlds\` is absent, and fails the build if the file is locked — that means a server is still up.
 
 ### Output
 - `navgen.exe` → `build\tools\navgen\navgen.exe`
@@ -33,6 +38,12 @@ cd d:\projects\trash\crossbot
 ```
 Areas are flat grey; areas flagged `NAV_AREA_CROUCH` get a light blue tint. Connections are white (walk), dashed red (air move) and green (teleport).
 
+Add `--trace <file>` to overlay a recorded bot trajectory — one `x y z` per line, exactly what the
+plugin's `crossbot_trace_path` writes — as a cyan polyline under the orange planned route. Where
+the bot tracked the plan the orange covers the cyan; any excursion shows as bare cyan. An empty or
+missing file draws nothing rather than failing, which is what `test_nav_goal.ps1` relies on when a
+run produces no trace.
+
 ### Prism areas
 
 `MergeAreas` merges leaves whose union is 3D-convex, and also leaves whose union is only a **vertical prism**: a
@@ -48,7 +59,7 @@ finished area would have swallowed anyway.
 see real treads. `Area::boundPlanes` is the convex region written to the `.nav` file: the polytope's own planes
 for a convex area, the footprint's vertical planes plus a z-slab for a prism. **Any point-in-area test must use
 `boundPlanes`** — a prism's raw face list is not a convex halfspace set, and intersecting it yields nothing.
-`--dump-areas` marks these areas `prism`, and `--validate-areas` judges every area by its exported region. Areas are drawn as the 2D convex hull of their vertices, which for a prism area is exactly its footprint.
+`--dump-areas` marks these areas `prism`. Areas are drawn as the 2D convex hull of their vertices, which for a prism area is exactly its footprint.
 
 The SVG overlays the A* route from the first spawn point to the `info_target` origin (falling back to the farthest area's centroid when there is no usable target) as a single orange polyline, with a green dot at the start and a red dot at the goal. The endpoints are the real entity origins, not the containing areas' centroids; the goal is clamped into its area's bounds the same way the runtime's `Repath` clamps it. The route is computed with the same `NavAStar::FindPath`, traverse costs and `NavPlan::BuildWaypointPlan` funnel the runtime uses, so it shows the string-pulled waypoints a bot would actually follow — straight across open areas, hugging corners through corridors — not the raw portal endpoints.
 
@@ -67,10 +78,24 @@ The z-slab check is what makes the two interchangeable for point lookup.
 Anything in navgen that asks "is this point in this area" must use `boundPlanes`, never `polytope.faces`: for a
 prism the faces include interior risers, and their halfspace intersection is empty.
 
-`--validate-areas` reports the prism count, plus any area that is non-convex, overlaps another, or contains an
-unclimbable internal floor step. All three must be zero.
-
 `--dump-planes <id>` prints the exported bound planes first, then the true face windings.
+
+### Debug output is always a command-line flag
+
+Never gate diagnostics behind environment variables. Every debug dump is a `--dump-*` flag on
+navgen, so a run is reproducible from its command line alone and shows up in `--help`.
+
+- `--dump-steps` — every walk connection the step filter drops. The filter samples the portal span
+  and keeps the connection if *any* point on it is walkable, so what is printed is the shallowest
+  crossing found: area pair, where it is, both floor heights, the step, and each chosen floor
+  face's normal z and 2D offset from the query point. A nonzero offset means `FloorFaceUnder` fell
+  back to its nearest face instead of finding a containing one.
+- `--dump-support` — every leaf fragment dropped as unsupported: floor centroid, floor normal,
+  total supported area over all of the fragment's floor faces, fragment volume.
+- `--dump-portals` — raw leaf-to-leaf portals with midpoints, before merging.
+- `--dump-path` — the waypoint plan: each waypoint's kind, position, area, flags and speed.
+- `--dump-airmove` — air-move launch derivation: why no funnel launch was found, and every
+  re-simulation miss with its launch, yaw, speed and where it actually landed.
 
 ### Batch generate SVGs for all maps
 ```powershell

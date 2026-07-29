@@ -31,9 +31,6 @@ private:
 	std::string m_entityText;
 };
 
-uint32_t BspChecksumLumps(const void *planes, size_t planesBytes,
-	const void *clipnodes, size_t clipnodesBytes,
-	const void *models, size_t modelsBytes);
 
 }
 

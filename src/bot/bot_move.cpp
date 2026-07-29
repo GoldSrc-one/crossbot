@@ -1,17 +1,12 @@
-﻿#include <extdll.h>
+#include <extdll.h>
 #include <meta_api.h>
-#include <in_buttons.h>
 
 #include "bot_move.h"
 #include "bot_move_nav.h"
-#include "../nav/nav.h"
 
 namespace
 {
 	constexpr float kPi = 3.14159265f;
-	constexpr float kMoveSpeed = 250.f;
-	constexpr float kDirChangeInterval = 3.f;
-	constexpr float kTraceDistance = 64.f;
 	constexpr float kMaxTurnRatePerSec = 300.f;
 
 	float NormalizeAngle(float a)
@@ -19,40 +14,6 @@ namespace
 		while (a > 180.f) a -= 360.f;
 		while (a < -180.f) a += 360.f;
 		return a;
-	}
-
-	Vector RandomDir()
-	{
-		float yaw = (rand() % 360) * (kPi / 180.f);
-		return Vector(cosf(yaw), sinf(yaw), 0.f);
-	}
-
-	void Bot_MoveWander(CBot &bot)
-	{
-		edict_t *pEdict = bot.pEdict;
-
-		if (bot.nextDirChangeTime <= gpGlobals->time)
-		{
-			bot.moveDir = RandomDir();
-			bot.nextDirChangeTime = gpGlobals->time + kDirChangeInterval;
-		}
-
-		Vector start = pEdict->v.origin;
-		Vector end = start + bot.moveDir * kTraceDistance;
-
-		TraceResult tr;
-		g_engfuncs.pfnTraceLine(start, end, ignore_monsters, pEdict, &tr);
-
-		if (tr.flFraction < 1.0f)
-		{
-			bot.moveDir = RandomDir();
-			bot.nextDirChangeTime = gpGlobals->time + kDirChangeInterval;
-		}
-
-		bot.desiredAngles = Vector(0.f, atan2f(bot.moveDir.y, bot.moveDir.x) * (180.f / kPi), 0.f);
-
-		Vector angles = Bot_UpdateFacing(bot);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
 	}
 }
 
@@ -89,11 +50,28 @@ Vector Bot_UpdateFacing(CBot &bot)
 	return smoothed;
 }
 
-void Bot_Move(CBot &bot)
+void Bot_DecomposeMove(float viewYawDeg, const Vector &worldDir, float driveLength, float &forwardMove,
+	float &sideMove)
 {
-	if (Nav::IsLoaded())
-		Bot_MoveNav(bot);
-	else
-		Bot_MoveWander(bot);
+	forwardMove = 0.f;
+	sideMove = 0.f;
+
+	float len = sqrtf(worldDir.x * worldDir.x + worldDir.y * worldDir.y);
+	if (len < 0.0001f)
+		return;
+
+	float nx = worldDir.x / len, ny = worldDir.y / len;
+
+	// PM_WalkMove and PM_AirMove both flatten forward/right and renormalize before use, so whatever
+	// pitch and roll the engine puts in pmove->angles drops out and the basis is just the yaw.
+	float yawRad = viewYawDeg * (kPi / 180.f);
+	float cy = cosf(yawRad), sy = sinf(yawRad);
+
+	forwardMove = (nx * cy + ny * sy) * driveLength;
+	sideMove = (nx * sy - ny * cy) * driveLength;
 }
 
+void Bot_Move(CBot &bot)
+{
+	Bot_MoveNav(bot);
+}

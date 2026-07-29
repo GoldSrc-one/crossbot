@@ -8,7 +8,7 @@
 namespace NavFunnel
 {
 
-struct PortalGate
+struct Gate
 {
 	Vector left, right;
 };
@@ -24,13 +24,13 @@ struct PulledPoint
 
 constexpr size_t kNoGate = static_cast<size_t>(-1);
 
-// Gates are the portal's true extent. Clearance is applied to the pulled corners instead of by
+// Gates are the connection's true extent. Clearance is applied to the pulled corners instead of by
 // shrinking gates, because shrinking assumes the obstacle lies along the gate span, which only
-// holds for some portal orientations.
-PortalGate MakeGate(const Vector &pointA, const Vector &pointB, const Vector &travelDir2D);
+// holds for some connection orientations.
+Gate MakeGate(const Vector &pointA, const Vector &pointB, const Vector &travelDir2D);
 
 std::vector<PulledPoint> StringPull(const Vector &start, const Vector &goal,
-	const std::vector<PortalGate> &gates);
+	const std::vector<Gate> &gates);
 
 }
 

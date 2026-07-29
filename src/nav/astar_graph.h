@@ -14,14 +14,14 @@ struct AreaNode
 	Vector centroid = Vector(0.f, 0.f, 0.f);
 };
 
-struct Conn
+struct Connection
 {
 	uint32_t areaA = 0, areaB = 0;
 
 	bool oneWay = false;
 	float traverseCost = 1.f;
-	Vector pointA = Vector(0.f, 0.f, 0.f);
-	Vector pointB = Vector(0.f, 0.f, 0.f);
+	// Where the path crosses from one area to the other, used to shape the traverse cost.
+	Vector crossing = Vector(0.f, 0.f, 0.f);
 };
 
 struct GraphResult
@@ -32,7 +32,7 @@ struct GraphResult
 };
 
 GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::vector<uint32_t>> &areaConnIndices,
-	const std::vector<Conn> &conns, uint32_t startArea, uint32_t goalArea);
+	const std::vector<Connection> &conns, uint32_t startArea, uint32_t goalArea);
 
 }
 

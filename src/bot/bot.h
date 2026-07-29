@@ -4,7 +4,7 @@
 
 #include <vector>
 
-#include "../nav/path_funnel.h"
+#include "../nav/nav_path.h"
 
 struct CBot
 {
@@ -12,18 +12,11 @@ struct CBot
 	edict_t *pEdict = nullptr;
 	char name[32] = {};
 
-		Vector moveDir = Vector(1.f, 0.f, 0.f);
-		float nextDirChangeTime = 0.f;
-
 		bool hasGoal = false;
 		Vector goalPoint;
 		std::vector<Nav::Waypoint> waypoints;
 		size_t waypointIndex = 0;
 		float nextRepathTime = 0.f;
-
-		float elevatorReadyTime = 0.f;
-
-		float doorWaitUntil = 0.f;
 
 		bool jumpAttempted = false;
 
@@ -49,5 +42,9 @@ struct CBot
 		float estimatedArrivalTime = 0.f;
 
 		Vector desiredAngles;
+
+		// Last forward/side pair handed to pfnRunPlayerMove, for crossbot_nav_status.
+		float moveForward = 0.f;
+		float moveSide = 0.f;
 };
 

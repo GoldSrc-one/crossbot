@@ -1,6 +1,5 @@
 ﻿#include <extdll.h>
 #include <meta_api.h>
-#include "ex_rehlds_api.h"
 
 meta_globals_t *gpMetaGlobals;
 gamedll_funcs_t *gpGamedllFuncs;
@@ -35,8 +34,8 @@ META_FUNCTIONS gMetaFunctionTable =
 	GetEntityAPI2_Post,
 	GetNewDLLFunctions,
 	GetNewDLLFunctions_Post,
-	GetEngineFunctions,
-	GetEngineFunctions_Post,
+	NULL,
+	NULL,
 };
 
 C_DLLEXPORT int Meta_Attach(PLUG_LOADTIME now, META_FUNCTIONS *pFunctionTable, meta_globals_t *pMGlobals, gamedll_funcs_t *pGamedllFuncs)
@@ -45,9 +44,6 @@ C_DLLEXPORT int Meta_Attach(PLUG_LOADTIME now, META_FUNCTIONS *pFunctionTable, m
 	gpGamedllFuncs = pGamedllFuncs;
 
 	g_engfuncs.pfnServerPrint("CrossBot: attached.\n");
-
-	if (meta_init_rehlds_api())
-		g_engfuncs.pfnServerPrint("ReHLDS API successfully initialized.\n");
 
 	memcpy(pFunctionTable, &gMetaFunctionTable, sizeof(META_FUNCTIONS));
 	return TRUE;

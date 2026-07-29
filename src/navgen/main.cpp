@@ -35,7 +35,7 @@ constexpr double kMapRadius = 8192.0;
 void PrintUsage(const char *argv0)
 {
 	std::fprintf(stderr,
-		"usage: %s <map.bsp> [--dump-leaves] [--dump-areas] [--dump-planes <id>] [--dump-obj <out.obj>] [--dump-svg <out.svg>] [--airmove-samples <n>] [--no-merge] [--no-prune] [-o <out.nav>]\n"
+		"usage: %s <map.bsp> [--dump-leaves] [--dump-areas] [--dump-planes <id>] [--dump-obj <out.obj>] [--dump-svg <out.svg>] [--trace <trace.txt>] [--airmove-samples <n>] [--no-merge] [--no-prune] [-o <out.nav>]\n"
 		"  --dump-leaves     print per-leaf (pre-merge) id/faces/volume/centroid stats\n"
 		"  --dump-areas      print per-area (post-merge) id/faces/volume/centroid/portal stats\n"
 		"  --dump-conns      print every final connection: type, flags, endpoints, air-move parameters\n"
@@ -43,13 +43,13 @@ void PrintUsage(const char *argv0)
 		"  --dump-obj <path> write the walkable floor of every area as an OBJ mesh (plus a sidecar\n"
 		"                    .mtl): crouch areas are coloured apart, the planned route is a ribbon\n"
 		"  --dump-svg <path> write a top-down SVG of the final area/portal graph, for offline inspection\n"
+		"  --trace <path>    overlay a recorded bot trajectory on the SVG: one \"x y z\" per line, as\n"
+		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
 		"                    edge gets 128 samples; 0.5 halves it; 0 disables air-move sampling)\n"
 		"  --no-floor-split  keep leaves whose floor is not solid (debug: pre-floor-support behaviour)\n"
 		"  --no-merge        skip MergeAreas (debug only): each BSP hull-3 leaf becomes its own area\n"
 		"  --no-prune        skip PruneUnreachableAreas (debug only): keep areas unreachable from any spawn\n"
-		"  --validate-areas  report any final area that is non-convex, overlaps another area, or holds\n"
-		"                    an internal floor step taller than a bot can climb\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
 		argv0);
 }
@@ -212,155 +212,30 @@ ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> 
 	return stats;
 }
 
-struct ExportRegion
+// A bot trajectory as the plugin's WriteTraceLog wrote it: one "x y z" per line. The test script
+// creates the file even when the run produced no trace, so an empty or absent one is not an error
+// -- it just means there is nothing to overlay.
+std::vector<navgen::Vec3> ReadTraceFile(const std::string &path)
 {
-	std::vector<navgen::Plane> planes;
-	std::vector<navgen::Vec3> verts;
-};
+	std::vector<navgen::Vec3> points;
 
-ExportRegion BuildExportRegion(const navgen::Area &area)
-{
-	ExportRegion region;
-	region.planes = area.boundPlanes;
-
-	navgen::Vec3 mn(1e30, 1e30, 1e30), mx(-1e30, -1e30, -1e30);
-	for (const navgen::Face &f : area.polytope.faces)
+	FILE *f = std::fopen(path.c_str(), "r");
+	if (!f)
 	{
-		for (const navgen::Vec3 &v : f.winding)
-		{
-			mn.z = std::min(mn.z, v.z);
-			mx.z = std::max(mx.z, v.z);
-		}
+		std::fprintf(stderr, "--trace: cannot open %s, drawing no trace\n", path.c_str());
+		return points;
 	}
 
-	for (const navgen::Face &f : area.polytope.faces)
+	char line[256];
+	while (std::fgets(line, sizeof(line), f))
 	{
-		for (const navgen::Vec3 &v : f.winding)
-		{
-			if (area.prism)
-			{
-				region.verts.push_back(navgen::Vec3(v.x, v.y, mn.z));
-				region.verts.push_back(navgen::Vec3(v.x, v.y, mx.z));
-			}
-			else
-			{
-				region.verts.push_back(v);
-			}
-		}
+		double x = 0, y = 0, z = 0;
+		if (std::sscanf(line, "%lf %lf %lf", &x, &y, &z) == 3)
+			points.push_back(navgen::Vec3(x, y, z));
 	}
 
-	return region;
-}
-
-double WorstConcavity(const ExportRegion &region)
-{
-	double worst = 0.0;
-	for (const navgen::Plane &p : region.planes)
-		for (const navgen::Vec3 &v : region.verts)
-			worst = std::max(worst, -(v.Dot(p.normal) - p.dist));
-	return worst;
-}
-
-bool SeparatedBy(const ExportRegion &a, const ExportRegion &b, double epsilon)
-{
-	for (const navgen::Plane &p : a.planes)
-	{
-		bool allOutside = true;
-		for (const navgen::Vec3 &v : b.verts)
-		{
-			if (v.Dot(p.normal) - p.dist > epsilon)
-			{
-				allOutside = false;
-				break;
-			}
-		}
-		if (allOutside)
-			return true;
-	}
-	return false;
-}
-
-double WorstInternalStep(const navgen::Area &area)
-{
-	const double kAdjacencyEpsilon = 0.5;
-
-	std::vector<const navgen::Face *> floors;
-	for (const navgen::Face &f : area.polytope.faces)
-		if (f.plane.normal.z > kFloorNormalZ && f.winding.size() >= 3)
-			floors.push_back(&f);
-
-	double worst = 0.0;
-	for (const navgen::Face *f : floors)
-	{
-		for (const navgen::Face *g : floors)
-		{
-			if (f == g)
-				continue;
-			for (const navgen::Vec3 &v : g->winding)
-			{
-				if (navgen::Distance2DToWinding(f->winding, v.x, v.y) > kAdjacencyEpsilon)
-					continue;
-				worst = std::max(worst, std::fabs(navgen::FloorHeightAt(*f, v.x, v.y) - v.z));
-			}
-		}
-	}
-	return worst;
-}
-
-void ValidateAreas(const std::vector<navgen::Area> &areas)
-{
-	const double kConcaveTolerance = 1.0;
-	const double kOverlapTolerance = 1.0;
-
-	std::vector<ExportRegion> regions;
-	regions.reserve(areas.size());
-	for (const navgen::Area &area : areas)
-		regions.push_back(BuildExportRegion(area));
-
-	size_t prismCount = 0;
-	size_t concaveCount = 0;
-	size_t steepCount = 0;
-	double worstStep = 0.0;
-	for (size_t i = 0; i < areas.size(); ++i)
-	{
-		if (areas[i].prism)
-			++prismCount;
-
-		double step = WorstInternalStep(areas[i]);
-		worstStep = std::max(worstStep, step);
-		if (step > navgen::kStepHeight + kConcaveTolerance)
-		{
-			++steepCount;
-			std::printf("  UNCLIMBABLE area %d: internal floor step of %.2f units\n", areas[i].id, step);
-		}
-
-		double worst = WorstConcavity(regions[i]);
-		if (worst > kConcaveTolerance)
-		{
-			++concaveCount;
-			std::printf("  NON-CONVEX area %d: %zu leaves, %zu planes, vertex %.2f units behind a bound plane\n",
-				areas[i].id, areas[i].memberLeafIds.size(), regions[i].planes.size(), worst);
-		}
-	}
-
-	size_t overlapCount = 0;
-	for (size_t i = 0; i < areas.size(); ++i)
-	{
-		for (size_t j = i + 1; j < areas.size(); ++j)
-		{
-			if (SeparatedBy(regions[i], regions[j], kOverlapTolerance))
-				continue;
-			if (SeparatedBy(regions[j], regions[i], kOverlapTolerance))
-				continue;
-			++overlapCount;
-			if (overlapCount <= 20)
-				std::printf("  OVERLAP area %d <-> area %d\n", areas[i].id, areas[j].id);
-		}
-	}
-
-	std::printf("validate: %zu areas (%zu prism), %zu non-convex, %zu overlapping pairs, "
-		"%zu with unclimbable internal steps (worst %.2f units)\n",
-		areas.size(), prismCount, concaveCount, overlapCount, steepCount, worstStep);
+	std::fclose(f);
+	return points;
 }
 
 std::string DeriveMapName(const std::string &bspPath)
@@ -410,7 +285,8 @@ Vector ClampToAreaBounds(const Vector &point, const navgen::Polytope &poly)
 
 std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &entities,
 	const navgen::MergeResult &merged, const NavPlan::PlanTraceContext *traces,
-	std::vector<uint8_t> *segmentKindsOut, std::vector<navgen::FailedAirmove> *failedAirmovesOut)
+	std::vector<uint8_t> *segmentKindsOut, std::vector<navgen::FailedAirmove> *failedAirmovesOut,
+	bool dumpPath)
 {
 	std::vector<navgen::Vec3> points;
 	if (merged.areas.empty())
@@ -447,7 +323,7 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		}
 	}
 
-	std::vector<NavAStar::Conn> graphConns(merged.conns.size());
+	std::vector<NavAStar::Connection> graphConns(merged.conns.size());
 	std::vector<NavPlan::PlanConnection> planConns(merged.conns.size());
 	std::vector<std::vector<uint32_t>> areaConnIndices(merged.areas.size());
 	for (size_t i = 0; i < merged.conns.size(); ++i)
@@ -456,29 +332,46 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		Vector pointA = ToVector(c.pointA);
 		Vector pointB = ToVector(c.pointB);
 
-		NavAStar::Conn &gc = graphConns[i];
+		NavAStar::Connection &gc = graphConns[i];
 		gc.areaA = static_cast<uint32_t>(c.areaA);
 		gc.areaB = static_cast<uint32_t>(c.areaB);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 		gc.traverseCost = navgen::TraverseCostFor(c);
-		gc.pointA = pointA;
-		gc.pointB = pointB;
 
 		NavPlan::PlanConnection &pc = planConns[i];
 		pc.areaA = gc.areaA;
 		pc.areaB = gc.areaB;
-		pc.pointA = pointA;
-		pc.pointB = pointB;
 		pc.connType = c.connType;
+		pc.gateA.valid = c.gateAValid;
+		pc.gateA.clamped = c.gateAClamped;
+		pc.gateA.left = ToVector(c.gateALeft);
+		pc.gateA.right = ToVector(c.gateARight);
+		pc.gateB.valid = c.gateBValid;
+		pc.gateB.clamped = c.gateBClamped;
+		pc.gateB.left = ToVector(c.gateBLeft);
+		pc.gateB.right = ToVector(c.gateBRight);
+		for (int k = 0; k < 2; ++k)
+		{
+			pc.gateAYaw[k] = static_cast<float>(c.gateAYaw[k]);
+			pc.gateASpeed[k] = static_cast<float>(c.gateASpeed[k]);
+		}
 		pc.connFlags = c.connFlags;
 		pc.exitSpeed = static_cast<float>(c.exitSpeed);
 		pc.exitAngle = static_cast<float>(c.exitAngle);
 		pc.jumpBackDist = static_cast<float>(c.jumpBackDist);
 		pc.flightTime = static_cast<float>(c.flightTime);
+		pc.launchPos = pointA;
+		pc.landingPos = pointB;
+
+		if (c.connType == crossbot_nav::CONN_AIRMOVE)
+			planAreas[gc.areaA].hasDropConnection = true;
 
 		areaConnIndices[static_cast<size_t>(c.areaA)].push_back(static_cast<uint32_t>(i));
 		areaConnIndices[static_cast<size_t>(c.areaB)].push_back(static_cast<uint32_t>(i));
 	}
+
+	for (size_t i = 0; i < planConns.size(); ++i)
+		graphConns[i].crossing = NavPlan::ConnectionCrossing(planAreas, planConns[i]);
 
 	uint32_t startArea = static_cast<uint32_t>(spawnAreas.front());
 	Vector startPoint = ToVector(spawnPoints.front());
@@ -531,17 +424,25 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	for (const NavPlan::PlanWaypoint &wp : plan)
 	{
 		navgen::Vec3 p(wp.point.x, wp.point.y, wp.point.z);
-		if (!points.empty() && (p - points.back()).Length() < 0.5)
-			continue;
-		points.push_back(p);
 
-		if (segmentKindsOut)
+		uint8_t kind = navgen::PATH_SEG_WALK;
+		if (wp.airmoveLaunch)
+			kind = wp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
+				: navgen::PATH_SEG_AIRMOVE_STORED;
+
+		// A launch that lands on the corner before it is still a launch: fold it into that point
+		// rather than dropping it, or the air move vanishes from the route.
+		bool merged = !points.empty() && (p - points.back()).Length() < 0.5;
+		if (merged)
 		{
-			uint8_t kind = navgen::PATH_SEG_WALK;
-			if (wp.airmoveLaunch)
-				kind = wp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
-					: navgen::PATH_SEG_AIRMOVE_STORED;
-			segmentKindsOut->push_back(kind);
+			if (segmentKindsOut && !segmentKindsOut->empty() && kind != navgen::PATH_SEG_WALK)
+				segmentKindsOut->back() = kind;
+		}
+		else
+		{
+			points.push_back(p);
+			if (segmentKindsOut)
+				segmentKindsOut->push_back(kind);
 		}
 
 		if (failedAirmovesOut && wp.launchSimFailed)
@@ -549,6 +450,7 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 			navgen::FailedAirmove fa;
 			fa.launch = navgen::Vec3(wp.launchSimFrom.x, wp.launchSimFrom.y, wp.launchSimFrom.z);
 			fa.landing = navgen::Vec3(wp.launchSimTo.x, wp.launchSimTo.y, wp.launchSimTo.z);
+			fa.aim = navgen::Vec3(wp.launchSimAim.x, wp.launchSimAim.y, wp.launchSimAim.z);
 			failedAirmovesOut->push_back(fa);
 		}
 	}
@@ -599,13 +501,12 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	}
 
 	std::printf("debug path: area %u -> %u via %zu connections, %zu waypoints "
-		"(%zu air moves re-simulated, %zu from stored, %zu with run-up; %zu corners, "
+		"(%zu air moves re-simulated, %zu from stored; %zu corners, "
 		"%zu gates short of full clearance, %zu segments leaving the mesh)\n",
 		startArea, goalArea, result.connPath.size(), points.size(), planStats.airmovesSimulated,
-		planStats.airmovesFromStored, planStats.airmoveRunups, planStats.corners,
-		planStats.gatesClamped, offMesh);
+		planStats.airmovesFromStored, planStats.corners, planStats.gatesClamped, offMesh);
 
-	if (std::getenv("NAVGEN_DUMP_PATH"))
+	if (dumpPath)
 	{
 		for (size_t i = 0; i < plan.size(); ++i)
 		{
@@ -655,15 +556,19 @@ int main(int argc, char **argv)
 	bool dumpLeaves = false;
 	bool dumpAreas = false;
 	bool dumpConns = false;
+	bool dumpSteps = false;
+	bool dumpSupport = false;
+	bool dumpPath = false;
+	bool dumpPortals = false;
+	bool dumpAirmove = false;
 	bool noFloorSplit = false;
-	bool dumpLadders = false;
 	bool noMerge = false;
 	bool noPrune = false;
-	bool validateAreas = false;
 	float airmoveSamplesPerUnit = navgen::AirmoveSampleParams().samplesPerUnit;
 	int dumpPlanesAreaId = -1;
 	std::string objPath;
 	std::string svgPath;
+	std::string tracePath;
 	std::string navPath;
 
 	for (int i = 1; i < argc; ++i)
@@ -681,9 +586,25 @@ int main(int argc, char **argv)
 		{
 			dumpConns = true;
 		}
-		else if (arg == "--dump-ladders")
+		else if (arg == "--dump-steps")
 		{
-			dumpLadders = true;
+			dumpSteps = true;
+		}
+		else if (arg == "--dump-support")
+		{
+			dumpSupport = true;
+		}
+		else if (arg == "--dump-path")
+		{
+			dumpPath = true;
+		}
+		else if (arg == "--dump-portals")
+		{
+			dumpPortals = true;
+		}
+		else if (arg == "--dump-airmove")
+		{
+			dumpAirmove = true;
 		}
 		else if (arg == "--no-floor-split")
 		{
@@ -696,10 +617,6 @@ int main(int argc, char **argv)
 		else if (arg == "--no-prune")
 		{
 			noPrune = true;
-		}
-		else if (arg == "--validate-areas")
-		{
-			validateAreas = true;
 		}
 		else if (arg == "--airmove-samples")
 		{
@@ -745,6 +662,15 @@ int main(int argc, char **argv)
 			}
 			svgPath = argv[++i];
 		}
+		else if (arg == "--trace")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			tracePath = argv[++i];
+		}
 		else if (arg == "-o")
 		{
 			if (i + 1 >= argc)
@@ -786,27 +712,6 @@ int main(int argc, char **argv)
 		std::vector<navgen::BlockingVolume> standBlockers =
 			navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullHuman);
 
-		if (dumpLadders)
-		{
-			for (const navgen::Entity &ent : entities)
-			{
-				if (ent.Get("classname") != "func_ladder")
-					continue;
-				std::string model = ent.Get("model");
-				if (model.empty() || model[0] != '*')
-					continue;
-				int modelIndex = std::atoi(model.c_str() + 1);
-				if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
-					continue;
-				const dmodel_t &m = bsp.Models()[static_cast<size_t>(modelIndex)];
-				double cx = (m.mins[0] + m.maxs[0]) * 0.5;
-				double cy = (m.mins[1] + m.maxs[1]) * 0.5;
-				double cz = (m.mins[2] + m.maxs[2]) * 0.5;
-				std::printf("  func_ladder *%d: mins (%.1f, %.1f, %.1f) maxs (%.1f, %.1f, %.1f) center (%.1f, %.1f, %.1f)\n",
-					modelIndex, m.mins[0], m.mins[1], m.mins[2], m.maxs[0], m.maxs[1], m.maxs[2], cx, cy, cz);
-			}
-		}
-
 		std::vector<navgen::ExtractedLeaf> navigableLeaves;
 		navigableLeaves.reserve(leaves.size());
 		size_t affectedLeaves = 0;
@@ -845,7 +750,7 @@ int main(int argc, char **argv)
 			size_t noFloorDropped = 0;
 			size_t beforeFloorSplit = leaves.size();
 			leaves = navgen::SplitLeavesByFloorSupport(bsp, worldModel.headnode[navgen::kHullDuck], blockers,
-				leaves, kMapRadius, &unsupportedDropped, &floorSplitLeaves, &noFloorDropped);
+				leaves, kMapRadius, &unsupportedDropped, &floorSplitLeaves, &noFloorDropped, dumpSupport);
 			std::printf("%s: floor support split %zu leaves, dropped %zu unsupported and %zu steep-bottomed "
 				"pieces (%zu -> %zu leaves)\n",
 				bspPath.c_str(), floorSplitLeaves, unsupportedDropped, noFloorDropped, beforeFloorSplit,
@@ -897,9 +802,8 @@ int main(int argc, char **argv)
 
 		std::vector<navgen::Portal> portals = navgen::BuildPortals(leaves);
 
-		if (const char *dumpPortalsEnv = std::getenv("NAVGEN_DUMP_PORTALS"))
+		if (dumpPortals)
 		{
-			(void)dumpPortalsEnv;
 			for (const navgen::Portal &p : portals)
 			{
 				navgen::Vec3 mid = (p.pointA + p.pointB) * 0.5;
@@ -916,13 +820,10 @@ int main(int argc, char **argv)
 			bspPath.c_str(), portals.size(), merged.areas.size(), merged.conns.size(),
 			noMerge ? "NoMerge" : "MergeAreas");
 
-		size_t steepWalkConns = navgen::FilterWalkConnectionsByStep(merged.areas, merged.conns, navgen::kStepHeight);
+		size_t steepWalkConns = navgen::FilterWalkConnectionsByStep(merged.areas, merged.conns, navgen::kStepHeight, dumpSteps);
 		if (steepWalkConns > 0)
 			std::printf("%s: dropped %zu walk connections exceeding %.0f-unit step height\n",
 				bspPath.c_str(), steepWalkConns, navgen::kStepHeight);
-
-		if (validateAreas)
-			ValidateAreas(merged.areas);
 
 		navgen::PhysicsParams physics;
 		navgen::AirmoveSampleParams airmoveParams;
@@ -956,6 +857,25 @@ int main(int argc, char **argv)
 				bspPath.c_str(), spawnAreas.size(), merged.areas.size(), rawAreaCount - merged.areas.size());
 		}
 
+		size_t gatelessConns = navgen::BakeConnectionGates(merged.areas, merged.conns);
+		if (gatelessConns > 0)
+		{
+			size_t walkless = 0, airless = 0;
+			for (const navgen::MergedConnection &c : merged.conns)
+			{
+				if (c.connType == crossbot_nav::CONN_TELEPORT)
+					continue;
+				if (c.gateAValid && c.gateBValid)
+					continue;
+				if (c.connType == crossbot_nav::CONN_WALK)
+					++walkless;
+				else
+					++airless;
+			}
+			std::printf("%s: %zu connections have no gate on one or both sides (%zu walk, %zu air move)\n",
+				bspPath.c_str(), gatelessConns, walkless, airless);
+		}
+
 		int walkConns = 0, airMoveConns = 0;
 		for (const navgen::MergedConnection &c : merged.conns)
 		{
@@ -976,9 +896,10 @@ int main(int argc, char **argv)
 					: (c.connType == crossbot_nav::CONN_TELEPORT) ? "teleport" : "walk";
 				bool oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 
-				std::printf("  %-8s %3d %s %3d  from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)",
+				std::printf("  %-8s %3d %s %3d  from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)  planes %d/%d",
 					typeName, c.areaA, oneWay ? "->" : "<->", c.areaB,
-					c.pointA.x, c.pointA.y, c.pointA.z, c.pointB.x, c.pointB.y, c.pointB.z);
+					c.pointA.x, c.pointA.y, c.pointA.z, c.pointB.x, c.pointB.y, c.pointB.z,
+					c.planeA, c.planeB);
 
 				if (c.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH)
 					std::printf("  [crouch]");
@@ -989,6 +910,15 @@ int main(int argc, char **argv)
 				if (c.connType == crossbot_nav::CONN_AIRMOVE)
 					std::printf("  speed %.0f yaw %.1f jumpBack %.1f fallDamage %.1f flightTime %.2f",
 						c.exitSpeed, c.exitAngle, c.jumpBackDist, c.fallDamage, c.flightTime);
+
+				if (c.gateAValid)
+					std::printf("\n             gateA (%.1f, %.1f, %.1f)-(%.1f, %.1f, %.1f)",
+						c.gateALeft.x, c.gateALeft.y, c.gateALeft.z,
+						c.gateARight.x, c.gateARight.y, c.gateARight.z);
+				if (c.gateBValid)
+					std::printf("\n             gateB (%.1f, %.1f, %.1f)-(%.1f, %.1f, %.1f)",
+						c.gateBLeft.x, c.gateBLeft.y, c.gateBLeft.z,
+						c.gateBRight.x, c.gateBRight.y, c.gateBRight.z);
 
 				std::printf("\n");
 			}
@@ -1064,8 +994,10 @@ int main(int argc, char **argv)
 			traces.duckTrace = duckSim.TraceFn();
 			traces.standTrace = standSim.TraceFn();
 			traces.physics = standSim.Physics();
+			traces.dumpAirmoves = dumpAirmove;
 
-			pathPoints = BuildDebugPath(entities, merged, &traces, &pathSegmentKinds, &failedAirmoves);
+			pathPoints = BuildDebugPath(entities, merged, &traces, &pathSegmentKinds, &failedAirmoves,
+				dumpPath);
 		}
 
 		if (!objPath.empty())
@@ -1078,9 +1010,16 @@ int main(int argc, char **argv)
 
 		if (!svgPath.empty())
 		{
+			std::vector<navgen::Vec3> tracePoints;
+			if (!tracePath.empty())
+			{
+				tracePoints = ReadTraceFile(tracePath);
+				std::printf("read %zu trace points from %s\n", tracePoints.size(), tracePath.c_str());
+			}
+
 			std::string mapName = DeriveMapName(bspPath);
 			navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
-				CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves);
+				CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves, tracePoints);
 			std::printf("wrote %s\n", svgPath.c_str());
 		}
 

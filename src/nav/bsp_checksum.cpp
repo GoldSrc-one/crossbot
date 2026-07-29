@@ -8,7 +8,6 @@
 #include <bspfile.h>
 
 #include "crc32.h"
-#include "bsp_file.h"
 
 namespace Nav
 {

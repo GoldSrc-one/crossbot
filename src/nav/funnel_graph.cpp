@@ -24,18 +24,18 @@ bool SamePoint2D(const Vector &a, const Vector &b)
 
 }
 
-PortalGate MakeGate(const Vector &pointA, const Vector &pointB, const Vector &travelDir2D)
+Gate MakeGate(const Vector &pointA, const Vector &pointB, const Vector &travelDir2D)
 {
 
 	float side = travelDir2D.x * (pointA.y - pointB.y) - travelDir2D.y * (pointA.x - pointB.x);
-	PortalGate gate;
+	Gate gate;
 	gate.left = (side > 0.f) ? pointA : pointB;
 	gate.right = (side > 0.f) ? pointB : pointA;
 	return gate;
 }
 
 std::vector<PulledPoint> StringPull(const Vector &start, const Vector &goal,
-	const std::vector<PortalGate> &gates)
+	const std::vector<Gate> &gates)
 {
 	std::vector<PulledPoint> path;
 	path.push_back({start, kNoGate});

@@ -26,15 +26,10 @@ float Heuristic(const std::vector<AreaNode> &areas, uint32_t a, uint32_t b)
 	return (areas[a].centroid - areas[b].centroid).Length();
 }
 
-static Vector ConnMid(const Conn &c)
-{
-	return (c.pointA + c.pointB) * 0.5f;
-}
-
 }
 
 GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::vector<uint32_t>> &areaConnIndices,
-	const std::vector<Conn> &conns, uint32_t startArea, uint32_t goalArea)
+	const std::vector<Connection> &conns, uint32_t startArea, uint32_t goalArea)
 {
 	GraphResult result;
 
@@ -73,7 +68,7 @@ GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::
 
 		for (uint32_t connIdx : areaConnIndices[current])
 		{
-			const Conn &conn = conns[connIdx];
+			const Connection &conn = conns[connIdx];
 			uint32_t neighbor = (conn.areaA == current) ? conn.areaB : conn.areaA;
 
 			if (conn.oneWay && conn.areaA != current)
@@ -82,11 +77,10 @@ GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::
 			if (closed[neighbor])
 				continue;
 
-			Vector connMid = (conn.pointA + conn.pointB) * 0.5f;
-			float approachCost = (areas[current].centroid - connMid).Length();
-			float crossCost = (connMid - areas[neighbor].centroid).Length() * conn.traverseCost;
-			float edgeCost = approachCost + crossCost;
-			float tentativeG = gScore[current] + edgeCost;
+			float approachCost = (areas[current].centroid - conn.crossing).Length();
+			float crossCost = (conn.crossing - areas[neighbor].centroid).Length() * conn.traverseCost;
+			float connCost = approachCost + crossCost;
+			float tentativeG = gScore[current] + connCost;
 
 			if (tentativeG < gScore[neighbor])
 			{

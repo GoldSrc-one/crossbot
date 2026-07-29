@@ -36,7 +36,11 @@ file(GLOB CROSSBOT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/meta/*.cpp
 )
 
-add_library(crossbot_mm SHARED ${CROSSBOT_SOURCES})
+# The plugin verifies a .nav file against the live BSP with the same checksum navgen baked into
+# it, so it needs this one navgen translation unit -- and only this one.
+add_library(crossbot_mm SHARED ${CROSSBOT_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/navgen/crc32.cpp
+)
 
 target_include_directories(crossbot_mm PRIVATE
     ${CMAKE_SOURCE_DIR}/src

@@ -69,6 +69,8 @@ constexpr const char *kAreaCrouch = "#93b3cf";
 constexpr const char *kConnWalk = "#e8eef4";
 constexpr const char *kConnAirmove = "#e74c3c";
 constexpr const char *kConnTeleport = "#27ae60";
+constexpr const char *kGate = "#8e6fc4";
+constexpr const char *kGateJump = "#e74c3c";
 constexpr const char *kRoute = "#f39c12";
 // Distinct from kConnAirmove and kRouteGoal, which are also reds, so the route overlay stays
 // readable on top of the connection layer.
@@ -77,6 +79,9 @@ constexpr const char *kRouteAirmoveStored = "#ff3b30";
 constexpr const char *kRouteAirmoveMissed = "#f5d020";
 constexpr const char *kRouteStart = "#27ae60";
 constexpr const char *kRouteGoal = "#e74c3c";
+// Where the bot actually went, as opposed to where it was told to go. A cool hue so it reads as a
+// separate layer under the warm planned route rather than as part of it.
+constexpr const char *kTrace = "#3fd0d4";
 constexpr const char *kTargetEntity = "#c86bd8";
 constexpr const char *kLabelText = "#e8eef4";
 
@@ -93,14 +98,14 @@ double AreaFloorZ(const Area &area)
 	return lowest < 1e29 ? lowest : 0.0;
 }
 
-struct EdgeStyle
+struct ConnStyle
 {
 	const char *color;
 	const char *dash;
 	double widthMul;
 };
 
-EdgeStyle StyleForConn(uint8_t connType)
+ConnStyle StyleForConn(uint8_t connType)
 {
 	using namespace crossbot_nav;
 	switch (connType)
@@ -137,7 +142,7 @@ void WriteHeader(FILE *f, const std::string &mapName, double minX, double minY, 
 void WriteDebugSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
 	const std::vector<MergedConnection> &conns, const std::vector<Vec3> &pathPoints,
 	const std::vector<Vec3> &targetPoints, const std::vector<uint8_t> &pathSegmentKinds,
-	const std::vector<FailedAirmove> &failedAirmoves)
+	const std::vector<FailedAirmove> &failedAirmoves, const std::vector<Vec3> &tracePoints)
 {
 	FILE *f = std::fopen(path.c_str(), "w");
 	if (!f)
@@ -162,6 +167,9 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		Consider(p.x, p.y);
 
 	for (const Vec3 &p : targetPoints)
+		Consider(p.x, p.y);
+
+	for (const Vec3 &p : tracePoints)
 		Consider(p.x, p.y);
 
 	if (!haveAny)
@@ -223,7 +231,7 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 			continue;
 		const Pt2 &a = centroids[static_cast<size_t>(c.areaA)];
 		const Pt2 &b = centroids[static_cast<size_t>(c.areaB)];
-		EdgeStyle style = StyleForConn(c.connType);
+		ConnStyle style = StyleForConn(c.connType);
 		bool oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 
 		std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"%s\" stroke-width=\"%.2f\"",
@@ -236,10 +244,61 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 	}
 	std::fprintf(f, "</g>\n");
 
+	// Walk gates first, then the air-move ones on top: a launch edge is the interesting one when
+	// both run along the same lip.
+	auto drawGateLayer = [&](const char *color, bool airmove)
+	{
+		std::fprintf(f, "<g stroke=\"%s\" stroke-opacity=\"0.9\" stroke-width=\"%.2f\" "
+			"stroke-dasharray=\"%.1f %.1f\" stroke-linecap=\"round\" fill=\"none\">\n",
+			color, unit * 0.14, unit * 0.5, unit * 0.4);
+
+		for (const MergedConnection &c : conns)
+		{
+			if ((c.connType == crossbot_nav::CONN_AIRMOVE) != airmove)
+				continue;
+
+			auto drawGate = [&](bool valid, const Vec3 &left, const Vec3 &right)
+			{
+				if (!valid)
+					return;
+
+				double dx = right.x - left.x, dy = right.y - left.y;
+				if (dx * dx + dy * dy < 0.01)
+				{
+					std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\"/>\n",
+						left.x, -left.y, unit * 0.35);
+					return;
+				}
+
+				std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\"/>\n",
+					left.x, -left.y, right.x, -right.y);
+			};
+
+			drawGate(c.gateAValid, c.gateALeft, c.gateARight);
+			drawGate(c.gateBValid, c.gateBLeft, c.gateBRight);
+		}
+
+		std::fprintf(f, "</g>\n");
+	};
+
+	drawGateLayer(kGate, false);
+	drawGateLayer(kGateJump, true);
+
 	std::fprintf(f, "<g fill=\"%s\">\n", kBackground);
 	for (const Pt2 &c : centroids)
 		std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\"/>\n", c.x, c.y, unit * 0.5);
 	std::fprintf(f, "</g>\n");
+
+	// Laid down before the planned route so the two are comparable at a glance: wherever the bot
+	// tracked the plan the orange sits on top of the cyan, and any excursion shows as bare cyan.
+	if (tracePoints.size() >= 2)
+	{
+		std::fprintf(f, "<polyline fill=\"none\" stroke=\"%s\" stroke-width=\"%.2f\" stroke-opacity=\"0.9\" "
+			"stroke-linecap=\"round\" stroke-linejoin=\"round\" points=\"", kTrace, unit * 0.6);
+		for (const Vec3 &p : tracePoints)
+			std::fprintf(f, "%.1f,%.1f ", p.x, -p.y);
+		std::fprintf(f, "\"/>\n");
+	}
 
 	if (pathPoints.size() >= 2)
 	{
@@ -265,13 +324,14 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 				a.x, -a.y, b.x, -b.y, colour, unit * 1.3);
 		}
 
-		// Where a re-simulated jump was tried and missed: dashed from the launch it was tried from
-		// to where it actually came down, with a ring on the bad landing.
+		// Where a re-simulated jump was tried and missed: dashed from the launch to what it was
+		// aiming at, with a ring on where it actually came down. A replay that never left the
+		// ground ends on its own launch, so the aim is the only part with any length to it.
 		for (const FailedAirmove &fa : failedAirmoves)
 		{
 			std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"%s\" "
 				"stroke-width=\"%.2f\" stroke-dasharray=\"%.1f %.1f\" stroke-linecap=\"round\"/>\n",
-				fa.launch.x, -fa.launch.y, fa.landing.x, -fa.landing.y, kRouteAirmoveMissed,
+				fa.launch.x, -fa.launch.y, fa.aim.x, -fa.aim.y, kRouteAirmoveMissed,
 				unit * 0.8, unit * 2.0, unit * 1.5);
 			std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"none\" stroke=\"%s\" "
 				"stroke-width=\"%.2f\"/>\n",
@@ -316,7 +376,10 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		double ly = minY - pad + unit * 4.0;
 		double lh = unit * 3.4;
 		double panelW = unit * 30.0;
-		double panelH = lh * 9.6;
+		// Derived from the row count rather than hand-tuned, so adding a legend entry cannot
+		// silently push it outside the panel.
+		constexpr int kLegendRows = 12;
+		double panelH = lh * (kLegendRows + 1.6);
 		double swatchW = unit * 3.0;
 		double fontSize = unit * 2.6;
 		double textX = lx + unit * 4.5;
@@ -374,10 +437,13 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		SwatchRow(kAreaCrouch, "area (crouch)");
 		LineRow(kConnWalk, nullptr, 1.0, "walk");
 		LineRow(kConnAirmove, "4,2", 1.3, "air move");
+		LineRow(kGate, "3,2", 0.5, "funnel gate");
+		LineRow(kGateJump, "3,2", 0.5, "funnel gate (air move)");
 		LineRow(kRoute, nullptr, 1.8, "planned route");
 		LineRow(kRouteAirmoveSim, nullptr, 1.8, "air move, launch re-simulated");
 		LineRow(kRouteAirmoveStored, nullptr, 1.8, "air move, stored launch");
 		LineRow(kRouteAirmoveMissed, nullptr, 1.8, "air move, re-simulation missed");
+		LineRow(kTrace, nullptr, 1.2, "recorded trace");
 		DotRow(kRouteStart, "route start");
 		DotRow(kRouteGoal, "route goal");
 		CrosshairRow(kTargetEntity, "info_target");

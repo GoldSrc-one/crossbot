@@ -1,6 +1,7 @@
 ﻿#include "floor_support.h"
 
 #include <cmath>
+#include <cstdio>
 
 #include "clipnode_tree.h"
 
@@ -16,6 +17,7 @@ constexpr double kSeamProbeDist = 2.0;
 constexpr double kOnBoundaryEpsilon = 0.1;
 constexpr double kMinFragmentVolume = 1.0;
 constexpr double kMinSupportedArea = 1.0;
+constexpr double kMinStepRescueArea = 1024.0;
 
 double DistanceToSegment(const Vec3 &p, const Vec3 &a, const Vec3 &b)
 {
@@ -150,6 +152,52 @@ double SupportedArea(const BspFile &bsp, int headnode, const std::vector<Blockin
 	return area;
 }
 
+void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+	const Winding &w, std::vector<Winding> &solid, std::vector<Winding> &empty)
+{
+	std::vector<Winding> remaining;
+	CarveWindingAgainstTree(bsp, headnode, w, solid, remaining);
+
+	for (const BlockingVolume &blocker : blockers)
+	{
+		if (remaining.empty())
+			break;
+
+		std::vector<Winding> stillRemaining;
+		for (const Winding &piece : remaining)
+		{
+			std::vector<Winding> blockerSolid;
+			std::vector<Winding> blockerEmpty;
+			CarveWindingAgainstTree(bsp, blocker.headnode, TranslateWinding(piece, blocker.origin * -1.0),
+				blockerSolid, blockerEmpty);
+
+			for (const Winding &part : blockerSolid)
+				solid.push_back(TranslateWinding(part, blocker.origin));
+			for (const Winding &part : blockerEmpty)
+				stillRemaining.push_back(TranslateWinding(part, blocker.origin));
+		}
+		remaining.swap(stillRemaining);
+	}
+
+	for (Winding &piece : remaining)
+		empty.push_back(std::move(piece));
+}
+
+double TotalSupportedArea(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+	const Polytope &poly)
+{
+	double total = 0.0;
+	for (const Face &f : poly.faces)
+	{
+		if (f.plane.normal.z <= kFloorNormalZ)
+			continue;
+		if (f.winding.size() < 3)
+			continue;
+		total += SupportedArea(bsp, headnode, blockers, f);
+	}
+	return total;
+}
+
 }
 
 const Face *LowestFloorFace(const Polytope &poly)
@@ -211,42 +259,22 @@ std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 
 	std::vector<Winding> supported;
 	std::vector<Winding> unsupported;
-	CarveWindingAgainstTree(bsp, headnode, probe, supported, unsupported);
+	CarveAgainstSolids(bsp, headnode, blockers, probe, supported, unsupported);
 
-	for (const BlockingVolume &blocker : blockers)
-	{
-		if (unsupported.empty())
-			break;
-
-		std::vector<Winding> stillUnsupported;
-		for (const Winding &w : unsupported)
-		{
-			std::vector<Winding> blockerSolid;
-			std::vector<Winding> blockerEmpty;
-			CarveWindingAgainstTree(bsp, blocker.headnode, TranslateWinding(w, blocker.origin * -1.0),
-				blockerSolid, blockerEmpty);
-
-			for (const Winding &piece : blockerSolid)
-				supported.push_back(TranslateWinding(piece, blocker.origin));
-			for (const Winding &piece : blockerEmpty)
-				stillUnsupported.push_back(TranslateWinding(piece, blocker.origin));
-		}
-		unsupported.swap(stillUnsupported);
-	}
-
+	Vec3 stepDrop = floorFace.plane.normal * (kStepHeight - kSupportProbeDepth);
 	for (const Winding &w : unsupported)
 	{
-		Vec3 centroid = WindingCentroid(w);
-		bool stepBelow = false;
-		for (double depth = kSupportProbeDepth; depth <= kStepHeight && !stepBelow; depth += 4.0)
-		{
-			Vec3 probePoint = centroid - floorFace.plane.normal * (depth - kSupportProbeDepth);
-			if (PointInSolid(bsp, headnode, blockers, probePoint))
-				stepBelow = true;
-		}
+		std::vector<Winding> stepSolid;
+		std::vector<Winding> stepEmpty;
+		CarveAgainstSolids(bsp, headnode, blockers, TranslateWinding(w, stepDrop * -1.0), stepSolid,
+			stepEmpty);
 
-		if (stepBelow)
-			supported.push_back(w);
+		for (const Winding &piece : stepSolid)
+		{
+			if (WindingArea(piece, floorFace.plane.normal) < kMinStepRescueArea)
+				continue;
+			supported.push_back(TranslateWinding(piece, stepDrop));
+		}
 	}
 
 	for (Winding &w : supported)
@@ -258,7 +286,7 @@ std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 
 std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const std::vector<ExtractedLeaf> &leaves, double mapRadius,
-	size_t *droppedOut, size_t *splitOut, size_t *noFloorOut)
+	size_t *droppedOut, size_t *splitOut, size_t *noFloorOut, bool dump)
 {
 	std::vector<ExtractedLeaf> out;
 	size_t dropped = 0;
@@ -337,8 +365,17 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 				continue;
 			}
 
-			if (SupportedArea(bsp, headnode, blockers, *fragFloor) <= kMinSupportedArea)
+			double totalSupported = TotalSupportedArea(bsp, headnode, blockers, frag);
+			if (totalSupported <= kMinSupportedArea)
 			{
+				if (dump)
+				{
+					Vec3 c = WindingCentroid(fragFloor->winding);
+					std::printf("  unsupported floor at (%.1f, %.1f, %.1f) normal (%.2f, %.2f, %.2f) "
+						"area %.1f volume %.0f\n", c.x, c.y, c.z, fragFloor->plane.normal.x,
+						fragFloor->plane.normal.y, fragFloor->plane.normal.z,
+						totalSupported, frag.Volume());
+				}
 				++dropped;
 				continue;
 			}

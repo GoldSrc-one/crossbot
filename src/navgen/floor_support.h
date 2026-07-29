@@ -41,7 +41,8 @@ std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 
 std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const std::vector<ExtractedLeaf> &leaves, double mapRadius,
-	size_t *droppedOut = nullptr, size_t *splitOut = nullptr, size_t *noFloorOut = nullptr);
+	size_t *droppedOut = nullptr, size_t *splitOut = nullptr, size_t *noFloorOut = nullptr,
+	bool dump = false);
 
 }
 

@@ -11,7 +11,6 @@ namespace NavFollow
 struct Config
 {
 
-	float turnRateDegPerSec = 300.f;
 	float runSpeed = 250.f;
 
 	float cornerRadius = 12.f;
@@ -20,9 +19,10 @@ struct Config
 	float lookahead = 48.f;
 	float lookaheadCareful = 24.f;
 
-	float turnInPlaceErrorDeg = 60.f;
-	float turnSlowdownErrorDeg = 20.f;
-	float turnSlowdownFactor = 0.3f;
+	// How far a corner may be cut. BuildWaypointPlan pushes every corner waypoint kPlanClearance
+	// off the wall it was string-pulled onto, so that is exactly the room reserved for the turn and
+	// steering into it is safe by construction.
+	float cornerCut = NavPlan::kPlanClearance;
 };
 
 struct Decision
@@ -35,18 +35,10 @@ struct Decision
 	float baseSpeed = 0.f;
 };
 
+// speed is the mover's current horizontal speed. It only sets how early the turn starts: a bot that
+// is barely moving can pivot on the spot and gets no pre-steering, one at full tilt gets all of it.
 Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpIndex, const Vector &pos,
-	const Config &cfg = {});
-
-float ScaleSpeedByHeadingError(float baseSpeed, float headingErrorDeg, const Config &cfg = {});
-
-struct SimResult
-{
-	std::vector<Vector> points;
-	bool finished = false;
-};
-SimResult Simulate(const std::vector<NavPlan::PlanWaypoint> &waypoints, const Vector &start,
-	float dt = 1.f / 60.f, float maxTime = 120.f, const Config &cfg = {});
+	float speed, const Config &cfg = {});
 
 }
 

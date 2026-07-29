@@ -133,11 +133,78 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		Connection &conn = mesh->conns[i];
 		conn.areaA = rec.areaA;
 		conn.areaB = rec.areaB;
-		conn.pointA = Vector(rec.pointA[0], rec.pointA[1], rec.pointA[2]);
-		conn.pointB = Vector(rec.pointB[0], rec.pointB[1], rec.pointB[2]);
 		conn.connType = rec.connType;
 		conn.connFlags = rec.connFlags;
 		conn.traverseCost = rec.traverseCost;
+		conn.exitSpeed = rec.exitSpeed;
+		conn.exitAngle = rec.exitAngle;
+		conn.jumpBackDist = rec.jumpBackDist;
+		conn.flightTime = rec.flightTime;
+		conn.launchPos = Vector(rec.launchPos[0], rec.launchPos[1], rec.launchPos[2]);
+		conn.landingPos = Vector(rec.landingPos[0], rec.landingPos[1], rec.landingPos[2]);
+
+		conn.gateA.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_A) != 0;
+		conn.gateB.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_B) != 0;
+		conn.gateA.valid = (rec.gateValid & crossbot_nav::GATE_VALID_A) != 0;
+		conn.gateA.left = Vector(rec.gateA[0][0], rec.gateA[0][1], rec.gateA[0][2]);
+		conn.gateA.right = Vector(rec.gateA[1][0], rec.gateA[1][1], rec.gateA[1][2]);
+		conn.gateB.valid = (rec.gateValid & crossbot_nav::GATE_VALID_B) != 0;
+		conn.gateB.left = Vector(rec.gateB[0][0], rec.gateB[0][1], rec.gateB[0][2]);
+		conn.gateB.right = Vector(rec.gateB[1][0], rec.gateB[1][1], rec.gateB[1][2]);
+		for (int k = 0; k < 2; ++k)
+		{
+			conn.gateAYaw[k] = rec.gateAYaw[k];
+			conn.gateASpeed[k] = rec.gateASpeed[k];
+		}
+	}
+
+	mesh->planAreas.resize(mesh->areas.size());
+	for (size_t i = 0; i < mesh->areas.size(); ++i)
+	{
+		const Area &a = mesh->areas[i];
+		NavPlan::PlanArea &pa = mesh->planAreas[i];
+		pa.centroid = a.centroid;
+		pa.crouch = (a.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		pa.door = (a.areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
+		pa.doorActivation = a.doorActivation;
+		pa.doorActivatorPos = a.doorActivatorPos;
+		pa.doorWaitTime = a.doorWaitTime;
+
+		pa.boundPlanes.reserve(a.planes.size());
+		for (const AreaPlane &src : a.planes)
+		{
+			NavPlan::PlanPlane plane;
+			plane.normal = src.normal;
+			plane.dist = src.dist;
+			pa.boundPlanes.push_back(plane);
+		}
+	}
+
+	mesh->planConns.resize(mesh->conns.size());
+	for (size_t i = 0; i < mesh->conns.size(); ++i)
+	{
+		const Connection &c = mesh->conns[i];
+		NavPlan::PlanConnection &pc = mesh->planConns[i];
+		pc.areaA = c.areaA;
+		pc.areaB = c.areaB;
+		pc.connType = c.connType;
+		pc.connFlags = c.connFlags;
+		pc.exitSpeed = c.exitSpeed;
+		pc.exitAngle = c.exitAngle;
+		pc.jumpBackDist = c.jumpBackDist;
+		pc.flightTime = c.flightTime;
+		pc.launchPos = c.launchPos;
+		pc.landingPos = c.landingPos;
+		pc.gateA = c.gateA;
+		pc.gateB = c.gateB;
+		for (int k = 0; k < 2; ++k)
+		{
+			pc.gateAYaw[k] = c.gateAYaw[k];
+			pc.gateASpeed[k] = c.gateASpeed[k];
+		}
+
+		if (c.connType == crossbot_nav::CONN_AIRMOVE && c.areaA < mesh->planAreas.size())
+			mesh->planAreas[c.areaA].hasDropConnection = true;
 	}
 
 	char msg[700];

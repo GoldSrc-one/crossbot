@@ -1,5 +1,7 @@
 ﻿#include "crc32.h"
 
+#include <vector>
+
 namespace navgen
 {
 
@@ -34,6 +36,25 @@ uint32_t Crc32(const void *data, size_t length)
 	for (size_t i = 0; i < length; ++i)
 		crc = table[(crc ^ bytes[i]) & 0xFF] ^ (crc >> 8);
 	return crc ^ 0xFFFFFFFFu;
+}
+
+uint32_t BspChecksumLumps(const void *planes, size_t planesBytes,
+	const void *clipnodes, size_t clipnodesBytes,
+	const void *models, size_t modelsBytes)
+{
+	std::vector<unsigned char> buf;
+	buf.reserve(planesBytes + clipnodesBytes + modelsBytes);
+
+	auto append = [&](const void *data, size_t bytes)
+	{
+		const unsigned char *p = static_cast<const unsigned char *>(data);
+		buf.insert(buf.end(), p, p + bytes);
+	};
+	append(planes, planesBytes);
+	append(clipnodes, clipnodesBytes);
+	append(models, modelsBytes);
+
+	return Crc32(buf.data(), buf.size());
 }
 
 }

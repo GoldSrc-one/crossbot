@@ -1,4 +1,4 @@
-﻿#include <extdll.h>
+#include <extdll.h>
 #include <meta_api.h>
 #include <in_buttons.h>
 #include <algorithm>
@@ -6,23 +6,25 @@
 #include "bot_move_nav.h"
 #include "bot_move.h"
 #include "../nav/nav.h"
-#include "../nav/nav_avoid.h"
+#include "../nav/nav_path.h"
 #include "../nav/nav_query.h"
-#include "../nav/path_astar.h"
 #include "../nav/path_follower.h"
-#include "../nav/path_funnel.h"
 
 namespace
 {
 		constexpr float kPi = 3.14159265f;
 		constexpr float kMoveSpeed = 250.f;
 
-		constexpr float kWaypointReachedDistance = 24.f;
+		// Over maxspeed on purpose: PM_CheckParamters rescales the forward/side pair down to
+		// maxspeed, so this just means "full speed in exactly the commanded direction".
+		constexpr float kFullDrive = 1000.f;
+
+		// Below this the velocity carries no usable heading, so the aim holds where it is rather
+		// than snapping about on numerical noise.
+		constexpr float kAimVelocitySpeed = 20.f;
 
 		constexpr float kJumpTriggerDistance = 100.f;
 		constexpr float kJumpFacingToleranceDeg = 20.f;
-
-		constexpr float kDoorWaitTriggerDistance = 64.f;
 
 		constexpr int kHullHuman = 1;
 		constexpr int kHullPoint = 0;
@@ -83,12 +85,19 @@ namespace
 
 		constexpr float kEtaSafetyMargin = 1.6f;
 
+	// Every path that stands the bot still, so the reported move pair never lingers from the last
+	// frame it was actually walking.
+	void RunIdleMove(CBot &bot, const Vector &angles)
+	{
+		bot.moveForward = 0.f;
+		bot.moveSide = 0.f;
+		g_engfuncs.pfnRunPlayerMove(bot.pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
+	}
+
 	void ResetPath(CBot &bot)
 	{
 		bot.waypoints.clear();
 		bot.waypointIndex = 0;
-		bot.elevatorReadyTime = 0.f;
-		bot.doorWaitUntil = 0.f;
 		bot.obstacleBlockedSince = 0.f;
 		bot.jumpAttempted = false;
 		bot.plannedAreaPath.clear();
@@ -150,17 +159,15 @@ namespace
 
 		if (freshAttempt)
 		{
-			float totalDist = 0.f, totalElevatorTime = 0.f;
+			float totalDist = 0.f;
 			Vector prev = pEdict->v.origin;
 			for (const Nav::Waypoint &wp : bot.waypoints)
 			{
 				totalDist += (wp.point - prev).Length();
 				prev = wp.point;
-				if (wp.requiresElevatorRide)
-					totalElevatorTime += wp.elevatorTravelTime;
 			}
 			bot.pathStartTime = gpGlobals->time;
-			bot.estimatedArrivalTime = gpGlobals->time + totalDist / kMoveSpeed * kEtaSafetyMargin + totalElevatorTime;
+			bot.estimatedArrivalTime = gpGlobals->time + totalDist / kMoveSpeed * kEtaSafetyMargin;
 			bot.visitedAreaPath.clear();
 			bot.visitedAreaPath.push_back(startArea->id);
 
@@ -173,11 +180,9 @@ namespace
 					{
 						const Nav::Waypoint &wp = bot.waypoints[i];
 						snprintf(wpMsg, sizeof(wpMsg),
-							"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d elev=%d tele=%d launch=%d drop=%d btn=%d trig=%d door=%d crouch=%d targArea=%d maxSpeed=%.1f\n",
+							"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d maxSpeed=%.1f\n",
 							i, wp.point.x, wp.point.y, wp.point.z,
-							wp.requiresJump, wp.requiresElevatorRide, wp.requiresTeleport,
-							wp.requiresLaunch, wp.requiresDrop, wp.requiresButtonUse, wp.requiresTriggerTouch,
-							wp.requiresDoor, wp.requiresCrouch, wp.targetAreaId, wp.maxSpeed);
+							wp.requiresJump, wp.requiresCrouch, wp.targetAreaId, wp.maxSpeed);
 						SERVER_PRINT(wpMsg);
 					}
 				}
@@ -209,18 +214,8 @@ void Bot_MoveNav(CBot &bot)
 		{
 
 			Vector angles = Bot_UpdateFacing(bot);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
+		RunIdleMove(bot, angles);
 		return;
-	}
-
-		bool hasPendingActivation = false;
-	for (size_t wi = bot.waypointIndex; wi < bot.waypoints.size(); ++wi)
-	{
-		if (bot.waypoints[wi].requiresButtonUse || bot.waypoints[wi].requiresTriggerTouch)
-		{
-			hasPendingActivation = true;
-			break;
-		}
 	}
 
 	if (static_cast<int>(bot.waypointIndex) != bot.lastSeenWaypointIndex)
@@ -232,8 +227,7 @@ void Bot_MoveNav(CBot &bot)
 		bool forcedRepath = bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
 	bool stalled = !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
-	if (bot.elevatorReadyTime <= 0.f && bot.doorWaitUntil <= 0.f && !hasPendingActivation &&
-		(bot.waypoints.empty() || forcedRepath || stalled))
+	if (bot.waypoints.empty() || forcedRepath || stalled)
 	{
 		if (!bot.waypoints.empty())
 		{
@@ -295,33 +289,33 @@ void Bot_MoveNav(CBot &bot)
 				horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
 			}
 
-					while (bot.waypointIndex + 1 < bot.waypoints.size())
+					// Steer reports advance for a corner passed and, on the final waypoint, for
+					// having arrived. Consuming it in both cases is what ends a route: once the
+					// index runs off the end, the arrival check at the top of the next frame fires.
+					const Vector &botVel = pEdict->v.velocity;
+					float botSpeed2D = sqrtf(botVel.x * botVel.x + botVel.y * botVel.y);
+
+					NavFollow::Decision steer;
+					while (true)
 					{
-						const Nav::Waypoint &currentWp = bot.waypoints[bot.waypointIndex];
-						bool isCommitmentWp = currentWp.requiresJump || currentWp.requiresLadder ||
-							currentWp.requiresElevatorRide || currentWp.requiresTeleport ||
-							currentWp.requiresLaunch || currentWp.requiresDrop ||
-							currentWp.requiresButtonUse || currentWp.requiresTriggerTouch ||
-							currentWp.requiresDoor;
+						steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin, botSpeed2D);
 
-						bool actionDone = false;
-						if (currentWp.requiresJump && bot.jumpAttempted) actionDone = true;
-						if (currentWp.requiresLadder) actionDone = false;
-						if (currentWp.requiresElevatorRide && bot.elevatorReadyTime > 0.f) actionDone = true;
-						if (currentWp.requiresTeleport) actionDone = true;
-						if (currentWp.requiresLaunch) actionDone = true;
-						if (currentWp.requiresDrop && !(pEdict->v.flags & FL_ONGROUND)) actionDone = true;
-						if (currentWp.requiresButtonUse && bot.doorWaitUntil > 0.f) actionDone = true;
-						if (currentWp.requiresTriggerTouch && bot.doorWaitUntil > 0.f) actionDone = true;
-						if (currentWp.requiresDoor && bot.doorWaitUntil > 0.f) actionDone = true;
-
-						if (isCommitmentWp && !actionDone)
+						// A jump waypoint is a commitment: it is not passed until the jump is made.
+						if (bot.waypoints[bot.waypointIndex].requiresJump && !bot.jumpAttempted)
+							break;
+						if (!steer.advance)
 							break;
 
-						NavFollow::Decision d = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin);
-						if (!d.advance)
-							break;
 						++bot.waypointIndex;
+						if (bot.waypointIndex >= bot.waypoints.size())
+							break;
+					}
+
+					if (bot.waypointIndex >= bot.waypoints.size())
+					{
+						Vector angles = Bot_UpdateFacing(bot);
+						RunIdleMove(bot, angles);
+						return;
 					}
 
 					wp = &bot.waypoints[bot.waypointIndex];
@@ -346,122 +340,7 @@ void Bot_MoveNav(CBot &bot)
 			}
 		}
 
-		if (wp->requiresElevatorRide)
-		{
-
-			if (horizDist >= kWaypointReachedDistance)
-			{
-				bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-				Vector angles = Bot_UpdateFacing(bot);
-				g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
-				return;
-			}
-
-			if (bot.elevatorReadyTime <= 0.f)
-						bot.elevatorReadyTime = gpGlobals->time + wp->elevatorTravelTime;
-
-			Vector angles = Bot_UpdateFacing(bot);
-			g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
-
-			if (gpGlobals->time >= bot.elevatorReadyTime)
-			{
-				bot.elevatorReadyTime = 0.f;
-				++bot.waypointIndex;
-			}
-			return;
-		}
-
-	if (wp->requiresTeleport)
-			{
-
-				if (horizDist >= kWaypointReachedDistance)
-				{
-					bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-					Vector angles = Bot_UpdateFacing(bot);
-					g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
-					return;
-				}
-
-				++bot.waypointIndex;
-				return;
-			}
-
-		if (wp->requiresLaunch)
-			{
-
-				if (horizDist >= kWaypointReachedDistance)
-				{
-					bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-					Vector angles = Bot_UpdateFacing(bot);
-					g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
-					return;
-				}
-
-				Vector angles = Bot_UpdateFacing(bot);
-				g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
-
-				const Nav::Area *actualArea = Nav::FindAreaForPoint(*mesh, pEdict->v.origin);
-				if (actualArea && actualArea->id == static_cast<uint32_t>(wp->targetAreaId))
-				{
-					++bot.waypointIndex;
-				}
-				return;
-			}
-
-		if (wp->requiresButtonUse)
-			{
-				if (horizDist >= kWaypointReachedDistance)
-				{
-
-					bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-					Vector angles = Bot_UpdateFacing(bot);
-					g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
-					return;
-				}
-
-				bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-				Vector angles = Bot_UpdateFacing(bot);
-				g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, IN_USE, 0, Bot_FrameMsec());
-
-				if (bot.doorWaitUntil <= 0.f)
-					bot.doorWaitUntil = gpGlobals->time + wp->buttonWaitTime;
-
-		if (gpGlobals->time >= bot.doorWaitUntil)
-		{
-			bot.doorWaitUntil = 0.f;
-			++bot.waypointIndex;
-		}
-		return;
-	}
-
-	if (wp->requiresDoor)
-	{
-		if (horizDist >= kDoorWaitTriggerDistance)
-		{
-
-					bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-					Vector angles = Bot_UpdateFacing(bot);
-					g_engfuncs.pfnRunPlayerMove(pEdict, angles, kMoveSpeed, 0.f, 0.f, IN_FORWARD, 0, Bot_FrameMsec());
-					return;
-				}
-
-				if (bot.doorWaitUntil <= 0.f)
-									bot.doorWaitUntil = gpGlobals->time + wp->doorWaitTime;
-
-		Vector angles = Bot_UpdateFacing(bot);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
-
-		if (gpGlobals->time >= bot.doorWaitUntil)
-		{
-			bot.doorWaitUntil = 0.f;
-			++bot.waypointIndex;
-		}
-		return;
-	}
-
-	bool onLadder = (pEdict->v.movetype == MOVETYPE_FLY);
-			bool needsJump = !onLadder && wp->requiresJump;
-			bool needsDrop = !onLadder && wp->requiresDrop;
+		bool needsJump = wp->requiresJump;
 
 		if (needsJump)
 		{
@@ -481,59 +360,19 @@ void Bot_MoveNav(CBot &bot)
 			}
 		}
 
-		if (needsDrop)
-			{
-
-				bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
-				if (!onGround)
-				{
-					++bot.waypointIndex;
-					return;
-				}
-			}
-
-				NavFollow::Decision steer;
-				while (true)
-				{
-					steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin);
-					if (!steer.advance || bot.waypointIndex + 1 >= bot.waypoints.size())
-						break;
-
-					const Nav::Waypoint &currentWp = bot.waypoints[bot.waypointIndex];
-					if (currentWp.requiresDrop)
-					{
-						bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
-						if (onGround)
-							break;
-					}
-					++bot.waypointIndex;
-				}
-			if ((!needsJump && !needsDrop) && steer.advance)
-			{
-
-				return;
-			}
-
 		bool committingToJump = needsJump && horizDist < kJumpTriggerDistance;
-		bool committingToDrop = needsDrop && horizDist < kJumpTriggerDistance;
 
-		if (onLadder)
+		// Where the feet go. Independent of where the bot looks -- the two only coincide by accident.
+		Vector moveDir;
+		if (committingToJump)
 	{
 
-		float climbPitch = (toTarget.z > 0.f) ? -60.f : 60.f;
-		bot.desiredAngles = Vector(climbPitch, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
-	}
-	else if (committingToJump || committingToDrop)
-	{
-
-		bot.desiredAngles = Vector(0.f, atan2f(toTarget.y, toTarget.x) * (180.f / kPi), 0.f);
+		moveDir = Vector(toTarget.x, toTarget.y, 0.f);
 	}
 	else
 	{
 
-		Vector aimTarget = steer.aimPoint - pEdict->v.origin;
-
-				Vector steerDir = NavAvoid::Deflect(bot, aimTarget);
+		Vector steerDir = steer.aimPoint - pEdict->v.origin;
 
 				float dirLen2D = sqrtf(steerDir.x * steerDir.x + steerDir.y * steerDir.y);
 				if (dirLen2D > 1.f)
@@ -563,11 +402,45 @@ void Bot_MoveNav(CBot &bot)
 			}
 		}
 
-		bot.desiredAngles = Vector(0.f, atan2f(steerDir.y, steerDir.x) * (180.f / kPi), 0.f);
+		moveDir = Vector(steerDir.x, steerDir.y, 0.f);
 	}
 
+		// Where the bot looks: at the node it is heading for next, so it reads as a player looking
+		// round the corner rather than one watching its own feet. Past the last node there is
+		// nothing ahead to look at, so it settles on wherever it is actually drifting.
+		size_t aimIndex = bot.waypointIndex + 1;
+		if (aimIndex < bot.waypoints.size())
+		{
+			Vector toAim = bot.waypoints[aimIndex].point - pEdict->v.origin;
+			if (toAim.x * toAim.x + toAim.y * toAim.y > 1.f)
+				bot.desiredAngles = Vector(0.f, atan2f(toAim.y, toAim.x) * (180.f / kPi), 0.f);
+		}
+		else
+		{
+			const Vector &vel = pEdict->v.velocity;
+			if (sqrtf(vel.x * vel.x + vel.y * vel.y) > kAimVelocitySpeed)
+				bot.desiredAngles = Vector(0.f, atan2f(vel.y, vel.x) * (180.f / kPi), 0.f);
+		}
+
 	Vector angles = Bot_UpdateFacing(bot);
-	unsigned short buttons = IN_FORWARD;
+
+		// The planner's careful speed near drops is the one case we want under maxspeed, and the
+		// engine only ever clamps down -- so a short vector passes through and becomes the speed.
+		float maxSpeed = (pEdict->v.maxspeed > 1.f) ? pEdict->v.maxspeed : kMoveSpeed;
+		float drive = (needsJump || steer.baseSpeed >= NavPlan::kPlanSpeedRun) ? kFullDrive : maxSpeed * 0.5f;
+
+	float fmove = 0.f, smove = 0.f;
+	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+	bot.moveForward = fmove;
+	bot.moveSide = smove;
+
+		// Movement rides on the speeds, not the buttons, but nothing watching a bot should see it
+		// claim to walk forward while it strafes.
+	unsigned short buttons = 0;
+	if (fmove > 1.f) buttons |= IN_FORWARD;
+	else if (fmove < -1.f) buttons |= IN_BACK;
+	if (smove > 1.f) buttons |= IN_MOVERIGHT;
+	else if (smove < -1.f) buttons |= IN_MOVELEFT;
 
 		if (wp->requiresCrouch || (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH)))
 	{
@@ -588,28 +461,5 @@ void Bot_MoveNav(CBot &bot)
 				buttons |= IN_DUCK;
 	}
 
-		float moveSpeed = (!needsJump && !onLadder) ? steer.baseSpeed : kMoveSpeed;
-	if (!onLadder)
-	{
-		float headingError = fabsf(NormalizeAngle(angles.y - bot.desiredAngles.y));
-		moveSpeed = NavFollow::ScaleSpeedByHeadingError(moveSpeed, headingError);
-	}
-
-	g_engfuncs.pfnRunPlayerMove(pEdict, angles, moveSpeed, 0.f, 0.f, buttons, 0, Bot_FrameMsec());
-
-		if (bot.waypointIndex == 1 && horizDist > 100.f && horizDist < 200.f)
-		{
-			static float lastDebugTime = 0.f;
-			if (gpGlobals->time - lastDebugTime > 1.f)
-			{
-				lastDebugTime = gpGlobals->time;
-				char dbg[256];
-				snprintf(dbg, sizeof(dbg), "CrossBot: dbg pos=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) moveSpeed=%.1f headingErr=%.1f dist=%.1f\n",
-					pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
-					pEdict->v.velocity.x, pEdict->v.velocity.y, pEdict->v.velocity.z,
-					moveSpeed, fabsf(NormalizeAngle(angles.y - bot.desiredAngles.y)), horizDist);
-				SERVER_PRINT(dbg);
-			}
-		}
+	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
 }
-

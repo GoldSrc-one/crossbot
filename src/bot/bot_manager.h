@@ -14,10 +14,6 @@ namespace BotManager
 
 	bool AddBot(const char *name);
 
-	bool RemoveBot();
-
-	int GetBotCount();
-
 	bool SetGoalForAllBots(const Vector &point);
 
 	bool TeleportAllBots(const Vector &point);
@@ -25,9 +21,5 @@ namespace BotManager
 	void PrintNavStatus();
 
 		void PrintWaypoints();
-
-	int GetOtherBotEdicts(edict_t *self, edict_t **outEdicts, int maxCount);
-
-	int GetBotsForDebug(const CBot **outBots, int maxCount);
 }
 

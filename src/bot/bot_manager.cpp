@@ -7,7 +7,6 @@
 #include "bot_move_nav.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
-#include "../nav/nav_debug.h"
 
 #include <string>
 
@@ -63,8 +62,6 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
 	Nav::LoadForMap(mapName);
-
-	NavDebug::Precache();
 }
 
 void ServerDeactivate()
@@ -91,8 +88,6 @@ void ClientDisconnect(edict_t *pEntity)
 
 void StartFrame()
 {
-	NavDebug::Draw();
-
 	if (!g_pGameProfile)
 		return;
 
@@ -155,36 +150,8 @@ bool AddBot(const char *name)
 	pSlot->inUse = true;
 	pSlot->pEdict = pEdict;
 	snprintf(pSlot->name, sizeof(pSlot->name), "%s", botName);
-	pSlot->nextDirChangeTime = 0.f;
 
 	return true;
-}
-
-bool RemoveBot()
-{
-	for (auto &bot : g_bots)
-	{
-		if (!bot.inUse)
-			continue;
-
-		char cmd[64];
-		snprintf(cmd, sizeof(cmd), "kick \"%s\"\n", bot.name);
-		SERVER_COMMAND(cmd);
-		SERVER_EXECUTE();
-		return true;
-	}
-	return false;
-}
-
-int GetBotCount()
-{
-	int count = 0;
-	for (auto &bot : g_bots)
-	{
-		if (bot.inUse)
-			++count;
-	}
-	return count;
 }
 
 bool SetGoalForAllBots(const Vector &point)
@@ -272,16 +239,17 @@ void PrintNavStatus()
 		{
 			const Nav::Waypoint &wp = bot.waypoints[bot.waypointIndex];
 			snprintf(targetBuf, sizeof(targetBuf), "(%.0f,%.0f,%.0f)%s", wp.point.x, wp.point.y, wp.point.z,
-				wp.requiresJump ? "[JUMP]" : wp.requiresElevatorRide ? "[ELEVATOR]" : "");
+				wp.requiresJump ? "[JUMP]" : "");
 		}
 
 		bool onGround = (bot.pEdict->v.flags & FL_ONGROUND) != 0;
 
-		char line[400];
+		char line[440];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s origin=(%.0f,%.0f,%.0f) vel=(%.0f,%.0f,%.0f) angles=(%.0f,%.0f) hasGoal=%d "
-			"goal=(%.0f,%.0f,%.0f) target=%s waypoint=%zu/%zu movetype=%d area=%d onground=%d",
+			"CrossBot: %s origin=(%.0f,%.0f,%.0f) vel=(%.0f,%.0f,%.0f) angles=(%.0f,%.0f) move=(%.0f,%.0f) "
+			"hasGoal=%d goal=(%.0f,%.0f,%.0f) target=%s waypoint=%zu/%zu movetype=%d area=%d onground=%d",
 			bot.name, origin.x, origin.y, origin.z, vel.x, vel.y, vel.z, angles.x, angles.y,
+			bot.moveForward, bot.moveSide,
 			bot.hasGoal ? 1 : 0, bot.goalPoint.x, bot.goalPoint.y, bot.goalPoint.z, targetBuf,
 			bot.waypointIndex, bot.waypoints.size(), bot.pEdict->v.movetype, bot.currentAreaId, onGround ? 1 : 0);
 		std::string msg = line;
@@ -305,13 +273,10 @@ void PrintNavStatus()
 			{
 				const Nav::Waypoint &wp = bot.waypoints[i];
 				char wpBuf[128];
-							snprintf(wpBuf, sizeof(wpBuf), "(wp%zu:(%.0f,%.0f,%.0f)%s%s%s%s%s",
+							snprintf(wpBuf, sizeof(wpBuf), "(wp%zu:(%.0f,%.0f,%.0f)%s%s",
 					i, wp.point.x, wp.point.y, wp.point.z,
 					wp.requiresJump ? " J" : "",
-					wp.requiresElevatorRide ? " E" : "",
-					wp.requiresTeleport ? " T" : "",
-					wp.requiresLaunch ? " L" : "",
-					wp.requiresDrop ? " D" : "");
+					wp.requiresCrouch ? " C" : "");
 				msg += wpBuf;
 				if (i + 1 < bot.waypoints.size())
 					msg += ",";
@@ -337,42 +302,12 @@ void PrintWaypoints()
 			{
 				const Nav::Waypoint &wp = bot.waypoints[i];
 				snprintf(line, sizeof(line),
-					"  wp[%zu]=(%.1f,%.1f,%.1f) jump=%d elev=%d tele=%d launch=%d drop=%d btn=%d trig=%d door=%d crouch=%d targArea=%d maxSpeed=%.1f\n",
+					"  wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d maxSpeed=%.1f\n",
 					i, wp.point.x, wp.point.y, wp.point.z,
-					wp.requiresJump, wp.requiresElevatorRide, wp.requiresTeleport,
-					wp.requiresLaunch, wp.requiresDrop, wp.requiresButtonUse, wp.requiresTriggerTouch,
-					wp.requiresDoor, wp.requiresCrouch, wp.targetAreaId, wp.maxSpeed);
+					wp.requiresJump, wp.requiresCrouch, wp.targetAreaId, wp.maxSpeed);
 				SERVER_PRINT(line);
 			}
 		}
-}
-
-int GetOtherBotEdicts(edict_t *self, edict_t **outEdicts, int maxCount)
-{
-	int count = 0;
-	for (auto &bot : g_bots)
-	{
-		if (count >= maxCount)
-			break;
-		if (!bot.inUse || bot.pEdict == self)
-			continue;
-		outEdicts[count++] = bot.pEdict;
-	}
-	return count;
-}
-
-int GetBotsForDebug(const CBot **outBots, int maxCount)
-{
-	int count = 0;
-	for (auto &bot : g_bots)
-	{
-		if (count >= maxCount)
-			break;
-		if (!bot.inUse)
-			continue;
-		outBots[count++] = &bot;
-	}
-	return count;
 }
 
 }

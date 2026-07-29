@@ -6,6 +6,7 @@
 #include <set>
 
 #include "floor_support.h"
+#include "waypoint_plan.h"
 
 namespace navgen
 {
@@ -20,9 +21,245 @@ float TraverseCostFor(const MergedConnection &conn)
 	return 1.0f + static_cast<float>(conn.flightTime) * 0.5f + damagePenalty;
 }
 
-size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
-	double maxStep)
+namespace
 {
+
+constexpr double kPlaneWallNormalZ = 0.3;
+constexpr double kOnPlaneTolerance = 1.0;
+constexpr double kLaunchEdgeTolerance = 8.0;
+
+double DistanceToWall(const Plane &plane, const Vec3 &p, bool &ok)
+{
+	Vec3 n;
+	double d;
+	ok = WallPlaneAsLine(plane, n, d);
+	return ok ? std::fabs(p.x * n.x + p.y * n.y - d) : 0.0;
+}
+
+int WallHoldingSegment(const Area &area, const Vec3 &a, const Vec3 &b)
+{
+	int best = -1;
+	double bestDist = kOnPlaneTolerance;
+
+	for (size_t i = 0; i < area.boundPlanes.size(); ++i)
+	{
+		bool ok = false;
+		double da = DistanceToWall(area.boundPlanes[i], a, ok);
+		if (!ok)
+			continue;
+		double db = DistanceToWall(area.boundPlanes[i], b, ok);
+
+		double worst = std::max(da, db);
+		if (worst < bestDist)
+		{
+			bestDist = worst;
+			best = static_cast<int>(i);
+		}
+	}
+
+	return best;
+}
+
+int WallNearestPoint(const Area &area, const Vec3 &p, double tolerance)
+{
+	int best = -1;
+	double bestDist = tolerance;
+
+	for (size_t i = 0; i < area.boundPlanes.size(); ++i)
+	{
+		bool ok = false;
+		double d = DistanceToWall(area.boundPlanes[i], p, ok);
+		if (ok && d < bestDist)
+		{
+			bestDist = d;
+			best = static_cast<int>(i);
+		}
+	}
+
+	return best;
+}
+
+}
+
+bool WallPlaneAsLine(const Plane &plane, Vec3 &normalOut, double &distOut)
+{
+	if (std::fabs(plane.normal.z) > kPlaneWallNormalZ)
+		return false;
+
+	double len = std::sqrt(plane.normal.x * plane.normal.x + plane.normal.y * plane.normal.y);
+	if (len < 1e-6)
+		return false;
+
+	normalOut = Vec3(plane.normal.x / len, plane.normal.y / len, 0.0);
+	distOut = plane.dist / len;
+	return true;
+}
+
+int WallFacingDirection(const Area &area, const Vec3 &dir2D)
+{
+	int best = -1;
+	double bestDot = 0.0;
+
+	for (size_t i = 0; i < area.boundPlanes.size(); ++i)
+	{
+		Vec3 n;
+		double d;
+		if (!WallPlaneAsLine(area.boundPlanes[i], n, d))
+			continue;
+
+		double dot = dir2D.x * n.x + dir2D.y * n.y;
+		if (best < 0 || dot > bestDot)
+		{
+			bestDot = dot;
+			best = static_cast<int>(i);
+		}
+	}
+
+	return (bestDot > 0.0) ? best : -1;
+}
+
+size_t ResolveConnectionPlanes(const std::vector<Area> &areas, std::vector<MergedConnection> &conns)
+{
+	size_t unresolved = 0;
+
+	for (MergedConnection &c : conns)
+	{
+		c.planeA = -1;
+		c.planeB = -1;
+
+		if (static_cast<size_t>(c.areaA) >= areas.size() || static_cast<size_t>(c.areaB) >= areas.size())
+			continue;
+
+		const Area &areaA = areas[static_cast<size_t>(c.areaA)];
+		const Area &areaB = areas[static_cast<size_t>(c.areaB)];
+
+		// Only a walk needs these: it is the one crossing whose gates come from the shared face.
+		// An air move carries gates measured off its own samples.
+		if (c.connType != crossbot_nav::CONN_WALK)
+			continue;
+
+		c.planeA = WallHoldingSegment(areaA, c.pointA, c.pointB);
+		c.planeB = WallHoldingSegment(areaB, c.pointA, c.pointB);
+
+		if (c.planeA < 0 || c.planeB < 0)
+			++unresolved;
+	}
+
+	return unresolved;
+}
+
+static Vector ToPlanVector(const Vec3 &v)
+{
+	return Vector(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z));
+}
+
+size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedConnection> &conns)
+{
+	ResolveConnectionPlanes(areas, conns);
+
+	std::vector<NavPlan::PlanArea> planAreas(areas.size());
+	for (size_t i = 0; i < areas.size(); ++i)
+	{
+		Vec3 c = areas[i].polytope.Centroid();
+		planAreas[i].centroid = Vector(static_cast<float>(c.x), static_cast<float>(c.y),
+			static_cast<float>(c.z));
+
+		planAreas[i].boundPlanes.reserve(areas[i].boundPlanes.size());
+		for (const Plane &p : areas[i].boundPlanes)
+		{
+			NavPlan::PlanPlane pp;
+			pp.normal = Vector(static_cast<float>(p.normal.x), static_cast<float>(p.normal.y),
+				static_cast<float>(p.normal.z));
+			pp.dist = static_cast<float>(p.dist);
+			planAreas[i].boundPlanes.push_back(pp);
+		}
+
+		NavPlan::BuildAreaGates(planAreas[i]);
+	}
+
+	auto planeIndex = [](int idx)
+	{
+		return (idx >= 0 && idx < static_cast<int>(crossbot_nav::kNoAreaPlane))
+			? static_cast<uint8_t>(idx) : crossbot_nav::kNoAreaPlane;
+	};
+
+	std::vector<NavPlan::PlanConnection> planConns(conns.size());
+	for (size_t i = 0; i < conns.size(); ++i)
+	{
+		planConns[i].areaA = static_cast<uint32_t>(conns[i].areaA);
+		planConns[i].areaB = static_cast<uint32_t>(conns[i].areaB);
+		planConns[i].planeA = planeIndex(conns[i].planeA);
+		planConns[i].planeB = planeIndex(conns[i].planeB);
+		planConns[i].connType = conns[i].connType;
+	}
+
+	NavPlan::BuildConnectionGates(planAreas, planConns);
+
+	// An air move already carries gates measured off the samples that proved it. Those beat
+	// anything derived from the area's outline, so only fill in where sampling left a hole.
+	for (size_t i = 0; i < conns.size(); ++i)
+	{
+		if (conns[i].gateAValid)
+		{
+			planConns[i].gateA.valid = true;
+			planConns[i].gateA.clamped = false;
+			planConns[i].gateA.left = ToPlanVector(conns[i].gateALeft);
+			planConns[i].gateA.right = ToPlanVector(conns[i].gateARight);
+		}
+		if (conns[i].gateBValid)
+		{
+			planConns[i].gateB.valid = true;
+			planConns[i].gateB.clamped = false;
+			planConns[i].gateB.left = ToPlanVector(conns[i].gateBLeft);
+			planConns[i].gateB.right = ToPlanVector(conns[i].gateBRight);
+		}
+	}
+
+	auto onFloor = [&](const Vector &p, int areaId)
+	{
+		Vec3 out(p.x, p.y, p.z);
+		if (static_cast<size_t>(areaId) >= areas.size())
+			return out;
+		const Face *floor = FloorFaceUnder(areas[static_cast<size_t>(areaId)].polytope, out.x, out.y);
+		if (floor)
+			out.z = FloorHeightAt(*floor, out.x, out.y);
+		return out;
+	};
+
+	size_t missing = 0;
+	for (size_t i = 0; i < conns.size(); ++i)
+	{
+		MergedConnection &c = conns[i];
+		const NavPlan::PlanConnection &pc = planConns[i];
+
+		c.gateAValid = pc.gateA.valid;
+		c.gateBValid = pc.gateB.valid;
+		c.gateAClamped = pc.gateA.clamped;
+		c.gateBClamped = pc.gateB.clamped;
+
+		if (c.gateAValid)
+		{
+			c.gateALeft = onFloor(pc.gateA.left, c.areaA);
+			c.gateARight = onFloor(pc.gateA.right, c.areaA);
+		}
+		if (c.gateBValid)
+		{
+			c.gateBLeft = onFloor(pc.gateB.left, c.areaB);
+			c.gateBRight = onFloor(pc.gateB.right, c.areaB);
+		}
+
+		if (c.connType != crossbot_nav::CONN_TELEPORT && (!c.gateAValid || !c.gateBValid))
+			++missing;
+	}
+
+	return missing;
+}
+
+size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
+	double maxStep, bool dump)
+{
+	constexpr int kStepSamples = 8;
+
 	size_t removed = 0;
 
 	std::vector<MergedConnection> kept;
@@ -37,24 +274,55 @@ size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<M
 			continue;
 		}
 
-		// The floor under the connection, not the area's lowest floor: an area holding
-		// both a ramp and the flat ground at its base would otherwise report the step
-		// as the whole ramp's rise.
-		Vec3 mid = (c.pointA + c.pointB) * 0.5;
+		const Polytope &polyA = areas[static_cast<size_t>(c.areaA)].polytope;
+		const Polytope &polyB = areas[static_cast<size_t>(c.areaB)].polytope;
 
-		const Face *floorA = FloorFaceUnder(areas[static_cast<size_t>(c.areaA)].polytope, mid.x, mid.y);
-		const Face *floorB = FloorFaceUnder(areas[static_cast<size_t>(c.areaB)].polytope, mid.x, mid.y);
-		if (!floorA || !floorB)
+		const Face *bestA = nullptr;
+		const Face *bestB = nullptr;
+		Vec3 bestAt = (c.pointA + c.pointB) * 0.5;
+		double bestStep = 0.0;
+		bool haveFloor = false;
+
+		for (int i = 0; i <= kStepSamples; ++i)
+		{
+			double t = static_cast<double>(i) / static_cast<double>(kStepSamples);
+			Vec3 at = c.pointA + (c.pointB - c.pointA) * t;
+
+			const Face *floorA = FloorFaceUnder(polyA, at.x, at.y);
+			const Face *floorB = FloorFaceUnder(polyB, at.x, at.y);
+			if (!floorA || !floorB)
+				continue;
+
+			double step = std::fabs(FloorHeightAt(*floorA, at.x, at.y) - FloorHeightAt(*floorB, at.x, at.y));
+			if (!haveFloor || step < bestStep)
+			{
+				haveFloor = true;
+				bestStep = step;
+				bestAt = at;
+				bestA = floorA;
+				bestB = floorB;
+			}
+		}
+
+		if (!haveFloor)
 		{
 			kept.push_back(c);
 			continue;
 		}
 
-		double zA = FloorHeightAt(*floorA, mid.x, mid.y);
-		double zB = FloorHeightAt(*floorB, mid.x, mid.y);
-
-		if (std::fabs(zA - zB) > maxStep)
+		if (bestStep > maxStep)
 		{
+			if (dump)
+			{
+				double zA = FloorHeightAt(*bestA, bestAt.x, bestAt.y);
+				double zB = FloorHeightAt(*bestB, bestAt.x, bestAt.y);
+				double distA = Distance2DToWinding(bestA->winding, bestAt.x, bestAt.y);
+				double distB = Distance2DToWinding(bestB->winding, bestAt.x, bestAt.y);
+				std::printf("  step drop %3d <-> %3d at (%.1f, %.1f): zA %.1f zB %.1f step %.1f "
+					"[faceA nz %.2f off %.1f, faceB nz %.2f off %.1f]\n",
+					c.areaA, c.areaB, bestAt.x, bestAt.y, zA, zB, bestStep,
+					bestA->plane.normal.z, distA, bestB->plane.normal.z, distB);
+			}
 			++removed;
 			continue;
 		}

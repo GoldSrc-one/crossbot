@@ -25,13 +25,15 @@ struct FailedAirmove
 {
 	Vec3 launch;
 	Vec3 landing;
+	Vec3 aim;
 };
 
 void WriteDebugSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
 	const std::vector<MergedConnection> &conns, const std::vector<Vec3> &pathPoints = {},
 	const std::vector<Vec3> &targetPoints = {},
 	const std::vector<uint8_t> &pathSegmentKinds = {},
-	const std::vector<FailedAirmove> &failedAirmoves = {});
+	const std::vector<FailedAirmove> &failedAirmoves = {},
+	const std::vector<Vec3> &tracePoints = {});
 
 }
 

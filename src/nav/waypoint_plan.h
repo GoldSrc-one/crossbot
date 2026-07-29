@@ -18,6 +18,13 @@ struct PlanPlane
 	float dist = 0.f;
 };
 
+struct PlanGate
+{
+	Vector left, right;
+	bool valid = false;
+	bool clamped = false;
+};
+
 struct PlanArea
 {
 	Vector centroid;
@@ -27,17 +34,24 @@ struct PlanArea
 	Vector doorActivatorPos;
 	float doorWaitTime = 0.f;
 
-	bool hasDropPortal = false;
+	bool hasDropConnection = false;
 
 	// Inward-facing bounds. Used to stop a corner being nudged into a wall, to find where a path
 	// leaves the area, and to test whether a simulated jump came down inside it.
 	std::vector<PlanPlane> boundPlanes;
+
+	// One per bound plane, built once by BuildAreaGates: that plane's edge of this area, inset at
+	// both ends and pushed inward by the player radius. Invalid where the plane carries no edge.
+	std::vector<PlanGate> edgeGates;
 };
 
 struct PlanConnection
 {
 	uint32_t areaA = 0, areaB = 0;
-	Vector pointA, pointB;
+	// Which bound plane the crossing sits on, on each side. Used only while navgen bakes the
+	// gates; the runtime reads the gates straight out of the file.
+	uint8_t planeA = crossbot_nav::kNoAreaPlane;
+	uint8_t planeB = crossbot_nav::kNoAreaPlane;
 	uint8_t connType = crossbot_nav::CONN_WALK;
 	uint8_t connFlags = crossbot_nav::CONN_FLAG_NONE;
 
@@ -46,6 +60,13 @@ struct PlanConnection
 	float exitAngle = 0.f;
 	float jumpBackDist = 0.f;
 	float flightTime = 0.f;
+	Vector launchPos, landingPos;
+
+	// The two areas' shared face, inset and pushed into each side. Built by BuildConnectionGates.
+	PlanGate gateA, gateB;
+	// Launch yaw and speed at gateA's left and right ends, interpolated across it.
+	float gateAYaw[2] = {0.f, 0.f};
+	float gateASpeed[2] = {0.f, 0.f};
 };
 
 struct PlanWaypoint
@@ -83,15 +104,20 @@ struct PlanWaypoint
 	bool launchSimFailed = false;
 	Vector launchSimFrom;
 	Vector launchSimTo;
+	// What the attempt was aiming at. A replay that never leaves the ground has launchSimTo sitting
+	// on top of launchSimFrom, and then this is the only thing that shows what it meant to do.
+	Vector launchSimAim;
 };
 
+// A stretch of route that passes near a drop is walked at the careful speed; everything else runs.
+// The bot turns these into a drive length for pfnRunPlayerMove, so anything under kPlanSpeedRun is
+// passed through as a literal speed rather than clamped up to maxspeed.
 constexpr float kPlanSpeedRun = 250.f;
 constexpr float kPlanSpeedCareful = 130.f;
-constexpr float kPlanSpeedCrawl = 100.f;
-constexpr float kPlanNarrowGateLength = 56.f;
 
-// The player's hull radius. Gates are inset by this at each end and pushed this far off the portal
-// plane into the area on either side, so the funnel can only route through space a hull fits in.
+// The player's hull radius. Gates are inset by this at each end and pushed this far off the
+// connection plane into the area on either side, so the funnel only routes through space a hull
+// fits in.
 constexpr float kPlanClearance = 16.f;
 
 // Areas are baked in the duck hull, so a floor point is already the ducked origin and a standing
@@ -106,19 +132,29 @@ struct PlanTraceContext
 	PmSim::PmTraceFn duckTrace;
 	PmSim::PmTraceFn standTrace;
 	PmSim::PmPhysics physics;
+	bool dumpAirmoves = false;
 };
 
 struct PlanStats
 {
 	size_t airmovesSimulated = 0;
 	size_t airmovesFromStored = 0;
-	// Air moves that got a run-up node; the rest had no room for one inside the source area.
-	size_t airmoveRunups = 0;
 	size_t corners = 0;
 	// Gates whose offset or end inset had to be cut short because the area was too thin or the
-	// portal too narrow to give the full clearance.
+	// connection too narrow to give the full clearance.
 	size_t gatesClamped = 0;
 };
+
+// Fills area.edgeGates from area.boundPlanes. Call once per area after loading, before planning.
+void BuildAreaGates(PlanArea &area);
+
+// Fills conn.gateA/gateB by trimming each area's edge to the span the two actually share. Call
+// after BuildAreaGates, once, before planning.
+void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanConnection> &conns);
+
+// Where a path crosses this connection: the middle of the gates it passes through, or the launch
+// for a move that leaves the ground. Used to shape A* traverse costs.
+Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnection &conn);
 
 std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 	const std::vector<PlanConnection> &conns, const std::vector<uint32_t> &areaPath,

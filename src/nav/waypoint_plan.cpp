@@ -2,7 +2,6 @@
 
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 
 #include "funnel_graph.h"
 
@@ -79,30 +78,9 @@ bool InAreaColumn(const Vector &p, const PlanArea &area, float margin)
 	return true;
 }
 
-// How far p can travel along dir before leaving the area through one of its walls.
-float MaxTravelInside(const Vector &p, const Vector &dir, const PlanArea &area)
-{
-	float best = 1e9f;
-	for (const PlanPlane &pl : area.boundPlanes)
-	{
-		if (std::fabs(pl.normal.z) > kWallNormalZ)
-			continue;
-
-		float along = dir.x * pl.normal.x + dir.y * pl.normal.y;
-		if (along >= -0.0001f)
-			continue; // moving along or away from this wall, it cannot stop us
-
-		float ahead = p.x * pl.normal.x + p.y * pl.normal.y + p.z * pl.normal.z - pl.dist;
-		float allowed = ahead / -along;
-		if (allowed < best)
-			best = allowed;
-	}
-	return best;
-}
-
 // Floor height at p, read off the gate it came from: the two gate ends carry the floor height at
 // their own corners, so a point along the gate interpolates between them.
-float GateFloorZ(const NavFunnel::PortalGate &gate, const Vector &p)
+float GateFloorZ(const NavFunnel::Gate &gate, const Vector &p)
 {
 	Vector span = gate.right - gate.left;
 	float len2Sq = span.x * span.x + span.y * span.y;
@@ -117,59 +95,282 @@ float GateFloorZ(const NavFunnel::PortalGate &gate, const Vector &p)
 	return gate.left.z + span.z * t;
 }
 
-// Ground distance to allow behind a launch so the bot arrives at speed. A tenth of the target
-// speed: 32 units at a full run. Deliberately generous against the ~27 units the tick-by-tick
-// acceleration actually needs, since arriving early at speed costs nothing and arriving slow
-// wrecks the jump.
-float GroundRunupDistance(float speed)
+// Where a route crosses a gate. Falls back to the gate's middle when the route misses it
+// altogether, which only happens if the funnel had no reason to steer through it.
+Vector CrossingOnGate(const std::vector<Vector> &line, const NavFunnel::Gate &gate)
 {
-	return (speed > 0.f) ? speed * 0.1f : 0.f;
+	Vector mid = (gate.left + gate.right) * 0.5f;
+
+	Vector span = gate.right - gate.left;
+	Vector normal(-span.y, span.x, 0.f);
+	float nlen = std::sqrt(normal.x * normal.x + normal.y * normal.y);
+	if (nlen < 0.0001f || line.size() < 2)
+		return mid;
+	normal = Vector(normal.x / nlen, normal.y / nlen, 0.f);
+
+	float gateAt = gate.left.x * normal.x + gate.left.y * normal.y;
+	float spanLenSq = span.x * span.x + span.y * span.y;
+
+	for (size_t i = 0; i + 1 < line.size(); ++i)
+	{
+		float da = line[i].x * normal.x + line[i].y * normal.y - gateAt;
+		float db = line[i + 1].x * normal.x + line[i + 1].y * normal.y - gateAt;
+		if ((da > 0.f) == (db > 0.f) || std::fabs(da - db) < 0.0001f)
+			continue;
+
+		float t = da / (da - db);
+		Vector hit = line[i] + (line[i + 1] - line[i]) * t;
+
+		float s = ((hit.x - gate.left.x) * span.x + (hit.y - gate.left.y) * span.y) / spanLenSq;
+		s = (s < 0.f) ? 0.f : (s > 1.f ? 1.f : s);
+		return gate.left + span * s;
+	}
+
+	return mid;
 }
 
-// Where the segment from -> to leaves the area, in 2D. False when it never does.
-bool ExitPointFromArea(const Vector &from, const Vector &to, const PlanArea &area, Vector &out,
-	int *whyNot = nullptr)
+// Where p sits along the gate, 0 at left and 1 at right. Measured against the stored gate rather
+// than the funnel's reordered copy, since the per-end parameters were recorded in stored order.
+float GateFraction(const PlanGate &gate, const Vector &p)
 {
-	Vector dir = Norm2D(to - from);
-	if (dir.x == 0.f && dir.y == 0.f)
-	{
-		if (whyNot) *whyNot = 1; // degenerate direction
-		return false;
-	}
+	Vector span = gate.right - gate.left;
+	float lenSq = span.x * span.x + span.y * span.y;
+	if (lenSq < 0.0001f)
+		return 0.f;
 
-	float t = MaxTravelInside(from, dir, area);
-	if (t >= 1e9f)
-	{
-		if (whyNot) *whyNot = 2; // no wall faces the ray
-		return false;
-	}
-	if (t < 0.f)
-	{
-		if (whyNot) *whyNot = 3; // the approach point is already outside the area
-		return false;
-	}
+	float t = ((p.x - gate.left.x) * span.x + (p.y - gate.left.y) * span.y) / lenSq;
+	return (t < 0.f) ? 0.f : (t > 1.f ? 1.f : t);
+}
 
-	float span = SegLen2D(from, to);
-	if (t > span)
-	{
-		if (whyNot) *whyNot = 4; // the landing is inside the source area's own column
-		return false;
-	}
-
-	out = Vector(from.x + dir.x * t, from.y + dir.y * t, from.z);
-	return true;
+// Shortest way round, so a gate whose ends straddle +/-180 does not sweep the long way.
+float LerpYaw(float a, float b, float t)
+{
+	float d = b - a;
+	while (d > 180.f)
+		d -= 360.f;
+	while (d < -180.f)
+		d += 360.f;
+	return a + d * t;
 }
 
 struct PendingGate
 {
-	NavFunnel::PortalGate gate;
-	// The area this gate was pushed into. Each portal contributes one gate on each side, so a
+	NavFunnel::Gate gate;
+	// The area this gate was pushed into. Each connection contributes one gate on each side, so a
 	// corner's height and crouch state come from the area it actually stands in.
 	uint32_t insideArea = 0;
 	uint32_t toArea = 0;
 	bool crouch = false;
 };
 
+const PlanPlane *FloorPlaneOf(const PlanArea &area)
+{
+	const PlanPlane *best = nullptr;
+	for (const PlanPlane &pl : area.boundPlanes)
+		if (!best || pl.normal.z > best->normal.z)
+			best = &pl;
+	return (best && best->normal.z > kWallNormalZ) ? best : nullptr;
+}
+
+float AreaFloorZ(const PlanArea &area, float x, float y)
+{
+	const PlanPlane *floor = FloorPlaneOf(area);
+	if (!floor || floor->normal.z < 0.0001f)
+		return 0.f;
+	return (floor->dist - floor->normal.x * x - floor->normal.y * y) / floor->normal.z;
+}
+
+// The line one bound plane carries, trimmed to the span that is actually open. Trimming by the
+// owning area alone gives that area's whole edge; trimming by the neighbour as well gives the two
+// areas' shared face, which is the only part a path may cross.
+struct EdgeLine
+{
+	Vector inward = Vector(0.f, 0.f, 0.f);
+	Vector along = Vector(0.f, 0.f, 0.f);
+	Vector base = Vector(0.f, 0.f, 0.f);
+	float lo = -1e9f;
+	float hi = 1e9f;
+	bool valid = false;
+};
+
+bool ClipLineByWalls(EdgeLine &line, const PlanArea &area, const PlanPlane *skip)
+{
+	for (const PlanPlane &other : area.boundPlanes)
+	{
+		if (&other == skip)
+			continue;
+		if (std::fabs(other.normal.z) > kWallNormalZ)
+			continue;
+
+		float denom = other.normal.x * line.along.x + other.normal.y * line.along.y;
+		float at = line.base.x * other.normal.x + line.base.y * other.normal.y - other.dist;
+
+		if (std::fabs(denom) < 0.0001f)
+		{
+			if (at < -0.05f)
+				return false;
+			continue;
+		}
+
+		float s = -at / denom;
+		if (denom > 0.f)
+		{
+			if (s > line.lo)
+				line.lo = s;
+		}
+		else if (s < line.hi)
+		{
+			line.hi = s;
+		}
+	}
+
+	return (line.hi - line.lo) > 0.0001f;
+}
+
+EdgeLine EdgeOfPlane(const PlanArea &area, size_t planeIdx)
+{
+	EdgeLine line;
+	if (planeIdx >= area.boundPlanes.size())
+		return line;
+
+	const PlanPlane &pl = area.boundPlanes[planeIdx];
+	if (std::fabs(pl.normal.z) > kWallNormalZ)
+		return line;
+
+	float nlen = std::sqrt(pl.normal.x * pl.normal.x + pl.normal.y * pl.normal.y);
+	if (nlen < 0.0001f)
+		return line;
+
+	line.inward = Vector(pl.normal.x / nlen, pl.normal.y / nlen, 0.f);
+	float dist = pl.dist / nlen;
+	line.along = Vector(-line.inward.y, line.inward.x, 0.f);
+	line.base = Vector(line.inward.x * dist, line.inward.y * dist, 0.f);
+	line.valid = ClipLineByWalls(line, area, &pl) && line.lo > -1e8f && line.hi < 1e8f;
+
+	return line;
+}
+
+PlanGate GateFromEdge(const EdgeLine &line, const PlanArea &inside, const Vector &inward)
+{
+	PlanGate gate;
+	if (!line.valid)
+		return gate;
+
+	auto shift = [](const Vector &p, const Vector &dir, float d)
+	{
+		return Vector(p.x + dir.x * d, p.y + dir.y * d, p.z);
+	};
+	auto onFloor = [&](const Vector &p)
+	{
+		return Vector(p.x, p.y, AreaFloorZ(inside, p.x, p.y));
+	};
+
+	Vector e1(line.base.x + line.along.x * line.lo, line.base.y + line.along.y * line.lo, 0.f);
+	Vector e2(line.base.x + line.along.x * line.hi, line.base.y + line.along.y * line.hi, 0.f);
+
+	gate.valid = true;
+
+	Vector l = shift(e1, line.along, kPlanClearance);
+	Vector r = shift(e2, line.along, -kPlanClearance);
+
+	bool usable = (line.hi - line.lo) > 2.f * kPlanClearance &&
+		InAreaColumn(l, inside, kInsideEpsilon) && InAreaColumn(r, inside, kInsideEpsilon);
+
+	if (!usable)
+	{
+		Vector c((e1.x + e2.x) * 0.5f, (e1.y + e2.y) * 0.5f, 0.f);
+		Vector pushed = shift(c, inward, kPlanClearance);
+		gate.left = gate.right = onFloor(InAreaColumn(pushed, inside, kInsideEpsilon) ? pushed : c);
+		gate.clamped = true;
+		return gate;
+	}
+
+	Vector pushedL = shift(l, inward, kPlanClearance);
+	Vector pushedR = shift(r, inward, kPlanClearance);
+	bool fits = InAreaColumn(pushedL, inside, kInsideEpsilon) &&
+		InAreaColumn(pushedR, inside, kInsideEpsilon);
+
+	gate.left = onFloor(fits ? pushedL : l);
+	gate.right = onFloor(fits ? pushedR : r);
+	gate.clamped = !fits;
+	return gate;
+}
+
+}
+
+void BuildAreaGates(PlanArea &area)
+{
+	area.edgeGates.assign(area.boundPlanes.size(), PlanGate());
+
+	for (size_t i = 0; i < area.boundPlanes.size(); ++i)
+	{
+		EdgeLine line = EdgeOfPlane(area, i);
+		if (line.valid)
+			area.edgeGates[i] = GateFromEdge(line, area, line.inward);
+	}
+}
+
+void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanConnection> &conns)
+{
+	for (PlanConnection &conn : conns)
+	{
+		conn.gateA = PlanGate();
+		conn.gateB = PlanGate();
+
+		if (conn.connType == crossbot_nav::CONN_TELEPORT)
+			continue;
+		if (conn.areaA >= areas.size() || conn.areaB >= areas.size())
+			continue;
+
+		const PlanArea &a = areas[conn.areaA];
+		const PlanArea &b = areas[conn.areaB];
+
+		// An air move's gates are measured off the samples that proved it, so there is nothing
+		// here to derive.
+		if (conn.connType == crossbot_nav::CONN_AIRMOVE)
+			continue;
+
+		EdgeLine shared = EdgeOfPlane(a, conn.planeA);
+		if (shared.valid && ClipLineByWalls(shared, b, nullptr))
+		{
+			conn.gateA = GateFromEdge(shared, a, shared.inward);
+			conn.gateB = GateFromEdge(shared, b,
+				Vector(-shared.inward.x, -shared.inward.y, 0.f));
+			continue;
+		}
+
+		if (conn.planeA < a.edgeGates.size())
+			conn.gateA = a.edgeGates[conn.planeA];
+		if (conn.planeB < b.edgeGates.size())
+			conn.gateB = b.edgeGates[conn.planeB];
+	}
+}
+
+Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnection &conn)
+{
+	if (conn.connType != crossbot_nav::CONN_WALK)
+		return conn.launchPos;
+
+	Vector sum(0.f, 0.f, 0.f);
+	int found = 0;
+
+	auto add = [&](const PlanGate &g)
+	{
+		if (!g.valid)
+			return;
+		sum = sum + (g.left + g.right) * 0.5f;
+		++found;
+	};
+
+	add(conn.gateA);
+	add(conn.gateB);
+
+	if (found > 0)
+		return sum * (1.f / static_cast<float>(found));
+
+	if (conn.areaA < areas.size() && conn.areaB < areas.size())
+		return (areas[conn.areaA].centroid + areas[conn.areaB].centroid) * 0.5f;
+	return sum;
 }
 
 std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
@@ -183,7 +384,6 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 	Vector anchorPoint = startPoint;
 	std::vector<PendingGate> pendingGates;
 
-	float stretchMinGate = 1e9f;
 	bool stretchNearDrop = false;
 
 	// A point standing on the floor of this area, at the height the bot's origin will be.
@@ -195,100 +395,72 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 
 	auto StretchSpeed = [&]() -> float
 	{
-		if (!stretchNearDrop)
-			return kPlanSpeedRun;
-		return (stretchMinGate < kPlanNarrowGateLength) ? kPlanSpeedCrawl : kPlanSpeedCareful;
+		return stretchNearDrop ? kPlanSpeedCareful : kPlanSpeedRun;
 	};
 
-	// Each portal becomes two gates: the portal segment pulled in from both ends by the player
-	// radius, then pushed that far off the portal plane into the area on either side. Funnelling
-	// through those instead of through the raw portal is what keeps the route off the walls -- a
-	// corner can then only land inside an area, never on the plane it shares with a wall.
+	// The gate an area carries on the face this connection crosses, already inset and pushed
+	// inward when the area was loaded.
+	auto GateFor = [&](const PlanConnection &conn, uint32_t insideId) -> const PlanGate *
+	{
+		const PlanGate &g = (conn.areaA == insideId) ? conn.gateA : conn.gateB;
+		return g.valid ? &g : nullptr;
+	};
+
+	// One gate on each side of the crossing, leaving side first so they are met in path order.
+	// Funnelling through those rather than the shared face itself keeps the route off the walls.
 	auto PushGate = [&](const PlanConnection &conn, uint32_t fromId, uint32_t toId)
 	{
 		const PlanArea &fromArea = areas[fromId];
 		const PlanArea &toArea = areas[toId];
+		Vector travel = toArea.centroid - fromArea.centroid;
 
-		NavFunnel::PortalGate base =
-			NavFunnel::MakeGate(conn.pointA, conn.pointB, toArea.centroid - fromArea.centroid);
-
-		float gateLen = SegLen2D(base.left, base.right);
-		if (gateLen < stretchMinGate)
-			stretchMinGate = gateLen;
-		if (fromArea.hasDropPortal || toArea.hasDropPortal)
+		if (fromArea.hasDropConnection || toArea.hasDropConnection)
 			stretchNearDrop = true;
 
-		Vector along = Norm2D(base.right - base.left);
-		Vector normal(-along.y, along.x, 0.f);
-		Vector mid = (base.left + base.right) * 0.5f;
-		if ((toArea.centroid.x - mid.x) * normal.x + (toArea.centroid.y - mid.y) * normal.y < 0.f)
-			normal = Vector(-normal.x, -normal.y, 0.f);
+		auto build = [&](uint32_t insideId)
+		{
+			const PlanGate *g = GateFor(conn, insideId);
+			if (!g)
+				return;
 
-		auto onGate = [&](const Vector &p)
-		{
-			return Vector(p.x, p.y, GateFloorZ(base, p));
-		};
-		auto shift = [&](const Vector &p, const Vector &dir, float d)
-		{
-			return Vector(p.x + dir.x * d, p.y + dir.y * d, p.z);
-		};
-
-		auto build = [&](const Vector &dir, uint32_t insideId)
-		{
-			const PlanArea &inside = areas[insideId];
+			if (g->clamped && stats)
+				++stats->gatesClamped;
 
 			PendingGate pg;
 			pg.insideArea = insideId;
 			pg.toArea = toId;
 			pg.crouch = fromArea.crouch || toArea.crouch;
-
-			Vector l = onGate(shift(base.left, along, kPlanClearance));
-			Vector r = onGate(shift(base.right, along, -kPlanClearance));
-
-			bool usable = gateLen > 2.f * kPlanClearance &&
-				InAreaColumn(l, inside, kInsideEpsilon) && InAreaColumn(r, inside, kInsideEpsilon);
-
-			if (!usable)
-			{
-				// Nothing survives the inset, so aim at the middle of the opening. Push it off the
-				// plane if that still lands inside, otherwise leave it on the boundary.
-				Vector c = onGate(mid);
-				Vector pushed = shift(c, dir, kPlanClearance);
-				pg.gate.left = pg.gate.right = InAreaColumn(pushed, inside, kInsideEpsilon) ? pushed : c;
-				if (stats)
-					++stats->gatesClamped;
-			}
-			else
-			{
-				Vector pl = shift(l, dir, kPlanClearance);
-				Vector pr = shift(r, dir, kPlanClearance);
-				bool fits = InAreaColumn(pl, inside, kInsideEpsilon) &&
-					InAreaColumn(pr, inside, kInsideEpsilon);
-				pg.gate.left = fits ? pl : l;
-				pg.gate.right = fits ? pr : r;
-				if (!fits && stats)
-					++stats->gatesClamped;
-			}
-
+			pg.gate = NavFunnel::MakeGate(g->left, g->right, travel);
 			pendingGates.push_back(pg);
 		};
 
-		// Leaving side first, then the entered side, so they are crossed in path order.
-		build(Vector(-normal.x, -normal.y, 0.f), fromId);
-		build(normal, toId);
+		build(fromId);
+		build(toId);
 	};
 
-	// The last corner the most recent flush emitted, in raw pulled coordinates. An air move needs it
-	// to know which way the path is heading as it leaves the area.
-	Vector lastFlushCorner;
-	bool haveFlushCorner = false;
+	// Runs the funnel without consuming it, so an air move can see where the route would cross its
+	// gates before committing to a launch.
+	auto PeekFunnel = [&](const Vector &target)
+	{
+		std::vector<NavFunnel::Gate> gates;
+		gates.reserve(pendingGates.size());
+		for (const PendingGate &pg : pendingGates)
+			gates.push_back(pg.gate);
+
+		std::vector<NavFunnel::PulledPoint> pulled = NavFunnel::StringPull(anchorPoint, target, gates);
+
+		std::vector<Vector> line;
+		line.reserve(pulled.size());
+		for (const NavFunnel::PulledPoint &p : pulled)
+			line.push_back(p.point);
+		return line;
+	};
 
 	auto FlushFunnelTo = [&](const Vector &target)
 	{
 		float speed = StretchSpeed();
-		haveFlushCorner = false;
 
-		std::vector<NavFunnel::PortalGate> gates;
+		std::vector<NavFunnel::Gate> gates;
 		gates.reserve(pendingGates.size());
 		for (const PendingGate &pg : pendingGates)
 			gates.push_back(pg.gate);
@@ -297,9 +469,6 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 
 		for (size_t k = 1; k + 1 < pulled.size(); ++k)
 		{
-			lastFlushCorner = pulled[k].point;
-			haveFlushCorner = true;
-
 			PlanWaypoint corner;
 			corner.maxSpeed = speed;
 			corner.point = pulled[k].point;
@@ -320,7 +489,6 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 		}
 
 		pendingGates.clear();
-		stretchMinGate = 1e9f;
 		stretchNearDrop = false;
 		return speed;
 	};
@@ -396,17 +564,17 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 
 		if (conn.connType == crossbot_nav::CONN_TELEPORT)
 		{
-			float speed = FlushFunnelTo(conn.pointA);
+			float speed = FlushFunnelTo(conn.launchPos);
 
 			PlanWaypoint triggerWp;
-			triggerWp.point = conn.pointA;
+			triggerWp.point = conn.launchPos;
 			triggerWp.requiresTeleport = true;
-			triggerWp.teleportDest = conn.pointB;
+			triggerWp.teleportDest = conn.landingPos;
 			triggerWp.maxSpeed = speed;
 			result.push_back(triggerWp);
 
 			PlanWaypoint destWp;
-			destWp.point = conn.pointB;
+			destWp.point = conn.landingPos;
 			result.push_back(destWp);
 			anchorPoint = destWp.point;
 			continue;
@@ -414,95 +582,66 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 
 		if (conn.connType == crossbot_nav::CONN_AIRMOVE)
 		{
-			// Air moves are one-way, so the sampled launch is always pointA.
 			bool needsCrouch = (conn.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH) != 0;
 			bool jump = (conn.connFlags & crossbot_nav::CONN_FLAG_JUMP) != 0;
 
-			// One pull, aimed at the landing. Its corners are the approach and get emitted here; the
-			// launch is then just where the final segment leaves the area, so the heading we jump on
-			// is the heading the path already had.
-			float speed = FlushFunnelTo(AtPlayerHeight(conn.pointB, toId));
-			Vector approachFrom = haveFlushCorner ? lastFlushCorner : anchorPoint;
+			// The air move goes through the funnel like any other crossing: its gates say where the
+			// route should leave and where it should come down. Only if replaying that launch
+			// misses does the baked one get used instead.
+			size_t gatesBefore = pendingGates.size();
+			PushGate(conn, fromId, toId);
 
-			Vector candidate = conn.pointA;
-			int whyNot = 0;
-			if (ExitPointFromArea(approachFrom, conn.pointB, fromArea, candidate, &whyNot))
-			{
-				// The crossing sits on the boundary plane itself. A drop wants to be right at the lip,
-				// but a jump has to start its run-up behind it -- and when the far side is a wall
-				// rather than a drop, standing on the plane buries the hull in it. Stand off by the
-				// same amount the sampler did: its launches are inset + jumpBack behind the edge.
-				float standOff = jump ? (kLaunchInset + conn.jumpBackDist) : 0.f;
-				Vector back = Norm2D(conn.pointB - candidate);
-				Vector pulled(candidate.x - back.x * standOff, candidate.y - back.y * standOff,
-					conn.pointA.z);
-
-				candidate = InAreaColumn(pulled, fromArea, kInsideEpsilon)
-					? pulled
-					: Vector(candidate.x, candidate.y, conn.pointA.z);
-			}
-			else if (whyNot == 4)
-			{
-				// The landing is under the area we are on, so there is no boundary to cross: walk to
-				// directly above it and step off.
-				Vector overhead(conn.pointB.x, conn.pointB.y, conn.pointA.z);
-				candidate = InAreaColumn(overhead, fromArea, kInsideEpsilon) ? overhead : conn.pointA;
-			}
-			else
-			{
-				// No approach direction to speak of -- the path already ends on the landing. The baked
-				// launch is the only opinion available.
-				candidate = conn.pointA;
-			}
-
-			if (whyNot != 0 && std::getenv("NAVGEN_DUMP_AIRMOVE"))
-				std::printf("    airmove %u->%u: no funnel launch, reason %d (approach %.1f,%.1f  "
-					"landing %.1f,%.1f)\n", fromId, toId, whyNot, approachFrom.x, approachFrom.y,
-					conn.pointB.x, conn.pointB.y);
-
-			Vector launch = conn.pointA;
+			Vector launch = conn.launchPos;
+			Vector land = conn.landingPos;
 			float yaw = conn.exitAngle;
+			float launchSpeed = conn.exitSpeed;
 			bool usedSim = false;
-			bool simTried = false;
-			Vector simFrom = candidate, simTo = candidate;
+			Vector simFrom = launch, simTo = land, simAim = land;
 
-			if (traces)
+			if (traces && pendingGates.size() > gatesBefore)
 			{
-				// The path heading first: that is the direction the bot genuinely arrives on, being
-				// the segment it just walked. The baked angle is the fallback for when the launch has
-				// not moved far enough for the heading to matter.
-				Vector pathDir = Norm2D(conn.pointB - candidate);
-				float yawPath = (pathDir.x != 0.f || pathDir.y != 0.f) ? Yaw2D(pathDir) : conn.exitAngle;
+				std::vector<Vector> line = PeekFunnel(AtPlayerHeight(conn.landingPos, toId));
 
-				// Path heading first, then the baked angle. The baked one was measured from the baked
-				// launch so it aims at nothing in particular once the launch has moved -- but the
-				// simulation is the arbiter either way, so a hit is a hit and it costs one replay.
-				const float candYaws[2] = { yawPath, conn.exitAngle };
+				Vector exitPoint = CrossingOnGate(line, pendingGates[gatesBefore].gate);
+				Vector entryPoint = (pendingGates.size() > gatesBefore + 1)
+					? CrossingOnGate(line, pendingGates[gatesBefore + 1].gate)
+					: AtPlayerHeight(conn.landingPos, toId);
 
-				simTried = true;
-				for (int yi = 0; yi < 2; ++yi)
+				// The samples that set each end of the gate flew their own way, so read the launch
+				// off the gate at the point the route actually crosses it.
+				float t = GateFraction(conn.gateA, exitPoint);
+				float candYaw = LerpYaw(conn.gateAYaw[0], conn.gateAYaw[1], t);
+				float candSpeed = conn.gateASpeed[0] + (conn.gateASpeed[1] - conn.gateASpeed[0]) * t;
+				if (candSpeed <= 0.f)
+					candSpeed = conn.exitSpeed;
+
+				Vector end;
+				const char *why = "";
+				simFrom = exitPoint;
+				simAim = entryPoint;
+				usedSim = JumpLandsIn(exitPoint, candYaw, candSpeed, jump, toId, needsCrouch,
+					end, &why);
+				simTo = end;
+
+				if (usedSim)
 				{
-					float candYaw = candYaws[yi];
-					Vector end;
-					const char *why = "";
-					bool ok = JumpLandsIn(candidate, candYaw, conn.exitSpeed, jump, toId, needsCrouch,
-						end, &why);
-					// Only the first attempt is worth drawing: it is the one aimed along the path.
-					if (yi == 0)
-						simTo = end;
-					if (!ok && std::getenv("NAVGEN_DUMP_AIRMOVE"))
-						std::printf("    airmove %u->%u sim miss: %s  launch (%.1f,%.1f,%.1f) yaw %.0f "
-							"speed %.0f jump %d -> end (%.1f,%.1f,%.1f)\n", fromId, toId, why,
-							candidate.x, candidate.y, candidate.z, candYaw, conn.exitSpeed, jump ? 1 : 0,
-							end.x, end.y, end.z);
-					if (!ok)
-						continue;
-					launch = candidate;
+					launch = exitPoint;
+					land = end;
 					yaw = candYaw;
-					usedSim = true;
-					break;
+					launchSpeed = candSpeed;
+				}
+				else if (traces->dumpAirmoves)
+				{
+					std::printf("    airmove %u->%u sim miss: %s  t %.2f launch (%.1f,%.1f,%.1f) "
+						"yaw %.0f speed %.0f jump %d -> end (%.1f,%.1f,%.1f)  entry (%.1f,%.1f)\n",
+						fromId, toId, why, t, exitPoint.x, exitPoint.y, exitPoint.z, candYaw,
+						candSpeed, jump ? 1 : 0, end.x, end.y, end.z, entryPoint.x, entryPoint.y);
 				}
 			}
+
+			// The gates have said their piece. The flush target is the launch itself, so carrying
+			// them any further would only constrain the route past where it leaves the ground.
+			pendingGates.resize(gatesBefore);
 
 			if (stats)
 			{
@@ -512,47 +651,27 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 					++stats->airmovesFromStored;
 			}
 
-			// Only worth a run-up node when the approach is too short to reach launch speed: with the
-			// heading taken from the path, a longer approach already arrives pointing the right way.
-			float runupDist = GroundRunupDistance(conn.exitSpeed);
-			if (SegLen2D(approachFrom, launch) < runupDist)
-			{
-				float yawRad = yaw * (kPi / 180.f);
-				Vector runup(launch.x - std::cos(yawRad) * runupDist,
-					launch.y - std::sin(yawRad) * runupDist, launch.z);
-
-				if (InAreaColumn(runup, fromArea, kInsideEpsilon))
-				{
-					PlanWaypoint runupWp;
-					runupWp.point = AtPlayerHeight(runup, fromId);
-					runupWp.maxSpeed = speed;
-					runupWp.requiresCrouch = needsCrouch;
-					runupWp.targetAreaId = static_cast<int>(fromId);
-					result.push_back(runupWp);
-
-					if (stats)
-						++stats->airmoveRunups;
-				}
-			}
+			float speed = FlushFunnelTo(AtPlayerHeight(launch, fromId));
 
 			PlanWaypoint launchWp;
 			launchWp.point = AtPlayerHeight(launch, fromId);
 			launchWp.airmoveLaunch = true;
 			launchWp.requiresJump = jump;
-			launchWp.launchSpeed = conn.exitSpeed;
+			launchWp.launchSpeed = launchSpeed;
 			launchWp.launchYaw = yaw;
 			launchWp.jumpBackDist = conn.jumpBackDist;
 			launchWp.launchSimulated = usedSim;
-			launchWp.launchSimFailed = simTried && !usedSim;
+			launchWp.launchSimFailed = !usedSim;
 			launchWp.launchSimFrom = simFrom;
 			launchWp.launchSimTo = simTo;
+			launchWp.launchSimAim = simAim;
 			launchWp.requiresCrouch = needsCrouch;
 			launchWp.maxSpeed = speed;
 			launchWp.targetAreaId = static_cast<int>(toId);
 			result.push_back(launchWp);
 
 			PlanWaypoint landWp;
-			landWp.point = AtPlayerHeight(conn.pointB, toId);
+			landWp.point = AtPlayerHeight(land, toId);
 			landWp.targetAreaId = static_cast<int>(toId);
 			result.push_back(landWp);
 
@@ -570,8 +689,15 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 			continue;
 		}
 
+		const PlanGate *doorGate = GateFor(conn, toId);
+		Vector doorPoint = doorGate
+			? Vector((doorGate->left.x + doorGate->right.x) * 0.5f,
+				(doorGate->left.y + doorGate->right.y) * 0.5f,
+				(doorGate->left.z + doorGate->right.z) * 0.5f)
+			: toArea.centroid;
+
 		PlanWaypoint wp;
-		wp.point = AtPlayerHeight((conn.pointA + conn.pointB) * 0.5f, toId);
+		wp.point = AtPlayerHeight(doorPoint, toId);
 		wp.requiresDoor = true;
 		wp.doorWaitTime = toArea.doorWaitTime;
 		wp.targetAreaId = static_cast<int>(toId);
