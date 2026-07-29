@@ -363,9 +363,6 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		pc.launchPos = pointA;
 		pc.landingPos = pointB;
 
-		if (c.connType == crossbot_nav::CONN_AIRMOVE)
-			planAreas[gc.areaA].hasDropConnection = true;
-
 		areaConnIndices[static_cast<size_t>(c.areaA)].push_back(static_cast<uint32_t>(i));
 		areaConnIndices[static_cast<size_t>(c.areaB)].push_back(static_cast<uint32_t>(i));
 	}
@@ -529,9 +526,9 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 			else if (wp.requiresDoor)
 				kind = "door";
 
-			std::printf("  wp[%2zu] %-8s (%8.1f, %8.1f, %8.1f) area %3d%s%s speed %.0f",
+			std::printf("  wp[%2zu] %-8s (%8.1f, %8.1f, %8.1f) area %3d%s%s",
 				i, kind, wp.point.x, wp.point.y, wp.point.z, wp.targetAreaId,
-				wp.requiresCrouch ? " crouch" : "", wp.requiresJump ? " JUMP" : "", wp.maxSpeed);
+				wp.requiresCrouch ? " crouch" : "", wp.requiresJump ? " JUMP" : "");
 			if (wp.airmoveLaunch)
 				std::printf(" launch %.0f yaw %.1f jumpBack %.1f", wp.launchSpeed, wp.launchYaw,
 					wp.jumpBackDist);

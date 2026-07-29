@@ -203,8 +203,6 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 			pc.gateASpeed[k] = c.gateASpeed[k];
 		}
 
-		if (c.connType == crossbot_nav::CONN_AIRMOVE && c.areaA < mesh->planAreas.size())
-			mesh->planAreas[c.areaA].hasDropConnection = true;
 	}
 
 	char msg[700];

@@ -77,26 +77,215 @@ bool SameLaunchEdge(const LaunchEdge &a, const LaunchEdge &b)
 	return std::fabs(da - db) < 0.1;
 }
 
-// A gate straight off the samples that proved the move: it runs across `normal`, as wide as the
-// points spread, and sits at their mean depth along `normal`. Nothing is guessed from geometry, so
-// nothing needs a clearance inset -- every one of these points was traced with the real hull. The
-// extreme samples hand over their own yaw and speed, since one pair does not fly from every point
-// on the span.
-SampleGate GateAcross(const std::vector<GatePoint> &points, const Vec3 &normal)
+constexpr int kFitIterations = 4;
+constexpr double kTukeyTuning = 4.685;
+constexpr double kMadScale = 1.4826;
+constexpr double kMinFitScale = 1.0;
+constexpr double kGateSigmas = 1.0;
+constexpr double kMinGateSigma = 1.0;
+
+// A segment fitted to the samples that proved the move, rather than drawn between the two extreme
+// ones. Iteratively reweighted: each pass measures how far every sample sits off the current line
+// and down-weights the strays, so the fit settles on the samples that agree with each other. Yaw
+// and speed are regressed against position along the segment and read off at its ends, because a
+// launch halfway along flies differently from one at the tip.
+//
+// Nothing is guessed from geometry, so nothing needs a clearance inset -- every one of these
+// points was traced with the real hull.
+SampleGate FitGate(const std::vector<GatePoint> &points)
 {
 	SampleGate gate;
-	if (points.empty())
-		return gate;
+	std::vector<double> weight(points.size(), 1.0);
+	std::vector<double> resid(points.size(), 0.0);
+	Vec3 mean(0.0, 0.0, 0.0);
+	Vec3 along(1.0, 0.0, 0.0);
+	double weightSum = 0.0;
 
-	Vec3 along(-normal.y, normal.x, 0.0);
+	for (int iter = 0; iter < kFitIterations; ++iter)
+	{
+		weightSum = 0.0;
+		Vec3 m(0.0, 0.0, 0.0);
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			m = m + points[i].pos * weight[i];
+			weightSum += weight[i];
+		}
+		if (weightSum < 1e-9)
+			return gate;
 
-	double lo = 1e30, hi = -1e30, depthSum = 0.0;
-	size_t loIdx = 0, hiIdx = 0;
+		mean = m * (1.0 / weightSum);
 
+		double cxx = 0.0, cxy = 0.0, cyy = 0.0;
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			double dx = points[i].pos.x - mean.x;
+			double dy = points[i].pos.y - mean.y;
+			cxx += weight[i] * dx * dx;
+			cxy += weight[i] * dx * dy;
+			cyy += weight[i] * dy * dy;
+		}
+		cxx /= weightSum;
+		cxy /= weightSum;
+		cyy /= weightSum;
+
+		if (std::fabs(cxy) > 1e-9)
+		{
+			double diff = cxx - cyy;
+			double lambda = 0.5 * ((cxx + cyy) + std::sqrt(diff * diff + 4.0 * cxy * cxy));
+			Vec3 v(cxy, lambda - cxx, 0.0);
+			double len = std::sqrt(v.x * v.x + v.y * v.y);
+			if (len > 1e-9)
+				along = v * (1.0 / len);
+		}
+		else
+		{
+			along = (cxx >= cyy) ? Vec3(1.0, 0.0, 0.0) : Vec3(0.0, 1.0, 0.0);
+		}
+
+		Vec3 across(-along.y, along.x, 0.0);
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			double dx = points[i].pos.x - mean.x;
+			double dy = points[i].pos.y - mean.y;
+			resid[i] = std::fabs(dx * across.x + dy * across.y);
+		}
+
+		if (iter + 1 == kFitIterations)
+			break;
+
+		std::vector<double> sorted = resid;
+		std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+		double scale = std::max(kMadScale * sorted[sorted.size() / 2], kMinFitScale);
+
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			double u = resid[i] / (kTukeyTuning * scale);
+			weight[i] = (u < 1.0) ? (1.0 - u * u) * (1.0 - u * u) : 0.0;
+		}
+	}
+
+	std::vector<double> t(points.size(), 0.0);
+	double tMean = 0.0, tMin = 1e30, tMax = -1e30;
 	for (size_t i = 0; i < points.size(); ++i)
 	{
-		const Vec3 &p = points[i].pos;
-		double s = p.x * along.x + p.y * along.y;
+		t[i] = (points[i].pos.x - mean.x) * along.x + (points[i].pos.y - mean.y) * along.y;
+		tMean += weight[i] * t[i];
+		if (weight[i] > 0.0)
+		{
+			tMin = std::min(tMin, t[i]);
+			tMax = std::max(tMax, t[i]);
+		}
+	}
+	if (weightSum < 1e-9 || tMin > tMax)
+		return gate;
+	tMean /= weightSum;
+
+	double variance = 0.0;
+	for (size_t i = 0; i < points.size(); ++i)
+	{
+		double dt = t[i] - tMean;
+		variance += weight[i] * dt * dt;
+	}
+	variance /= weightSum;
+
+	double sigma = std::sqrt(variance);
+	if (sigma < kMinGateSigma)
+		return gate;
+
+	double tLo = std::max(tMean - kGateSigmas * sigma, tMin);
+	double tHi = std::min(tMean + kGateSigmas * sigma, tMax);
+	if (tHi - tLo < kMinGateSigma)
+		return gate;
+
+	// What the samples near one end of the segment were doing. Local rather than global on purpose:
+	// yaw and speed are drawn independently of position by the sweep, so a line fitted across the
+	// whole span has no slope to find and collapses to the overall mean -- a yaw nobody flew paired
+	// with a speed nobody flew. Weighting by proximity along the segment keeps each end's values
+	// drawn from launches that actually started near it, and keeps yaw and speed paired.
+	double bandwidth = std::max((tHi - tLo) * 0.5, kMinGateSigma);
+	auto localAt = [&](double tAt, double (*get)(const GatePoint &))
+	{
+		double num = 0.0, den = 0.0;
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			double u = std::fabs((t[i] - tAt) / bandwidth);
+			if (u >= 1.0)
+				continue;
+			double tricube = (1.0 - u * u * u);
+			double w = weight[i] * tricube * tricube * tricube;
+			num += w * get(points[i]);
+			den += w;
+		}
+
+		if (den < 1e-9)
+		{
+			for (size_t i = 0; i < points.size(); ++i)
+			{
+				num += weight[i] * get(points[i]);
+				den += weight[i];
+			}
+		}
+
+		return (den > 1e-9) ? (num / den) : 0.0;
+	};
+
+	auto getZ = [](const GatePoint &p) { return p.pos.z; };
+	auto getSpeed = [](const GatePoint &p) { return static_cast<double>(p.speed); };
+	// Yaw as its two components: averaging degrees would tear at the +/-180 seam.
+	auto getCos = [](const GatePoint &p) { return std::cos(p.yaw * kPi / 180.0); };
+	auto getSin = [](const GatePoint &p) { return std::sin(p.yaw * kPi / 180.0); };
+
+	double zLo = localAt(tLo, getZ), zHi = localAt(tHi, getZ);
+	double speedLo = localAt(tLo, getSpeed), speedHi = localAt(tHi, getSpeed);
+	double cosLo = localAt(tLo, getCos), cosHi = localAt(tHi, getCos);
+	double sinLo = localAt(tLo, getSin), sinHi = localAt(tHi, getSin);
+
+	gate.left = Vec3(mean.x + along.x * tLo, mean.y + along.y * tLo, zLo);
+	gate.right = Vec3(mean.x + along.x * tHi, mean.y + along.y * tHi, zHi);
+	gate.yaw[0] = static_cast<float>(std::atan2(sinLo, cosLo) * 180.0 / kPi);
+	gate.yaw[1] = static_cast<float>(std::atan2(sinHi, cosHi) * 180.0 / kPi);
+	gate.speed[0] = static_cast<float>(std::max(0.0, speedLo));
+	gate.speed[1] = static_cast<float>(std::max(0.0, speedHi));
+	gate.valid = true;
+	return gate;
+}
+
+// Where a climb back out of a drop can be launched from: the drop's landing spread, turned into an
+// edge to sample along. `outward` points at the ledge, so the sweep fans its yaws around the climb
+// and sets its run-up back away from it. Deliberately the raw spread rather than a fitted gate --
+// the climb fits its own gate from whatever succeeds, so a wide seed only offers more to try.
+bool SeedEdgeFromLandings(const BinEntry &entry, LaunchEdge &out)
+{
+	Vec3 dirSum(0.0, 0.0, 0.0);
+	std::vector<Vec3> landings;
+
+	for (const AirmoveSample &s : entry.samples)
+	{
+		if (!SameLaunchEdge(s.edge, entry.bestEdge))
+			continue;
+
+		Vec3 climb = s.launchPos - s.landingPos;
+		climb.z = 0.0;
+		double len = std::sqrt(climb.x * climb.x + climb.y * climb.y);
+		if (len < 1e-6)
+			continue;
+
+		dirSum = dirSum + climb * (1.0 / len);
+		landings.push_back(s.landingPos);
+	}
+
+	double dirLen = std::sqrt(dirSum.x * dirSum.x + dirSum.y * dirSum.y);
+	if (landings.size() < 2 || dirLen < 1e-6)
+		return false;
+
+	out.outward = dirSum * (1.0 / dirLen);
+	Vec3 along(-out.outward.y, out.outward.x, 0.0);
+
+	double lo = 1e30, hi = -1e30;
+	size_t loIdx = 0, hiIdx = 0;
+	for (size_t i = 0; i < landings.size(); ++i)
+	{
+		double s = landings[i].x * along.x + landings[i].y * along.y;
 		if (s < lo)
 		{
 			lo = s;
@@ -107,28 +296,25 @@ SampleGate GateAcross(const std::vector<GatePoint> &points, const Vec3 &normal)
 			hi = s;
 			hiIdx = i;
 		}
-		depthSum += p.x * normal.x + p.y * normal.y;
 	}
 
-	Vec3 base = normal * (depthSum / static_cast<double>(points.size()));
+	// Real landing positions as the endpoints, so every point along the seed interpolates between
+	// two places a drop actually came down, floor height included.
+	out.a = landings[loIdx];
+	out.b = landings[hiIdx];
 
-	gate.left = Vec3(base.x + along.x * lo, base.y + along.y * lo, points[loIdx].pos.z);
-	gate.right = Vec3(base.x + along.x * hi, base.y + along.y * hi, points[hiIdx].pos.z);
-	gate.yaw[0] = points[loIdx].yaw;
-	gate.yaw[1] = points[hiIdx].yaw;
-	gate.speed[0] = points[loIdx].speed;
-	gate.speed[1] = points[hiIdx].speed;
-	gate.valid = true;
-	return gate;
+	Vec3 span = out.b - out.a;
+	out.length = std::sqrt(span.x * span.x + span.y * span.y);
+	return out.length > 1.0;
 }
 
-// Exit gate: the launch points, across the edge they left from. Entry gate: the landing points,
-// across the mean flight direction -- an arrival window rather than anything tied to a wall, since
-// a landing cloud sits wherever it sits inside the destination area.
-void BuildSampledGates(const BinEntry &entry, MergedConnection &conn)
+// Exit gate fitted to the launch points, entry gate to the landing points. False when either
+// cloud is too thin or too tight to fit a segment through -- a move proven by a couple of samples
+// is not one worth planning through, and the caller drops the connection rather than carrying a
+// degenerate gate.
+bool BuildSampledGates(const BinEntry &entry, MergedConnection &conn)
 {
 	std::vector<GatePoint> launches, landings;
-	Vec3 flightSum(0.0, 0.0, 0.0);
 
 	for (const AirmoveSample &s : entry.samples)
 	{
@@ -137,40 +323,25 @@ void BuildSampledGates(const BinEntry &entry, MergedConnection &conn)
 
 		launches.push_back({s.launchPos, s.yaw, s.speed});
 		landings.push_back({s.landingPos, s.yaw, s.speed});
-
-		Vec3 flight = s.landingPos - s.launchPos;
-		flight.z = 0.0;
-		double len = std::sqrt(flight.x * flight.x + flight.y * flight.y);
-		if (len > 1e-6)
-			flightSum = flightSum + flight * (1.0 / len);
 	}
 
-	if (launches.empty())
-		return;
+	SampleGate exitGate = FitGate(launches);
+	SampleGate entryGate = FitGate(landings);
+	if (!exitGate.valid || !entryGate.valid)
+		return false;
 
-	SampleGate exitGate = GateAcross(launches, entry.bestEdge.outward * -1.0);
-	if (exitGate.valid)
-	{
-		conn.gateAValid = true;
-		conn.gateALeft = exitGate.left;
-		conn.gateARight = exitGate.right;
-		conn.gateAYaw[0] = exitGate.yaw[0];
-		conn.gateAYaw[1] = exitGate.yaw[1];
-		conn.gateASpeed[0] = exitGate.speed[0];
-		conn.gateASpeed[1] = exitGate.speed[1];
-	}
+	conn.gateAValid = true;
+	conn.gateALeft = exitGate.left;
+	conn.gateARight = exitGate.right;
+	conn.gateAYaw[0] = exitGate.yaw[0];
+	conn.gateAYaw[1] = exitGate.yaw[1];
+	conn.gateASpeed[0] = exitGate.speed[0];
+	conn.gateASpeed[1] = exitGate.speed[1];
 
-	double flightLen = std::sqrt(flightSum.x * flightSum.x + flightSum.y * flightSum.y);
-	if (flightLen < 1e-6)
-		return;
-
-	SampleGate entryGate = GateAcross(landings, flightSum * (1.0 / flightLen));
-	if (entryGate.valid)
-	{
-		conn.gateBValid = true;
-		conn.gateBLeft = entryGate.left;
-		conn.gateBRight = entryGate.right;
-	}
+	conn.gateBValid = true;
+	conn.gateBLeft = entryGate.left;
+	conn.gateBRight = entryGate.right;
+	return true;
 }
 
 std::vector<LaunchEdge> CollectPerimeterEdges(const Area &area)
@@ -408,6 +579,11 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 	sim.Begin(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
 		static_cast<float>(launchPos.z)), yawDegrees, commandedSpeed, jump);
 
+	// A drop leaves by walking off, so the mover starts on the ground and stays there for the first
+	// steps. Nothing counts as a landing until it has actually been airborne -- otherwise one step
+	// across an area boundary at walking speed registers as an air move with no flight in it.
+	bool airborne = false;
+
 	while (sim.Time() < m_params.maxSimulationTime)
 	{
 		if (!sim.Step())
@@ -415,7 +591,11 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 
 		const Vector &pos = sim.Origin();
 
-		if (sim.OnGround())
+		if (!sim.OnGround())
+		{
+			airborne = true;
+		}
+		else if (airborne)
 		{
 			Vec3 landing(pos.x, pos.y, pos.z + navZAdjust);
 			int area = FindAreaStrict(landing, areas);
@@ -437,8 +617,13 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 				return result;
 
 			// Touching down inside the source area is a scuff on the way out, not a landing --
-			// the next fall is measured from here.
+			// the next fall is measured from here, and it has to leave the ground again.
 			sim.ResetFallSpeed();
+			airborne = false;
+		}
+		else if (sim.Time() > m_params.groundGraceTime)
+		{
+			return result;
 		}
 
 		if (pos.x < m_worldMins.x || pos.y < m_worldMins.y || pos.z < m_worldMins.z ||
@@ -501,8 +686,10 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	std::map<long long, BinEntry> bins[kBinCount];
 	size_t simulated = 0;
 	std::unordered_set<int> sourceAreas;
+	size_t unfitted = 0;
 
-	auto runSweep = [&](const SweepMode &mode, const Area &area, const std::vector<LaunchEdge> &edges)
+	auto runSweep = [&](const SweepMode &mode, const Area &area, const std::vector<LaunchEdge> &edges,
+		bool requireLaunchInside)
 	{
 		for (const LaunchEdge &edge : edges)
 		{
@@ -538,6 +725,12 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 					// The support test belongs at probe z: a duck hull parked at the standing
 					// origin has nothing within reach below it.
 					if (!mode.sim->IsSupported(Vec3(launchPos.x, launchPos.y, launchPos.z + mode.probeZ)))
+						continue;
+
+					// A perimeter edge is the area's own boundary, so a setback from it always stays
+					// inside. A seed edge sits mid-area and jumpBack can push the launch out through
+					// the far side onto ground that belongs to a neighbour.
+					if (requireLaunchInside && FindAreaStrict(launchPos, areas) != area.id)
 						continue;
 
 					launchPos.z += mode.launchZ;
@@ -581,23 +774,66 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		}
 	};
 
-	for (const Area &area : areas)
+	// Every hull an area can launch in. Given a seed edge the sweep climbs out of a drop and only
+	// the jump variants apply; given none it walks the area's own perimeter as usual.
+	auto sweepArea = [&](const Area &area, const std::vector<LaunchEdge> *seed)
 	{
+		auto run = [&](const SweepMode &base, const PM_MoveSimulator &sim)
+		{
+			SweepMode mode = base;
+			if (seed)
+				mode.drop = false;
+
+			// A separate list per hull: a low overhang the standing hull cannot pass may still be
+			// open to a crouch-jump, so the two disagree about which perimeter edges face void.
+			std::vector<LaunchEdge> perimeter;
+			if (!seed)
+				perimeter = FilterLaunchEdges(sim, area, mode.probeZ, params);
+
+			runSweep(mode, area, seed ? *seed : perimeter, seed != nullptr);
+		};
+
 		if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
 		{
 			// Nothing stands here, so the duck hull is the only thing to simulate.
-			std::vector<LaunchEdge> edges = FilterLaunchEdges(duckSim, area, duckSweep.probeZ, params);
-			runSweep(duckSweep, area, edges);
-			continue;
+			run(duckSweep, duckSim);
+			return;
 		}
 
-		std::vector<LaunchEdge> standEdges = FilterLaunchEdges(standSim, area, standSweep.probeZ, params);
-		runSweep(standSweep, area, standEdges);
+		run(standSweep, standSim);
+		run(crouchJumpSweep, crouchJumpSim);
+	};
 
-		// A separate list: a low overhang the standing hull cannot pass may still be open to a
-		// crouch-jump, so the two hulls disagree about which perimeter edges face void.
-		std::vector<LaunchEdge> crouchEdges = FilterLaunchEdges(crouchJumpSim, area, crouchJumpSweep.probeZ, params);
-		runSweep(crouchJumpSweep, area, crouchEdges);
+	for (const Area &area : areas)
+		sweepArea(area, nullptr);
+
+	// Climbing back out of a drop. Nothing about a drop's own trajectory predicts the jump that
+	// undoes it -- a shallow fall reversed at the same speed sails straight past the ledge -- so the
+	// landing spread is used only to say where such a jump could start, and the simulator decides
+	// what actually works. Results land in the jump bins and are emitted as ordinary air moves.
+	size_t reverseSeeds = 0;
+	for (int bin : {kBinStandDrop, kBinDuckDrop})
+	{
+		for (const auto &entry : bins[bin])
+		{
+			int from = static_cast<int>(entry.first / 1000000LL);
+			int to = static_cast<int>(entry.first % 1000000LL);
+			const AirmoveTrajectory &drop = entry.second.best;
+
+			double rise = drop.launchPos.z - drop.landingPos.z;
+			if (rise <= 0.0 || rise > params.maxJumpHeight)
+				continue;
+			if (existingPairs.count(PairKey(to, from)) || static_cast<size_t>(to) >= areas.size())
+				continue;
+
+			LaunchEdge seed;
+			if (!SeedEdgeFromLandings(entry.second, seed))
+				continue;
+
+			std::vector<LaunchEdge> seedEdges{seed};
+			sweepArea(areas[static_cast<size_t>(to)], &seedEdges);
+			++reverseSeeds;
+		}
 	}
 
 	// Hull before drop-vs-jump: a pair a standing bot can reach never gets flagged crouch-only,
@@ -611,14 +847,19 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 				continue;
 
 			const AirmoveTrajectory &traj = entry.second.best;
-			emitted.emplace(entry.first, traj.duckHull);
 
 			MergedConnection conn;
 			conn.areaA = static_cast<int>(entry.first / 1000000LL);
 			conn.areaB = static_cast<int>(entry.first % 1000000LL);
 			conn.pointA = traj.launchPos;
 			conn.pointB = traj.landingPos;
-			BuildSampledGates(entry.second, conn);
+			if (!BuildSampledGates(entry.second, conn))
+			{
+				++unfitted;
+				continue;
+			}
+
+			emitted.emplace(entry.first, traj.duckHull);
 			conn.area = 0.0;
 			conn.connType = crossbot_nav::CONN_AIRMOVE;
 			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
@@ -635,82 +876,6 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		}
 	}
 
-	// A short enough drop implies the jump back up. Standing drops first, so a reverse that both
-	// hulls can serve is not needlessly flagged crouch-only.
-	//
-	// params.maxJumpHeight is the crouch-jump reach; anything above a plain jump's apex can only
-	// be climbed by ducking at the top, so the reverse needs a crouch even out of a standing drop.
-	double plainJumpHeight = static_cast<double>(kJumpImpulse) * static_cast<double>(kJumpImpulse) /
-		(2.0 * static_cast<double>(physics.gravity));
-	size_t derived = 0;
-	for (int bin : {kBinStandDrop, kBinDuckDrop})
-	{
-		for (const auto &entry : bins[bin])
-		{
-			int from = static_cast<int>(entry.first / 1000000LL);
-			int to = static_cast<int>(entry.first % 1000000LL);
-			const AirmoveTrajectory &drop = entry.second.best;
-
-			double rise = drop.launchPos.z - drop.landingPos.z;
-			if (rise <= 0.0 || rise > params.maxJumpHeight)
-				continue;
-
-			long long reverseKey = PairKey(to, from);
-			if (existingPairs.count(reverseKey) || emitted.count(reverseKey))
-				continue;
-
-			bool needsCrouch = drop.duckHull || rise > plainJumpHeight;
-			emitted.emplace(reverseKey, needsCrouch);
-
-			MergedConnection conn;
-			conn.areaA = to;
-			conn.areaB = from;
-			conn.pointA = drop.landingPos;
-			conn.pointB = drop.launchPos;
-
-			// Climbing back up the way the drop came down: the drop's landing spread is where this
-			// jump starts, and its launch spread is where it arrives.
-			MergedConnection dropConn;
-			dropConn.areaA = from;
-			dropConn.areaB = to;
-			dropConn.pointA = drop.launchPos;
-			dropConn.pointB = drop.landingPos;
-			BuildSampledGates(entry.second, dropConn);
-
-			conn.gateAValid = dropConn.gateBValid;
-			conn.gateALeft = dropConn.gateBLeft;
-			conn.gateARight = dropConn.gateBRight;
-			conn.gateBValid = dropConn.gateAValid;
-			conn.gateBLeft = dropConn.gateALeft;
-			conn.gateBRight = dropConn.gateARight;
-
-			conn.area = 0.0;
-			conn.connType = crossbot_nav::CONN_AIRMOVE;
-			// Climbing back up what was dropped down is a jump by definition, whatever the drop was.
-			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY | crossbot_nav::CONN_FLAG_JUMP;
-			if (needsCrouch)
-				conn.connFlags |= crossbot_nav::CONN_FLAG_NEEDS_CROUCH;
-			conn.exitSpeed = drop.exitSpeed;
-			conn.exitAngle = (drop.exitYaw >= 180.0f) ? drop.exitYaw - 180.0f : drop.exitYaw + 180.0f;
-
-			// No samples exist for the climb itself, so both ends of its gate carry the one
-			// reversed set of parameters the drop implies.
-			conn.gateAYaw[0] = conn.gateAYaw[1] = static_cast<float>(conn.exitAngle);
-			conn.gateASpeed[0] = conn.gateASpeed[1] = static_cast<float>(conn.exitSpeed);
-
-			// Standing where the drop came down, the lip to clear is where the drop left from, so
-			// the jump is initiated exactly that far back from it.
-			Vec3 back = drop.launchPos - drop.landingPos;
-			conn.jumpBackDist = std::sqrt(back.x * back.x + back.y * back.y);
-
-			// Climbing, not falling, so there is nothing to take fall damage from.
-			conn.fallDamage = 0.0;
-			conn.flightTime = drop.flightTime;
-			conns.push_back(conn);
-			++derived;
-		}
-	}
-
 	size_t crouchOnly = 0;
 	for (const auto &entry : emitted)
 		if (entry.second)
@@ -718,12 +883,14 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 
 	std::printf("air move sampling: %zu trajectories at %.2f samples/unit from %zu areas (%zu launched), "
 		"%zu pairs [stand drop %zu, stand jump %zu, duck drop %zu, duck jump %zu] -> %zu connections "
-		"(%zu crouch-only, %zu reverse jumps derived from drops under %.0f units)\n",
+		"(%zu crouch-only, %zu drops seeded a climb back under %.0f units, "
+		"%zu dropped for too few samples to fit a gate)\n",
 		simulated, params.samplesPerUnit, areas.size(), sourceAreas.size(),
 		bins[kBinStandDrop].size() + bins[kBinStandJump].size() + bins[kBinDuckDrop].size() +
 			bins[kBinDuckJump].size(),
 		bins[kBinStandDrop].size(), bins[kBinStandJump].size(), bins[kBinDuckDrop].size(),
-		bins[kBinDuckJump].size(), emitted.size(), crouchOnly, derived, params.maxJumpHeight);
+		bins[kBinDuckJump].size(), emitted.size(), crouchOnly, reverseSeeds, params.maxJumpHeight,
+		unfitted);
 }
 
 }

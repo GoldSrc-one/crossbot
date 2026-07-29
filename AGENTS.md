@@ -2,6 +2,20 @@
 
 CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh-driven bots. The runtime plugin (`crossbot_mm.dll`) and an offline nav-graph compiler (`navgen.exe`) share the planning/steering code verbatim via `src/nav/`.
 
+## Code Style
+
+- **Main source: Use HLSDK style C++, use std if necessary**
+- **Tools and scripts: Use PowerShell! Don't use CMD! Use Powershell! Don't use Python! Use powershell! Don't use Node.JS!**
+- **Comments: Do not add comments. All comments will be deleted! If you cannot escape you irresistable urge to write comments, put them in doc/ instead.**
+
+## Important Notes
+
+- **DO NOT include target areas (info_target) as seed areas in navgen.** The targets are for debugging/validation only. The navgen must discover reachability through normal connectivity (walk, jump, elevator, teleport, launch edges). Using targets as seeds would artificially keep unreachable areas.
+
+- **Coordinate conventions (GoldSrc / Hammer):**
+  - X = East, Y = North, Z = Up (right-handed)
+  - SVG debug view: Y is flipped (screen Y down), so world Y+ = North = SVG Y-
+
 ## Build & Commands
 
 ### Prerequisites
@@ -137,21 +151,8 @@ Start-Job { .\scripts\test_nav_goal.ps1 -Map maps\test16_float.bsp }
 Get-Job | Wait-Job | Receive-Job
 ```
 
-## Code Style
-
-- **Main source: Use HLSDK style C++, use std if necessary**
-- **Tools and scripts: Use PowerShell! Don't use CMD! Use Powershell! Don't use Python! Use powershell! Don't use Node.JS!**
-- **Comments: Do not add comments. All comments will be deleted!**
 
 ## Testing
 
 - `scripts/nav_target_test.ps1` greps qconsole.log for "CrossBot: <name> reached goal" lines (a short goal can complete within one rcon poll interval)
 - Debug visualization: `NavDebug::Draw()` emits `TE_BEAMPOINTS` temp entities; toggled via `crossbot_nav_debug_path` / `crossbot_nav_debug_area`
-
-## Important Notes
-
-- **DO NOT include target areas (info_target) as seed areas in navgen.** The targets are for debugging/validation only. The navgen must discover reachability through normal connectivity (walk, jump, elevator, teleport, launch edges). Using targets as seeds would artificially keep unreachable areas.
-
-- **Coordinate conventions (GoldSrc / Hammer):**
-  - X = East, Y = North, Z = Up (right-handed)
-  - SVG debug view: Y is flipped (screen Y down), so world Y+ = North = SVG Y-

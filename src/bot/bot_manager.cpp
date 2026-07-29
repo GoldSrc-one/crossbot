@@ -302,9 +302,9 @@ void PrintWaypoints()
 			{
 				const Nav::Waypoint &wp = bot.waypoints[i];
 				snprintf(line, sizeof(line),
-					"  wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d maxSpeed=%.1f\n",
+					"  wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d\n",
 					i, wp.point.x, wp.point.y, wp.point.z,
-					wp.requiresJump, wp.requiresCrouch, wp.targetAreaId, wp.maxSpeed);
+					wp.requiresJump, wp.requiresCrouch, wp.targetAreaId);
 				SERVER_PRINT(line);
 			}
 		}

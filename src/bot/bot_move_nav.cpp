@@ -180,9 +180,9 @@ namespace
 					{
 						const Nav::Waypoint &wp = bot.waypoints[i];
 						snprintf(wpMsg, sizeof(wpMsg),
-							"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d maxSpeed=%.1f\n",
+							"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d\n",
 							i, wp.point.x, wp.point.y, wp.point.z,
-							wp.requiresJump, wp.requiresCrouch, wp.targetAreaId, wp.maxSpeed);
+							wp.requiresJump, wp.requiresCrouch, wp.targetAreaId);
 						SERVER_PRINT(wpMsg);
 					}
 				}
@@ -292,13 +292,15 @@ void Bot_MoveNav(CBot &bot)
 					// Steer reports advance for a corner passed and, on the final waypoint, for
 					// having arrived. Consuming it in both cases is what ends a route: once the
 					// index runs off the end, the arrival check at the top of the next frame fires.
-					const Vector &botVel = pEdict->v.velocity;
-					float botSpeed2D = sqrtf(botVel.x * botVel.x + botVel.y * botVel.y);
+					NavFollow::Config followCfg;
+					if (pEdict->v.maxspeed > 1.f)
+						followCfg.maxSpeed = pEdict->v.maxspeed;
 
 					NavFollow::Decision steer;
 					while (true)
 					{
-						steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin, botSpeed2D);
+						steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin,
+							pEdict->v.velocity, followCfg);
 
 						// A jump waypoint is a commitment: it is not passed until the jump is made.
 						if (bot.waypoints[bot.waypointIndex].requiresJump && !bot.jumpAttempted)
@@ -372,12 +374,12 @@ void Bot_MoveNav(CBot &bot)
 	else
 	{
 
-		Vector steerDir = steer.aimPoint - pEdict->v.origin;
+		// Already a unit direction, and already braked if the bot is inside a corner.
+		Vector steerDir = steer.moveDir;
 
-				float dirLen2D = sqrtf(steerDir.x * steerDir.x + steerDir.y * steerDir.y);
-				if (dirLen2D > 1.f)
+				if (steerDir.x != 0.f || steerDir.y != 0.f)
 				{
-					Vector dir2D(steerDir.x / dirLen2D, steerDir.y / dirLen2D, 0.f);
+					Vector dir2D = steerDir;
 					Vector traceEnd = pEdict->v.origin + dir2D * kObstacleTraceDistance;
 
 					TraceResult tr;
@@ -424,13 +426,8 @@ void Bot_MoveNav(CBot &bot)
 
 	Vector angles = Bot_UpdateFacing(bot);
 
-		// The planner's careful speed near drops is the one case we want under maxspeed, and the
-		// engine only ever clamps down -- so a short vector passes through and becomes the speed.
-		float maxSpeed = (pEdict->v.maxspeed > 1.f) ? pEdict->v.maxspeed : kMoveSpeed;
-		float drive = (needsJump || steer.baseSpeed >= NavPlan::kPlanSpeedRun) ? kFullDrive : maxSpeed * 0.5f;
-
 	float fmove = 0.f, smove = 0.f;
-	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, kFullDrive, fmove, smove);
 	bot.moveForward = fmove;
 	bot.moveSide = smove;
 

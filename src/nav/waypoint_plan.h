@@ -34,8 +34,6 @@ struct PlanArea
 	Vector doorActivatorPos;
 	float doorWaitTime = 0.f;
 
-	bool hasDropConnection = false;
-
 	// Inward-facing bounds. Used to stop a corner being nudged into a wall, to find where a path
 	// leaves the area, and to test whether a simulated jump came down inside it.
 	std::vector<PlanPlane> boundPlanes;
@@ -73,7 +71,6 @@ struct PlanWaypoint
 {
 	Vector point;
 
-	float maxSpeed = 250.f;
 	bool requiresElevatorRide = false;
 	float elevatorTravelTime = 0.f;
 	bool requiresCrouch = false;
@@ -108,12 +105,6 @@ struct PlanWaypoint
 	// on top of launchSimFrom, and then this is the only thing that shows what it meant to do.
 	Vector launchSimAim;
 };
-
-// A stretch of route that passes near a drop is walked at the careful speed; everything else runs.
-// The bot turns these into a drive length for pfnRunPlayerMove, so anything under kPlanSpeedRun is
-// passed through as a literal speed rather than clamped up to maxspeed.
-constexpr float kPlanSpeedRun = 250.f;
-constexpr float kPlanSpeedCareful = 130.f;
 
 // The player's hull radius. Gates are inset by this at each end and pushed this far off the
 // connection plane into the area on either side, so the funnel only routes through space a hull
