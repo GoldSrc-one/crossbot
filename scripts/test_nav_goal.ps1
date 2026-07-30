@@ -60,7 +60,12 @@ param(
 
     [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
 
-    [string]$OutputDir = "nav_debug"
+    [string]$OutputDir = "nav_debug",
+
+    # How close the bot must end up for hasGoal=0 to count as arrival rather than giving up.
+    # Legitimate arrivals land 24-50 units out (the follower stops at finalRadius, and the goal is
+    # clamped into its area, so it never coincides with the raw entity origin).
+    [double]$GoalRadius = 96
 )
 
 $ErrorActionPreference = "Stop"
@@ -349,10 +354,17 @@ try {
                     $pollTracePoints += [pscustomobject]@{ X = $ox; Y = $oy; Z = $oz }
                 }
 
-                # Goal reached when hasGoal becomes 0
+                # hasGoal=0 means the bot stopped pursuing the goal -- which happens both when it
+                # arrives and when Repath fails and it gives up. Only the first is a pass, so
+                # confirm it actually ended up near the goal.
                 if ($hasGoalMatch.Success -and [int]$hasGoalMatch.Groups[1].Value -eq 0) {
-                    $result = "PASS"
-                    $reason = "bot reported hasGoal=0 (goal reached), t=${elapsed}s"
+                    if ($originMatch.Success -and $dist -gt $GoalRadius) {
+                        $result = "FAIL"
+                        $reason = ("bot abandoned the goal at ({0:F0},{1:F0},{2:F0}), {3:F0} units away (limit {4}), t={5}s" -f $ox, $oy, $oz, $dist, $GoalRadius, $elapsed)
+                    } else {
+                        $result = "PASS"
+                        $reason = ("goal reached, {0:F0} units away, t={1}s" -f $dist, $elapsed)
+                    }
                     break
                 }
             }
@@ -395,7 +407,8 @@ try {
                     }
                 }
             }
-            Write-Host "Read $($tracePoints.Count) trace points from $traceLogPath"
+            $zStats = $tracePoints | Measure-Object -Property Z -Minimum -Maximum
+            Write-Host ("Read {0} trace points from {1} (z {2:F0}..{3:F0})" -f $tracePoints.Count, $traceLogPath, $zStats.Minimum, $zStats.Maximum)
         }
     } else {
         Write-Warning "Trace log not found at $traceLogPath (bot may not have reached goal or trace writing failed)"

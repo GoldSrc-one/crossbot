@@ -12,39 +12,43 @@ struct CBot
 	edict_t *pEdict = nullptr;
 	char name[32] = {};
 
-		bool hasGoal = false;
-		Vector goalPoint;
-		std::vector<Nav::Waypoint> waypoints;
-		size_t waypointIndex = 0;
-		float nextRepathTime = 0.f;
+	bool hasGoal = false;
+	Vector goalPoint;
+	std::vector<Nav::Waypoint> waypoints;
+	size_t waypointIndex = 0;
+	float nextRepathTime = 0.f;
 
-		bool jumpAttempted = false;
+	bool airmoveActive = false;
+	bool airmoveCrouch = false;
+	float airmoveYaw = 0.f;
+	float airmoveSpeed = 0.f;
+	float airmoveStartTime = 0.f;
+	int airmoveTargetArea = -1;
 
-		bool fallTelemetryLogged = false;
+	bool fallTelemetryLogged = false;
 
-		std::vector<Vector> traceLog;
+	std::vector<Vector> traceLog;
 
-		float obstacleBlockedSince = 0.f;
+	float obstacleBlockedSince = 0.f;
 
-		float lastProgressTime = 0.f;
-		int lastSeenWaypointIndex = 0;
+	float lastProgressTime = 0.f;
+	int lastSeenWaypointIndex = 0;
 
-		Vector lastOrigin;
-		bool hasLastOrigin = false;
+	Vector lastOrigin;
+	bool hasLastOrigin = false;
 
-		int currentAreaId = -1;
+	int currentAreaId = -1;
 
-		std::vector<uint32_t> plannedAreaPath;
-		std::vector<uint32_t> visitedAreaPath;
+	std::vector<uint32_t> plannedAreaPath;
+	std::vector<uint32_t> visitedAreaPath;
 
-		float pathStartTime = 0.f;
+	float pathStartTime = 0.f;
 
-		float estimatedArrivalTime = 0.f;
+	float estimatedArrivalTime = 0.f;
 
-		Vector desiredAngles;
+	Vector desiredAngles;
 
-		// Last forward/side pair handed to pfnRunPlayerMove, for crossbot_nav_status.
-		float moveForward = 0.f;
-		float moveSide = 0.f;
+	float moveForward = 0.f;
+	float moveSide = 0.f;
 };
 

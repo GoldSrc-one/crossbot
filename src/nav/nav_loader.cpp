@@ -1,4 +1,4 @@
-﻿#include "nav_loader.h"
+#include "nav_loader.h"
 
 #include <cstdio>
 #include <cstring>
@@ -135,7 +135,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.areaB = rec.areaB;
 		conn.connType = rec.connType;
 		conn.connFlags = rec.connFlags;
-		conn.traverseCost = rec.traverseCost;
+		conn.costSeconds = rec.costSeconds;
 		conn.exitSpeed = rec.exitSpeed;
 		conn.exitAngle = rec.exitAngle;
 		conn.jumpBackDist = rec.jumpBackDist;
@@ -166,6 +166,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		pa.centroid = a.centroid;
 		pa.crouch = (a.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		pa.door = (a.areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
+		pa.breakable = (a.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE) != 0;
 		pa.doorActivation = a.doorActivation;
 		pa.doorActivatorPos = a.doorActivatorPos;
 		pa.doorWaitTime = a.doorWaitTime;

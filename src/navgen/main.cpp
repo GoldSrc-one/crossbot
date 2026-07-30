@@ -1,4 +1,4 @@
-﻿#include <algorithm>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -54,8 +54,6 @@ void PrintUsage(const char *argv0)
 		argv0);
 }
 
-// Area polytopes carry inward-facing plane normals, so the walkable floor of an area
-// is the face whose normal points up. Same threshold as floor_support/airmove_sampler.
 constexpr double kFloorNormalZ = 0.7;
 
 struct ObjMaterial
@@ -102,8 +100,6 @@ void WriteObjMaterialLib(const std::string &path)
 	std::fclose(f);
 }
 
-// True when the stored vertex order winds the other way round the plane normal, in which
-// case the OBJ face has to be reversed so it renders facing up rather than down.
 bool WindingOpposesNormal(const navgen::Face &face)
 {
 	navgen::Vec3 sum(0, 0, 0);
@@ -175,8 +171,6 @@ ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> 
 		}
 	}
 
-	// The planned route as a flat ribbon: waypoints sit at area centroid height, well
-	// above the floor polygons, so it reads as a line hovering over the walkable set.
 	if (pathPoints.size() >= 2)
 	{
 		constexpr double kPathHalfWidth = 3.0;
@@ -212,9 +206,6 @@ ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> 
 	return stats;
 }
 
-// A bot trajectory as the plugin's WriteTraceLog wrote it: one "x y z" per line. The test script
-// creates the file even when the run produced no trace, so an empty or absent one is not an error
-// -- it just means there is nothing to overlay.
 std::vector<navgen::Vec3> ReadTraceFile(const std::string &path)
 {
 	std::vector<navgen::Vec3> points;
@@ -311,6 +302,10 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		planAreas[i].centroid = centroid;
 		planAreas[i].crouch = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		planAreas[i].door = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
+		planAreas[i].breakable = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_BREAKABLE) != 0;
+		planAreas[i].doorActivation = merged.areas[i].doorActivation;
+		planAreas[i].doorActivatorPos = ToVector(merged.areas[i].doorActivatorPos);
+		planAreas[i].doorWaitTime = static_cast<float>(merged.areas[i].openSeconds);
 
 		planAreas[i].boundPlanes.reserve(merged.areas[i].boundPlanes.size());
 		for (const navgen::Plane &p : merged.areas[i].boundPlanes)
@@ -336,7 +331,7 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		gc.areaA = static_cast<uint32_t>(c.areaA);
 		gc.areaB = static_cast<uint32_t>(c.areaB);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
-		gc.traverseCost = navgen::TraverseCostFor(c);
+		gc.costSeconds = navgen::ConnectionCostSeconds(c, merged.areas);
 
 		NavPlan::PlanConnection &pc = planConns[i];
 		pc.areaA = gc.areaA;
@@ -427,8 +422,6 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 			kind = wp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
 				: navgen::PATH_SEG_AIRMOVE_STORED;
 
-		// A launch that lands on the corner before it is still a launch: fold it into that point
-		// rather than dropping it, or the air move vanishes from the route.
 		bool merged = !points.empty() && (p - points.back()).Length() < 0.5;
 		if (merged)
 		{
@@ -452,8 +445,6 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		}
 	}
 
-	// The route is only trustworthy if every step of it lies over an area. Air-move segments are
-	// skipped: those are meant to leave the floor.
 	size_t offMesh = 0;
 	{
 		auto overSomeArea = [&](const Vector &p)
@@ -709,6 +700,21 @@ int main(int argc, char **argv)
 		std::vector<navgen::BlockingVolume> standBlockers =
 			navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullHuman);
 
+		navgen::PassableSet duckPassables = navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck);
+		navgen::PassableSet standPassables = navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullHuman);
+
+		// A door whose activator nobody can reach is a wall, so it carves like one.
+		blockers.insert(blockers.end(), duckPassables.impassable.begin(), duckPassables.impassable.end());
+		standBlockers.insert(standBlockers.end(), standPassables.impassable.begin(),
+			standPassables.impassable.end());
+
+		// A door or breakable still holds up whatever rests on it, so floor support counts it as
+		// solid. Air-move sampling does not: the bot opens or breaks it, so a jump may pass
+		// straight through.
+		std::vector<navgen::BlockingVolume> supportBlockers = blockers;
+		for (const navgen::PassableVolume &p : duckPassables.passable)
+			supportBlockers.push_back(p.volume);
+
 		std::vector<navgen::ExtractedLeaf> navigableLeaves;
 		navigableLeaves.reserve(leaves.size());
 		size_t affectedLeaves = 0;
@@ -740,14 +746,65 @@ int main(int argc, char **argv)
 		}
 		leaves = std::move(navigableLeaves);
 
+		size_t passableLeaves = 0;
+		for (size_t pi = 0; pi < duckPassables.passable.size(); ++pi)
+		{
+			const navgen::BlockingVolume &vol = duckPassables.passable[pi].volume;
+			std::vector<navgen::ExtractedLeaf> next;
+			next.reserve(leaves.size());
+
+			for (navgen::ExtractedLeaf &leaf : leaves)
+			{
+				if (leaf.passableIndex >= 0 || !navgen::OverlapsBlockingVolume(leaf.polytope, vol))
+				{
+					leaf.id = static_cast<int>(next.size());
+					next.push_back(std::move(leaf));
+					continue;
+				}
+
+				std::vector<navgen::Polytope> inside, outside;
+				navgen::SplitByPassableVolume(bsp, leaf.polytope, vol, kMapRadius, inside, outside);
+
+				for (navgen::Polytope &piece : outside)
+				{
+					navgen::ExtractedLeaf split;
+					split.id = static_cast<int>(next.size());
+					split.polytope = std::move(piece);
+					split.passableIndex = leaf.passableIndex;
+					next.push_back(std::move(split));
+				}
+
+				for (navgen::Polytope &piece : inside)
+				{
+					navgen::ExtractedLeaf split;
+					split.id = static_cast<int>(next.size());
+					split.polytope = std::move(piece);
+					split.passableIndex = static_cast<int>(pi);
+					next.push_back(std::move(split));
+					++passableLeaves;
+				}
+			}
+
+			leaves = std::move(next);
+		}
+
+		if (!duckPassables.passable.empty() || !duckPassables.impassable.empty())
+		{
+			std::printf("%s: %zu passable entities split out %zu door/breakable leaves, %zu impassable "
+				"entities carved\n",
+				bspPath.c_str(), duckPassables.passable.size(), passableLeaves,
+				duckPassables.impassable.size());
+		}
+
 		if (!noFloorSplit)
 		{
 			size_t unsupportedDropped = 0;
 			size_t floorSplitLeaves = 0;
 			size_t noFloorDropped = 0;
 			size_t beforeFloorSplit = leaves.size();
-			leaves = navgen::SplitLeavesByFloorSupport(bsp, worldModel.headnode[navgen::kHullDuck], blockers,
-				leaves, kMapRadius, &unsupportedDropped, &floorSplitLeaves, &noFloorDropped, dumpSupport);
+			leaves = navgen::SplitLeavesByFloorSupport(bsp, worldModel.headnode[navgen::kHullDuck],
+				supportBlockers, leaves, kMapRadius, &unsupportedDropped, &floorSplitLeaves, &noFloorDropped,
+				dumpSupport);
 			std::printf("%s: floor support split %zu leaves, dropped %zu unsupported and %zu steep-bottomed "
 				"pieces (%zu -> %zu leaves)\n",
 				bspPath.c_str(), floorSplitLeaves, unsupportedDropped, noFloorDropped, beforeFloorSplit,
@@ -810,8 +867,8 @@ int main(int argc, char **argv)
 		}
 
 		navgen::MergeResult merged = noMerge
-			? navgen::NoMerge(leaves, portals, isCrouchLeaf)
-			: navgen::MergeAreas(leaves, portals, isCrouchLeaf);
+			? navgen::NoMerge(leaves, portals, isCrouchLeaf, duckPassables.passable)
+			: navgen::MergeAreas(leaves, portals, isCrouchLeaf, duckPassables.passable);
 
 		std::printf("%s: %zu raw portals -> %zu areas, %zu inter-area connections (%s)\n",
 			bspPath.c_str(), portals.size(), merged.areas.size(), merged.conns.size(),
@@ -930,6 +987,26 @@ int main(int argc, char **argv)
 					areaKind += " crouch";
 				if (area.prism)
 					areaKind += " prism";
+				if (area.areaFlags & (crossbot_nav::NAV_AREA_DOOR | crossbot_nav::NAV_AREA_BREAKABLE))
+				{
+					static const char *kActivation[] = {"touch", "button", "trigger"};
+					char buf[128];
+					if (area.doorActivation == crossbot_nav::DOOR_ACTIVATION_TOUCH)
+					{
+						std::snprintf(buf, sizeof(buf), " %s(touch %.2fs)",
+							(area.areaFlags & crossbot_nav::NAV_AREA_DOOR) ? "door" : "breakable",
+							area.openSeconds);
+					}
+					else
+					{
+						std::snprintf(buf, sizeof(buf), " %s(%s at (%.1f, %.1f, %.1f) %.2fs)",
+							(area.areaFlags & crossbot_nav::NAV_AREA_DOOR) ? "door" : "breakable",
+							kActivation[area.doorActivation < 3 ? area.doorActivation : 0],
+							area.doorActivatorPos.x, area.doorActivatorPos.y, area.doorActivatorPos.z,
+							area.openSeconds);
+					}
+					areaKind += buf;
+				}
 				navgen::Vec3 c = area.polytope.Centroid();
 				navgen::Vec3 mn(1e9, 1e9, 1e9), mx(-1e9, -1e9, -1e9);
 				for (const navgen::Face &f : area.polytope.faces)
@@ -980,8 +1057,7 @@ int main(int argc, char **argv)
 		std::vector<navgen::FailedAirmove> failedAirmoves;
 		if (!objPath.empty() || !svgPath.empty())
 		{
-			// The same two hulls the air-move sampler launched from, so a replayed jump is
-			// checked against exactly the geometry that proved it.
+
 			navgen::PM_MoveSimulator duckSim(bsp, worldModel.headnode[navgen::kHullDuck], blockers,
 				airmoveParams, physics);
 			navgen::PM_MoveSimulator standSim(bsp, worldModel.headnode[navgen::kHullHuman], standBlockers,

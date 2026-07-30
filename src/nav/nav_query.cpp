@@ -1,5 +1,7 @@
 ﻿#include "nav_query.h"
 
+#include "nav_math.h"
+
 namespace Nav
 {
 
@@ -10,15 +12,7 @@ constexpr float kPlaneEpsilon = 2.0f;
 
 bool ContainsPoint(const Area &area, const Vector &point)
 {
-	if (area.planes.empty())
-		return false;
-	for (const AreaPlane &plane : area.planes)
-	{
-		float d = plane.normal.x * point.x + plane.normal.y * point.y + plane.normal.z * point.z - plane.dist;
-		if (d < -kPlaneEpsilon)
-			return false;
-	}
-	return true;
+	return NavMath::PointInsidePlanes(point, area.planes, kPlaneEpsilon);
 }
 }
 

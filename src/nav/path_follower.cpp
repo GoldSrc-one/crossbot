@@ -2,25 +2,20 @@
 
 #include <cmath>
 
+#include "nav_math.h"
+
 namespace NavFollow
 {
 
 namespace
 {
 
+using NavMath::Norm2D;
+
 float HorizDist(const Vector &a, const Vector &b)
 {
 	float dx = b.x - a.x, dy = b.y - a.y;
 	return std::sqrt(dx * dx + dy * dy);
-}
-
-// Unit length in the xy plane, zero if the input has no horizontal extent.
-Vector Norm2D(const Vector &v)
-{
-	float len = std::sqrt(v.x * v.x + v.y * v.y);
-	if (len < 0.0001f)
-		return Vector(0.f, 0.f, 0.f);
-	return Vector(v.x / len, v.y / len, 0.f);
 }
 
 }
@@ -78,14 +73,6 @@ Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpInd
 		}
 	}
 
-	// Pre-steer into the corner. A mover at speed cannot turn on the spot -- HL ground accel needs
-	// a couple of tenths to redirect 250 u/s -- so holding the aim on the corner until it is
-	// reached carries it wide into whatever is on the far side. Instead start bending toward the
-	// outgoing segment while still short of the corner.
-	//
-	// The aim never leaves a disc of cornerCut around the corner, so the turn bites at most that
-	// far into the inside of it -- which is the clearance the planner reserved when it pushed the
-	// waypoint off the wall. An air-move launch has to be hit squarely, so it is left alone.
 	if (!isFinal && !wp.airmoveLaunch)
 	{
 		float cut = cfg.cornerCut * (speed / cfg.maxSpeed);
@@ -107,16 +94,6 @@ Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpInd
 
 	Vector dir = Norm2D(d.aimPoint - pos);
 
-	// Cross-track correction. Aiming at a point ahead says nothing about how far the mover has been
-	// thrown sideways getting there, and momentum through a sharp corner throws it a long way: an 80
-	// degree turn at top speed swings it over 20 units wide of the line. The funnel's line is the
-	// only route the planner actually vouched for, so on a narrow ledge that overshoot is a fall
-	// rather than a scenic detour.
-	//
-	// The pull ramps across the band between freeplay and corridor: inside the freeplay none at all,
-	// halfway across it is half aim and half pull, at the corridor edge it is nothing but pull. The
-	// dead band matters -- correcting from zero fights every honest racing line through a corner and
-	// leaves the mover sawing at the path rather than following it.
 	if (wpIndex > 0 && cfg.pathCorridor > cfg.pathFreeplay && (dir.x != 0.f || dir.y != 0.f))
 	{
 		const Vector &segStart = waypoints[wpIndex - 1].point;
@@ -145,29 +122,6 @@ Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpInd
 
 	d.moveDir = dir;
 
-	// Inside the corner the aim point stops being the useful thing: what matters is not where the
-	// mover is pointed but where it is drifting. Steering along the velocity error folds the whole
-	// approach into one correction -- the lateral part cancels the drift, the forward part carries
-	// it through -- and it pulls hardest exactly when the turn is sharpest.
-	//
-	// Mirroring the velocity about dir would cancel the same drift, but its forward term is (v.dir),
-	// which inverts past 90 degrees and drives the mover backwards out of a hairpin. The velocity
-	// error carries (s - v.dir) instead, which cannot go negative while s >= |v|, so taking s as the
-	// larger of maxSpeed and the current speed makes it safe even when a launch or a push has put
-	// the mover over maxspeed. No clamp needed.
-	//
-	// An air-move launch is exempt: it has to be hit at the speed and heading the sampler proved.
-	//
-	// How far to lean on the correction is set by how big it is, measured against top speed. That
-	// weighting is doing real work in both directions. Near the top speed a few degrees of drift
-	// gives a short error vector pointing almost square across dir, and steering straight down it
-	// would answer a slight wobble with a hard sideways shove; the weight keeps that case on dir.
-	// A hairpin gives an error as long as top speed and takes the correction whole.
-	//
-	// The drive stays flat out either way. Commanding a smaller wish speed does not brake in this
-	// engine -- PM_Accelerate only ever adds along wishdir, so a small wish speed just lets friction
-	// win and the mover coasts. Braking means commanding *against* the velocity at full strength,
-	// which is what the correction direction already does.
 	if (!wp.airmoveLaunch && horizDist < cfg.brakeRadius && (dir.x != 0.f || dir.y != 0.f))
 	{
 		float s = (speed > cfg.maxSpeed) ? speed : cfg.maxSpeed;

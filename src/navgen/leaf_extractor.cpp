@@ -1,4 +1,4 @@
-﻿#include "leaf_extractor.h"
+#include "leaf_extractor.h"
 
 #include <utility>
 

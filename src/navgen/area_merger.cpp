@@ -1,4 +1,4 @@
-﻿#include "area_merger.h"
+#include "area_merger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,14 +11,31 @@
 namespace navgen
 {
 
-float TraverseCostFor(const MergedConnection &conn)
+// Seconds the bot loses on this edge beyond simply running its length: waiting for a door to
+// open, shooting a breakable, or hanging in the air on a jump. The A* graph adds this to the
+// travel time, so everything here is real time rather than a distance multiplier.
+float ConnectionCostSeconds(const MergedConnection &conn, const std::vector<Area> &areas)
 {
-	if (conn.connType != crossbot_nav::CONN_AIRMOVE)
-		return 1.0f;
+	float seconds = 0.0f;
 
-	float damage = static_cast<float>(conn.fallDamage);
-	float damagePenalty = (damage <= 0.0f) ? 0.0f : (damage >= 100.0f ? 1.0e4f : damage * 0.5f);
-	return 1.0f + static_cast<float>(conn.flightTime) * 0.5f + damagePenalty;
+	for (int areaId : {conn.areaA, conn.areaB})
+	{
+		if (areaId < 0 || static_cast<size_t>(areaId) >= areas.size())
+			continue;
+
+		const Area &area = areas[static_cast<size_t>(areaId)];
+		if (area.areaFlags & (crossbot_nav::NAV_AREA_DOOR | crossbot_nav::NAV_AREA_BREAKABLE))
+			seconds = std::max(seconds, static_cast<float>(area.openSeconds));
+	}
+
+	if (conn.connType == crossbot_nav::CONN_AIRMOVE)
+	{
+		float damage = static_cast<float>(conn.fallDamage);
+		seconds += static_cast<float>(conn.flightTime);
+		seconds += (damage <= 0.0f) ? 0.0f : (damage >= 100.0f ? 1.0e4f : damage * 0.5f);
+	}
+
+	return seconds;
 }
 
 namespace
@@ -133,8 +150,6 @@ size_t ResolveConnectionPlanes(const std::vector<Area> &areas, std::vector<Merge
 		const Area &areaA = areas[static_cast<size_t>(c.areaA)];
 		const Area &areaB = areas[static_cast<size_t>(c.areaB)];
 
-		// Only a walk needs these: it is the one crossing whose gates come from the shared face.
-		// An air move carries gates measured off its own samples.
 		if (c.connType != crossbot_nav::CONN_WALK)
 			continue;
 
@@ -195,8 +210,6 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 
 	NavPlan::BuildConnectionGates(planAreas, planConns);
 
-	// An air move already carries gates measured off the samples that proved it. Those beat
-	// anything derived from the area's outline, so only fill in where sampling left a hole.
 	for (size_t i = 0; i < conns.size(); ++i)
 	{
 		if (conns[i].gateAValid)
@@ -355,17 +368,13 @@ size_t SnapConnectionsToFloor(const std::vector<Area> &areas, std::vector<Merged
 
 		if (c.connType == crossbot_nav::CONN_WALK)
 		{
-			// Both endpoints are corners of the one shared face, so they take their height from
-			// the same area -- resolving each against its own side would tilt the gate by the
-			// step between the two floors for no geometric reason.
+
 			ok = snap(c.pointA, c.areaA);
 			ok = snap(c.pointB, c.areaA) || ok;
 		}
 		else
 		{
-			// Only the launch: the landing is where the simulation actually put the player down,
-			// and re-deriving it from the destination area would move it whenever the landing
-			// grazes an area boundary.
+
 			ok = snap(c.pointA, c.areaA);
 		}
 
@@ -472,10 +481,27 @@ void TagCrouchConnections(MergeResult &result)
 	}
 }
 
+int LeafPassable(const std::vector<ExtractedLeaf> &leaves, int leafId)
+{
+	return (static_cast<size_t>(leafId) < leaves.size()) ? leaves[static_cast<size_t>(leafId)].passableIndex : -1;
+}
+
+void ApplyPassable(Area &area, const std::vector<PassableVolume> &passables, int passableIndex)
+{
+	if (passableIndex < 0 || static_cast<size_t>(passableIndex) >= passables.size())
+		return;
+
+	const PassableVolume &p = passables[static_cast<size_t>(passableIndex)];
+	area.areaFlags |= p.areaFlag;
+	area.doorActivation = p.activation;
+	area.doorActivatorPos = p.activatorPos;
+	area.openSeconds = p.openSeconds;
+}
+
 }
 
 MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
-	const std::vector<bool> &isCrouchLeaf)
+	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables)
 {
 	MergeResult result;
 	result.areas.reserve(leaves.size());
@@ -489,6 +515,7 @@ MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<
 			AddPlaneUnique(area.boundPlanes, f.plane);
 		if (LeafIsCrouch(isCrouchLeaf, leaf.id))
 			area.areaFlags |= crossbot_nav::NAV_AREA_CROUCH;
+		ApplyPassable(area, passables, leaf.passableIndex);
 		result.areas.push_back(std::move(area));
 	}
 
@@ -673,7 +700,7 @@ struct MergeCandidate
 }
 
 MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
-	const std::vector<bool> &isCrouchLeaf)
+	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables)
 {
 	int n = static_cast<int>(leaves.size());
 
@@ -751,6 +778,11 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 	for (const Portal &p : portals)
 	{
 		if (LeafIsCrouch(isCrouchLeaf, p.leafA) != LeafIsCrouch(isCrouchLeaf, p.leafB))
+			continue;
+
+		// A door or breakable has to stay its own area so it keeps its activation, and it must
+		// not absorb a different one either.
+		if (LeafPassable(leaves, p.leafA) != LeafPassable(leaves, p.leafB))
 			continue;
 
 		const Face &fa = leaves[static_cast<size_t>(p.leafA)].polytope.faces[static_cast<size_t>(p.faceIndexA)];
@@ -936,6 +968,7 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 			area.memberLeafIds.push_back(leafId);
 			if (LeafIsCrouch(isCrouchLeaf, leafId))
 				area.areaFlags |= crossbot_nav::NAV_AREA_CROUCH;
+			ApplyPassable(area, passables, LeafPassable(leaves, leafId));
 			std::vector<const Face *> faces;
 			facesExcluding(leafId, removedFaces, faces);
 			for (const Face *f : faces)

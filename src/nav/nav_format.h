@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 
@@ -7,7 +7,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 9;
+constexpr uint32_t kNavVersion = 10;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
 
@@ -19,6 +19,7 @@ enum AreaFlags : uint32_t
 	NAV_AREA_WATER            = 1u << 2,
 
 	NAV_AREA_DOOR             = 1u << 7,
+	NAV_AREA_BREAKABLE        = 1u << 8,
 };
 
 enum ConnType : uint8_t
@@ -33,11 +34,7 @@ enum ConnFlags : uint8_t
 	CONN_FLAG_NONE         = 0,
 	CONN_FLAG_ONE_WAY      = 1u << 0,
 	CONN_FLAG_NEEDS_CROUCH = 1u << 1,
-	// The air move leaves the ground under jump impulse rather than by walking off. Not derivable
-	// from jumpBackDist: a reverse jump inferred from a drop carries no run-up, and a sampled jump
-	// may have drawn one close to zero.
 	CONN_FLAG_JUMP         = 1u << 2,
-
 };
 
 enum DoorActivation : uint8_t
@@ -83,10 +80,6 @@ struct NavAreaPlane
 	float dist;
 };
 
-// gateA and gateB are the funnel gates on each side of the crossing, baked by navgen with the
-// player radius already applied: inset at both ends and pushed that far into the owning area. A
-// zero-length gate means the opening was too narrow to inset and the midpoint is the only way
-// through. gateValid says which sides carry one; a teleport carries neither.
 struct NavConnectionRecord
 {
 	uint32_t areaA;
@@ -95,12 +88,10 @@ struct NavConnectionRecord
 	uint8_t connFlags;
 	uint8_t gateValid;
 	uint8_t pad;
-	float traverseCost;
+	float costSeconds;
 
 	float gateA[2][3];
 	float gateB[2][3];
-	// Launch parameters at gateA's two ends, to be interpolated across it: the samples that set
-	// each end flew with their own yaw and speed, and one pair does not serve the whole span.
 	float gateAYaw[2];
 	float gateASpeed[2];
 

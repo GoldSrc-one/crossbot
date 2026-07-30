@@ -1,4 +1,4 @@
-﻿#include "svg_debug.h"
+#include "svg_debug.h"
 
 #include <algorithm>
 #include <cmath>
@@ -66,29 +66,27 @@ std::vector<Pt2> AreaFootprint(const Area &area)
 constexpr const char *kBackground = "#12141a";
 constexpr const char *kAreaWalkable = "#8d9298";
 constexpr const char *kAreaCrouch = "#93b3cf";
+constexpr const char *kAreaDoor = "#b99a5b";
+constexpr const char *kAreaBreakable = "#a8705f";
 constexpr const char *kConnWalk = "#e8eef4";
 constexpr const char *kConnAirmove = "#e74c3c";
 constexpr const char *kConnTeleport = "#27ae60";
 constexpr const char *kGate = "#8e6fc4";
 constexpr const char *kGateJump = "#e74c3c";
 constexpr const char *kRoute = "#f39c12";
-// Distinct from kConnAirmove and kRouteGoal, which are also reds, so the route overlay stays
-// readable on top of the connection layer.
+
 constexpr const char *kRouteAirmoveSim = "#2ecc71";
 constexpr const char *kRouteAirmoveStored = "#ff3b30";
 constexpr const char *kRouteAirmoveMissed = "#f5d020";
 constexpr const char *kRouteStart = "#27ae60";
 constexpr const char *kRouteGoal = "#e74c3c";
-// Where the bot actually went, as opposed to where it was told to go. A cool hue so it reads as a
-// separate layer under the warm planned route rather than as part of it.
+
 constexpr const char *kTrace = "#3fd0d4";
 constexpr const char *kTargetEntity = "#c86bd8";
 constexpr const char *kLabelText = "#e8eef4";
 
-// Areas are see-through so a floor stacked over another still reveals what is beneath it.
 constexpr double kAreaFillOpacity = 0.7;
 
-// Lowest point of an area, i.e. its floor height -- the sort key for the painter's order.
 double AreaFloorZ(const Area &area)
 {
 	double lowest = 1e30;
@@ -123,7 +121,13 @@ ConnStyle StyleForConn(uint8_t connType)
 
 const char *FillForArea(const Area &area)
 {
-	return (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) ? kAreaCrouch : kAreaWalkable;
+	if (area.areaFlags & crossbot_nav::NAV_AREA_DOOR)
+		return kAreaDoor;
+	if (area.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE)
+		return kAreaBreakable;
+	if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
+		return kAreaCrouch;
+	return kAreaWalkable;
 }
 
 void WriteHeader(FILE *f, const std::string &mapName, double minX, double minY, double w, double h)
@@ -196,9 +200,6 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		centroids[i] = {c.x, -c.y};
 	}
 
-	// Painter's order: this is a top-down view, so the lowest floors have to be laid down
-	// first and higher ones paint over them. The natural order is area id, which drops
-	// basements on top of the rooms above them at random.
 	std::vector<size_t> drawOrder(areas.size());
 	std::vector<double> floorZ(areas.size(), 0.0);
 	for (size_t i = 0; i < areas.size(); ++i)
@@ -244,8 +245,6 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 	}
 	std::fprintf(f, "</g>\n");
 
-	// Walk gates first, then the air-move ones on top: a launch edge is the interesting one when
-	// both run along the same lip.
 	auto drawGateLayer = [&](const char *color, bool airmove)
 	{
 		std::fprintf(f, "<g stroke=\"%s\" stroke-opacity=\"0.9\" stroke-width=\"%.2f\" "
@@ -289,8 +288,6 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\"/>\n", c.x, c.y, unit * 0.5);
 	std::fprintf(f, "</g>\n");
 
-	// Laid down before the planned route so the two are comparable at a glance: wherever the bot
-	// tracked the plan the orange sits on top of the cyan, and any excursion shows as bare cyan.
 	if (tracePoints.size() >= 2)
 	{
 		std::fprintf(f, "<polyline fill=\"none\" stroke=\"%s\" stroke-width=\"%.2f\" stroke-opacity=\"0.9\" "
@@ -308,8 +305,6 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 			std::fprintf(f, "%.1f,%.1f ", p.x, -p.y);
 		std::fprintf(f, "\"/>\n");
 
-		// Overdraw the air moves so it is obvious which jumps the planner re-simulated from the
-		// funnelled launch point and which fell back to the baked one.
 		for (size_t i = 0; i + 1 < pathPoints.size() && i < pathSegmentKinds.size(); ++i)
 		{
 			if (pathSegmentKinds[i] == PATH_SEG_WALK)
@@ -324,9 +319,6 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 				a.x, -a.y, b.x, -b.y, colour, unit * 1.3);
 		}
 
-		// Where a re-simulated jump was tried and missed: dashed from the launch to what it was
-		// aiming at, with a ring on where it actually came down. A replay that never left the
-		// ground ends on its own launch, so the aim is the only part with any length to it.
 		for (const FailedAirmove &fa : failedAirmoves)
 		{
 			std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"%s\" "
@@ -376,9 +368,8 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		double ly = minY - pad + unit * 4.0;
 		double lh = unit * 3.4;
 		double panelW = unit * 30.0;
-		// Derived from the row count rather than hand-tuned, so adding a legend entry cannot
-		// silently push it outside the panel.
-		constexpr int kLegendRows = 12;
+
+		constexpr int kLegendRows = 14;
 		double panelH = lh * (kLegendRows + 1.6);
 		double swatchW = unit * 3.0;
 		double fontSize = unit * 2.6;
@@ -435,6 +426,8 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 
 		SwatchRow(kAreaWalkable, "area");
 		SwatchRow(kAreaCrouch, "area (crouch)");
+		SwatchRow(kAreaDoor, "area (door)");
+		SwatchRow(kAreaBreakable, "area (breakable)");
 		LineRow(kConnWalk, nullptr, 1.0, "walk");
 		LineRow(kConnAirmove, "4,2", 1.3, "air move");
 		LineRow(kGate, "3,2", 0.5, "funnel gate");

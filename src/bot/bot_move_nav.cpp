@@ -6,43 +6,95 @@
 #include "bot_move_nav.h"
 #include "bot_move.h"
 #include "../nav/nav.h"
+#include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
 #include "../nav/nav_query.h"
 #include "../nav/path_follower.h"
 
 namespace
 {
-		constexpr float kPi = 3.14159265f;
-		constexpr float kMoveSpeed = 250.f;
+	using NavMath::kPiF;
+	using NavMath::Norm2D;
 
-		// Over maxspeed on purpose: PM_CheckParamters rescales the forward/side pair down to
-		// maxspeed, so this just means "full speed in exactly the commanded direction".
-		constexpr float kFullDrive = 1000.f;
+	constexpr float kMoveSpeed = 250.f;
+	constexpr float kFullDrive = 1000.f;
+	constexpr float kAimVelocitySpeed = 20.f;
+	constexpr int kHullHuman = 1;
+	constexpr int kHullDuck = 3;
+	constexpr int kHullPoint = 0;
 
-		// Below this the velocity carries no usable heading, so the aim holds where it is rather
-		// than snapping about on numerical noise.
-		constexpr float kAimVelocitySpeed = 20.f;
+	constexpr float kAirmoveApproachLead = 32.f;
+	constexpr float kAirmoveLaunchSlack = 4.f;
+	constexpr float kAirmoveMinAirTime = 0.1f;
+	constexpr float kAirmoveMaxAirTime = 6.f;
+	constexpr float kDodgeFloorProbeDepth = 90.f;
+	constexpr float kObstacleTraceDistance = 48.f;
+	constexpr float kObstacleStuckRepathDelay = 1.5f;
 
-		constexpr float kJumpTriggerDistance = 100.f;
-		constexpr float kJumpFacingToleranceDeg = 20.f;
-
-		constexpr int kHullHuman = 1;
-		constexpr int kHullPoint = 0;
-
-		constexpr float kDodgeFloorProbeDepth = 90.f;
-
-		constexpr float kObstacleTraceDistance = 48.f;
-
-		constexpr float kObstacleStuckRepathDelay = 1.5f;
-
-	float NormalizeAngle(float a)
+	Vector YawDir(float yawDeg)
 	{
-		while (a > 180.f) a -= 360.f;
-		while (a < -180.f) a += 360.f;
-		return a;
+		float r = yawDeg * (kPiF / 180.f);
+		return Vector(cosf(r), sinf(r), 0.f);
 	}
 
-		Vector FindClearDirection(edict_t *pEdict, const Vector &dir2D, float traceDistance)
+	PmSim::PmTraceFn EngineTraceFn(edict_t *ignore, int hull)
+	{
+		return [ignore, hull](const Vector &start, const Vector &end)
+		{
+			TraceResult tr;
+			g_engfuncs.pfnTraceHull(start, end, ignore_monsters, hull, ignore, &tr);
+
+			PmSim::PmTrace out;
+			out.endpos = tr.vecEndPos;
+			out.planeNormal = tr.vecPlaneNormal;
+			out.fraction = tr.flFraction;
+			out.allsolid = tr.fAllSolid != 0;
+			out.startsolid = tr.fStartSolid != 0;
+			return out;
+		};
+	}
+
+	float BotMaxSpeed(edict_t *pEdict)
+	{
+		float maxspeed = pEdict->v.maxspeed;
+		if (maxspeed <= 1.f)
+			maxspeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");
+		if (maxspeed <= 1.f)
+			maxspeed = kMoveSpeed;
+		return maxspeed;
+	}
+
+	NavPlan::PlanTraceContext MakePlanTraces(edict_t *pEdict)
+	{
+		NavPlan::PlanTraceContext traces;
+		traces.standTrace = EngineTraceFn(pEdict, kHullHuman);
+		traces.duckTrace = EngineTraceFn(pEdict, kHullDuck);
+
+		float maxspeed = BotMaxSpeed(pEdict);
+
+		float gravity = g_engfuncs.pfnCVarGetFloat("sv_gravity");
+		if (gravity <= 1.f)
+			gravity = 800.f;
+		if (pEdict->v.gravity > 0.f)
+			gravity *= pEdict->v.gravity;
+
+		float airAccel = g_engfuncs.pfnCVarGetFloat("sv_airaccelerate");
+		if (airAccel <= 0.f)
+			airAccel = 10.f;
+
+		float frameTime = gpGlobals->frametime;
+		if (frameTime < 1.f / 128.f || frameTime > 1.f / 20.f)
+			frameTime = 1.f / 60.f;
+
+		traces.physics.maxSpeed = maxspeed;
+		traces.physics.gravity = gravity;
+		traces.physics.airAccelerate = airAccel;
+		traces.physics.friction = 1.f;
+		traces.physics.frameTime = frameTime;
+		return traces;
+	}
+
+	Vector FindClearDirection(edict_t *pEdict, const Vector &dir2D, float traceDistance)
 	{
 		static constexpr float kCandidateAngles[] = {0.f, 45.f, -45.f, 90.f, -90.f, 135.f, -135.f, 180.f};
 
@@ -51,7 +103,7 @@ namespace
 
 		for (float deg : kCandidateAngles)
 		{
-			float rad = deg * (kPi / 180.f);
+			float rad = deg * (kPiF / 180.f);
 			float cs = cosf(rad), sn = sinf(rad);
 			Vector candidate(dir2D.x * cs - dir2D.y * sn, dir2D.x * sn + dir2D.y * cs, 0.f);
 
@@ -59,7 +111,7 @@ namespace
 			Vector traceEnd = pEdict->v.origin + candidate * traceDistance;
 			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
 
-				Vector reach = pEdict->v.origin + candidate * (traceDistance * tr.flFraction);
+			Vector reach = pEdict->v.origin + candidate * (traceDistance * tr.flFraction);
 			TraceResult down;
 			g_engfuncs.pfnTraceHull(reach, reach - Vector(0.f, 0.f, kDodgeFloorProbeDepth), ignore_monsters,
 				kHullPoint, pEdict, &down);
@@ -79,14 +131,10 @@ namespace
 		return best;
 	}
 
-		constexpr float kTeleportJumpThreshold = 150.f;
+	constexpr float kTeleportJumpThreshold = 150.f;
+	constexpr float kRepathInterval = 10.f;
+	constexpr float kEtaSafetyMargin = 1.6f;
 
-		constexpr float kRepathInterval = 10.f;
-
-		constexpr float kEtaSafetyMargin = 1.6f;
-
-	// Every path that stands the bot still, so the reported move pair never lingers from the last
-	// frame it was actually walking.
 	void RunIdleMove(CBot &bot, const Vector &angles)
 	{
 		bot.moveForward = 0.f;
@@ -94,12 +142,124 @@ namespace
 		g_engfuncs.pfnRunPlayerMove(bot.pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
 	}
 
+	void RunAirmoveDrive(CBot &bot, const Vector &moveDir, float drive, float aimYaw, bool crouch, bool jump)
+	{
+		edict_t *pEdict = bot.pEdict;
+
+		bot.desiredAngles = Vector(0.f, aimYaw, 0.f);
+		Vector angles = Bot_UpdateFacing(bot);
+
+		float fmove = 0.f, smove = 0.f;
+		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+
+		unsigned short buttons = 0;
+		if (fmove > 1.f) buttons |= IN_FORWARD;
+		else if (fmove < -1.f) buttons |= IN_BACK;
+		if (smove > 1.f) buttons |= IN_MOVERIGHT;
+		else if (smove < -1.f) buttons |= IN_MOVELEFT;
+		if (crouch) buttons |= IN_DUCK;
+		if (jump) buttons |= IN_JUMP;
+
+		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
+	}
+
+	void RunAirmoveApproach(CBot &bot, const Nav::Waypoint &wp)
+	{
+		edict_t *pEdict = bot.pEdict;
+		const Vector &origin = pEdict->v.origin;
+		const Vector &vel = pEdict->v.velocity;
+
+		Vector launchDir = YawDir(wp.launchYaw);
+		Vector toLaunch(wp.point.x - origin.x, wp.point.y - origin.y, 0.f);
+		float remaining = toLaunch.x * launchDir.x + toLaunch.y * launchDir.y;
+
+		float speed = sqrtf(vel.x * vel.x + vel.y * vel.y);
+		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
+
+		float drive = (wp.launchSpeed > 1.f) ? wp.launchSpeed : kFullDrive;
+
+		bool atLaunchPlane = remaining <= speed * gpGlobals->frametime + kAirmoveLaunchSlack;
+
+		bool launching = onGround && atLaunchPlane;
+		if (!wp.requiresJump && !onGround && remaining <= kAirmoveApproachLead)
+			launching = true;
+
+		if (launching)
+		{
+			bot.airmoveActive = true;
+			bot.airmoveYaw = wp.launchYaw;
+			bot.airmoveSpeed = drive;
+			bot.airmoveCrouch = wp.requiresCrouch;
+			bot.airmoveStartTime = gpGlobals->time;
+			bot.airmoveTargetArea = wp.targetAreaId;
+			++bot.waypointIndex;
+
+			Vector offTrack(toLaunch.x - launchDir.x * remaining,
+				toLaunch.y - launchDir.y * remaining, 0.f);
+
+			char msg[256];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s airmove launch at (%.1f,%.1f,%.1f) plan yaw %.0f speed %.0f "
+				"jump %d crouch %d | actual yaw %.0f speed %.0f lateral %.1f\n",
+				bot.name, origin.x, origin.y, origin.z, wp.launchYaw, drive, wp.requiresJump ? 1 : 0,
+				wp.requiresCrouch ? 1 : 0,
+				(speed > kAimVelocitySpeed) ? atan2f(vel.y, vel.x) * (180.f / kPiF) : wp.launchYaw, speed,
+				sqrtf(offTrack.x * offTrack.x + offTrack.y * offTrack.y));
+			SERVER_PRINT(msg);
+
+			RunAirmoveDrive(bot, launchDir, drive, wp.launchYaw, wp.requiresCrouch,
+				wp.requiresJump && onGround);
+			return;
+		}
+
+		Vector aim = wp.point + launchDir * kAirmoveApproachLead;
+		Vector moveDir = Norm2D(aim - origin);
+		if (moveDir.x == 0.f && moveDir.y == 0.f)
+			moveDir = launchDir;
+
+		RunAirmoveDrive(bot, moveDir, drive, wp.launchYaw, wp.requiresCrouch && !wp.requiresJump, false);
+	}
+
+	bool RunAirmoveFlight(CBot &bot, const Nav::NavMesh &mesh)
+	{
+		edict_t *pEdict = bot.pEdict;
+		float airTime = gpGlobals->time - bot.airmoveStartTime;
+		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
+
+		if ((onGround && airTime >= kAirmoveMinAirTime) || airTime >= kAirmoveMaxAirTime)
+		{
+			bot.airmoveActive = false;
+
+			const Nav::Area *landedArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
+			int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
+
+			char msg[224];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s airmove %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d)\n", bot.name,
+				onGround ? "landed" : "timed out", airTime, pEdict->v.origin.x, pEdict->v.origin.y,
+				pEdict->v.origin.z, landedId, bot.airmoveTargetArea);
+			SERVER_PRINT(msg);
+
+			if (bot.airmoveTargetArea >= 0 && landedId != bot.airmoveTargetArea)
+				bot.nextRepathTime = gpGlobals->time;
+
+			return false;
+		}
+
+		RunAirmoveDrive(bot, YawDir(bot.airmoveYaw), bot.airmoveSpeed, bot.airmoveYaw, bot.airmoveCrouch,
+			false);
+		return true;
+	}
+
 	void ResetPath(CBot &bot)
 	{
 		bot.waypoints.clear();
 		bot.waypointIndex = 0;
 		bot.obstacleBlockedSince = 0.f;
-		bot.jumpAttempted = false;
+		bot.airmoveActive = false;
+		bot.airmoveTargetArea = -1;
 		bot.plannedAreaPath.clear();
 		bot.visitedAreaPath.clear();
 		bot.pathStartTime = 0.f;
@@ -136,7 +296,6 @@ namespace
 
 	bool Repath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict)
 	{
-
 		bool freshAttempt = bot.waypoints.empty();
 
 		const Nav::Area *startArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
@@ -144,17 +303,20 @@ namespace
 		if (!startArea || !goalArea)
 			return false;
 
-			Vector clampedGoal = bot.goalPoint;
-			clampedGoal.x = std::max(goalArea->mins.x, std::min(goalArea->maxs.x, clampedGoal.x));
-			clampedGoal.y = std::max(goalArea->mins.y, std::min(goalArea->maxs.y, clampedGoal.y));
-			clampedGoal.z = std::max(goalArea->mins.z, std::min(goalArea->maxs.z, clampedGoal.z));
+		Vector clampedGoal = bot.goalPoint;
+		clampedGoal.x = std::max(goalArea->mins.x, std::min(goalArea->maxs.x, clampedGoal.x));
+		clampedGoal.y = std::max(goalArea->mins.y, std::min(goalArea->maxs.y, clampedGoal.y));
+		clampedGoal.z = std::max(goalArea->mins.z, std::min(goalArea->maxs.z, clampedGoal.z));
 
-			Nav::PathResult path = Nav::FindPath(mesh, startArea->id, goalArea->id);
-			if (!path.found)
-				return false;
+		Nav::PathResult path = Nav::FindPath(mesh, startArea->id, goalArea->id);
+		if (!path.found)
+			return false;
 
-			bot.waypoints = Nav::BuildWaypointPath(mesh, path, pEdict->v.origin, clampedGoal);
+		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
+		NavPlan::PlanStats planStats;
+		bot.waypoints = Nav::BuildWaypointPath(mesh, path, pEdict->v.origin, clampedGoal, &traces, &planStats);
 		bot.waypointIndex = 0;
+		bot.airmoveActive = false;
 		bot.plannedAreaPath = path.areaPath;
 
 		if (freshAttempt)
@@ -171,21 +333,35 @@ namespace
 			bot.visitedAreaPath.clear();
 			bot.visitedAreaPath.push_back(startArea->id);
 
-					char wpMsg[512];
-					snprintf(wpMsg, sizeof(wpMsg), "CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu\n",
-						pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
-						clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size());
-					SERVER_PRINT(wpMsg);
-					for (size_t i = 0; i < bot.waypoints.size(); ++i)
-					{
-						const Nav::Waypoint &wp = bot.waypoints[i];
-						snprintf(wpMsg, sizeof(wpMsg),
-							"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d\n",
-							i, wp.point.x, wp.point.y, wp.point.z,
-							wp.requiresJump, wp.requiresCrouch, wp.targetAreaId);
-						SERVER_PRINT(wpMsg);
-					}
+			char wpMsg[512];
+			snprintf(wpMsg, sizeof(wpMsg),
+				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
+				"airmoves=%zu simulated/%zu stored\n",
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
+				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
+				planStats.airmovesSimulated, planStats.airmovesFromStored);
+			SERVER_PRINT(wpMsg);
+			for (size_t i = 0; i < bot.waypoints.size(); ++i)
+			{
+				const Nav::Waypoint &wp = bot.waypoints[i];
+				if (wp.airmoveLaunch)
+				{
+					snprintf(wpMsg, sizeof(wpMsg),
+						"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) AIRMOVE jump=%d crouch=%d yaw=%.0f speed=%.0f "
+						"sim=%d targArea=%d\n",
+						i, wp.point.x, wp.point.y, wp.point.z, wp.requiresJump, wp.requiresCrouch,
+						wp.launchYaw, wp.launchSpeed, wp.launchSimulated, wp.targetAreaId);
 				}
+				else
+				{
+					snprintf(wpMsg, sizeof(wpMsg),
+						"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d\n",
+						i, wp.point.x, wp.point.y, wp.point.z,
+						wp.requiresJump, wp.requiresCrouch, wp.targetAreaId);
+				}
+				SERVER_PRINT(wpMsg);
+			}
+		}
 		return true;
 	}
 }
@@ -211,9 +387,8 @@ void Bot_MoveNav(CBot &bot)
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
 	if (!bot.hasGoal)
-		{
-
-			Vector angles = Bot_UpdateFacing(bot);
+	{
+		Vector angles = Bot_UpdateFacing(bot);
 		RunIdleMove(bot, angles);
 		return;
 	}
@@ -224,14 +399,13 @@ void Bot_MoveNav(CBot &bot)
 		bot.lastProgressTime = gpGlobals->time;
 	}
 
-		bool forcedRepath = bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
+	bool forcedRepath = bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
 	bool stalled = !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
 	if (bot.waypoints.empty() || forcedRepath || stalled)
 	{
 		if (!bot.waypoints.empty())
 		{
-
 			char msg[160];
 			snprintf(msg, sizeof(msg), "CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
 				bot.name, forcedRepath ? "obstacle-forced" : "stalled", pEdict->v.origin.x, pEdict->v.origin.y,
@@ -240,7 +414,6 @@ void Bot_MoveNav(CBot &bot)
 		}
 		if (!Repath(bot, *mesh, pEdict))
 		{
-
 			WriteTraceLog(bot);
 			bot.hasGoal = false;
 			return;
@@ -256,9 +429,11 @@ void Bot_MoveNav(CBot &bot)
 	if (bot.traceLog.size() < 100000)
 		bot.traceLog.push_back(pEdict->v.origin);
 
+	if (bot.airmoveActive && RunAirmoveFlight(bot, *mesh))
+		return;
+
 	if (bot.waypointIndex >= bot.waypoints.size())
 	{
-
 		char msg[128];
 		snprintf(msg, sizeof(msg), "CrossBot: %s reached goal (%.1f,%.1f,%.1f)\n", bot.name, bot.goalPoint.x,
 			bot.goalPoint.y, bot.goalPoint.z);
@@ -271,122 +446,92 @@ void Bot_MoveNav(CBot &bot)
 	}
 
 	Nav::Waypoint *wp = &bot.waypoints[bot.waypointIndex];
-			Vector toTarget = wp->point - pEdict->v.origin;
-		float horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
+	Vector toTarget = wp->point - pEdict->v.origin;
+	float horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
 
-			if (bot.waypointIndex == 0 && horizDist < 16.f)
-			{
-				++bot.waypointIndex;
-				if (bot.waypointIndex >= bot.waypoints.size())
-				{
-					bot.hasGoal = false;
-					ResetPath(bot);
-					return;
-				}
-
-				wp = &bot.waypoints[bot.waypointIndex];
-				toTarget = wp->point - pEdict->v.origin;
-				horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
-			}
-
-					// Steer reports advance for a corner passed and, on the final waypoint, for
-					// having arrived. Consuming it in both cases is what ends a route: once the
-					// index runs off the end, the arrival check at the top of the next frame fires.
-					NavFollow::Config followCfg;
-					if (pEdict->v.maxspeed > 1.f)
-						followCfg.maxSpeed = pEdict->v.maxspeed;
-
-					NavFollow::Decision steer;
-					while (true)
-					{
-						steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin,
-							pEdict->v.velocity, followCfg);
-
-						// A jump waypoint is a commitment: it is not passed until the jump is made.
-						if (bot.waypoints[bot.waypointIndex].requiresJump && !bot.jumpAttempted)
-							break;
-						if (!steer.advance)
-							break;
-
-						++bot.waypointIndex;
-						if (bot.waypointIndex >= bot.waypoints.size())
-							break;
-					}
-
-					if (bot.waypointIndex >= bot.waypoints.size())
-					{
-						Vector angles = Bot_UpdateFacing(bot);
-						RunIdleMove(bot, angles);
-						return;
-					}
-
-					wp = &bot.waypoints[bot.waypointIndex];
-					toTarget = wp->point - pEdict->v.origin;
-					horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
-
-		{
-			bool onGroundNow = (pEdict->v.flags & FL_ONGROUND) != 0;
-			if (onGroundNow)
-			{
-				bot.fallTelemetryLogged = false;
-			}
-			else if (!bot.fallTelemetryLogged && pEdict->v.velocity.z < -120.f && !wp->requiresJump)
-			{
-				char fallMsg[192];
-				snprintf(fallMsg, sizeof(fallMsg),
-					"CrossBot: %s falling at (%.1f,%.1f,%.1f) heading to wp %zu/%zu (%.1f,%.1f,%.1f)\n", bot.name,
-					pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.waypointIndex,
-									bot.waypoints.size(), wp->point.x, wp->point.y, wp->point.z);
-				SERVER_PRINT(fallMsg);
-				bot.fallTelemetryLogged = true;
-			}
-		}
-
-		bool needsJump = wp->requiresJump;
-
-		if (needsJump)
-		{
-
-			bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
-				bool inTargetArea = wp->targetAreaId < 0;
-			if (!inTargetArea)
-			{
-				const Nav::Area *actualArea = Nav::FindAreaForPoint(*mesh, pEdict->v.origin);
-					inTargetArea = actualArea && actualArea->id == static_cast<uint32_t>(wp->targetAreaId);
-			}
-			if (bot.jumpAttempted && onGround && inTargetArea)
-			{
-				bot.jumpAttempted = false;
-				++bot.waypointIndex;
-				return;
-			}
-		}
-
-		bool committingToJump = needsJump && horizDist < kJumpTriggerDistance;
-
-		// Where the feet go. Independent of where the bot looks -- the two only coincide by accident.
-		Vector moveDir;
-		if (committingToJump)
+	if (bot.waypointIndex == 0 && horizDist < 16.f)
 	{
+		++bot.waypointIndex;
+		if (bot.waypointIndex >= bot.waypoints.size())
+		{
+			bot.hasGoal = false;
+			ResetPath(bot);
+			return;
+		}
 
-		moveDir = Vector(toTarget.x, toTarget.y, 0.f);
+		wp = &bot.waypoints[bot.waypointIndex];
+		toTarget = wp->point - pEdict->v.origin;
+		horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
 	}
-	else
-	{
 
-		// Already a unit direction, and already braked if the bot is inside a corner.
+	NavFollow::Config followCfg;
+	followCfg.maxSpeed = BotMaxSpeed(pEdict);
+
+	NavFollow::Decision steer;
+	while (true)
+	{
+		steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin,
+			pEdict->v.velocity, followCfg);
+
+		if (bot.waypoints[bot.waypointIndex].airmoveLaunch)
+			break;
+		if (!steer.advance)
+			break;
+
+		++bot.waypointIndex;
+		if (bot.waypointIndex >= bot.waypoints.size())
+			break;
+	}
+
+	if (bot.waypointIndex >= bot.waypoints.size())
+	{
+		Vector angles = Bot_UpdateFacing(bot);
+		RunIdleMove(bot, angles);
+		return;
+	}
+
+	wp = &bot.waypoints[bot.waypointIndex];
+	toTarget = wp->point - pEdict->v.origin;
+	horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
+
+	{
+		bool onGroundNow = (pEdict->v.flags & FL_ONGROUND) != 0;
+		if (onGroundNow)
+		{
+			bot.fallTelemetryLogged = false;
+		}
+		else if (!bot.fallTelemetryLogged && pEdict->v.velocity.z < -120.f && !wp->requiresJump)
+		{
+			char fallMsg[192];
+			snprintf(fallMsg, sizeof(fallMsg),
+				"CrossBot: %s falling at (%.1f,%.1f,%.1f) heading to wp %zu/%zu (%.1f,%.1f,%.1f)\n", bot.name,
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.waypointIndex,
+				bot.waypoints.size(), wp->point.x, wp->point.y, wp->point.z);
+			SERVER_PRINT(fallMsg);
+			bot.fallTelemetryLogged = true;
+		}
+	}
+
+	if (wp->airmoveLaunch)
+	{
+		RunAirmoveApproach(bot, *wp);
+		return;
+	}
+
+	Vector moveDir;
+	{
 		Vector steerDir = steer.moveDir;
 
-				if (steerDir.x != 0.f || steerDir.y != 0.f)
-				{
-					Vector dir2D = steerDir;
-					Vector traceEnd = pEdict->v.origin + dir2D * kObstacleTraceDistance;
+		if (steerDir.x != 0.f || steerDir.y != 0.f)
+		{
+			Vector dir2D = steerDir;
+			Vector traceEnd = pEdict->v.origin + dir2D * kObstacleTraceDistance;
 
-					TraceResult tr;
-					g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
+			TraceResult tr;
+			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
 
-					bool hitDynamicObstacle = tr.flFraction < 1.0f && tr.pHit &&
-						g_engfuncs.pfnIndexOfEdict(tr.pHit) != 0;
+			bool hitDynamicObstacle = tr.flFraction < 1.0f && tr.pHit &&
+				g_engfuncs.pfnIndexOfEdict(tr.pHit) != 0;
 
 			if (hitDynamicObstacle)
 			{
@@ -407,22 +552,19 @@ void Bot_MoveNav(CBot &bot)
 		moveDir = Vector(steerDir.x, steerDir.y, 0.f);
 	}
 
-		// Where the bot looks: at the node it is heading for next, so it reads as a player looking
-		// round the corner rather than one watching its own feet. Past the last node there is
-		// nothing ahead to look at, so it settles on wherever it is actually drifting.
-		size_t aimIndex = bot.waypointIndex + 1;
-		if (aimIndex < bot.waypoints.size())
-		{
-			Vector toAim = bot.waypoints[aimIndex].point - pEdict->v.origin;
-			if (toAim.x * toAim.x + toAim.y * toAim.y > 1.f)
-				bot.desiredAngles = Vector(0.f, atan2f(toAim.y, toAim.x) * (180.f / kPi), 0.f);
-		}
-		else
-		{
-			const Vector &vel = pEdict->v.velocity;
-			if (sqrtf(vel.x * vel.x + vel.y * vel.y) > kAimVelocitySpeed)
-				bot.desiredAngles = Vector(0.f, atan2f(vel.y, vel.x) * (180.f / kPi), 0.f);
-		}
+	size_t aimIndex = bot.waypointIndex + 1;
+	if (aimIndex < bot.waypoints.size())
+	{
+		Vector toAim = bot.waypoints[aimIndex].point - pEdict->v.origin;
+		if (toAim.x * toAim.x + toAim.y * toAim.y > 1.f)
+			bot.desiredAngles = Vector(0.f, atan2f(toAim.y, toAim.x) * (180.f / kPiF), 0.f);
+	}
+	else
+	{
+		const Vector &vel = pEdict->v.velocity;
+		if (sqrtf(vel.x * vel.x + vel.y * vel.y) > kAimVelocitySpeed)
+			bot.desiredAngles = Vector(0.f, atan2f(vel.y, vel.x) * (180.f / kPiF), 0.f);
+	}
 
 	Vector angles = Bot_UpdateFacing(bot);
 
@@ -431,32 +573,17 @@ void Bot_MoveNav(CBot &bot)
 	bot.moveForward = fmove;
 	bot.moveSide = smove;
 
-		// Movement rides on the speeds, not the buttons, but nothing watching a bot should see it
-		// claim to walk forward while it strafes.
 	unsigned short buttons = 0;
 	if (fmove > 1.f) buttons |= IN_FORWARD;
 	else if (fmove < -1.f) buttons |= IN_BACK;
 	if (smove > 1.f) buttons |= IN_MOVERIGHT;
 	else if (smove < -1.f) buttons |= IN_MOVELEFT;
 
-		if (wp->requiresCrouch || (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH)))
+	if (wp->requiresCrouch || (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH)))
 	{
 		buttons |= IN_DUCK;
 	}
 
-	if (needsJump)
-	{
-		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
-		float facingError = fabsf(NormalizeAngle(angles.y - bot.desiredAngles.y));
-		if (onGround && horizDist < kJumpTriggerDistance && facingError < kJumpFacingToleranceDeg)
-		{
-			buttons |= IN_JUMP;
-			bot.jumpAttempted = true;
-		}
-
-			if (pEdict->v.velocity.z > 0.f)
-				buttons |= IN_DUCK;
-	}
 
 	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
 }

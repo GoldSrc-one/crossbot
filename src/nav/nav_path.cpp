@@ -24,7 +24,7 @@ PathResult FindPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea)
 		gc.areaB = c.areaB;
 		gc.crossing = NavPlan::ConnectionCrossing(mesh.planAreas, mesh.planConns[i]);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
-		gc.traverseCost = c.traverseCost;
+		gc.costSeconds = c.costSeconds;
 	}
 
 	NavAStar::GraphResult graphResult = NavAStar::FindPath(areas, areaConnIndices, conns, startArea, goalArea);
@@ -37,10 +37,11 @@ PathResult FindPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea)
 }
 
 std::vector<Waypoint> BuildWaypointPath(const NavMesh &mesh, const PathResult &path, const Vector &startPoint,
-	const Vector &goalPoint)
+	const Vector &goalPoint, const NavPlan::PlanTraceContext *traces, NavPlan::PlanStats *stats)
 {
 	return NavPlan::BuildWaypointPlan(mesh.planAreas, mesh.planConns, path.areaPath, path.connPath,
-		startPoint, goalPoint);
+		startPoint, goalPoint, traces, stats);
 }
 
 }
+

@@ -1,4 +1,4 @@
-﻿#include "entity_parser.h"
+#include "entity_parser.h"
 
 #include <cctype>
 

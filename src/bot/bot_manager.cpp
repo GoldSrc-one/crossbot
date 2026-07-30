@@ -3,7 +3,6 @@
 
 #include "bot_manager.h"
 #include "bot.h"
-#include "bot_move.h"
 #include "bot_move_nav.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
@@ -99,7 +98,7 @@ void StartFrame()
 		if (g_pGameProfile->IsDead(bot.pEdict))
 			g_pGameProfile->Respawn(bot.pEdict);
 		else
-			Bot_Move(bot);
+			Bot_MoveNav(bot);
 	}
 }
 
@@ -188,41 +187,37 @@ bool TeleportAllBots(const Vector &point)
 	return any;
 }
 
-namespace
+void AppendAreaList(std::string &msg, const char *label, const std::vector<uint32_t> &ids, bool fromTail)
 {
+	constexpr size_t kMaxShown = 24;
+	msg += " ";
+	msg += label;
+	msg += "=[";
 
-	void AppendAreaList(std::string &msg, const char *label, const std::vector<uint32_t> &ids, bool fromTail)
+	size_t begin = 0;
+	size_t end = ids.size();
+	bool truncated = ids.size() > kMaxShown;
+	if (truncated)
 	{
-		constexpr size_t kMaxShown = 24;
-		msg += " ";
-		msg += label;
-		msg += "=[";
-
-		size_t begin = 0;
-		size_t end = ids.size();
-		bool truncated = ids.size() > kMaxShown;
-		if (truncated)
-		{
-			if (fromTail)
-				begin = ids.size() - kMaxShown;
-			else
-				end = kMaxShown;
-		}
-
-		if (truncated && fromTail)
-			msg += "...,";
-		char idBuf[16];
-		for (size_t i = begin; i < end; ++i)
-		{
-			snprintf(idBuf, sizeof(idBuf), "%u", ids[i]);
-			msg += idBuf;
-			if (i + 1 < end)
-				msg += ",";
-		}
-		if (truncated && !fromTail)
-			msg += ",...";
-		msg += "]";
+		if (fromTail)
+			begin = ids.size() - kMaxShown;
+		else
+			end = kMaxShown;
 	}
+
+	if (truncated && fromTail)
+		msg += "...,";
+	char idBuf[16];
+	for (size_t i = begin; i < end; ++i)
+	{
+		snprintf(idBuf, sizeof(idBuf), "%u", ids[i]);
+		msg += idBuf;
+		if (i + 1 < end)
+			msg += ",";
+	}
+	if (truncated && !fromTail)
+		msg += ",...";
+	msg += "]";
 }
 
 void PrintNavStatus()
@@ -308,7 +303,7 @@ void PrintWaypoints()
 				SERVER_PRINT(line);
 			}
 		}
-}
+			}
 
-}
+			} // namespace BotManager
 

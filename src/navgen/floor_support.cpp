@@ -1,4 +1,4 @@
-﻿#include "floor_support.h"
+#include "floor_support.h"
 
 #include <cmath>
 #include <cstdio>
@@ -383,6 +383,7 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 			ExtractedLeaf piece;
 			piece.id = static_cast<int>(out.size());
 			piece.polytope = std::move(frag);
+			piece.passableIndex = leaf.passableIndex;
 			out.push_back(std::move(piece));
 		}
 	}

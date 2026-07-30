@@ -9,6 +9,10 @@
 namespace NavAStar
 {
 
+// Path cost is in seconds. Distances are converted with the bot's running speed, and
+// costSeconds adds the time an edge takes beyond running its length.
+constexpr float kNavRunSpeed = 250.f;
+
 struct AreaNode
 {
 	Vector centroid = Vector(0.f, 0.f, 0.f);
@@ -19,8 +23,7 @@ struct Connection
 	uint32_t areaA = 0, areaB = 0;
 
 	bool oneWay = false;
-	float traverseCost = 1.f;
-	// Where the path crosses from one area to the other, used to shape the traverse cost.
+	float costSeconds = 0.f;
 	Vector crossing = Vector(0.f, 0.f, 0.f);
 };
 

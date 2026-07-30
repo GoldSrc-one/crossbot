@@ -1,8 +1,10 @@
-﻿#include "blocking_entities.h"
+#include "blocking_entities.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include "clipnode_tree.h"
 #include "hull_defs.h"
@@ -17,10 +19,64 @@ namespace
 constexpr double kOverlapEpsilon = 0.5;
 constexpr double kMinPieceVolume = 1.0;
 
+constexpr int kSfBreakTriggerOnly = 1;
+constexpr int kSfDoorStartOpen = 1;
+constexpr int kSfDoorPassable = 8;
+constexpr int kSfDoorUseOnly = 256;
+
+constexpr double kDefaultDoorSpeed = 100.0;
+constexpr double kDefaultRotateDistance = 90.0;
+constexpr double kDefaultBreakableHealth = 1.0;
+constexpr double kBreakSecondsPerHealth = 0.1;
+
 bool IsBlockingClassname(const std::string &classname)
 {
-	return classname == "func_wall" || classname == "func_breakable" || classname == "func_detail" ||
-		classname == "func_door" || classname == "func_door_rotating";
+	return classname == "func_wall" || classname == "func_detail";
+}
+
+bool IsDoorClassname(const std::string &classname)
+{
+	return classname == "func_door" || classname == "func_door_rotating";
+}
+
+bool IsPassableClassname(const std::string &classname)
+{
+	return IsDoorClassname(classname) || classname == "func_breakable";
+}
+
+double ParseDouble(const std::string &s, double def)
+{
+	if (s.empty())
+		return def;
+	char *end = nullptr;
+	double v = std::strtod(s.c_str(), &end);
+	return (end == s.c_str()) ? def : v;
+}
+
+int ParseInt(const std::string &s, int def)
+{
+	if (s.empty())
+		return def;
+	char *end = nullptr;
+	long v = std::strtol(s.c_str(), &end, 10);
+	return (end == s.c_str()) ? def : static_cast<int>(v);
+}
+
+// SetMovedir (hlsdk subs.cpp): the forward vector of the full angles triple, so up is
+// (-90 0 0) and north is (0 90 0), plus the two legacy sentinels the engine still honours.
+Vec3 MoveDirFromAngles(const Vec3 &angles)
+{
+	if (angles.x == 0.0 && angles.z == 0.0)
+	{
+		if (angles.y == -1.0)
+			return Vec3(0, 0, 1);
+		if (angles.y == -2.0)
+			return Vec3(0, 0, -1);
+	}
+
+	double pitch = angles.x * 3.14159265358979323846 / 180.0;
+	double yaw = angles.y * 3.14159265358979323846 / 180.0;
+	return Vec3(std::cos(yaw) * std::cos(pitch), std::sin(yaw) * std::cos(pitch), -std::sin(pitch));
 }
 
 int ParseBrushModelIndex(const std::string &model)
@@ -66,6 +122,84 @@ bool BoundsOverlap(const Vec3 &aMins, const Vec3 &aMaxs, const Vec3 &bMins, cons
 		aMins.z <= bMaxs.z + epsilon && aMaxs.z >= bMins.z - epsilon;
 }
 
+Vec3 ModelWorldCenter(const dmodel_t &model, const Vec3 &origin)
+{
+	return Vec3(origin.x + (model.mins[0] + model.maxs[0]) * 0.5,
+		origin.y + (model.mins[1] + model.maxs[1]) * 0.5,
+		origin.z + (model.mins[2] + model.maxs[2]) * 0.5);
+}
+
+// A func_button may fire the door directly, or through a trigger_relay / multi_manager.
+const Entity *ResolveButtonFor(const std::vector<Entity> &entities, const std::string &targetname)
+{
+	for (const Entity &ent : entities)
+	{
+		if (ent.Get("classname") != "func_button")
+			continue;
+
+		std::string target = ent.Get("target");
+		if (target.empty())
+			continue;
+
+		if (target == targetname)
+			return &ent;
+
+		for (const Entity &mid : entities)
+		{
+			std::string midClass = mid.Get("classname");
+			if (midClass == "trigger_relay")
+			{
+				if (mid.Get("targetname") == target && mid.Get("target") == targetname)
+					return &ent;
+			}
+			else if (midClass == "multi_manager")
+			{
+				if (mid.Get("targetname") == target && mid.Find(targetname) != nullptr)
+					return &ent;
+			}
+		}
+	}
+	return nullptr;
+}
+
+const Entity *ResolveTriggerFor(const std::vector<Entity> &entities, const std::string &targetname)
+{
+	for (const Entity &ent : entities)
+	{
+		std::string classname = ent.Get("classname");
+		if (classname != "trigger_multiple" && classname != "trigger_once")
+			continue;
+		if (ent.Get("target") == targetname)
+			return &ent;
+	}
+	return nullptr;
+}
+
+double DoorOpenSeconds(const Entity &ent, const dmodel_t &model)
+{
+	double speed = ParseDouble(ent.Get("speed"), 0.0);
+	if (speed <= 0.0)
+		speed = kDefaultDoorSpeed;
+
+	if (ent.Get("classname") == "func_door_rotating")
+	{
+		double distance = ParseDouble(ent.Get("distance"), 0.0);
+		if (distance <= 0.0)
+			distance = kDefaultRotateDistance;
+		return distance / speed;
+	}
+
+	Vec3 movedir = MoveDirFromAngles(ParseEntityOrigin(ent.Get("angles")));
+	Vec3 size(model.maxs[0] - model.mins[0], model.maxs[1] - model.mins[1], model.maxs[2] - model.mins[2]);
+
+	double travel = std::fabs(movedir.x * (size.x - 2.0)) + std::fabs(movedir.y * (size.y - 2.0)) +
+		std::fabs(movedir.z * (size.z - 2.0)) - ParseDouble(ent.Get("lip"), 0.0);
+	if (travel < 0.0)
+		travel = 0.0;
+
+	return travel / speed;
+}
+
 }
 
 std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
@@ -107,6 +241,104 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 	return result;
 }
 
+PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity> &entities, int hullIndex)
+{
+	Vec3 hullMins(kHumanHullMinX, kHumanHullMinY, kHumanHullMinZ);
+	Vec3 hullMaxs(kHumanHullMaxX, kHumanHullMaxY, kHumanHullMaxZ);
+	if (hullIndex == kHullDuck)
+	{
+		hullMins = Vec3(kDuckClipHullMinX, kDuckClipHullMinY, kDuckClipHullMinZ);
+		hullMaxs = Vec3(kDuckClipHullMaxX, kDuckClipHullMaxY, kDuckClipHullMaxZ);
+	}
+
+	PassableSet result;
+
+	for (const Entity &ent : entities)
+	{
+		std::string classname = ent.Get("classname");
+		if (!IsPassableClassname(classname))
+			continue;
+
+		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
+		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
+			continue;
+
+		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
+		if (model.headnode[hullIndex] < 0)
+			continue;
+
+		bool isDoor = IsDoorClassname(classname);
+		int spawnflags = ParseInt(ent.Get("spawnflags"), 0);
+
+		// A door that spawns open, or one flagged SOLID_NOT, never occupies its brush space.
+		if (isDoor && ((spawnflags & kSfDoorStartOpen) || (spawnflags & kSfDoorPassable)))
+			continue;
+
+		BlockingVolume vol;
+		vol.headnode = model.headnode[hullIndex];
+		vol.origin = ParseEntityOrigin(ent.Get("origin"));
+		vol.mins = Vec3(model.mins[0] + hullMins.x, model.mins[1] + hullMins.y,
+			model.mins[2] + hullMins.z) + vol.origin;
+		vol.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
+			model.maxs[2] + hullMaxs.z) + vol.origin;
+
+		PassableVolume pass;
+		pass.volume = vol;
+		pass.areaFlag = isDoor ? crossbot_nav::NAV_AREA_DOOR : crossbot_nav::NAV_AREA_BREAKABLE;
+		pass.openSeconds = isDoor ? DoorOpenSeconds(ent, model)
+			: std::max(ParseDouble(ent.Get("health"), kDefaultBreakableHealth), kDefaultBreakableHealth) *
+				kBreakSecondsPerHealth;
+
+		std::string targetname = ent.Get("targetname");
+		bool triggerOnly = isDoor ? ((spawnflags & kSfDoorUseOnly) != 0)
+			: ((spawnflags & kSfBreakTriggerOnly) != 0);
+
+		if (targetname.empty() && !triggerOnly)
+		{
+			pass.activation = crossbot_nav::DOOR_ACTIVATION_TOUCH;
+			result.passable.push_back(pass);
+			continue;
+		}
+
+		// An unnamed use-only door is opened by pressing use on the door itself, which is the
+		// same runtime action as a button -- just with the door as its own activator.
+		if (targetname.empty() && isDoor)
+		{
+			pass.activation = crossbot_nav::DOOR_ACTIVATION_BUTTON;
+			pass.activatorPos = ModelWorldCenter(model, vol.origin);
+			result.passable.push_back(pass);
+			continue;
+		}
+
+		const Entity *activator = nullptr;
+		if (!targetname.empty())
+		{
+			activator = ResolveButtonFor(entities, targetname);
+			pass.activation = crossbot_nav::DOOR_ACTIVATION_BUTTON;
+			if (!activator)
+			{
+				activator = ResolveTriggerFor(entities, targetname);
+				pass.activation = crossbot_nav::DOOR_ACTIVATION_TRIGGER;
+			}
+		}
+
+		int activatorModel = activator ? ParseBrushModelIndex(activator->Get("model")) : -1;
+		if (activatorModel < 0 || static_cast<size_t>(activatorModel) >= bsp.Models().size())
+		{
+			// Nothing the bot can reach opens this, so it stays a wall and whatever is behind
+			// it prunes out -- an honest report that there is no way through.
+			result.impassable.push_back(vol);
+			continue;
+		}
+
+		pass.activatorPos = ModelWorldCenter(bsp.Models()[static_cast<size_t>(activatorModel)],
+			ParseEntityOrigin(activator->Get("origin")));
+		result.passable.push_back(pass);
+	}
+
+	return result;
+}
+
 bool OverlapsAnyBlockingVolume(const ExtractedLeaf &leaf, const std::vector<BlockingVolume> &blockers)
 {
 	Vec3 mins, maxs;
@@ -117,6 +349,35 @@ bool OverlapsAnyBlockingVolume(const ExtractedLeaf &leaf, const std::vector<Bloc
 			return true;
 
 	return false;
+}
+
+bool OverlapsBlockingVolume(const Polytope &poly, const BlockingVolume &blocker)
+{
+	Vec3 mins, maxs;
+	PolytopeBounds(poly, mins, maxs);
+	return BoundsOverlap(mins, maxs, blocker.mins, blocker.maxs, kOverlapEpsilon);
+}
+
+// Both halves come out of the same clip planes, so their shared faces are exactly coplanar
+// and BuildPortals connects the door piece to its neighbours with no extra linking.
+void SplitByPassableVolume(const BspFile &bsp, const Polytope &poly, const BlockingVolume &blocker,
+	double mapRadius, std::vector<Polytope> &inside, std::vector<Polytope> &outside, double epsilon)
+{
+	if (!OverlapsBlockingVolume(poly, blocker))
+	{
+		outside.push_back(poly);
+		return;
+	}
+
+	Polytope local = TranslatePolytope(poly, blocker.origin * -1.0);
+
+	for (const Polytope &piece : CarvePolytopeAgainstTree(bsp, blocker.headnode, local, CONTENTS_SOLID,
+			mapRadius, kMinPieceVolume, epsilon))
+		outside.push_back(TranslatePolytope(piece, blocker.origin));
+
+	for (const Polytope &piece : CarvePolytopeAgainstTree(bsp, blocker.headnode, local, CONTENTS_EMPTY,
+			mapRadius, kMinPieceVolume, epsilon))
+		inside.push_back(TranslatePolytope(piece, blocker.origin));
 }
 
 std::vector<Polytope> SubtractBlockingVolumes(const BspFile &bsp, const Polytope &leafPolytope,

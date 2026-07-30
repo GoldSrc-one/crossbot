@@ -23,6 +23,8 @@ struct PathResult
 PathResult FindPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea);
 
 std::vector<Waypoint> BuildWaypointPath(const NavMesh &mesh, const PathResult &path, const Vector &startPoint,
-	const Vector &goalPoint);
+	const Vector &goalPoint, const NavPlan::PlanTraceContext *traces = nullptr,
+	NavPlan::PlanStats *stats = nullptr);
 
 }
+

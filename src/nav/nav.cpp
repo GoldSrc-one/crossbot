@@ -1,4 +1,4 @@
-﻿#include "nav.h"
+#include "nav.h"
 
 #include "nav_loader.h"
 

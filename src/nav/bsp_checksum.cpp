@@ -1,4 +1,4 @@
-﻿#include "bsp_checksum.h"
+#include "bsp_checksum.h"
 
 #include <cstdio>
 #include <cstring>

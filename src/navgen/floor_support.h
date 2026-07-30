@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 
@@ -29,9 +29,6 @@ bool PointInSolid(const BspFile &bsp, int headnode, const std::vector<BlockingVo
 
 const Face *LowestFloorFace(const Polytope &poly);
 
-// The floor face directly under (x,y). A convex polytope's lower boundary is hit
-// once by any vertical line, so this is unambiguous; when (x,y) falls just outside
-// every face (a connection midpoint sitting on a shared edge) the nearest one wins.
 const Face *FloorFaceUnder(const Polytope &poly, double x, double y);
 
 double FloorHeightAt(const Face &floorFace, double x, double y);

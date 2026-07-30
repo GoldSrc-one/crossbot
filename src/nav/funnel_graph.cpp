@@ -1,4 +1,4 @@
-﻿#include "funnel_graph.h"
+#include "funnel_graph.h"
 
 #include <cmath>
 

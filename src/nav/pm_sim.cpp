@@ -2,13 +2,16 @@
 
 #include <cmath>
 
+#include "nav_math.h"
+
 namespace PmSim
 {
 
 namespace
 {
 
-constexpr float kPi = 3.14159265358979323846f;
+using NavMath::kPiF;
+
 constexpr int kMaxClipPlanes = 5;
 
 inline void VectorCopy(const float *in, float *out)
@@ -67,7 +70,7 @@ PmSimulator::PmSimulator(PmTraceFn trace, const PmPhysics &physics)
 
 void PmSimulator::Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump)
 {
-	float yawRad = yawDegrees * kPi / 180.f;
+	float yawRad = yawDegrees * kPiF / 180.f;
 	m_forward[0] = std::cos(yawRad);
 	m_forward[1] = std::sin(yawRad);
 	m_forward[2] = 0.f;
@@ -300,3 +303,4 @@ bool PmSimulator::Step()
 }
 
 }
+

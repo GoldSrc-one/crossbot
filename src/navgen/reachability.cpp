@@ -1,9 +1,11 @@
-﻿#include "reachability.h"
+#include "reachability.h"
 
 #include <cmath>
 #include <cstdio>
 #include <limits>
 #include <unordered_set>
+
+#include "nav_math.h"
 
 namespace navgen
 {
@@ -35,12 +37,7 @@ bool ParseOrigin(const std::string &origin, Vec3 &out)
 
 bool PointInArea(const Vec3 &point, const Area &area, double epsilon)
 {
-	if (area.boundPlanes.empty())
-		return false;
-	for (const Plane &p : area.boundPlanes)
-		if (point.Dot(p.normal) - p.dist < -epsilon)
-			return false;
-	return true;
+	return NavMath::PointInsidePlanes(point, area.boundPlanes, epsilon);
 }
 
 Vec3 AreaCentroid(const Area &area)
@@ -213,7 +210,6 @@ MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vec
 
 	return result;
 }
-
 
 }
 

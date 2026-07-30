@@ -1,4 +1,4 @@
-﻿#include "portal_builder.h"
+#include "portal_builder.h"
 
 #include <cmath>
 #include <unordered_map>

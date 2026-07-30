@@ -1,4 +1,4 @@
-﻿#include "nav_file.h"
+#include "nav_file.h"
 
 #include <cstdio>
 #include <cstring>
@@ -89,9 +89,11 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.id = static_cast<uint32_t>(areas[i].id);
 		ComputeBounds(areas[i].polytope, rec.mins, rec.maxs, rec.centroid);
 		rec.areaFlags = areas[i].areaFlags;
-		rec.doorActivation = DOOR_ACTIVATION_TOUCH;
-		rec.doorActivatorPos[0] = rec.doorActivatorPos[1] = rec.doorActivatorPos[2] = 0.0f;
-		rec.doorWaitTime = 0.0f;
+		rec.doorActivation = areas[i].doorActivation;
+		rec.doorActivatorPos[0] = static_cast<float>(areas[i].doorActivatorPos.x);
+		rec.doorActivatorPos[1] = static_cast<float>(areas[i].doorActivatorPos.y);
+		rec.doorActivatorPos[2] = static_cast<float>(areas[i].doorActivatorPos.z);
+		rec.doorWaitTime = static_cast<float>(areas[i].openSeconds);
 		rec.connOffset = ToU16Count(areaConnIndex.size(), "area-conn-index offset");
 		rec.connCount = ToU16Count(perArea[i].size(), "conns-per-area");
 
@@ -143,7 +145,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 			rec.gateASpeed[k] = static_cast<float>(c.gateASpeed[k]);
 		}
 
-		rec.traverseCost = TraverseCostFor(c);
+		rec.costSeconds = ConnectionCostSeconds(c, areas);
 
 		rec.exitSpeed = static_cast<float>(c.exitSpeed);
 		rec.exitAngle = static_cast<float>(c.exitAngle);

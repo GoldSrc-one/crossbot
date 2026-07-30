@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-12.8 -524.8 537.6 537.6" font-family="monospace">
+<title>test6_crouchjump nav debug</title>
+<rect x="-12.8" y="-524.8" width="537.6" height="537.6" fill="#12141a"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e74c3c"/></marker></defs>
+<g stroke="#12141a" stroke-width="0.96" fill-opacity="0.70">
+<polygon fill="#8d9298" points="288.0,-496.0 496.0,-496.0 496.0,-272.0 288.0,-272.0 "/>
+<polygon fill="#8d9298" points="112.0,-496.0 224.0,-496.0 224.0,-272.0 112.0,-272.0 "/>
+<polygon fill="#8d9298" points="416.0,-272.0 496.0,-272.0 496.0,-16.0 416.0,-16.0 "/>
+<polygon fill="#8d9298" points="384.0,-208.0 416.0,-208.0 416.0,-16.0 384.0,-16.0 "/>
+<polygon fill="#8d9298" points="208.0,-208.0 320.0,-208.0 320.0,-16.0 208.0,-16.0 "/>
+<polygon fill="#8d9298" points="112.0,-208.0 144.0,-208.0 144.0,-16.0 112.0,-16.0 "/>
+<polygon fill="#8d9298" points="16.0,-496.0 112.0,-496.0 112.0,-16.0 16.0,-16.0 "/>
+<polygon fill="#8d9298" points="320.0,-208.0 384.0,-208.0 384.0,-16.0 320.0,-16.0 "/>
+<polygon fill="#8d9298" points="144.0,-208.0 208.0,-208.0 208.0,-16.0 144.0,-16.0 "/>
+</g>
+<g stroke-linecap="round" stroke-opacity="0.85">
+<line x1="392.0" y1="-384.0" x2="456.0" y2="-144.0" stroke="#e8eef4" stroke-width="1.68"/>
+<line x1="168.0" y1="-384.0" x2="64.0" y2="-256.0" stroke="#e8eef4" stroke-width="1.68"/>
+<line x1="128.0" y1="-112.0" x2="64.0" y2="-256.0" stroke="#e8eef4" stroke-width="1.68"/>
+<line x1="456.0" y1="-144.0" x2="400.0" y2="-112.0" stroke="#e8eef4" stroke-width="1.68"/>
+<line x1="352.0" y1="-112.0" x2="456.0" y2="-144.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="352.0" y1="-112.0" x2="400.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="352.0" y1="-112.0" x2="264.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="176.0" y1="-112.0" x2="264.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="176.0" y1="-112.0" x2="128.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="176.0" y1="-112.0" x2="64.0" y2="-256.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="456.0" y1="-144.0" x2="352.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="456.0" y1="-144.0" x2="264.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="400.0" y1="-112.0" x2="352.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="264.0" y1="-112.0" x2="456.0" y2="-144.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="264.0" y1="-112.0" x2="352.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="264.0" y1="-112.0" x2="176.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="264.0" y1="-112.0" x2="64.0" y2="-256.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="128.0" y1="-112.0" x2="264.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="128.0" y1="-112.0" x2="176.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="64.0" y1="-256.0" x2="264.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+<line x1="64.0" y1="-256.0" x2="176.0" y2="-112.0" stroke="#e74c3c" stroke-width="2.18" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+</g>
+<g stroke="#8e6fc4" stroke-opacity="0.9" stroke-width="0.67" stroke-dasharray="2.4 1.9" stroke-linecap="round" fill="none">
+<line x1="480.0" y1="-288.0" x2="432.0" y2="-288.0"/>
+<line x1="480.0" y1="-256.0" x2="432.0" y2="-256.0"/>
+<line x1="128.0" y1="-288.0" x2="128.0" y2="-480.0"/>
+<line x1="96.0" y1="-288.0" x2="96.0" y2="-480.0"/>
+<line x1="128.0" y1="-32.0" x2="128.0" y2="-192.0"/>
+<line x1="96.0" y1="-32.0" x2="96.0" y2="-192.0"/>
+<line x1="432.0" y1="-32.0" x2="432.0" y2="-192.0"/>
+<line x1="400.0" y1="-32.0" x2="400.0" y2="-192.0"/>
+</g>
+<g stroke="#e74c3c" stroke-opacity="0.9" stroke-width="0.67" stroke-dasharray="2.4 1.9" stroke-linecap="round" fill="none">
+<line x1="382.0" y1="-56.4" x2="382.0" y2="-159.2"/>
+<line x1="444.2" y1="-56.8" x2="442.9" y2="-178.0"/>
+<line x1="382.0" y1="-59.4" x2="382.0" y2="-152.5"/>
+<line x1="402.2" y1="-61.6" x2="400.3" y2="-155.4"/>
+<line x1="322.0" y1="-61.5" x2="322.0" y2="-163.2"/>
+<line x1="286.2" y1="-66.4" x2="286.5" y2="-164.0"/>
+<line x1="206.0" y1="-55.7" x2="206.0" y2="-164.0"/>
+<line x1="243.7" y1="-53.9" x2="253.8" y2="-160.5"/>
+<line x1="146.0" y1="-65.3" x2="146.0" y2="-159.5"/>
+<line x1="129.1" y1="-63.1" x2="127.2" y2="-176.1"/>
+<line x1="146.0" y1="-66.3" x2="146.0" y2="-163.2"/>
+<line x1="85.2" y1="-57.6" x2="76.9" y2="-179.6"/>
+<line x1="468.8" y1="-54.9" x2="464.0" y2="-157.2"/>
+<line x1="352.3" y1="-71.5" x2="362.7" y2="-169.9"/>
+<line x1="466.1" y1="-83.3" x2="464.6" y2="-170.0"/>
+<line x1="249.6" y1="-56.6" x2="240.2" y2="-196.9"/>
+<line x1="409.4" y1="-79.9" x2="407.2" y2="-167.9"/>
+<line x1="349.8" y1="-73.9" x2="348.9" y2="-180.0"/>
+<line x1="247.7" y1="-130.9" x2="272.4" y2="-192.1"/>
+<line x1="452.1" y1="-62.3" x2="452.1" y2="-187.3"/>
+<line x1="242.5" y1="-106.5" x2="265.0" y2="-180.6"/>
+<line x1="362.7" y1="-59.0" x2="348.4" y2="-171.1"/>
+<line x1="248.3" y1="-44.4" x2="270.9" y2="-146.1"/>
+<line x1="176.6" y1="-57.0" x2="175.3" y2="-166.2"/>
+<line x1="259.2" y1="-81.2" x2="257.5" y2="-137.3"/>
+<line x1="56.9" y1="-80.4" x2="76.7" y2="-177.0"/>
+<line x1="120.3" y1="-91.0" x2="118.2" y2="-150.3"/>
+<line x1="207.7" y1="-44.5" x2="242.6" y2="-200.5"/>
+<line x1="116.0" y1="-95.8" x2="116.4" y2="-168.3"/>
+<line x1="164.8" y1="-104.5" x2="165.2" y2="-206.2"/>
+<line x1="63.9" y1="-59.5" x2="70.6" y2="-189.4"/>
+<line x1="276.8" y1="-49.4" x2="277.5" y2="-153.3"/>
+<line x1="60.8" y1="-68.8" x2="53.6" y2="-180.5"/>
+<line x1="173.7" y1="-78.8" x2="167.6" y2="-176.3"/>
+</g>
+<g fill="#12141a">
+<circle cx="392.0" cy="-384.0" r="2.40"/>
+<circle cx="168.0" cy="-384.0" r="2.40"/>
+<circle cx="456.0" cy="-144.0" r="2.40"/>
+<circle cx="400.0" cy="-112.0" r="2.40"/>
+<circle cx="352.0" cy="-112.0" r="2.40"/>
+<circle cx="264.0" cy="-112.0" r="2.40"/>
+<circle cx="176.0" cy="-112.0" r="2.40"/>
+<circle cx="128.0" cy="-112.0" r="2.40"/>
+<circle cx="64.0" cy="-256.0" r="2.40"/>
+</g>
+<polyline fill="none" stroke="#f39c12" stroke-width="4.32" stroke-linecap="round" stroke-linejoin="round" points="128.0,-384.0 96.0,-288.0 70.5,-189.4 284.6,-106.8 250.9,-156.0 453.0,-42.1 432.0,-288.0 400.0,-384.0 "/>
+<line x1="70.5" y1="-189.4" x2="284.6" y2="-106.8" stroke="#ff3b30" stroke-width="6.24" stroke-linecap="round"/>
+<line x1="250.9" y1="-156.0" x2="453.0" y2="-42.1" stroke="#ff3b30" stroke-width="6.24" stroke-linecap="round"/>
+<line x1="70.6" y1="-189.4" x2="277.3" y2="-119.7" stroke="#f5d020" stroke-width="3.84" stroke-dasharray="9.6 7.2" stroke-linecap="round"/>
+<circle cx="144.0" cy="-176.9" r="7.68" fill="none" stroke="#f5d020" stroke-width="2.88"/>
+<line x1="247.7" y1="-130.9" x2="452.1" y2="-62.3" stroke="#f5d020" stroke-width="3.84" stroke-dasharray="9.6 7.2" stroke-linecap="round"/>
+<circle cx="320.0" cy="-129.2" r="7.68" fill="none" stroke="#f5d020" stroke-width="2.88"/>
+<circle cx="128.0" cy="-384.0" r="9.60" fill="#27ae60"/>
+<circle cx="400.0" cy="-384.0" r="9.60" fill="#e74c3c"/>
+<g stroke="#c86bd8" stroke-width="2.88" fill="none">
+<circle cx="400.0" cy="-384.0" r="10.56"/>
+<line x1="383.1" y1="-384.0" x2="416.9" y2="-384.0"/>
+<line x1="400.0" y1="-400.9" x2="400.0" y2="-367.1"/>
+</g>
+<g fill="#12141a" text-anchor="middle" font-size="15.36">
+<text x="392.0" y="-384.0">0</text>
+<text x="168.0" y="-384.0">1</text>
+<text x="456.0" y="-144.0">2</text>
+<text x="400.0" y="-112.0">3</text>
+<text x="352.0" y="-112.0">4</text>
+<text x="264.0" y="-112.0">5</text>
+<text x="176.0" y="-112.0">6</text>
+<text x="128.0" y="-112.0">7</text>
+<text x="64.0" y="-256.0">8</text>
+</g>
+<rect x="-12.8" y="-524.8" width="144.0" height="222.0" fill="#12141a" fill-opacity="0.85" stroke="#4a5a6a" stroke-width="0.72"/>
+<text x="-5.6" y="-515.2" font-size="16.32" fill="#ffffff" font-weight="bold">test6_crouchjump</text>
+<rect x="-5.6" y="-504.9" width="14.4" height="10.6" fill="#8d9298" fill-opacity="0.70"/>
+<text x="16.0" y="-495.8" font-size="12.48" fill="#e8eef4">area</text>
+<rect x="-5.6" y="-488.6" width="14.4" height="10.6" fill="#93b3cf" fill-opacity="0.70"/>
+<text x="16.0" y="-479.5" font-size="12.48" fill="#e8eef4">area (crouch)</text>
+<line x1="-5.6" y1="-467.0" x2="8.8" y2="-467.0" stroke="#e8eef4" stroke-width="2.40"/>
+<text x="16.0" y="-463.2" font-size="12.48" fill="#e8eef4">walk</text>
+<line x1="-5.6" y1="-450.7" x2="8.8" y2="-450.7" stroke="#e74c3c" stroke-width="3.12" stroke-dasharray="4,2"/>
+<text x="16.0" y="-446.8" font-size="12.48" fill="#e8eef4">air move</text>
+<line x1="-5.6" y1="-434.4" x2="8.8" y2="-434.4" stroke="#8e6fc4" stroke-width="1.20" stroke-dasharray="3,2"/>
+<text x="16.0" y="-430.5" font-size="12.48" fill="#e8eef4">funnel gate</text>
+<line x1="-5.6" y1="-418.0" x2="8.8" y2="-418.0" stroke="#e74c3c" stroke-width="1.20" stroke-dasharray="3,2"/>
+<text x="16.0" y="-414.2" font-size="12.48" fill="#e8eef4">funnel gate (air move)</text>
+<line x1="-5.6" y1="-401.7" x2="8.8" y2="-401.7" stroke="#f39c12" stroke-width="4.32"/>
+<text x="16.0" y="-397.9" font-size="12.48" fill="#e8eef4">planned route</text>
+<line x1="-5.6" y1="-385.4" x2="8.8" y2="-385.4" stroke="#2ecc71" stroke-width="4.32"/>
+<text x="16.0" y="-381.6" font-size="12.48" fill="#e8eef4">air move, launch re-simulated</text>
+<line x1="-5.6" y1="-369.1" x2="8.8" y2="-369.1" stroke="#ff3b30" stroke-width="4.32"/>
+<text x="16.0" y="-365.2" font-size="12.48" fill="#e8eef4">air move, stored launch</text>
+<line x1="-5.6" y1="-352.8" x2="8.8" y2="-352.8" stroke="#f5d020" stroke-width="4.32"/>
+<text x="16.0" y="-348.9" font-size="12.48" fill="#e8eef4">air move, re-simulation missed</text>
+<line x1="-5.6" y1="-336.4" x2="8.8" y2="-336.4" stroke="#3fd0d4" stroke-width="2.88"/>
+<text x="16.0" y="-332.6" font-size="12.48" fill="#e8eef4">recorded trace</text>
+<circle cx="1.6" cy="-320.1" r="5.76" fill="#27ae60"/>
+<text x="16.0" y="-316.3" font-size="12.48" fill="#e8eef4">route start</text>
+<circle cx="1.6" cy="-303.8" r="5.76" fill="#e74c3c"/>
+<text x="16.0" y="-300.0" font-size="12.48" fill="#e8eef4">route goal</text>
+<g stroke="#c86bd8" stroke-width="1.44" fill="none"><circle cx="1.6" cy="-287.5" r="4.80"/><line x1="-6.1" y1="-287.5" x2="9.3" y2="-287.5"/><line x1="1.6" y1="-295.2" x2="1.6" y2="-279.8"/></g>
+<text x="16.0" y="-283.6" font-size="12.48" fill="#e8eef4">info_target</text>
+</svg>

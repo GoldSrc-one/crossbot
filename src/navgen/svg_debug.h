@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <vector>
@@ -10,8 +10,6 @@
 namespace navgen
 {
 
-// What the route does over the segment leaving each path point. Parallel to pathPoints; the entry
-// for the last point is unused.
 enum PathSegmentKind : uint8_t
 {
 	PATH_SEG_WALK = 0,
@@ -19,8 +17,6 @@ enum PathSegmentKind : uint8_t
 	PATH_SEG_AIRMOVE_STORED,
 };
 
-// A re-simulated air move that missed: where the replay launched from, and where it actually came
-// down instead of in the destination area.
 struct FailedAirmove
 {
 	Vec3 launch;

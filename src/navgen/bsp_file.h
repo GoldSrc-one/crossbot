@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -30,7 +30,6 @@ private:
 	std::vector<dmodel_t> m_models;
 	std::string m_entityText;
 };
-
 
 }
 

@@ -5,9 +5,6 @@
 #include "mathlib.h"
 #include "vector.h"
 
-// A transcription of the Half-Life player movement code, driven a frame at a time. Both the nav
-// bake and the bot run this same core so a jump the sampler proved is a jump the bot can make;
-// the only thing either side supplies is how to trace a hull through the world.
 namespace PmSim
 {
 
@@ -42,11 +39,7 @@ constexpr float kPlayerFatalFallSpeed = 1024.f;
 constexpr float kPlayerMaxSafeFallSpeed = 580.f;
 constexpr float kDamageForFallSpeed = 100.f / (kPlayerFatalFallSpeed - kPlayerMaxSafeFallSpeed);
 
-// Damage a landing at this downward speed costs. Zero below the safe threshold.
 float FallDamageFor(float fallSpeed);
-
-// The apex of a standing jump, from the impulse and gravity. Anything taller needs the extra
-// reach of ducking at the top.
 float PlainJumpHeight(float gravity);
 
 class PmSimulator
@@ -54,23 +47,17 @@ class PmSimulator
 public:
 	PmSimulator(PmTraceFn trace, const PmPhysics &physics);
 
-	// Places the mover on the ground at origin, running flat out along yaw. A pending jump fires
-	// on the first Step.
 	void Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump);
-
-	// Advances one frame. False once the mover is wedged and can no longer be moved, which the
-	// caller should treat as the run ending without a landing.
 	bool Step();
+
+	// Arms the jump for the next Step, so a run-up can be simulated on the ground first and the
+	// jump fired at the point it is actually taken rather than at Begin.
+	void RequestJump() { m_jumpPending = true; }
 
 	const Vector &Origin() const { return m_origin; }
 	bool OnGround() const { return m_onGround; }
 	float Time() const { return m_time; }
-
-	// Downward speed entering the current frame, which is what a landing this frame fell at.
 	float FallSpeed() const { return m_fallSpeed; }
-
-	// Call after deciding a ground contact does not end the run, so the next fall is measured
-	// from here rather than from the original launch.
 	void ResetFallSpeed() { m_fallSpeed = 0.f; }
 
 private:

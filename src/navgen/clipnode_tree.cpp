@@ -1,4 +1,4 @@
-﻿#include "clipnode_tree.h"
+#include "clipnode_tree.h"
 #include "blocking_entities.h"
 
 namespace navgen

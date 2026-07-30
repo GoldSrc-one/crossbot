@@ -1,4 +1,4 @@
-﻿#include "astar_graph.h"
+#include "astar_graph.h"
 
 #include <algorithm>
 #include <limits>
@@ -21,9 +21,11 @@ struct OpenEntryCompare
 	bool operator()(const OpenEntry &a, const OpenEntry &b) const { return a.fScore > b.fScore; }
 };
 
+// Costs are seconds, so the heuristic is the time to run the straight line -- nothing can
+// beat that, which keeps it admissible.
 float Heuristic(const std::vector<AreaNode> &areas, uint32_t a, uint32_t b)
 {
-	return (areas[a].centroid - areas[b].centroid).Length();
+	return (areas[a].centroid - areas[b].centroid).Length() / kNavRunSpeed;
 }
 
 }
@@ -77,9 +79,9 @@ GraphResult FindPath(const std::vector<AreaNode> &areas, const std::vector<std::
 			if (closed[neighbor])
 				continue;
 
-			float approachCost = (areas[current].centroid - conn.crossing).Length();
-			float crossCost = (conn.crossing - areas[neighbor].centroid).Length() * conn.traverseCost;
-			float connCost = approachCost + crossCost;
+			float travelDist = (areas[current].centroid - conn.crossing).Length() +
+				(conn.crossing - areas[neighbor].centroid).Length();
+			float connCost = travelDist / kNavRunSpeed + conn.costSeconds;
 			float tentativeG = gScore[current] + connCost;
 
 			if (tentativeG < gScore[neighbor])
