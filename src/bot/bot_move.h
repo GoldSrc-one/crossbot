@@ -2,7 +2,6 @@
 
 #include "bot.h"
 
-// Wraps an angle into (-180, 180].
 float Bot_NormalizeAngle(float a);
 
 Vector Bot_UpdateFacing(CBot &bot);

@@ -50,8 +50,6 @@ public:
 	void Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump);
 	bool Step();
 
-	// Arms the jump for the next Step, so a run-up can be simulated on the ground first and the
-	// jump fired at the point it is actually taken rather than at Begin.
 	void RequestJump() { m_jumpPending = true; }
 
 	const Vector &Origin() const { return m_origin; }

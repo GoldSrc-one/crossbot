@@ -9,8 +9,6 @@
 namespace NavAStar
 {
 
-// Path cost is in seconds. Distances are converted with the bot's running speed, and
-// costSeconds adds the time an edge takes beyond running its length.
 constexpr float kNavRunSpeed = 250.f;
 
 struct AreaNode

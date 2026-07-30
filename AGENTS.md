@@ -4,7 +4,8 @@ CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh
 
 ## Code Style
 
-- **Main source: Use HLSDK style C++, use std if necessary**
+- **Main source: Use HLSDK style C++, use std if necessary.**
+- **Use floats in the bot code, use doubles in navgen, in shared code use floats.**
 - **Tools and scripts: Use PowerShell! Don't use CMD! Use Powershell! Don't use Python! Use powershell! Don't use Node.JS!**
 - **Comments: Do not add comments. All comments will be deleted! If you cannot escape you irresistable urge to write comments, put them in doc/ instead.**
 

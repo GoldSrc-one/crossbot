@@ -21,8 +21,6 @@ struct OpenEntryCompare
 	bool operator()(const OpenEntry &a, const OpenEntry &b) const { return a.fScore > b.fScore; }
 };
 
-// Costs are seconds, so the heuristic is the time to run the straight line -- nothing can
-// beat that, which keeps it admissible.
 float Heuristic(const std::vector<AreaNode> &areas, uint32_t a, uint32_t b)
 {
 	return (areas[a].centroid - areas[b].centroid).Length() / kNavRunSpeed;

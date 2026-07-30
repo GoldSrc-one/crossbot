@@ -14,8 +14,6 @@ struct ExtractedLeaf
 	int id = 0;
 	Polytope polytope;
 
-	// Index into the passable-volume list when this leaf is the interior of a door or
-	// breakable, -1 for ordinary world space. Every split pass must carry it forward.
 	int passableIndex = -1;
 };
 

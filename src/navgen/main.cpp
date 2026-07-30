@@ -703,16 +703,12 @@ int main(int argc, char **argv)
 		navgen::PassableSet duckPassables = navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck);
 		navgen::PassableSet standPassables = navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullHuman);
 
-		// A door whose activator nobody can reach is a wall, so it carves like one.
-		blockers.insert(blockers.end(), duckPassables.impassable.begin(), duckPassables.impassable.end());
-		standBlockers.insert(standBlockers.end(), standPassables.impassable.begin(),
+	blockers.insert(blockers.end(), duckPassables.impassable.begin(), duckPassables.impassable.end());
+	standBlockers.insert(standBlockers.end(), standPassables.impassable.begin(),
 			standPassables.impassable.end());
 
-		// A door or breakable still holds up whatever rests on it, so floor support counts it as
-		// solid. Air-move sampling does not: the bot opens or breaks it, so a jump may pass
-		// straight through.
-		std::vector<navgen::BlockingVolume> supportBlockers = blockers;
-		for (const navgen::PassableVolume &p : duckPassables.passable)
+	std::vector<navgen::BlockingVolume> supportBlockers = blockers;
+	for (const navgen::PassableVolume &p : duckPassables.passable)
 			supportBlockers.push_back(p.volume);
 
 		std::vector<navgen::ExtractedLeaf> navigableLeaves;

@@ -34,8 +34,6 @@ struct LaunchEdge
 	Vec3 outward;
 	double length = 0.0;
 
-	// A reverse-jump seed knows which way the drop it retraces actually travelled, so it aims
-	// inside that arc instead of fanning the full yawSpread over directions already known to miss.
 	bool yawRange = false;
 	float yawLo = 0.0f;
 	float yawHi = 0.0f;
@@ -64,9 +62,6 @@ struct SampleGate
 	bool valid = false;
 };
 
-// Samples from every edge the pair was reached from land in one cloud. Which edge a sample left
-// through does not matter: the robust fit keeps whichever cluster is the majority and rejects the
-// rest as outliers, so the gate settles on the face the move is really about.
 struct BinEntry
 {
 	AirmoveTrajectory best;
@@ -410,9 +405,9 @@ struct SweepMode
 {
 	const PM_MoveSimulator *sim = nullptr;
 	const char *name = "";
-	double probeZ = 0.0;     // edge filtering and the ground-support test happen here
-	double launchZ = 0.0;    // the simulated origin starts here
-	double navZAdjust = 0.0; // added to simulated positions to express them in nav space
+	double probeZ = 0.0;
+	double launchZ = 0.0;
+	double navZAdjust = 0.0;
 	float maxSpeed = 0.0f;
 	bool duckHull = false;
 	bool drop = true;
@@ -765,7 +760,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		}
 	}
 
-	std::map<long long, bool> emitted; // pair key -> whether the winning move needs a crouch
+	std::map<long long, bool> emitted;
 	for (int bin = 0; bin < kBinCount; ++bin)
 	{
 		for (const auto &entry : bins[bin])

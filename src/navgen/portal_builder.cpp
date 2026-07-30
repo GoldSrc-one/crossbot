@@ -88,7 +88,7 @@ std::pair<Vec3, Vec3> PolygonDiameter(const Winding &w)
 	return {a, b};
 }
 
-constexpr double kMinPortalArea = 1.0; // sq units; filters edge/point-touching slivers
+constexpr double kMinPortalArea = 1.0;
 
 }
 

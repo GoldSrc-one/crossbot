@@ -62,8 +62,6 @@ int ParseInt(const std::string &s, int def)
 	return (end == s.c_str()) ? def : static_cast<int>(v);
 }
 
-// SetMovedir (hlsdk subs.cpp): the forward vector of the full angles triple, so up is
-// (-90 0 0) and north is (0 90 0), plus the two legacy sentinels the engine still honours.
 Vec3 MoveDirFromAngles(const Vec3 &angles)
 {
 	if (angles.x == 0.0 && angles.z == 0.0)
@@ -129,7 +127,6 @@ Vec3 ModelWorldCenter(const dmodel_t &model, const Vec3 &origin)
 		origin.z + (model.mins[2] + model.maxs[2]) * 0.5);
 }
 
-// A func_button may fire the door directly, or through a trigger_relay / multi_manager.
 const Entity *ResolveButtonFor(const std::vector<Entity> &entities, const std::string &targetname)
 {
 	for (const Entity &ent : entities)
@@ -270,7 +267,6 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 		bool isDoor = IsDoorClassname(classname);
 		int spawnflags = ParseInt(ent.Get("spawnflags"), 0);
 
-		// A door that spawns open, or one flagged SOLID_NOT, never occupies its brush space.
 		if (isDoor && ((spawnflags & kSfDoorStartOpen) || (spawnflags & kSfDoorPassable)))
 			continue;
 
@@ -300,8 +296,6 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 			continue;
 		}
 
-		// An unnamed use-only door is opened by pressing use on the door itself, which is the
-		// same runtime action as a button -- just with the door as its own activator.
 		if (targetname.empty() && isDoor)
 		{
 			pass.activation = crossbot_nav::DOOR_ACTIVATION_BUTTON;
@@ -325,8 +319,6 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 		int activatorModel = activator ? ParseBrushModelIndex(activator->Get("model")) : -1;
 		if (activatorModel < 0 || static_cast<size_t>(activatorModel) >= bsp.Models().size())
 		{
-			// Nothing the bot can reach opens this, so it stays a wall and whatever is behind
-			// it prunes out -- an honest report that there is no way through.
 			result.impassable.push_back(vol);
 			continue;
 		}
@@ -358,8 +350,6 @@ bool OverlapsBlockingVolume(const Polytope &poly, const BlockingVolume &blocker)
 	return BoundsOverlap(mins, maxs, blocker.mins, blocker.maxs, kOverlapEpsilon);
 }
 
-// Both halves come out of the same clip planes, so their shared faces are exactly coplanar
-// and BuildPortals connects the door piece to its neighbours with no extra linking.
 void SplitByPassableVolume(const BspFile &bsp, const Polytope &poly, const BlockingVolume &blocker,
 	double mapRadius, std::vector<Polytope> &inside, std::vector<Polytope> &outside, double epsilon)
 {

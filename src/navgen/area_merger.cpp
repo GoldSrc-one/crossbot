@@ -11,9 +11,6 @@
 namespace navgen
 {
 
-// Seconds the bot loses on this edge beyond simply running its length: waiting for a door to
-// open, shooting a breakable, or hanging in the air on a jump. The A* graph adds this to the
-// travel time, so everything here is real time rather than a distance multiplier.
 float ConnectionCostSeconds(const MergedConnection &conn, const std::vector<Area> &areas)
 {
 	float seconds = 0.0f;
@@ -780,8 +777,6 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		if (LeafIsCrouch(isCrouchLeaf, p.leafA) != LeafIsCrouch(isCrouchLeaf, p.leafB))
 			continue;
 
-		// A door or breakable has to stay its own area so it keeps its activation, and it must
-		// not absorb a different one either.
 		if (LeafPassable(leaves, p.leafA) != LeafPassable(leaves, p.leafB))
 			continue;
 

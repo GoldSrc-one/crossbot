@@ -75,6 +75,15 @@ Candidates sorted by portal area descending (larger portals first). Each candida
 - `PruneUnreachableAreas`: BFS from spawn areas over connections (respects one-way)
 - `BakeConnectionGates`: runs shared planner code to build gates, lifts endpoints to true floor
 
+### Cost Calculation
+Seconds the bot loses on this edge beyond simply running its length: waiting for a door to open, shooting a breakable, or hanging in the air on a jump. The A* graph adds this to the travel time, so everything here is real time rather than a distance multiplier.
+
+### Door/Breakable Isolation
+A door or breakable has to stay its own area so it keeps its activation, and it must not absorb a different one either.
+
+### Portal Connection Logic
+Both halves come out of the same clip planes, so their shared faces are exactly coplanar and BuildPortals connects the door piece to its neighbours with no extra linking.
+
 ## airmove_sampler.cpp
 
 ### PM_MoveSimulator
@@ -98,6 +107,18 @@ For each connection:
 - Local regression (tricube kernel, bandwidth = 0.5×segment) at segment ends for yaw/speed
 - Gate endpoints = mean ± 1σ (min 1.0), clamped to sample range
 - Returns invalid if cloud too thin/tight
+
+### Reverse-Jump Seeds
+A reverse-jump seed knows which way the drop it retraces actually travelled, so it aims inside that arc instead of fanning the full yawSpread over directions already known to miss.
+
+### Sample Cloud Aggregation
+Samples from every edge the pair was reached from land in one cloud. Which edge a sample left through does not matter: the robust fit keeps whichever cluster is the majority and rejects the rest as outliers, so the gate settles on the face the move is really about.
+
+### Probe Variables
+- `probeZ = 0.0` - edge filtering and the ground-support test happen here
+- `launchZ = 0.0` - the simulated origin starts here
+- `navZAdjust = 0.0` - added to simulated positions to express them in nav space
+- `emitted` map - pair key -> whether the winning move needs a crouch
 
 ## floor_support.cpp
 
@@ -176,6 +197,22 @@ For each overlapping blocker:
 - Translate leaf polytope to blocker local space
 - Carve against blocker's clip tree (remove CONTENTS_SOLID)
 - Translate pieces back
+
+### Door Angle Convention
+SetMovedir (hlsdk subs.cpp): the forward vector of the full angles triple, so up is (-90 0 0) and north is (0 90 0), plus the two legacy sentinels the engine still honours.
+
+### Button/Trigger Activation Chain
+A func_button may fire the door directly, or through a trigger_relay / multi_manager.
+
+### Door Activation Logic
+- A door that spawns open, or one flagged SOLID_NOT, never occupies its brush space.
+- An unnamed use-only door is opened by pressing use on the door itself, which is the same runtime action as a button -- just with the door as its own activator.
+
+### Unreachable Door Handling
+Nothing the bot can reach opens this, so it stays a wall and whatever is behind it prunes out -- an honest report that there is no way through.
+
+### Door/Neighbor Connection
+Both halves come out of the same clip planes, so their shared faces are exactly coplanar and BuildPortals connects the door piece to its neighbours with no extra linking.
 
 ## nav_file.cpp
 

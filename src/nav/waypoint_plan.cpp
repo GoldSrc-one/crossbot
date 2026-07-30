@@ -26,9 +26,6 @@ constexpr float kAirmoveSimMinTime = 0.1f;
 
 constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
 
-// How far back down the launch line the plan-time simulation starts, and how far back the run-up
-// waypoint sits. The waypoint is nearer than the simulation so the bot is already established on
-// the launch line over ground the simulation covered.
 constexpr float kPlanAirmoveRunup = 64.f;
 constexpr float kPlanAirmoveRunupNode = 32.f;
 
@@ -487,26 +484,10 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 		if (!trace)
 			return false;
 
-		// Two different offsets, and conflating them is what broke crouch jumps.
-		//
-		// Where the move leaves from depends on the source area: a crouch-jump takes off at standing
-		// origin height and ducks in the air, and that lift is the whole mechanic -- starting it on
-		// the floor costs 18 units of reach. Only a move out of a genuine crouch area starts low,
-		// which mirrors the sampler running its ducked sweep for crouch areas alone.
-		//
-		// Where it comes down depends on the hull. Nav space is duck-hull space, so a ducked landing
-		// needs no adjustment at all, while a standing one sits 18 above the floor it rests on. That
-		// is the sampler's navZAdjust: -18 for the standing hull, 0 for both ducked sweeps.
 		bool duckLaunch = (fromAreaId < areas.size()) && areas[fromAreaId].crouch;
 		float launchLift = duckLaunch ? 0.f : kPlanStandHeight;
 		float zAdjust = needsCrouch ? 0.f : kPlanStandHeight;
 
-		// The simulation starts back down the launch line rather than at the launch point, so it
-		// covers the ground the bot runs over on the way in. A launch is only worth planning if the
-		// approach to it exists: the sampler picks a launch position and a velocity and begins there
-		// with that velocity already established, which quietly assumes a run-up nobody checked. If
-		// the ground gives out or something blocks it in those last units, the move is not takeable
-		// however good the trajectory after it looks.
 		Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
 		Vector runupStart = launchFloor - launchDir * kPlanAirmoveRunup;
 
@@ -678,14 +659,8 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 				else
 					++stats->airmovesFromStored;
 			}
-
-			// A launch the simulation could not make is not a launch. Ending the route at the last
-			// reachable point is honest about that: the bot walks as far as the plan is good for and
-			// stops, rather than sprinting at a jump nothing verified. The real answer is for A* to
-			// see the failure and route around it, which needs the search and the waypoint build to
-			// run together.
-			if (!usedSim)
-			{
+						if (!usedSim)
+						{
 				if (stats)
 					++stats->airmovesUnplannable;
 				FlushFunnelTo(AtPlayerHeight(conn.launchPos, fromId));
@@ -695,10 +670,6 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 			Vector launchPoint = AtPlayerHeight(launch, fromId);
 			Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
 
-			// A run-up node on the launch line, so the funnel hands the bot a straight final segment
-			// into the launch instead of a corner that lands on the launch point itself. Without it
-			// the bot can arrive still turning -- on test5_jump the funnel put the corner and the
-			// launch on the same point, and the bot jumped east while still running south.
 			PlanWaypoint runupWp;
 			runupWp.point = launchPoint - launchDir * kPlanAirmoveRunupNode;
 			runupWp.targetAreaId = static_cast<int>(fromId);
