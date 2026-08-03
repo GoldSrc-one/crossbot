@@ -146,7 +146,8 @@ void WriteHeader(FILE *f, const std::string &mapName, double minX, double minY, 
 void WriteDebugSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
 	const std::vector<MergedConnection> &conns, const std::vector<Vec3> &pathPoints,
 	const std::vector<Vec3> &targetPoints, const std::vector<uint8_t> &pathSegmentKinds,
-	const std::vector<FailedAirmove> &failedAirmoves, const std::vector<Vec3> &tracePoints)
+	const std::vector<FailedAirmove> &failedAirmoves, const std::vector<Vec3> &tracePoints,
+	const std::vector<std::vector<Vec3>> &runupTraces)
 {
 	FILE *f = std::fopen(path.c_str(), "w");
 	if (!f)

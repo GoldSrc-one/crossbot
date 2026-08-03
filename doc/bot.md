@@ -17,15 +17,9 @@ translation units share one copy.
 ### Constants
 - kFullDrive: Over maxspeed on purpose: PM_CheckParamters rescales the forward/side pair down to maxspeed, so this just means "full speed in exactly the commanded direction".
 - kAimVelocitySpeed: Below this the velocity carries no usable heading, so the aim holds where it is rather than snapping about on numerical noise.
-- kDodgeFloorProbeDepth: Depth for floor probe when dodging obstacles.
-- kObstacleTraceDistance: Distance to trace for obstacle detection.
-- kObstacleStuckRepathDelay: Time stuck against obstacle before forcing repath.
 - kTeleportJumpThreshold: Distance threshold to detect teleport/jump and reset path.
 - kRepathInterval: Interval for forced repath when stalled.
 - kEtaSafetyMargin: Safety margin multiplier for ETA calculation.
-
-### FindClearDirection
-Samples candidate angles (0, ±45, ±90, ±135, 180) around current direction to find a clear path when blocked.
 
 ### ResetPath
 Clears all path state: waypoints, indices, timers, progress tracking, visited areas.
@@ -44,15 +38,14 @@ Main navigation-driven movement function:
 - Detects teleportation via origin jump and resets path if needed.
 - Updates current area ID.
 - If no goal, runs idle move.
-- Triggers repath on empty path, forced repath (obstacle), or stall (no progress for kRepathInterval).
+- Triggers repath on empty path, forced repath (airmove landed off-target), or stall (no progress for kRepathInterval).
 - Tracks visited areas for debug.
 - Logs position to trace log (capped at 100k points).
 - On waypoint completion: logs goal reached, writes trace, clears goal.
 - Uses NavFollow::Steer for path following with funnel string-pulling.
 - Handles jump waypoints as commitments - not passed until jump is made.
 - Steers toward next waypoint for aiming (looking around corners).
-- Obstacle avoidance: traces ahead, finds clear direction if blocked, forces repath if stuck too long.
-- Computes move direction: jump commits to target, otherwise uses steered direction with obstacle avoidance.
+- Computes move direction from the steered direction.
 - Sets desired angles toward next waypoint or velocity direction.
 - Decomposes move into forward/side speeds for RunPlayerMove.
 - Sets movement buttons (forward/back, left/right, duck, jump).

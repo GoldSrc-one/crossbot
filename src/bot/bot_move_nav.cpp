@@ -21,15 +21,11 @@ namespace
 	constexpr float kAimVelocitySpeed = 20.f;
 	constexpr int kHullHuman = 1;
 	constexpr int kHullDuck = 3;
-	constexpr int kHullPoint = 0;
 
 	constexpr float kAirmoveApproachLead = 32.f;
 	constexpr float kAirmoveLaunchSlack = 4.f;
 	constexpr float kAirmoveMinAirTime = 0.1f;
 	constexpr float kAirmoveMaxAirTime = 6.f;
-	constexpr float kDodgeFloorProbeDepth = 90.f;
-	constexpr float kObstacleTraceDistance = 48.f;
-	constexpr float kObstacleStuckRepathDelay = 1.5f;
 
 	Vector YawDir(float yawDeg)
 	{
@@ -92,43 +88,6 @@ namespace
 		traces.physics.friction = 1.f;
 		traces.physics.frameTime = frameTime;
 		return traces;
-	}
-
-	Vector FindClearDirection(edict_t *pEdict, const Vector &dir2D, float traceDistance)
-	{
-		static constexpr float kCandidateAngles[] = {0.f, 45.f, -45.f, 90.f, -90.f, 135.f, -135.f, 180.f};
-
-		Vector best = dir2D;
-		float bestFraction = -1.f;
-
-		for (float deg : kCandidateAngles)
-		{
-			float rad = deg * (kPiF / 180.f);
-			float cs = cosf(rad), sn = sinf(rad);
-			Vector candidate(dir2D.x * cs - dir2D.y * sn, dir2D.x * sn + dir2D.y * cs, 0.f);
-
-			TraceResult tr;
-			Vector traceEnd = pEdict->v.origin + candidate * traceDistance;
-			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
-
-			Vector reach = pEdict->v.origin + candidate * (traceDistance * tr.flFraction);
-			TraceResult down;
-			g_engfuncs.pfnTraceHull(reach, reach - Vector(0.f, 0.f, kDodgeFloorProbeDepth), ignore_monsters,
-				kHullPoint, pEdict, &down);
-			if (down.flFraction >= 1.0f)
-				continue;
-
-			if (tr.flFraction >= 1.0f)
-				return candidate;
-
-			if (tr.flFraction > bestFraction)
-			{
-				bestFraction = tr.flFraction;
-				best = candidate;
-			}
-		}
-
-		return best;
 	}
 
 	constexpr float kTeleportJumpThreshold = 150.f;
@@ -257,7 +216,6 @@ namespace
 	{
 		bot.waypoints.clear();
 		bot.waypointIndex = 0;
-		bot.obstacleBlockedSince = 0.f;
 		bot.airmoveActive = false;
 		bot.airmoveTargetArea = -1;
 		bot.plannedAreaPath.clear();
@@ -336,10 +294,10 @@ namespace
 			char wpMsg[512];
 			snprintf(wpMsg, sizeof(wpMsg),
 				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
-				"airmoves=%zu simulated/%zu stored\n",
+				"airmoves=%zu simulated/%zu from_stored/%zu unplannable\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
-				planStats.airmovesSimulated, planStats.airmovesFromStored);
+				planStats.airmovesSimulated, planStats.airmovesFromStored, planStats.airmovesUnplannable);
 			SERVER_PRINT(wpMsg);
 			for (size_t i = 0; i < bot.waypoints.size(); ++i)
 			{
@@ -408,7 +366,7 @@ void Bot_MoveNav(CBot &bot)
 		{
 			char msg[160];
 			snprintf(msg, sizeof(msg), "CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
-				bot.name, forcedRepath ? "obstacle-forced" : "stalled", pEdict->v.origin.x, pEdict->v.origin.y,
+				bot.name, forcedRepath ? "forced" : "stalled", pEdict->v.origin.x, pEdict->v.origin.y,
 				pEdict->v.origin.z, bot.waypointIndex, bot.waypoints.size());
 			SERVER_PRINT(msg);
 		}
@@ -518,39 +476,7 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	Vector moveDir;
-	{
-		Vector steerDir = steer.moveDir;
-
-		if (steerDir.x != 0.f || steerDir.y != 0.f)
-		{
-			Vector dir2D = steerDir;
-			Vector traceEnd = pEdict->v.origin + dir2D * kObstacleTraceDistance;
-
-			TraceResult tr;
-			g_engfuncs.pfnTraceHull(pEdict->v.origin, traceEnd, dont_ignore_monsters, kHullHuman, pEdict, &tr);
-
-			bool hitDynamicObstacle = tr.flFraction < 1.0f && tr.pHit &&
-				g_engfuncs.pfnIndexOfEdict(tr.pHit) != 0;
-
-			if (hitDynamicObstacle)
-			{
-				if (bot.obstacleBlockedSince <= 0.f)
-					bot.obstacleBlockedSince = gpGlobals->time;
-
-				steerDir = FindClearDirection(pEdict, dir2D, kObstacleTraceDistance);
-
-				if (gpGlobals->time - bot.obstacleBlockedSince > kObstacleStuckRepathDelay)
-					bot.nextRepathTime = gpGlobals->time;
-			}
-			else
-			{
-				bot.obstacleBlockedSince = 0.f;
-			}
-		}
-
-		moveDir = Vector(steerDir.x, steerDir.y, 0.f);
-	}
+	Vector moveDir(steer.moveDir.x, steer.moveDir.y, 0.f);
 
 	size_t aimIndex = bot.waypointIndex + 1;
 	if (aimIndex < bot.waypoints.size())

@@ -1080,17 +1080,18 @@ int main(int argc, char **argv)
 		if (!svgPath.empty())
 		{
 			std::vector<navgen::Vec3> tracePoints;
-			if (!tracePath.empty())
-			{
-				tracePoints = ReadTraceFile(tracePath);
-				std::printf("read %zu trace points from %s\n", tracePoints.size(), tracePath.c_str());
-			}
+					std::vector<std::vector<navgen::Vec3>> runupTraces;
+					if (!tracePath.empty())
+					{
+						tracePoints = ReadTraceFile(tracePath);
+						std::printf("read %zu trace points from %s\n", tracePoints.size(), tracePath.c_str());
+					}
 
-			std::string mapName = DeriveMapName(bspPath);
-			navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
-				CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves, tracePoints);
-			std::printf("wrote %s\n", svgPath.c_str());
-		}
+					std::string mapName = DeriveMapName(bspPath);
+					navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
+									CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves, tracePoints, runupTraces);
+					std::printf("wrote %s\n", svgPath.c_str());
+				}
 
 		if (!navPath.empty())
 		{

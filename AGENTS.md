@@ -2,6 +2,9 @@
 
 CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh-driven bots. The runtime plugin (`crossbot_mm.dll`) and an offline nav-graph compiler (`navgen.exe`) share the planning/steering code verbatim via `src/nav/`.
 
+How the systems actually work lives in `doc/`, one file per system, keyed by source file: `doc/navgen.md`,
+`doc/nav.md`, `doc/bot.md`, `doc/game.md`, `doc/console.md`. This file is build, commands and house rules only.
+
 ## Code Style
 
 - **Main source: Use HLSDK style C++, use std if necessary.**
@@ -62,67 +65,6 @@ run produces no trace.
 The SVG overlays the A* route from the first spawn point to the `info_target` origin (falling back to the farthest area's centroid when there is no usable target) as a single orange polyline, with a green dot at the start and a red dot at the goal. The endpoints are the real entity origins, not the containing areas' centroids; the goal is clamped into its area's bounds the same way the runtime's `Repath` clamps it. The route is computed with the same `NavAStar::FindPath`, traverse costs and `NavPlan::BuildWaypointPlan` funnel the runtime uses, so it shows the string-pulled waypoints a bot would actually follow — straight across open areas, hugging corners through corridors — not the raw portal endpoints.
 
 Add `--dump-conns` to print every final connection with its type, flags, endpoints and air-move parameters.
-
-### Prism areas
-
-An area is normally a convex polytope, and the nav file exports its face planes verbatim. Stairs and
-ramp/floor junctions are not convex in 3D, so `MergeAreas` also accepts a merge when the union's **X-Y
-footprint stays convex**, its **z-slab is free of every leaf outside the group**, and its **floor stays
-walkable** (no internal step over 18 units). Such an area is flagged `prism`: `Area::polytope` keeps the true
-multi-tread surface for floor lookups, air-move launches and the OBJ/SVG dumps, while `Area::boundPlanes`
-exports the footprint hull plus a z-slab — a convex region the runtime's `ContainsPoint` can test unchanged.
-The z-slab check is what makes the two interchangeable for point lookup.
-
-The slab test runs against *leaves*, never groups, so leaves never move and an earlier prism cannot be
-invalidated by a later merge. When it fails, the merge **absorbs** the conflicting group if a candidate portal
-reaches it, then retries: a ramp only becomes conflict-free as a whole, so every pairwise step along one trips
-over the neighbour the finished area would have swallowed anyway.
-
-Anything in navgen that asks "is this point in this area" must use `boundPlanes`, never `polytope.faces`: for a
-prism the faces include interior risers, and their halfspace intersection is empty.
-
-`--dump-planes <id>` prints the exported bound planes first, then the true face windings.
-
-### Doors and breakables
-
-`func_wall` and `func_detail` are permanently solid, so they are **carved** out of the world leaves. A
-`func_door`, `func_door_rotating` or `func_breakable` is not: it **splits** the leaf it sits in and the interior
-piece survives as its own area, tagged `NAV_AREA_DOOR` or `NAV_AREA_BREAKABLE`. Both halves come out of the same
-clip planes, so their shared faces are exactly coplanar and `BuildPortals` connects them with no extra linking —
-the same property prism merging relies on. A merge never crosses `ExtractedLeaf::passableIndex`, so a door keeps
-its own area and never absorbs a different one.
-
-How the bot gets through is decided from the entity, not at runtime:
-
-- **No `targetname` and not trigger-only** → `DOOR_ACTIVATION_TOUCH`: walk straight through.
-- **Named** → the activator is resolved through `func_button` (chasing `trigger_relay` and `multi_manager`) or
-  `trigger_multiple`, giving `DOOR_ACTIVATION_BUTTON` / `_TRIGGER` and a `doorActivatorPos` at the activator's
-  model centre. The bot detours there first.
-- **Named with no activator navgen can reach** → treated as a wall and carved, so whatever is behind it prunes
-  out. That is deliberate: pruning then reports honestly that there is no way through.
-- `SF_DOOR_START_OPEN` and `SF_DOOR_PASSABLE` doors never occupy their brush space at all, so they are neither
-  carved nor split.
-
-Which passes see a door as solid:
-
-- **Floor support** does — a door brush still holds up whatever rests on it.
-- **The leaf carve, the stand-clearance test and air-move sampling** do not. The bot opens or breaks a door, so
-  a jump may pass straight through one; leaving doors in would also classify every door interior as crouch-only.
-
-In the SVG a door area is gold and a breakable area terracotta, taking precedence over the crouch tint so a
-crouch-height vent still reads as breakable.
-
-`--dump-areas` prints the flag, activation, activator position and time, e.g.
-`door(button at (4.0, 112.0, 48.0) 0.94s)`.
-
-### Path cost is seconds
-
-`NavConnectionRecord::costSeconds` is the time an edge costs **beyond running its length**, and
-`NavAStar::FindPath` computes `distance / kNavRunSpeed + costSeconds`, with the heuristic in the same units. It
-is not a distance multiplier. A door contributes its opening time (`travel / speed` for a slider,
-`distance / speed` for a rotator, from the real SDK formulas), a breakable `health * 0.1` as a guess at how long
-the bot spends shooting it, and an air move its flight time plus a fall-damage penalty. Button and trigger doors
-need no extra penalty — the detour to the activator already costs its own travel time.
 
 ### Debug output is always a command-line flag
 

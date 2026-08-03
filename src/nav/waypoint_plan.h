@@ -104,14 +104,16 @@ struct PlanTraceContext
 	PmSim::PmTraceFn standTrace;
 	PmSim::PmPhysics physics;
 	bool dumpAirmoves = false;
+	bool collectRunupTraces = false;
 };
 
 struct PlanStats
 {
 	size_t airmovesSimulated = 0;
 	size_t airmovesFromStored = 0;
+	size_t airmovesUnplannable = 0;
 	size_t corners = 0;
-
+	std::vector<std::vector<Vector>> runupTraces;
 	size_t gatesClamped = 0;
 };
 

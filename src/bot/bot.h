@@ -29,8 +29,6 @@ struct CBot
 
 	std::vector<Vector> traceLog;
 
-	float obstacleBlockedSince = 0.f;
-
 	float lastProgressTime = 0.f;
 	int lastSeenWaypointIndex = 0;
 

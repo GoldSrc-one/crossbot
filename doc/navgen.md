@@ -60,6 +60,22 @@ Union-find merge of leaves through portals, with three merge modes:
 
 **3. No Merge** (--no-merge flag)
 
+### Area geometry vs exported region
+An area carries two descriptions of itself and they are not interchangeable:
+
+- `Area::polytope` — the true surface, multi-tread floors and all. Floor lookups, the step filter, air-move
+  launch edges and the OBJ/SVG dumps all want this.
+- `Area::boundPlanes` — the convex region written to the nav file. A convex area exports its own face planes; a
+  prism exports its X-Y footprint hull plus a z-slab, which is a convex region the runtime's `ContainsPoint`
+  can test unchanged. The slab check during merging is what makes the substitution sound.
+
+**Anything asking "is this point inside this area" must read `boundPlanes`.** A prism's `polytope.faces`
+include interior risers, and their halfspace intersection is empty — the test silently answers "no area" for
+every point. That bug cost real connectivity twice before it was understood: `FindAreaStrict` (air-move landing
+resolution) and `PointInArea` (spawn/target resolution) both returned nothing and gutted the graph.
+
+`--dump-planes <id>` prints the exported bound planes first, then the true face windings.
+
 ### Portal Filtering
 - Crouch mismatch: skip
 - Whole-face portal (`PortalSharesWholeFace`): portal area ≈ both face areas (2% tolerance)
@@ -76,10 +92,21 @@ Candidates sorted by portal area descending (larger portals first). Each candida
 - `BakeConnectionGates`: runs shared planner code to build gates, lifts endpoints to true floor
 
 ### Cost Calculation
-Seconds the bot loses on this edge beyond simply running its length: waiting for a door to open, shooting a breakable, or hanging in the air on a jump. The A* graph adds this to the travel time, so everything here is real time rather than a distance multiplier.
+`ConnectionCostSeconds` returns the seconds the bot loses on this edge **beyond simply running its length**:
+waiting for a door to open, shooting a breakable, or hanging in the air on a jump. The A* graph adds it to the
+travel time, so it is real time and **not** a distance multiplier — it used to be one, and reintroducing a
+multiplier would silently break door and air-move routing.
+
+- plain walk — 0
+- walk touching a door or breakable area — that area's `openSeconds`
+- air move — `flightTime` plus a fall-damage penalty, keeping the "lethal ⇒ effectively infinite" sentinel
+
+Button and trigger doors get no extra penalty on top: the detour to the activator already costs its own travel
+time, which is the whole point of expressing cost as time.
 
 ### Door/Breakable Isolation
-A door or breakable has to stay its own area so it keeps its activation, and it must not absorb a different one either.
+A merge never crosses `ExtractedLeaf::passableIndex`. A door or breakable has to stay its own area so it keeps
+its activation, and it must not absorb a different one either.
 
 ### Portal Connection Logic
 Both halves come out of the same clip planes, so their shared faces are exactly coplanar and BuildPortals connects the door piece to its neighbours with no extra linking.
@@ -109,7 +136,20 @@ For each connection:
 - Returns invalid if cloud too thin/tight
 
 ### Reverse-Jump Seeds
-A reverse-jump seed knows which way the drop it retraces actually travelled, so it aims inside that arc instead of fanning the full yawSpread over directions already known to miss.
+A drop under `maxJumpHeight` seeds a climb back the other way: `SeedEdgeFromLandings` turns the drop's landing
+points into a synthetic launch edge in the destination area, swept like any other edge.
+
+A normal perimeter edge fans yaw over the full `±yawSpread` (90°) around its outward normal, because nothing is
+known about where the bot wants to go. A reverse seed does know: the climb has to retrace the drop, so it can
+only usefully aim along the drop's own headings reversed. The seed therefore carries a `yawRange` — the circular
+mean of the drop samples' inverse yaws, widened to the spread those samples actually covered — and the sweep
+draws from that arc instead.
+
+This matters more than it sounds, because `BuildSampledGates` **drops the whole connection, not just its gate**,
+when `FitGate` cannot establish lateral spread. Fanning 180° at a narrow opening lands too few successes to fit
+a gate, so genuinely traversable crossings disappeared: at the default sample density test43_vent lost both vent
+crossings and pruned to 3 of 8 areas. With the seeded arc it is 8 of 8 with nothing unfitted, using slightly
+fewer trajectories — every air-move map gained connections and none lost reachability.
 
 ### Sample Cloud Aggregation
 Samples from every edge the pair was reached from land in one cloud. Which edge a sample left through does not matter: the robust fit keeps whichever cluster is the majority and rejects the rest as outliers, so the gate settles on the face the move is really about.
@@ -119,6 +159,9 @@ Samples from every edge the pair was reached from land in one cloud. Which edge 
 - `launchZ = 0.0` - the simulated origin starts here
 - `navZAdjust = 0.0` - added to simulated positions to express them in nav space
 - `emitted` map - pair key -> whether the winning move needs a crouch
+
+### Reverse-Jump Yaw Calculation
+The climb has to retrace the drop, so its yaw only ever wants to be one of the drop's headings reversed. Take the mean of those inverse headings as a circular average, then keep the spread the samples actually covered.
 
 ## floor_support.cpp
 
@@ -185,12 +228,49 @@ GoldSrc RecursiveHullCheck:
 
 ## blocking_entities.cpp
 
+### Carved vs passable
+Two classes of brush entity, handled oppositely:
+
+- **`func_wall`, `func_detail`** are permanently solid, so `ExtractBlockingVolumes` returns them and they are
+  **carved** out of the world leaves — the space simply ceases to exist.
+- **`func_door`, `func_door_rotating`, `func_breakable`** are not, so `ExtractPassableVolumes` returns them and
+  they **split** the leaf they sit in. The interior piece survives as its own area tagged `NAV_AREA_DOOR` or
+  `NAV_AREA_BREAKABLE`, carrying activation, activator position and opening time.
+
+Carving them was the old behaviour and it disconnected the graph: every door map lost most of its areas
+(test9_door kept 3 of 9) because the doorway became a hole between two components.
+
 ### ExtractBlockingVolumes
-Entities with classname in {func_wall, func_breakable, func_detail, func_door, func_door_rotating}:
 - Parse model index from "model" (*N)
 - Get model bounds, expand by hull size (human: ±16 XY, -36..36 Z; duck: ±16 XY, -18..32 Z for clip hull)
 - Translate by entity origin
 - Return BlockingVolume {headnode, origin, mins, maxs}
+
+### ExtractPassableVolumes
+Same volume extraction, plus the classification that decides how the bot gets through. Returns a `PassableSet`:
+entities it can classify go in `passable`, ones it cannot go in `impassable` and join the carve list.
+
+- **No `targetname`, not trigger-only** → `DOOR_ACTIVATION_TOUCH`, walk straight through. Trigger-only is
+  `SF_BREAK_TRIGGER_ONLY` (1) for breakables, `SF_DOOR_USE_ONLY` (256) for doors.
+- **Unnamed use-only door** → `BUTTON` with the door as its own activator (walk up, press use).
+- **Named** → resolve through `func_button` (chasing `trigger_relay` and `multi_manager`) else
+  `trigger_multiple`, giving `BUTTON` / `TRIGGER` and `doorActivatorPos` at the activator's model centre.
+- **Named, activator unresolvable** → impassable, carved like a wall so whatever is behind it prunes out. That
+  is deliberate: pruning then reports honestly that there is no way through.
+- **`SF_DOOR_START_OPEN` / `SF_DOOR_PASSABLE`** never occupy their brush space, so neither carved nor split.
+
+Opening time, from the real SDK (`external/hlsdk-full`; the vendored `external/hlsdk` is headers-only):
+
+- `func_door` — `travel / speed`, where
+  `travel = Σ|movedir.k · (size.k − 2)| − lip`, speed defaulting to 100. The −2 per axis is
+  `CBaseDoor::Spawn` compensating for the engine expanding bboxes by 1 each way.
+- `func_door_rotating` — `distance / speed`, defaults 90° and 100°/s.
+- `func_breakable` — `health * 0.1`, a guess at how long the bot spends shooting it; health defaults to 1.
+
+### Which passes see a passable as solid
+- **Floor support** does — a door brush still holds up whatever rests on it.
+- **The leaf carve, stand clearance and air-move sampling** do not. The bot opens or breaks it, so a jump may
+  pass straight through; and leaving doors in the stand test would classify every door interior as crouch-only.
 
 ### SubtractBlockingVolumes
 For each overlapping blocker:
@@ -198,29 +278,31 @@ For each overlapping blocker:
 - Carve against blocker's clip tree (remove CONTENTS_SOLID)
 - Translate pieces back
 
+### SplitByPassableVolume
+Same carve run twice against the passable's clip tree — `CONTENTS_SOLID` removed gives the pieces outside,
+`CONTENTS_EMPTY` removed gives the piece inside. Every leaf-splitting pass downstream
+(`SplitLeavesByFloorSupport`, `SplitLeavesByStandClearance`) must forward `ExtractedLeaf::passableIndex` or the
+door loses its identity the moment its leaf is split again.
+
 ### Door Angle Convention
-SetMovedir (hlsdk subs.cpp): the forward vector of the full angles triple, so up is (-90 0 0) and north is (0 90 0), plus the two legacy sentinels the engine still honours.
-
-### Button/Trigger Activation Chain
-A func_button may fire the door directly, or through a trigger_relay / multi_manager.
-
-### Door Activation Logic
-- A door that spawns open, or one flagged SOLID_NOT, never occupies its brush space.
-- An unnamed use-only door is opened by pressing use on the door itself, which is the same runtime action as a button -- just with the door as its own activator.
-
-### Unreachable Door Handling
-Nothing the bot can reach opens this, so it stays a wall and whatever is behind it prunes out -- an honest report that there is no way through.
+`SetMovedir` (hlsdk `subs.cpp`) is the forward vector of the **full angles triple** — up is `(-90 0 0)`, down
+`(90 0 0)`, east `(0 0 0)`, north `(0 90 0)` — plus two legacy sentinels the engine still honours,
+`angles == (0 -1 0)` → up and `(0 -2 0)` → down. It is not a yaw-only convention.
 
 ### Door/Neighbor Connection
-Both halves come out of the same clip planes, so their shared faces are exactly coplanar and BuildPortals connects the door piece to its neighbours with no extra linking.
+Both halves come out of the same clip planes, so their shared faces are exactly coplanar and `BuildPortals`
+connects the door piece to its neighbours with no extra linking. This is the same property prism merging relies
+on, and it is why splitting needs no new linking code at all.
 
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v9):
-- Header: magic "CBNV", version 9, mapName[64], bspChecksum, counts
-- Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, door fields
-- Connection records: areaA/B, connType/Flags, gateValid, traverseCost, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallDamage, flightTime, launchPos/landingPos[3]
+Serializes MergeResult to crossbot_nav format (v10):
+- Header: magic "CBNV", version 10, mapName[64], bspChecksum, counts
+- Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, and the door fields
+  (`doorActivation`, `doorActivatorPos[3]`, `doorWaitTime` = the area's `openSeconds`)
+- Area planes come from `boundPlanes`, not `polytope.faces` — see "Area geometry vs exported region"
+- Connection records: areaA/B, connType/Flags, gateValid, costSeconds, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallDamage, flightTime, launchPos/landingPos[3]
 - Area-connection index (uint32 per connection per area)
 - Area planes (normal[3], dist)
 
@@ -260,3 +342,8 @@ CRC32 of concatenated planes + clipnodes + models lumps (standard GoldSrc BSP ch
 
 ### ParseEntities
 Parses GoldSrc entity lump (nested "key" "value" pairs in braces) into vector<Entity> (unordered_map<string,string>).
+
+## svg_debug.cpp
+
+### WriteDebugSvg - Run-up Traces
+The plan-time run-up simulations, drawn over the route they were derived from so the two can be read against each other: where they diverge is where the mover could not hold the planned line.

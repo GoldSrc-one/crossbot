@@ -29,7 +29,8 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 	const std::vector<Vec3> &targetPoints = {},
 	const std::vector<uint8_t> &pathSegmentKinds = {},
 	const std::vector<FailedAirmove> &failedAirmoves = {},
-	const std::vector<Vec3> &tracePoints = {});
+	const std::vector<Vec3> &tracePoints = {},
+	const std::vector<std::vector<Vec3>> &runupTraces = {});
 
 }
 
