@@ -40,9 +40,17 @@ std::vector<PulledPoint> StringPull(const Vector &start, const Vector &goal,
 	std::vector<PulledPoint> path;
 	path.push_back({start, kNoGate});
 
+	auto push = [&](const PulledPoint &p)
+	{
+		if (!path.empty() && SamePoint2D(path.back().point, p.point))
+			path.back() = p;
+		else
+			path.push_back(p);
+	};
+
 	if (gates.empty())
 	{
-		path.push_back({goal, kNoGate});
+		push({goal, kNoGate});
 		return path;
 	}
 
@@ -65,7 +73,7 @@ std::vector<PulledPoint> StringPull(const Vector &start, const Vector &goal,
 			else
 			{
 
-				path.push_back({funnelLeft, leftIndex});
+				push({funnelLeft, leftIndex});
 				apex = funnelLeft;
 				apexIndex = leftIndex;
 				funnelLeft = apex;
@@ -86,7 +94,7 @@ std::vector<PulledPoint> StringPull(const Vector &start, const Vector &goal,
 			}
 			else
 			{
-				path.push_back({funnelRight, rightIndex});
+				push({funnelRight, rightIndex});
 				apex = funnelRight;
 				apexIndex = rightIndex;
 				funnelLeft = apex;
@@ -99,7 +107,7 @@ std::vector<PulledPoint> StringPull(const Vector &start, const Vector &goal,
 		}
 	}
 
-	path.push_back({goal, kNoGate});
+	push({goal, kNoGate});
 	return path;
 }
 

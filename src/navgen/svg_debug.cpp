@@ -147,7 +147,7 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 	const std::vector<MergedConnection> &conns, const std::vector<Vec3> &pathPoints,
 	const std::vector<Vec3> &targetPoints, const std::vector<uint8_t> &pathSegmentKinds,
 	const std::vector<FailedAirmove> &failedAirmoves, const std::vector<Vec3> &tracePoints,
-	const std::vector<std::vector<Vec3>> &runupTraces)
+	const std::vector<std::vector<Vec3>> &runupTraces, const std::vector<float> &pathSpeeds)
 {
 	FILE *f = std::fopen(path.c_str(), "w");
 	if (!f)
@@ -305,6 +305,29 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		for (const Vec3 &p : pathPoints)
 			std::fprintf(f, "%.1f,%.1f ", p.x, -p.y);
 		std::fprintf(f, "\"/>\n");
+
+		if (pathSpeeds.size() >= pathPoints.size())
+		{
+			float fastest = 1.f;
+			for (float v : pathSpeeds)
+				fastest = std::max(fastest, v);
+
+			for (size_t i = 0; i + 1 < pathPoints.size(); ++i)
+			{
+				float frac = std::min(1.f, pathSpeeds[i] / fastest);
+				if (frac > 0.9f)
+					continue;
+
+				int red = 255;
+				int green = static_cast<int>(40.f + 150.f * frac);
+				int blue = static_cast<int>(20.f + 40.f * frac);
+				const Vec3 &a = pathPoints[i];
+				const Vec3 &b = pathPoints[i + 1];
+				std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" "
+					"stroke=\"#%02x%02x%02x\" stroke-width=\"%.2f\" stroke-linecap=\"round\"/>\n",
+					a.x, -a.y, b.x, -b.y, red, green, blue, unit * 1.1);
+			}
+		}
 
 		for (size_t i = 0; i + 1 < pathPoints.size() && i < pathSegmentKinds.size(); ++i)
 		{

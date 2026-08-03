@@ -41,6 +41,7 @@ namespace
 constexpr double kPlaneWallNormalZ = 0.3;
 constexpr double kOnPlaneTolerance = 1.0;
 constexpr double kLaunchEdgeTolerance = 8.0;
+constexpr double kFloorFootprintTolerance = 1.0;
 
 double DistanceToWall(const Plane &plane, const Vec3 &p, bool &ok)
 {
@@ -205,7 +206,22 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 		planConns[i].connType = conns[i].connType;
 	}
 
-	NavPlan::BuildConnectionGates(planAreas, planConns);
+	// A wedge closed off by a sloped ceiling (the crawlspace under a ramp) ends where the ceiling
+	// meets the floor, and no near-vertical plane records that -- so the gate builder cannot see the
+	// end of it from the bound planes alone. Reporting "no floor here" outside the real floor
+	// footprint keeps gates inside the area they belong to.
+	auto floorAt = [&](uint32_t areaId, float x, float y, float &zOut)
+	{
+		if (static_cast<size_t>(areaId) >= areas.size())
+			return false;
+		const Face *floor = FloorFaceUnder(areas[areaId].polytope, x, y);
+		if (!floor || Distance2DToWinding(floor->winding, x, y) > kFloorFootprintTolerance)
+			return false;
+		zOut = static_cast<float>(FloorHeightAt(*floor, x, y));
+		return true;
+	};
+
+	NavPlan::BuildConnectionGates(planAreas, planConns, floorAt, static_cast<float>(kStepHeight));
 
 	for (size_t i = 0; i < conns.size(); ++i)
 	{

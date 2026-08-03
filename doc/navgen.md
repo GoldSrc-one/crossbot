@@ -10,7 +10,11 @@ Command-line tool with extensive debug flags:
 - `--dump-planes <id>` - one final area's exact plane list (normal+dist) and face windings
 - `--dump-obj <path>` - walkable floor of every area as OBJ mesh (+ MTL): crouch areas colored apart, planned route as ribbon
 - `--dump-svg <path>` - top-down SVG of final area/portal graph
-- `--trace <path>` - overlays recorded bot trajectory on SVG (one "x y z" per line, empty file = nothing)
+- `--dump-path` - per-waypoint clearance and per-segment arc/line/gap rows (radius, turn, length,
+  entry/exit speed, cap) for the debug route, plus the profile summary line
+- `--trace <path>` - overlays recorded bot trajectory on SVG (one "x y z" per line, empty file = nothing).
+  Also reports mean and max lateral deviation of the trace from the planned profile, and the clearance
+  budget at the worst point — the headline number for whether the bot actually held its arcs.
 - `--airmove-samples <n>` - launch samples per unit edge length (default 1; 0.5 halves; 0 disables)
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
 - `--no-merge` - skip MergeAreas (debug: each BSP hull-3 leaf becomes its own area)
@@ -23,7 +27,10 @@ Command-line tool with extensive debug flags:
 - Runs A* + string-pull from first spawn to first target (or farthest area centroid)
 - Re-simulates air moves from funnel's preferred launch point if traces available
 - Validates route stays over areas (skips air-move segments)
-- Outputs path points + segment kinds (walk/airmove_simulated/airmove_stored)
+- Builds the `PlanProfile` and tessellates it, so the exported route is the arc chain the bot will
+  actually follow, not the raw waypoint polyline
+- Outputs path points + segment kinds (walk/airmove_simulated/airmove_stored) + per-segment speeds,
+  which the SVG uses to tint slow stretches red
 
 ### OBJ Export
 `WriteFloorObj`:

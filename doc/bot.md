@@ -42,7 +42,18 @@ Main navigation-driven movement function:
 - Tracks visited areas for debug.
 - Logs position to trace log (capped at 100k points).
 - On waypoint completion: logs goal reached, writes trace, clears goal.
-- Uses NavFollow::Steer for path following with funnel string-pulling.
+- Uses NavFollow::Track against the `PlanProfile` built at repath time (see doc/nav.md). Progress is
+  arclength along the arc chain, so there is no per-waypoint arrival radius or advance loop, and
+  waypoint 0 is no longer a special case — the chain starts at the bot's own position.
+- Drive magnitude is the servo's `wishSpeed`, divided by `kDuckingMultiplier` when `FL_DUCKING`
+  (the engine applies 0.333 after the maxspeed clamp) and then clamped to maxspeed. This replaced the
+  constant `kFullDrive = 1000`, which meant the bot had no speed control at all: it entered every
+  corner at full speed and walked past the goal until an arrival radius caught it.
+- Stall detection is rebased on `trackState.progressS` advancing, not on the waypoint index changing —
+  a bot correctly braking to a stop at a hard node would otherwise read as stalled.
+- `BotPhysics` reads sv_gravity, sv_airaccelerate, sv_accelerate, sv_friction, sv_stopspeed and
+  sv_edgefriction, so plan-time physics match a non-default server. Only the first three were read
+  before, which silently diverged the profile from the engine.
 - Handles jump waypoints as commitments - not passed until jump is made.
 - Steers toward next waypoint for aiming (looking around corners).
 - Computes move direction from the steered direction.

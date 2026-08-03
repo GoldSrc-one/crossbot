@@ -14,6 +14,8 @@ namespace
 constexpr double kFloorNormalZ = 0.7;
 constexpr double kSupportProbeDepth = 1.0;
 constexpr double kSeamProbeDist = 2.0;
+constexpr double kSeamProbeSpacing = 8.0;
+constexpr int kMaxSeamProbes = 128;
 constexpr double kOnBoundaryEpsilon = 0.1;
 constexpr double kMinFragmentVolume = 1.0;
 constexpr double kMinSupportedArea = 1.0;
@@ -139,6 +141,35 @@ bool VerticalPlaneThroughEdge(const Vec3 &a, const Vec3 &b, Plane &out)
 
 namespace
 {
+
+// True when solid butts up against the whole outside of this edge, i.e. the edge is a seam left by
+// decomposing one continuous floor into windings rather than the rim of a hole. One edge can be both:
+// the strip of upper floor beside a ramp opening meets its neighbour along part of the edge and
+// overhangs the ramp along the rest, so probing the midpoint alone would call the whole thing a seam
+// and leave the overhang uncut. Any non-solid sample makes it a rim.
+bool EdgeIsSeam(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+	const Vec3 &a, const Vec3 &b, const Vec3 &outward, const Vec3 &down)
+{
+	Vec3 edge = b - a;
+	double len = edge.Length();
+
+	int probes = static_cast<int>(len / kSeamProbeSpacing);
+	if (probes < 1)
+		probes = 1;
+	if (probes > kMaxSeamProbes)
+		probes = kMaxSeamProbes;
+
+	Vec3 offset = outward * kSeamProbeDist - down;
+
+	for (int i = 0; i < probes; ++i)
+	{
+		double t = (static_cast<double>(i) + 0.5) / static_cast<double>(probes);
+		if (!PointInSolid(bsp, headnode, blockers, a + edge * t + offset))
+			return false;
+	}
+
+	return true;
+}
 
 double SupportedArea(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 	const Face &floorFace)
@@ -319,18 +350,18 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 				if (OnWindingBoundary(mid, floor->winding))
 					continue;
 
-				Vec3 outward = mid - centroid;
-				double len = outward.Length();
-				if (len < 1e-6)
-					continue;
-
-				Vec3 beyond = mid + outward * (kSeamProbeDist / len) - down;
-				if (PointInSolid(bsp, headnode, blockers, beyond))
-					continue;
-
 				Plane plane;
-				if (VerticalPlaneThroughEdge(a, b, plane))
-					cuts.push_back(plane);
+				if (!VerticalPlaneThroughEdge(a, b, plane))
+					continue;
+
+				Vec3 outward = plane.normal;
+				if (outward.Dot(centroid) > plane.dist)
+					outward = outward * -1.0;
+
+				if (EdgeIsSeam(bsp, headnode, blockers, a, b, outward, down))
+					continue;
+
+				cuts.push_back(plane);
 			}
 		}
 

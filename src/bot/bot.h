@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../nav/nav_path.h"
+#include "../nav/path_follower.h"
 
 struct CBot
 {
@@ -18,6 +19,9 @@ struct CBot
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;
 
+	NavPlan::PlanProfile followProfile;
+	NavFollow::TrackState trackState;
+
 	bool airmoveActive = false;
 	bool airmoveCrouch = false;
 	float airmoveYaw = 0.f;
@@ -30,7 +34,7 @@ struct CBot
 	std::vector<Vector> traceLog;
 
 	float lastProgressTime = 0.f;
-	int lastSeenWaypointIndex = 0;
+	float lastProgressS = 0.f;
 
 	Vector lastOrigin;
 	bool hasLastOrigin = false;

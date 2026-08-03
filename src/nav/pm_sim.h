@@ -24,9 +24,15 @@ struct PmPhysics
 	float maxSpeed = 320.f;
 	float gravity = 800.f;
 	float airAccelerate = 10.f;
+	float accelerate = 10.f;
+	float groundFriction = 4.f;
+	float stopSpeed = 100.f;
+	float edgeFriction = 2.f;
 	float friction = 1.f;
 	float frameTime = 1.f / 60.f;
 };
+
+constexpr float kDuckingMultiplier = 0.333f;
 
 constexpr float kJumpImpulse = 268.328156f;
 constexpr float kBunnyJumpMaxSpeedFactor = 1.7f;

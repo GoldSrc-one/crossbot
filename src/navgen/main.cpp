@@ -25,6 +25,7 @@
 #include "reachability.h"
 #include "stand_classifier.h"
 #include "svg_debug.h"
+#include "path_profile.h"
 #include "waypoint_plan.h"
 
 namespace
@@ -274,10 +275,42 @@ Vector ClampToAreaBounds(const Vector &point, const navgen::Polytope &poly)
 	return Vector(clamp(point.x, mins.x, maxs.x), clamp(point.y, mins.y, maxs.y), clamp(point.z, mins.z, maxs.z));
 }
 
+void ReportTraceDeviation(const NavPlan::PlanProfile &profile,
+	const std::vector<navgen::Vec3> &trace)
+{
+	if (profile.Empty() || trace.empty())
+		return;
+
+	double sum = 0.0;
+	float worst = 0.f;
+	float worstS = 0.f;
+	float s = 0.f;
+	size_t counted = 0;
+
+	for (const navgen::Vec3 &p : trace)
+	{
+		Vector pos((float)p.x, (float)p.y, (float)p.z);
+		float lateral = 0.f;
+		s = NavPlan::ProjectOntoProfile(profile, pos, s - 32.f, s + 128.f, &lateral);
+
+		sum += lateral;
+		++counted;
+		if (lateral > worst)
+		{
+			worst = lateral;
+			worstS = s;
+		}
+	}
+
+	NavPlan::ProfileSample at = NavPlan::SampleProfile(profile, worstS);
+	std::printf("trace deviation: mean %.1f, max %.1f at s=%.0f (wp %zu, clearance %.1f)\n",
+		counted ? sum / (double)counted : 0.0, worst, worstS, at.wpIndex, at.clearance);
+}
+
 std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &entities,
 	const navgen::MergeResult &merged, const NavPlan::PlanTraceContext *traces,
 	std::vector<uint8_t> *segmentKindsOut, std::vector<navgen::FailedAirmove> *failedAirmovesOut,
-	bool dumpPath)
+	std::vector<float> *segmentSpeedsOut, bool dumpPath, NavPlan::PlanProfile *profileOut)
 {
 	std::vector<navgen::Vec3> points;
 	if (merged.areas.empty())
@@ -413,28 +446,56 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	std::vector<NavPlan::PlanWaypoint> plan = NavPlan::BuildWaypointPlan(planAreas, planConns, result.areaPath,
 		result.connPath, startPoint, goalPoint, traces, &planStats);
 
-	for (const NavPlan::PlanWaypoint &wp : plan)
+	NavPlan::PlanProfile profile = NavPlan::BuildPathProfile(plan,
+		traces ? traces->physics : PmSim::PmPhysics(), traces);
+
+	if (profileOut)
+		*profileOut = profile;
+
+	auto PushPoint = [&](const Vector &v, uint8_t kind, float speed)
 	{
-		navgen::Vec3 p(wp.point.x, wp.point.y, wp.point.z);
-
-		uint8_t kind = navgen::PATH_SEG_WALK;
-		if (wp.airmoveLaunch)
-			kind = wp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
-				: navgen::PATH_SEG_AIRMOVE_STORED;
-
-		bool merged = !points.empty() && (p - points.back()).Length() < 0.5;
-		if (merged)
+		navgen::Vec3 p(v.x, v.y, v.z);
+		if (!points.empty() && (p - points.back()).Length() < 0.5)
 		{
 			if (segmentKindsOut && !segmentKindsOut->empty() && kind != navgen::PATH_SEG_WALK)
 				segmentKindsOut->back() = kind;
+			return;
 		}
-		else
-		{
-			points.push_back(p);
-			if (segmentKindsOut)
-				segmentKindsOut->push_back(kind);
-		}
+		points.push_back(p);
+		if (segmentKindsOut)
+			segmentKindsOut->push_back(kind);
+		if (segmentSpeedsOut)
+			segmentSpeedsOut->push_back(speed);
+	};
 
+	for (const NavPlan::ProfileSeg &seg : profile.segs)
+	{
+		const NavPlan::PlanWaypoint &startWp = plan[std::min<size_t>(seg.wpIndex - 1, plan.size() - 1)];
+
+		uint8_t kind = navgen::PATH_SEG_WALK;
+		if (seg.gap && startWp.airmoveLaunch)
+			kind = startWp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
+				: navgen::PATH_SEG_AIRMOVE_STORED;
+
+		PushPoint(seg.a, kind, seg.vEntry);
+
+		if (seg.isArc)
+		{
+			int steps = std::max(2, static_cast<int>(std::fabs(seg.turn) * 8.f));
+			for (int k = 1; k < steps; ++k)
+			{
+				float t = static_cast<float>(k) / static_cast<float>(steps);
+				NavPlan::ProfileSample s = NavPlan::SampleProfile(profile, seg.sStart + seg.sLen * t);
+				PushPoint(s.point, kind, s.speed);
+			}
+		}
+	}
+
+	if (!profile.segs.empty())
+		PushPoint(profile.segs.back().b, navgen::PATH_SEG_WALK, profile.segs.back().vExit);
+
+	for (const NavPlan::PlanWaypoint &wp : plan)
+	{
 		if (failedAirmovesOut && wp.launchSimFailed)
 		{
 			navgen::FailedAirmove fa;
@@ -489,10 +550,16 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	}
 
 	std::printf("debug path: area %u -> %u via %zu connections, %zu waypoints "
-		"(%zu air moves re-simulated, %zu from stored; %zu corners, "
+		"(%zu air moves re-simulated, %zu from stored, %zu re-speeded, %zu unplannable; %zu corners, "
 		"%zu gates short of full clearance, %zu segments leaving the mesh)\n",
-		startArea, goalArea, result.connPath.size(), points.size(), planStats.airmovesSimulated,
-		planStats.airmovesFromStored, planStats.corners, planStats.gatesClamped, offMesh);
+		startArea, goalArea, result.connPath.size(), plan.size(), planStats.airmovesSimulated,
+		planStats.airmovesFromStored, planStats.airmovesRespeeded, planStats.airmovesUnplannable,
+		planStats.corners, planStats.gatesClamped, offMesh);
+
+	std::printf("debug profile: %zu segments, %.0f units, %.1fs, %zu corners arced, "
+		"%zu slowed, %zu shrunk by trace\n",
+		profile.segs.size(), profile.totalLength, profile.totalTime, profile.cornersArced,
+		profile.cornersSlowed, profile.cornersShrunk);
 
 	if (dumpPath)
 	{
@@ -523,7 +590,22 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 			if (wp.airmoveLaunch)
 				std::printf(" launch %.0f yaw %.1f jumpBack %.1f", wp.launchSpeed, wp.launchYaw,
 					wp.jumpBackDist);
+			std::printf(" clearance %.1f", wp.clearance);
 			std::printf("\n");
+		}
+
+		for (size_t i = 0; i < profile.segs.size(); ++i)
+		{
+			const NavPlan::ProfileSeg &seg = profile.segs[i];
+			if (seg.isArc)
+				std::printf("  seg[%2zu] arc  wp %2zu r %6.1f turn %6.1fdeg len %6.1f "
+					"v %5.0f -> %5.0f cap %5.0f clearance %.1f\n",
+					i, seg.wpIndex, seg.radius, seg.turn * 180.f / 3.14159265f, seg.sLen,
+					seg.vEntry, seg.vExit, seg.vCap, seg.clearance);
+			else
+				std::printf("  seg[%2zu] %-4s wp %2zu %26slen %6.1f v %5.0f -> %5.0f cap %5.0f\n",
+					i, seg.gap ? "gap" : "line", seg.wpIndex, "", seg.sLen, seg.vEntry, seg.vExit,
+					seg.vCap);
 		}
 	}
 
@@ -1050,8 +1132,10 @@ int main(int argc, char **argv)
 
 		std::vector<navgen::Vec3> pathPoints;
 		std::vector<uint8_t> pathSegmentKinds;
+		std::vector<float> pathSegmentSpeeds;
+		NavPlan::PlanProfile pathProfile;
 		std::vector<navgen::FailedAirmove> failedAirmoves;
-		if (!objPath.empty() || !svgPath.empty())
+		if (!objPath.empty() || !svgPath.empty() || dumpPath)
 		{
 
 			navgen::PM_MoveSimulator duckSim(bsp, worldModel.headnode[navgen::kHullDuck], blockers,
@@ -1066,7 +1150,7 @@ int main(int argc, char **argv)
 			traces.dumpAirmoves = dumpAirmove;
 
 			pathPoints = BuildDebugPath(entities, merged, &traces, &pathSegmentKinds, &failedAirmoves,
-				dumpPath);
+				&pathSegmentSpeeds, dumpPath, &pathProfile);
 		}
 
 		if (!objPath.empty())
@@ -1085,11 +1169,13 @@ int main(int argc, char **argv)
 					{
 						tracePoints = ReadTraceFile(tracePath);
 						std::printf("read %zu trace points from %s\n", tracePoints.size(), tracePath.c_str());
+						ReportTraceDeviation(pathProfile, tracePoints);
 					}
 
 					std::string mapName = DeriveMapName(bspPath);
 					navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
-									CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves, tracePoints, runupTraces);
+									CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves, tracePoints, runupTraces,
+								pathSegmentSpeeds);
 					std::printf("wrote %s\n", svgPath.c_str());
 				}
 

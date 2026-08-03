@@ -1,34 +1,43 @@
-﻿#pragma once
+#pragma once
 
 #include <cstddef>
-#include <vector>
 
-#include "waypoint_plan.h"
+#include "path_profile.h"
 
 namespace NavFollow
 {
 
 struct Config
 {
-	float maxSpeed = 250.f;
-	float cornerRadius = 12.f;
-	float finalRadius = 24.f;
-	float lookahead = 48.f;
-	float brakeRadius = NavPlan::kPlanClearance;
-	float pathFreeplay = 0.f;
-	float pathCorridor = NavPlan::kPlanClearance;
-	float cornerCut = NavPlan::kPlanClearance;
+	float rejoinDist = 32.f;
+	float projectBack = 32.f;
+	float projectAhead = 64.f;
+	float rejoinAbort = 96.f;
+	float derateFloor = 0.25f;
+	float goalRadius = 12.f;
+};
+
+struct TrackState
+{
+	float progressS = 0.f;
+	float lateral = 0.f;
+	bool started = false;
 };
 
 struct Decision
 {
-	bool advance = false;
+	Vector wishDir;
 	Vector aimPoint;
-	Vector moveDir;
+	float wishSpeed = 0.f;
+	float targetSpeed = 0.f;
+	float lateral = 0.f;
+	size_t wpIndex = 0;
+	bool done = false;
+	bool needRepath = false;
+	bool onGap = false;
 };
 
-Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpIndex, const Vector &pos,
-	const Vector &vel, const Config &cfg = {});
+Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vector &vel,
+	const PmSim::PmPhysics &physics, TrackState &state, const Config &cfg = {});
 
 }
-

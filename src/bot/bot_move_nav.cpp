@@ -60,11 +60,9 @@ namespace
 		return maxspeed;
 	}
 
-	NavPlan::PlanTraceContext MakePlanTraces(edict_t *pEdict)
+	PmSim::PmPhysics BotPhysics(edict_t *pEdict)
 	{
-		NavPlan::PlanTraceContext traces;
-		traces.standTrace = EngineTraceFn(pEdict, kHullHuman);
-		traces.duckTrace = EngineTraceFn(pEdict, kHullDuck);
+		PmSim::PmPhysics physics;
 
 		float maxspeed = BotMaxSpeed(pEdict);
 
@@ -78,21 +76,52 @@ namespace
 		if (airAccel <= 0.f)
 			airAccel = 10.f;
 
+		float accel = g_engfuncs.pfnCVarGetFloat("sv_accelerate");
+		if (accel <= 0.f)
+			accel = 10.f;
+
+		float groundFriction = g_engfuncs.pfnCVarGetFloat("sv_friction");
+		if (groundFriction <= 0.f)
+			groundFriction = 4.f;
+
+		float stopSpeed = g_engfuncs.pfnCVarGetFloat("sv_stopspeed");
+		if (stopSpeed <= 0.f)
+			stopSpeed = 100.f;
+
+		float edgeFriction = g_engfuncs.pfnCVarGetFloat("sv_edgefriction");
+		if (edgeFriction <= 0.f)
+			edgeFriction = 2.f;
+
 		float frameTime = gpGlobals->frametime;
 		if (frameTime < 1.f / 128.f || frameTime > 1.f / 20.f)
 			frameTime = 1.f / 60.f;
 
-		traces.physics.maxSpeed = maxspeed;
-		traces.physics.gravity = gravity;
-		traces.physics.airAccelerate = airAccel;
-		traces.physics.friction = 1.f;
-		traces.physics.frameTime = frameTime;
+		physics.maxSpeed = maxspeed;
+		physics.gravity = gravity;
+		physics.airAccelerate = airAccel;
+		physics.accelerate = accel;
+		physics.groundFriction = groundFriction;
+		physics.stopSpeed = stopSpeed;
+		physics.edgeFriction = edgeFriction;
+		physics.friction = 1.f;
+		physics.frameTime = frameTime;
+		return physics;
+	}
+
+	NavPlan::PlanTraceContext MakePlanTraces(edict_t *pEdict)
+	{
+		NavPlan::PlanTraceContext traces;
+		traces.standTrace = EngineTraceFn(pEdict, kHullHuman);
+		traces.duckTrace = EngineTraceFn(pEdict, kHullDuck);
+		traces.physics = BotPhysics(pEdict);
 		return traces;
 	}
 
 	constexpr float kTeleportJumpThreshold = 150.f;
 	constexpr float kRepathInterval = 10.f;
 	constexpr float kEtaSafetyMargin = 1.6f;
+	constexpr float kProgressEpsilon = 8.f;
+	constexpr float kMoveButtonDeadzone = 0.01f;
 
 	void RunIdleMove(CBot &bot, const Vector &angles)
 	{
@@ -216,6 +245,8 @@ namespace
 	{
 		bot.waypoints.clear();
 		bot.waypointIndex = 0;
+		bot.followProfile = NavPlan::PlanProfile();
+		bot.trackState = NavFollow::TrackState();
 		bot.airmoveActive = false;
 		bot.airmoveTargetArea = -1;
 		bot.plannedAreaPath.clear();
@@ -223,7 +254,7 @@ namespace
 		bot.pathStartTime = 0.f;
 		bot.estimatedArrivalTime = 0.f;
 		bot.lastProgressTime = 0.f;
-		bot.lastSeenWaypointIndex = 0;
+		bot.lastProgressS = 0.f;
 		bot.nextRepathTime = 0.f;
 	}
 
@@ -277,27 +308,28 @@ namespace
 		bot.airmoveActive = false;
 		bot.plannedAreaPath = path.areaPath;
 
+		bot.followProfile = NavPlan::BuildPathProfile(bot.waypoints, traces.physics, &traces);
+		bot.trackState = NavFollow::TrackState();
+		bot.lastProgressS = 0.f;
+
 		if (freshAttempt)
 		{
-			float totalDist = 0.f;
-			Vector prev = pEdict->v.origin;
-			for (const Nav::Waypoint &wp : bot.waypoints)
-			{
-				totalDist += (wp.point - prev).Length();
-				prev = wp.point;
-			}
 			bot.pathStartTime = gpGlobals->time;
-			bot.estimatedArrivalTime = gpGlobals->time + totalDist / kMoveSpeed * kEtaSafetyMargin;
+			bot.estimatedArrivalTime = gpGlobals->time + bot.followProfile.totalTime * kEtaSafetyMargin;
 			bot.visitedAreaPath.clear();
 			bot.visitedAreaPath.push_back(startArea->id);
 
 			char wpMsg[512];
 			snprintf(wpMsg, sizeof(wpMsg),
 				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
-				"airmoves=%zu simulated/%zu from_stored/%zu unplannable\n",
+				"airmoves=%zu simulated/%zu from_stored/%zu unplannable | profile segs=%zu len=%.0f "
+				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
-				planStats.airmovesSimulated, planStats.airmovesFromStored, planStats.airmovesUnplannable);
+				planStats.airmovesSimulated, planStats.airmovesFromStored, planStats.airmovesUnplannable,
+				bot.followProfile.segs.size(), bot.followProfile.totalLength,
+				bot.followProfile.totalTime, bot.followProfile.cornersArced,
+				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk);
 			SERVER_PRINT(wpMsg);
 			for (size_t i = 0; i < bot.waypoints.size(); ++i)
 			{
@@ -351,9 +383,9 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	if (static_cast<int>(bot.waypointIndex) != bot.lastSeenWaypointIndex)
+	if (bot.trackState.progressS > bot.lastProgressS + kProgressEpsilon)
 	{
-		bot.lastSeenWaypointIndex = static_cast<int>(bot.waypointIndex);
+		bot.lastProgressS = bot.trackState.progressS;
 		bot.lastProgressTime = gpGlobals->time;
 	}
 
@@ -378,7 +410,7 @@ void Bot_MoveNav(CBot &bot)
 		}
 		bot.nextRepathTime = 0.f;
 		bot.lastProgressTime = gpGlobals->time;
-		bot.lastSeenWaypointIndex = static_cast<int>(bot.waypointIndex);
+		bot.lastProgressS = 0.f;
 	}
 
 	if (curArea && (bot.visitedAreaPath.empty() || bot.visitedAreaPath.back() != curArea->id))
@@ -387,10 +419,22 @@ void Bot_MoveNav(CBot &bot)
 	if (bot.traceLog.size() < 100000)
 		bot.traceLog.push_back(pEdict->v.origin);
 
-	if (bot.airmoveActive && RunAirmoveFlight(bot, *mesh))
-		return;
+	if (bot.airmoveActive)
+	{
+		if (RunAirmoveFlight(bot, *mesh))
+			return;
+		bot.trackState.started = false;
+	}
 
-	if (bot.waypointIndex >= bot.waypoints.size())
+	PmSim::PmPhysics physics = BotPhysics(pEdict);
+
+	NavFollow::Decision follow = NavFollow::Track(bot.followProfile, pEdict->v.origin,
+		pEdict->v.velocity, physics, bot.trackState);
+
+	if (follow.wpIndex < bot.waypoints.size())
+		bot.waypointIndex = follow.wpIndex;
+
+	if (follow.done)
 	{
 		char msg[128];
 		snprintf(msg, sizeof(msg), "CrossBot: %s reached goal (%.1f,%.1f,%.1f)\n", bot.name, bot.goalPoint.x,
@@ -403,42 +447,14 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	Nav::Waypoint *wp = &bot.waypoints[bot.waypointIndex];
-	Vector toTarget = wp->point - pEdict->v.origin;
-	float horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
-
-	if (bot.waypointIndex == 0 && horizDist < 16.f)
+	if (follow.needRepath && bot.nextRepathTime <= 0.f)
 	{
-		++bot.waypointIndex;
-		if (bot.waypointIndex >= bot.waypoints.size())
-		{
-			bot.hasGoal = false;
-			ResetPath(bot);
-			return;
-		}
-
-		wp = &bot.waypoints[bot.waypointIndex];
-		toTarget = wp->point - pEdict->v.origin;
-		horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
-	}
-
-	NavFollow::Config followCfg;
-	followCfg.maxSpeed = BotMaxSpeed(pEdict);
-
-	NavFollow::Decision steer;
-	while (true)
-	{
-		steer = NavFollow::Steer(bot.waypoints, bot.waypointIndex, pEdict->v.origin,
-			pEdict->v.velocity, followCfg);
-
-		if (bot.waypoints[bot.waypointIndex].airmoveLaunch)
-			break;
-		if (!steer.advance)
-			break;
-
-		++bot.waypointIndex;
-		if (bot.waypointIndex >= bot.waypoints.size())
-			break;
+		char msg[192];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s strayed %.1f from the plan at (%.1f,%.1f,%.1f), repathing\n", bot.name,
+			follow.lateral, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z);
+		SERVER_PRINT(msg);
+		bot.nextRepathTime = gpGlobals->time;
 	}
 
 	if (bot.waypointIndex >= bot.waypoints.size())
@@ -448,9 +464,7 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	wp = &bot.waypoints[bot.waypointIndex];
-	toTarget = wp->point - pEdict->v.origin;
-	horizDist = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
+	Nav::Waypoint *wp = &bot.waypoints[bot.waypointIndex];
 
 	{
 		bool onGroundNow = (pEdict->v.flags & FL_ONGROUND) != 0;
@@ -476,7 +490,7 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	Vector moveDir(steer.moveDir.x, steer.moveDir.y, 0.f);
+	Vector moveDir(follow.wishDir.x, follow.wishDir.y, 0.f);
 
 	size_t aimIndex = bot.waypointIndex + 1;
 	if (aimIndex < bot.waypoints.size())
@@ -494,22 +508,27 @@ void Bot_MoveNav(CBot &bot)
 
 	Vector angles = Bot_UpdateFacing(bot);
 
+	bool crouch = wp->requiresCrouch || (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH));
+
+	float drive = follow.wishSpeed;
+	if ((pEdict->v.flags & FL_DUCKING) != 0)
+		drive /= PmSim::kDuckingMultiplier;
+	if (drive > physics.maxSpeed)
+		drive = physics.maxSpeed;
+
 	float fmove = 0.f, smove = 0.f;
-	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, kFullDrive, fmove, smove);
+	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
 	bot.moveForward = fmove;
 	bot.moveSide = smove;
 
 	unsigned short buttons = 0;
-	if (fmove > 1.f) buttons |= IN_FORWARD;
-	else if (fmove < -1.f) buttons |= IN_BACK;
-	if (smove > 1.f) buttons |= IN_MOVERIGHT;
-	else if (smove < -1.f) buttons |= IN_MOVELEFT;
+	if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
+	else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
+	if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
+	else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
 
-	if (wp->requiresCrouch || (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH)))
-	{
+	if (crouch)
 		buttons |= IN_DUCK;
-	}
-
 
 	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
 }

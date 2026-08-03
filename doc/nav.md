@@ -76,39 +76,142 @@ Implements string-pulling (funnel algorithm) on 2D gates:
 - When funnel constricts, emits corner at tight bound and restarts from there
 - Returns pulled points with gate indices for corner attribution
 
+Coincident consecutive points are collapsed as they are pushed, keeping the later one so the goal
+always ends the list with `kNoGate`. The last iteration feeds the goal in as *both* funnel bounds, so
+whenever the goal itself became the tight bound the algorithm emitted it as a corner and then pushed
+it again — a zero-length step at the end of nearly every route.
+
+It mattered more than a stray waypoint. `BuildPathProfile` skips a corner whose adjacent segment is
+shorter than `kEpsLen`, and skips it before assigning a speed cap, so the duplicate silently disabled
+arc fitting *and* speed limiting at both corners touching it. In `test5_jump` that was the 104-degree
+turn immediately before the first launch: no arc, and the profile claiming 320 through it. With the
+duplicate gone it fits an 11.7-unit arc capped at 191, and the run-up leg is long enough to get back
+to the 300 the launch wants.
+
 ### NavFunnel::MakeGate
 Orders gate endpoints so left/right matches travel direction.
 
+## path_profile.cpp
+
+Fits circular arcs to the waypoint polyline and computes a speed profile the engine can actually
+hold. Runs at plan time, so navgen and the runtime produce identical geometry and the result is
+inspectable offline via `--dump-path`.
+
+### Movement physics it derives from
+
+Each frame on ground the engine runs `PM_Friction` then `PM_WalkMove`. Acceleration scales with
+*wishspeed*, not current speed, so at full drive it is the constant `A = sv_accelerate * maxspeed`
+(3200 at defaults). Friction drag is `D(v) = sv_friction * max(v, sv_stopspeed)`.
+
+Turning at constant speed requires tilting the wish direction forward enough to cancel drag, leaving
+
+```
+a_lat(v) = sqrt(A^2 - (f*v)^2)          r = v^2 / a_lat(v)
+```
+
+which is `r = 34.9` at 320, not the drag-free `v^2/A = 32`. `SpeedForRadius` inverts this.
+
+Braking is the coasting case: `dv/dx = -f` exactly while `v > stopspeed`, so braking distance is
+linear (320 to 0 costs 67.5 units). `BrakeBack` handles the sub-stopspeed branch separately.
+
+### Corner fitting
+For deflection `theta` at a corner with budget `C`:
+
+```
+R_geo = C*cos(theta/2) / (1 - cos(theta/2))     apex stays within C of the vertex
+R_len = min(availIn, availOut) / tan(theta/2)   neighbouring arcs must not overlap
+R     = min(R_geo, R_len)
+```
+
+Three fit passes, because shrinking one arc frees length for its neighbours. When trace functions are
+available the arc is hull-traced entry to apex to exit and shrunk up to 3 times on a hit — this is
+what makes the clearance number a prior rather than an assumption.
+
+Below `v_pivot = sv_accelerate * maxspeed * dt` (53.3, the one-frame velocity quantum) an arc is
+meaningless — the fitted radius is under a unit. Those corners emit no arc; the two lines meet at the
+vertex and the servo pivots through it. Arcs only become geometrically visible above about 200.
+
+Corners at an airmove launch itself and at a landing emit no arc: the launch has to be crossed on the
+launch heading, and a landing is entered with whatever velocity the flight left. The corner *into* the
+run-up node does get one — its outward tangent is clamped to half the run-up leg, which keeps the last
+stretch into the launch straight while still letting the bot round the turn before it.
+
+### Speed profile
+A backward pass propagates each node cap through `BrakeBack`, with the final waypoint pinned to 0 and
+airmove launches capped at `launchSpeed`. Entry speeds are additionally clamped by the cap of the node
+the segment starts from. `vEntry`/`vExit` are ceilings, not predictions: a segment leaving an arc may
+report 320 while the bot is still accelerating from the arc exit speed. A forward pass integrates the
+real speed against those ceilings to produce `totalTime`, which replaces the old fabricated ETA, and
+records what it actually reached at the end of each segment in `vReach`.
+
+`ProfileReachAtWaypoint(profile, i)` reads that back for the segment ending at waypoint `i`.
+`BuildWaypointPlan` uses it to re-validate air moves at the speed the route can really deliver rather
+than the one the sampler assumed.
+
+`NodeMaxSpeed` applies `kDuckingMultiplier` for `requiresCrouch`, except at a launch waypoint, where
+the flag means duck in flight and the approach is a full-speed run.
+
+### Speed within a segment
+`SegSpeedAt(seg, local)` is the single definition of "how fast should the bot be `local` units into
+this segment", and both the forward pass and `SampleProfile` go through it. It is
+`min(max(vEntry, vExit), BrakeBack(vExit, sLen - local))`: hold the ceiling until the physical brake
+curve for the segment's exit speed drops below it, then follow that curve down.
+
+It replaces a straight interpolation between `vEntry` and `vExit`, which was wrong in a way that cost
+both accuracy and time. Braking is `dv/dx = -f` regardless of segment length — 320 to 0 takes 67.5
+units, whether the segment is 70 units or 700. Lerping instead spread the deceleration across the
+whole segment, so on a 196-unit approach to a 191-cap corner the bot was told to run at 238 halfway
+along rather than hold 320 and brake in the last 32 units. Measured ground speeds tracked the lerp
+almost exactly, which is why the bot never reached `maxSpeed` on a straight.
+
+The forward pass suffered the same error compounded: as the lerped limit fell toward zero at the end
+of a decelerating segment, `v` hit its 1 u/s floor and each step advanced only `v * dt`, so the tail of
+a segment ending at rest cost roughly `(sLen / maxSpeed) * ln(maxSpeed)` seconds. That inflated
+`totalTime` by about 1.5x across the test maps; it now lands within 10% of measured arrival.
+
+The ceiling is `max(vEntry, vExit)` rather than `vEntry` so an accelerating segment is not capped
+below its own exit speed. On an arc the two are equal and the result is the constant `vCap`.
+
+### Sampling
+`SampleProfile(s)` returns point, tangent, speed, clearance and waypoint index at arclength `s`.
+Speed comes from `SegSpeedAt`, so the servo is commanded to hold speed and brake late rather than to
+coast down gently; `PlanProfile` carries `friction`/`stopSpeed` so the sampler can evaluate the brake
+curve without the physics struct.
+`ProjectOntoProfile(pos, sMin, sMax)` finds the nearest arclength within a window and the unsigned
+lateral distance to it.
+
 ## path_follower.cpp
 
-### NavFollow::Steer
-Computes steering decision for current waypoint:
+### NavFollow::Track
+Follows a `PlanProfile`. All the old heuristics (chase point, corner cut, corridor pull, `brakeRadius`
+blend, arrival radii) are gone — the geometry is precomputed, so the tracker only has to stay on it.
 
-**Advance logic:**
-- Final waypoint: reached within `finalRadius` (24)
-- Intermediate: reached within `cornerRadius` (12) OR past segment endpoint
+**Projection** - monotone: each frame searches only `[s - projectBack, s + speed*dt*4 + projectAhead]`,
+so the bot cannot snap onto a distant part of the route that happens to pass nearby.
 
-**Aim point:**
-- Base: current waypoint
-- With lookahead: projects ahead along segment from previous waypoint
+**Aim direction** - the tangent one frame ahead, plus a cross-track correction toward the chain scaled
+by `min(1, offset/rejoinDist)`. Deliberately *not* pure pursuit: aiming at a point some lookahead
+ahead makes the bot start turning as soon as that point rounds a corner, cutting the corner by up to
+the lookahead distance. Since the arc already encodes the turn, no anticipation is wanted.
 
-**Corner pre-steer (cuts corner early):**
-- Only for non-final, non-airmove waypoints
-- Blend factor based on speed/maxSpeed, capped at `cornerCut` (16)
-- Activates within `cornerCut + cornerRadius` of corner
-- Displaces aim along outgoing segment
+**Speed** - the profile speed at the current arclength, derated by `1 - (lateral - C)/C` (floored at
+`derateFloor`) when outside the clearance budget, so the bot slows to rejoin instead of arcing wider.
 
-**Cross-track correction (pulls to planned line):**
-- Dead band: `pathFreeplay` (0) to `pathCorridor` (16)
-- Inside freeplay: no correction
-- At corridor edge: full pull to line
-- Blends aim direction with pull direction
+**Velocity servo** - inverts one engine frame to hit the target velocity `V*`:
 
-**Corner brake (velocity-based correction):**
-- Activates within `brakeRadius` (16) of waypoint
-- Computes velocity error = desiredDir * max(speed, maxSpeed) - currentVel
-- Blends aim with error direction weighted by error/maxSpeed
-- Exempt for air-move launches (must hit exact sampled heading/speed)
+```
+v_af      = velocity after this frame's friction   (guard |v| < 0.1, as PM_Friction does)
+need      = V* - v_af
+wishdir   = normalize(need)
+wishspeed = max(|need| / (sv_accelerate * dt * friction), along + |need|)
+```
+
+The second term matters: `PM_Accelerate` caps its delta at `wishspeed - v.wishdir`, so the rate-based
+form alone commands zero acceleration when already cruising at the target. One formula covers
+acceleration, braking, counter-strafing and arc tracking, saturating when a frame cannot deliver.
+
+**Abort** - `needRepath` once lateral exceeds `rejoinAbort` (96). Previously nothing detected being
+off-path; the corridor pull fought forever until the 10s stall timer fired.
 
 ## pm_sim.cpp
 
@@ -227,61 +330,89 @@ Builds waypoint sequence from area/connection path:
 
 ### Constants
 - `kPlanClearance = 16` - player hull radius; gates inset by this at ends and pushed this far off connection plane
+- `kPlanClampedClearance = 6.63` - corner-cut budget at a clamped gate, `16*(sqrt(2)-1)`: the diagonal
+  slack at a right-angle corner of a minimum-width corridor
 - `kPlanStandHeight = 18` - duck hull origin to stand origin
+
+### Corner clearance
+`PlanWaypoint::clearance` is how far an arc may deviate from the vertex. It is derived in
+`GateClearance` from the gate the corner came from, *not* stored on `PlanGate` — gates round-trip
+through `MergedConnection` and the `.nav` file, both of which copy field by field, so anything added
+to `PlanGate` is silently dropped on load.
+
+Gate width is not the budget. `GateFromEdge` already insets endpoints `kPlanClearance` from the wall,
+so a surviving endpoint is 16 units off geometry by construction and the remaining width is *extra*
+freedom: `clearance = min(16 + halfWidth, 32)`. A clamped gate collapsed to a point, so it gets
+`kPlanClampedClearance`. Over-estimating here is safe — the hull trace in `BuildPathProfile` shrinks
+any arc that does not actually fit — whereas under-estimating stops the bot at every tight gate.
 
 ### PlanTraceContext
 - `duckTrace`, `standTrace` - trace functions for re-simulation
 - `physics` - movement physics
 - `dumpAirmoves` - debug output flag
-- `collectRunupTraces` - keeps the simulated run-up paths in PlanStats so they can be drawn. Off by default: the bot replans mid-route and has no use for them.
+- `collectRunupTraces` - vestigial. The steered-approach simulator it fed no longer exists, so nothing
+  reads it and nothing fills `PlanStats::runupTraces`.
 
 ### PlanStats
-- `airmovesSimulated`, `airmovesFromStored`, `airmovesUnplannable`, `corners`, `gatesClamped`
+- `airmovesSimulated`, `airmovesFromStored`, `airmovesRespeeded`, `airmovesUnplannable`, `corners`,
+  `gatesClamped`
 - `airmovesUnplannable` - launches the simulation could not make, each of which truncated the route.
-- `runupTraces` - one simulated approach per air move, when the trace context asks for them.
+- `airmovesRespeeded` - launches the profile could not deliver the design speed to, which were
+  re-simulated at the speed it could and still landed.
+- `runupTraces` - vestigial, never populated. `--dump-svg` still accepts them and draws nothing.
 
-### Run-up Length Tuning (waypoint_plan.cpp)
-- `kPlanAirmoveRunup = 48` - How far back along the route the steered approach is simulated from.
-  - Measured over the six launches on test22_gap, test41_skydrop, test5_jump, test39_skybox and test38_islands at 16, 32, 48 and 64. Sixteen is enough whenever the bot arrives already moving, and buys about 231 u/s from a standstill -- that figure recurs on four independent launches, so it is the acceleration limit rather than anything about the maps. Launches wanting more than that need the longer run-up: test22_gap asks for 297 and only lands from rest at 48.
-  - Longer is not simply better. Walking back along the route diverges from the launch line at the sine of the angle between them, and the controller does not fully recover the offset, so lateral error at the jump grows with the distance -- about 0.54 units per unit of run-up. test38_islands 5->4 lands at 16, 32 and 48 and misses at 64 for that reason alone. Forty-eight is the longest that still lands everything it can.
+### JumpLandsIn (waypoint_plan.cpp)
+`JumpLandsIn` re-simulates one air move at plan time and accepts it only if the mover ends up inside
+the destination area. It begins on the launch point itself, at a given speed and the launch heading,
+and requests the jump on the first frame.
 
-### TruncatePolylineAt
-Truncates a polyline at the point nearest to cut, so what remains is the ground approach up to the launch and not the flight past it.
+It used to start some distance back along the launch heading, on the theory that simulating the
+run-up validated the approach. It did not: a straight line drawn backwards from the launch is not
+where the route comes from, so it ran through whatever geometry happened to be behind the launch and
+the mover wedged or slid off a wall before ever reaching the launch plane. At the last value of 64
+this failed on **every air move in every test map**, truncating all fifteen routes at the first jump.
+The approach is now checked by the profile instead, which knows the real route — see the run-up node
+below.
 
-### RunupTail
-Walks back from the end of a polyline until backDist has been covered, or the polyline runs out, and returns the tail from there to the end. Reports how far back it actually got, which is less than asked for when the route into the launch is shorter than that.
+### The run-up node
+A waypoint inserted `launchSpeed * kPlanAirmoveRunupTime` (0.1 s of travel, floored at
+`kPlanAirmoveRunupMin` = 8 units) back along the launch heading, so the route's last leg into a launch
+is straight and aligned. Roughly six frames of approach at a full-speed launch, proportionally less
+for the slow drops, where a fixed distance used to leave the node stranded far off the natural route —
+`test15_staircase` had two plan segments leaving the mesh entirely for that reason.
 
-### SimulateApproach
-One attempt at reaching a launch through a steered ground approach.
+It is load-bearing for a second reason that has nothing to do with alignment. `Bot_MoveNav` hands
+control to `RunAirmoveApproach` when the tracker's `wpIndex` reaches the launch waypoint, and
+`wpIndex` comes from whichever profile segment the bot projects onto. `BuildPathProfile` drops
+segments shorter than `kEpsLen`, and the funnel's last corner lands on the launch point exactly, so
+without this node the segment ending at the launch is zero-length, gets dropped, and no segment ever
+carries the launch's index. The bot then walks straight through the launch point and never jumps.
 
-### AirmoveSimResult
-- `launchState` - State at the moment the jump was taken, against what the launch wanted.
-- `runupTrace` - Where the simulated mover actually went, for drawing over the route.
+### Re-speeding a launch
+The stored `exitSpeed` is what the air-move sampler launched at, not what the route can deliver. A
+corner 30 units before the launch caps the bot well under it, and nothing used to notice: the plan
+asserted the design speed and the jump was validated at a speed the bot would never reach.
 
-### ArcLengthToEnd
-Arc length from the point on path nearest pos to the end of path. This is the distance still to run, measured along the route rather than straight at the launch, so a route that turns on the way in reports honestly.
+`BuildWaypointPlan` therefore builds a probe `PlanProfile` over its own finished waypoint list before
+returning. `ProfileReachAtWaypoint` reads the forward pass's achieved speed on the segment ending at
+each launch — the arc fit, the backward braking pass and the acceleration integral all folded into one
+number — and if it falls short of the design speed by more than `kPlanAirmoveRespeedEps`, the jump is
+re-simulated at that speed. The landing waypoint moves to wherever it actually lands. If it no longer
+lands in the destination area the route truncates at the run-up node, same as any other unplannable
+launch. The yaw needs no adjustment: the last leg is straight along the launch heading by construction.
 
-### SimulateFullAirmove
-Runs the whole move: a steered ground approach down the route the bot actually takes, then the flight. The controller is the point of it. Rather than assuming the bot shows up on the launch line at the launch speed -- which is what the sampler assumes and nothing had checked -- it starts back along the path at whatever velocity the caller specifies and steers toward the launch velocity, braking if it is coming in too hot. What comes out is an answer to the question that matters: can a mover obeying HL ground physics reach this launch in the state the jump needs, from where the route brings it in.
+Only one iteration runs. The node's own position depends on the design speed, and the funnel was
+already string-pulled through it, so re-placing it from the re-speeded result would invalidate the
+geometry the result was computed on.
 
-### Z Height Handling
-Only x and y come from the polyline. Its z cannot be trusted: the funnel line runs from the bot's own origin, which is a standing player height, through gate points that are in nav space 18 units lower, so interpolating along it climbs or drops for no physical reason. The run-up happens on the source area's floor, so that is where its height comes from.
+Two corners of the profile are what make the number meaningful, and both had to change for it:
+- the corner *into* the run-up node is no longer suppressed, so it gets a real arc and a real speed
+  cap. Its outward tangent is clamped to half the run-up leg so the straight approach survives.
+- `NodeMaxSpeed` no longer applies `kDuckingMultiplier` at a launch waypoint. `requiresCrouch` there
+  means duck *in flight*; the approach is a full-speed run. Capping it at 107 made every crouch jump
+  arrive at a third of its launch speed — `test6_crouchjump` and `test40_walljump` both failed
+  re-speeding outright until this was fixed.
 
-### Distance Measurement
-Distance still to run measured against the launch plane, which is what decides the jump. The along-path figure is only used to notice the ground running out.
-
-### Velocity Steering
-Steer down the velocity error toward the launch velocity, flat out, for the whole run-up. Commanding along the error is what allows braking at all: PM_Accelerate only ever adds along the wish direction, so asking for a lower speed merely lets friction do the work, whereas aiming against the current velocity at full drive actually sheds it.
-
-The target is the launch velocity from the first frame rather than something blended out of the path heading. Blending the two vectors reads well until the route comes in against the launch -- on test5_jump the approach runs south-west and the jump goes east, so the interpolation passes through zero and the mover obediently brakes to a standstill halfway along its run-up.
-
-### Run-up Length Selection
-Tries the run-up lengths shortest first, and each length from rest as well as at speed. The shortest that lands is the interesting answer: it is the least distance the runtime would have to hand the controller, and starting from rest is the harder of the two cases because the mover has to build the speed as well as aim it.
-
-From rest first, because it is the harder of the two: the mover has to build the speed as well as aim it. A launch that survives that needs nothing of the bot on the way in.
-
-### Ground Approach
-The ground the bot covers on the way in, which is the funnel's own line cut off at the launch -- not a straight extension backwards along the launch heading. Those are different wherever the route turns into the launch, and it is the route the controller has to work with.
 - `BuildAreaGates(PlanArea&)` - fills edgeGates from boundPlanes
 - `BuildConnectionGates(areas, conns)` - builds shared face gates
 - `ConnectionCrossing(areas, conn)` - crossing point for A* cost

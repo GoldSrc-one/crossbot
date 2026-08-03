@@ -1,5 +1,6 @@
 #include "path_follower.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "nav_math.h"
@@ -20,129 +21,112 @@ float HorizDist(const Vector &a, const Vector &b)
 
 }
 
-Decision Steer(const std::vector<NavPlan::PlanWaypoint> &waypoints, size_t wpIndex, const Vector &pos,
-	const Vector &vel, const Config &cfg)
+Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vector &vel,
+	const PmSim::PmPhysics &physics, TrackState &state, const Config &cfg)
 {
 	Decision d;
-	if (wpIndex >= waypoints.size())
+	if (profile.Empty())
 	{
-		d.advance = false;
-		d.aimPoint = pos;
+		d.done = true;
 		return d;
 	}
 
+	float dt = physics.frameTime > 0.f ? physics.frameTime : 1.f / 60.f;
 	float speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
 
-	const NavPlan::PlanWaypoint &wp = waypoints[wpIndex];
-	float horizDist = HorizDist(pos, wp.point);
-	bool isFinal = wpIndex + 1 >= waypoints.size();
-
-	bool reached = horizDist < (isFinal ? cfg.finalRadius : cfg.cornerRadius);
-	if (!reached && !isFinal && wpIndex > 0)
+	float lateral = 0.f;
+	float s;
+	if (!state.started)
 	{
-		const Vector &segStart = waypoints[wpIndex - 1].point;
-		Vector seg = wp.point - segStart;
-		Vector toBot = pos - segStart;
-		float segLen2DSq = seg.x * seg.x + seg.y * seg.y;
-		if (segLen2DSq > 1.f && (toBot.x * seg.x + toBot.y * seg.y) >= segLen2DSq)
-			reached = true;
+		s = NavPlan::ProjectOntoProfile(profile, pos, 0.f, profile.totalLength, &lateral);
+		state.started = true;
 	}
-	if (reached)
+	else
 	{
-		d.advance = true;
+		float sMin = state.progressS - cfg.projectBack;
+		float sMax = state.progressS + speed * dt * 4.f + cfg.projectAhead;
+		s = NavPlan::ProjectOntoProfile(profile, pos, sMin, sMax, &lateral);
+	}
+
+	state.progressS = s;
+	state.lateral = lateral;
+	d.lateral = lateral;
+
+	NavPlan::ProfileSample here = NavPlan::SampleProfile(profile, s);
+	d.wpIndex = here.wpIndex;
+	d.onGap = here.gap;
+
+	const NavPlan::ProfileSeg &lastSeg = profile.segs.back();
+	if (HorizDist(pos, lastSeg.b) < cfg.goalRadius)
+	{
+		d.done = true;
 		return d;
 	}
 
-	float lookahead = cfg.lookahead;
-	d.aimPoint = wp.point;
-	if (wpIndex > 0)
+	NavPlan::ProfileSample lead = NavPlan::SampleProfile(profile, s + speed * dt);
+	d.aimPoint = lead.point;
+
+	Vector aimDir = lead.tangent;
+	if (aimDir.x == 0.f && aimDir.y == 0.f)
+		aimDir = here.tangent;
+
+	Vector toChain(here.point.x - pos.x, here.point.y - pos.y, 0.f);
+	float off = std::sqrt(toChain.x * toChain.x + toChain.y * toChain.y);
+	if (off > 0.0001f && cfg.rejoinDist > 0.0001f)
 	{
-		const Vector &segStart = waypoints[wpIndex - 1].point;
-		Vector seg = wp.point - segStart;
-		float segLen2DSq = seg.x * seg.x + seg.y * seg.y;
-		if (segLen2DSq > 1.f)
-		{
-			Vector toBot = pos - segStart;
-			float t = (toBot.x * seg.x + toBot.y * seg.y) / segLen2DSq;
-			if (t < 0.f)
-				t = 0.f;
-			float tAhead = t + lookahead / std::sqrt(segLen2DSq);
-			if (tAhead > 1.f)
-				tAhead = 1.f;
-			d.aimPoint = segStart + seg * tAhead;
-		}
+		float gain = std::min(1.f, off / cfg.rejoinDist) / off;
+		aimDir = Norm2D(aimDir + Vector(toChain.x * gain, toChain.y * gain, 0.f));
 	}
 
-	if (!isFinal && !wp.airmoveLaunch)
+	if (aimDir.x == 0.f && aimDir.y == 0.f)
 	{
-		float cut = cfg.cornerCut * (speed / cfg.maxSpeed);
-		if (cut > cfg.cornerCut)
-			cut = cfg.cornerCut;
-
-		if (cut > 0.1f && horizDist < cut + cfg.cornerRadius)
-		{
-			Vector outDir = Norm2D(waypoints[wpIndex + 1].point - wp.point);
-			if (outDir.x != 0.f || outDir.y != 0.f)
-			{
-				float blend = (cut + cfg.cornerRadius - horizDist) / cut;
-				if (blend > 1.f)
-					blend = 1.f;
-				d.aimPoint = wp.point + outDir * (cut * blend);
-			}
-		}
+		d.done = true;
+		return d;
 	}
 
-	Vector dir = Norm2D(d.aimPoint - pos);
+	float clearance = std::max(here.clearance, 1.f);
+	float derate = 1.f;
+	if (lateral > clearance)
+		derate = std::max(cfg.derateFloor, 1.f - (lateral - clearance) / clearance);
+	if (lateral > cfg.rejoinAbort)
+		d.needRepath = true;
 
-	if (wpIndex > 0 && cfg.pathCorridor > cfg.pathFreeplay && (dir.x != 0.f || dir.y != 0.f))
+	float target = std::min(here.speed, physics.maxSpeed) * derate;
+	d.targetSpeed = target;
+
+	Vector wanted = aimDir * target;
+
+	float f = physics.groundFriction * physics.friction;
+	Vector afterFriction = vel;
+	afterFriction.z = 0.f;
+	if (speed >= 0.1f)
 	{
-		const Vector &segStart = waypoints[wpIndex - 1].point;
-		Vector segDir = Norm2D(wp.point - segStart);
-		if (segDir.x != 0.f || segDir.y != 0.f)
-		{
-			Vector toBot(pos.x - segStart.x, pos.y - segStart.y, 0.f);
-			float along = toBot.x * segDir.x + toBot.y * segDir.y;
-			Vector off(toBot.x - segDir.x * along, toBot.y - segDir.y * along, 0.f);
-
-			float strayed = std::sqrt(off.x * off.x + off.y * off.y);
-			if (strayed > cfg.pathFreeplay)
-			{
-				float w = (strayed - cfg.pathFreeplay) / (cfg.pathCorridor - cfg.pathFreeplay);
-				if (w > 1.f)
-					w = 1.f;
-
-				Vector pull(-off.x / strayed, -off.y / strayed, 0.f);
-				Vector corrected = Norm2D(Vector(dir.x * (1.f - w) + pull.x * w,
-					dir.y * (1.f - w) + pull.y * w, 0.f));
-				if (corrected.x != 0.f || corrected.y != 0.f)
-					dir = corrected;
-			}
-		}
+		float drop = f * std::max(speed, physics.stopSpeed) * dt;
+		float scaled = std::max(speed - drop, 0.f) / speed;
+		afterFriction.x = vel.x * scaled;
+		afterFriction.y = vel.y * scaled;
 	}
 
-	d.moveDir = dir;
-
-	if (!wp.airmoveLaunch && horizDist < cfg.brakeRadius && (dir.x != 0.f || dir.y != 0.f))
+	Vector need(wanted.x - afterFriction.x, wanted.y - afterFriction.y, 0.f);
+	float needLen = std::sqrt(need.x * need.x + need.y * need.y);
+	if (needLen < 0.0001f)
 	{
-		float s = (speed > cfg.maxSpeed) ? speed : cfg.maxSpeed;
-		Vector error(dir.x * s - vel.x, dir.y * s - vel.y, 0.f);
-
-		float errorLen = std::sqrt(error.x * error.x + error.y * error.y);
-		if (errorLen > 0.0001f)
-		{
-			float w = errorLen / cfg.maxSpeed;
-			if (w > 1.f)
-				w = 1.f;
-
-			Vector blended = Norm2D(Vector(dir.x * (1.f - w) + (error.x / errorLen) * w,
-				dir.y * (1.f - w) + (error.y / errorLen) * w, 0.f));
-			if (blended.x != 0.f || blended.y != 0.f)
-				d.moveDir = blended;
-		}
+		d.wishDir = aimDir;
+		d.wishSpeed = 0.f;
+		return d;
 	}
+
+	d.wishDir = Vector(need.x / needLen, need.y / needLen, 0.f);
+
+	float rate = physics.accelerate * dt * physics.friction;
+	float along = afterFriction.x * d.wishDir.x + afterFriction.y * d.wishDir.y;
+	float byRate = (rate > 0.0001f) ? (needLen / rate) : physics.maxSpeed;
+	float byCap = along + needLen;
+
+	d.wishSpeed = std::max(byRate, byCap);
+	d.wishSpeed = std::max(0.f, std::min(physics.maxSpeed, d.wishSpeed));
 
 	return d;
 }
 
 }
-

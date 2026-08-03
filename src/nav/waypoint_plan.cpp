@@ -1,10 +1,12 @@
 #include "waypoint_plan.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
 #include "funnel_graph.h"
 #include "nav_math.h"
+#include "path_profile.h"
 
 namespace NavPlan
 {
@@ -26,8 +28,20 @@ constexpr float kAirmoveSimMinTime = 0.1f;
 
 constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
 
-constexpr float kPlanAirmoveRunup = 64.f;
-constexpr float kPlanAirmoveRunupNode = 32.f;
+constexpr float kPlanAirmoveRunupTime = 0.1f;
+constexpr float kPlanAirmoveRunupMin = 8.f;
+constexpr float kPlanAirmoveRespeedEps = 1.f;
+
+struct PendingLaunch
+{
+	size_t index = 0;
+	uint32_t fromId = 0, toId = 0;
+	bool jump = false;
+	bool needsCrouch = false;
+	Vector launchFloor;
+	float yaw = 0.f;
+	float designSpeed = 0.f;
+};
 
 bool PointInArea(const Vector &p, const PlanArea &area, float epsilon)
 {
@@ -170,6 +184,7 @@ struct PendingGate
 	uint32_t insideArea = 0;
 	uint32_t toArea = 0;
 	bool crouch = false;
+	float clearance = kPlanClearance;
 };
 
 const PlanPlane *FloorPlaneOf(const PlanArea &area)
@@ -302,6 +317,92 @@ PlanGate GateFromEdge(const EdgeLine &line, const PlanArea &inside, const Vector
 	return gate;
 }
 
+constexpr float kStepClipSpacing = 4.f;
+constexpr int kStepClipRefineIters = 8;
+constexpr float kStepClipMinSpan = 1.f;
+
+// A shared wall between two areas runs the full length of the boundary, but only the stretch where
+// the two floors meet within a step is actually crossable -- the rest is a cliff face. Narrows
+// [lo, hi] to the longest run that a walker can step across, and reports whether anything survived.
+bool ClipLineByStep(EdgeLine &line, uint32_t areaA, uint32_t areaB, const PlanFloorFn &floorAt,
+	float maxStep)
+{
+	auto steppable = [&](float s)
+	{
+		float x = line.base.x + line.along.x * s;
+		float y = line.base.y + line.along.y * s;
+		float za = 0.f, zb = 0.f;
+		if (!floorAt(areaA, x, y, za) || !floorAt(areaB, x, y, zb))
+			return false;
+		return std::fabs(za - zb) <= maxStep;
+	};
+
+	int samples = static_cast<int>((line.hi - line.lo) / kStepClipSpacing) + 1;
+	if (samples < 2)
+		samples = 2;
+	if (samples > 512)
+		samples = 512;
+
+	float step = (line.hi - line.lo) / static_cast<float>(samples - 1);
+
+	int bestStart = -1, bestEnd = -1;
+	int runStart = -1;
+	for (int i = 0; i < samples; ++i)
+	{
+		if (steppable(line.lo + step * static_cast<float>(i)))
+		{
+			if (runStart < 0)
+				runStart = i;
+			if (bestStart < 0 || i - runStart > bestEnd - bestStart)
+			{
+				bestStart = runStart;
+				bestEnd = i;
+			}
+		}
+		else
+		{
+			runStart = -1;
+		}
+	}
+
+	if (bestStart < 0)
+		return false;
+
+	// Push each end outwards to the exact crossing, so a gate is not quantized away by the spacing.
+	auto refine = [&](float good, float bad)
+	{
+		for (int i = 0; i < kStepClipRefineIters; ++i)
+		{
+			float mid = (good + bad) * 0.5f;
+			(steppable(mid) ? good : bad) = mid;
+		}
+		return good;
+	};
+
+	float lo = line.lo + step * static_cast<float>(bestStart);
+	float hi = line.lo + step * static_cast<float>(bestEnd);
+
+	if (bestStart > 0)
+		lo = refine(lo, lo - step);
+	if (bestEnd < samples - 1)
+		hi = refine(hi, hi + step);
+
+	line.lo = lo;
+	line.hi = hi;
+	return (line.hi - line.lo) > kStepClipMinSpan;
+}
+
+float GateClearance(const PlanGate &gate)
+{
+	if (gate.clamped)
+		return kPlanClampedClearance;
+
+	float dx = gate.left.x - gate.right.x;
+	float dy = gate.left.y - gate.right.y;
+	float half = std::sqrt(dx * dx + dy * dy) * 0.5f;
+	return std::min(kPlanClearance + half, kPlanClearance * 2.f);
+}
+
 }
 
 void BuildAreaGates(PlanArea &area)
@@ -316,7 +417,8 @@ void BuildAreaGates(PlanArea &area)
 	}
 }
 
-void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanConnection> &conns)
+void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanConnection> &conns,
+	const PlanFloorFn &floorAt, float maxStep)
 {
 	for (PlanConnection &conn : conns)
 	{
@@ -335,11 +437,26 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 			continue;
 
 		EdgeLine shared = EdgeOfPlane(a, conn.planeA);
-		if (shared.valid && ClipLineByWalls(shared, b, nullptr))
+		bool fromA = shared.valid && ClipLineByWalls(shared, b, nullptr);
+
+		// It is the same wall from either side, but only one side may have bound planes that close
+		// it off: a wedge under a ramp is capped by its sloped ceiling, so its own edge line runs to
+		// infinity and EdgeOfPlane rejects it. Take the line from whichever neighbour bounds it.
+		if (!fromA)
 		{
-			conn.gateA = GateFromEdge(shared, a, shared.inward);
-			conn.gateB = GateFromEdge(shared, b,
-				Vector(-shared.inward.x, -shared.inward.y, 0.f));
+			shared = EdgeOfPlane(b, conn.planeB);
+			if (shared.valid && !ClipLineByWalls(shared, a, nullptr))
+				shared.valid = false;
+		}
+
+		if (shared.valid && (!floorAt || maxStep <= 0.f ||
+			ClipLineByStep(shared, conn.areaA, conn.areaB, floorAt, maxStep)))
+		{
+			Vector inwardA = fromA ? shared.inward
+				: Vector(-shared.inward.x, -shared.inward.y, 0.f);
+
+			conn.gateA = GateFromEdge(shared, a, inwardA);
+			conn.gateB = GateFromEdge(shared, b, Vector(-inwardA.x, -inwardA.y, 0.f));
 			continue;
 		}
 
@@ -387,6 +504,7 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 
 	Vector anchorPoint = startPoint;
 	std::vector<PendingGate> pendingGates;
+	std::vector<PendingLaunch> launches;
 
 	auto AtPlayerHeight = [&](const Vector &floorPoint, uint32_t areaId)
 	{
@@ -417,6 +535,7 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 		pg.insideArea = insideId;
 		pg.toArea = toId;
 		pg.crouch = fromArea.crouch || toArea.crouch;
+		pg.clearance = GateClearance(*g);
 		pg.gate = NavFunnel::MakeGate(g->left, g->right, toArea.centroid - fromArea.centroid);
 		pendingGates.push_back(pg);
 	};
@@ -459,6 +578,7 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 				corner.point = AtPlayerHeight(p, pg.insideArea);
 				corner.requiresCrouch = pg.crouch;
 				corner.targetAreaId = static_cast<int>(pg.toArea);
+				corner.clearance = pg.clearance;
 			}
 
 			if (stats)
@@ -488,12 +608,9 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 		float launchLift = duckLaunch ? 0.f : kPlanStandHeight;
 		float zAdjust = needsCrouch ? 0.f : kPlanStandHeight;
 
-		Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
-		Vector runupStart = launchFloor - launchDir * kPlanAirmoveRunup;
-
 		PmSim::PmPhysics physics = traces->physics;
 		PmSim::PmSimulator sim(trace, physics);
-		sim.Begin(Vector(runupStart.x, runupStart.y, launchFloor.z + launchLift + kPlanLaunchLift),
+		sim.Begin(Vector(launchFloor.x, launchFloor.y, launchFloor.z + launchLift + kPlanLaunchLift),
 			yaw, speed, false);
 
 		auto record = [&]()
@@ -502,44 +619,22 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 			endOut = Vector(p.x, p.y, p.z - zAdjust);
 		};
 
-		bool launched = false;
-		float launchTime = 0.f;
+		if (jump)
+			sim.RequestJump();
 
 		while (sim.Time() < kAirmoveSimMaxTime)
 		{
-			if (!launched)
-			{
-				const Vector &p = sim.Origin();
-				float remaining = (launchFloor.x - p.x) * launchDir.x +
-					(launchFloor.y - p.y) * launchDir.y;
-
-				if (!sim.OnGround() && remaining > 0.f)
-				{
-					record();
-					if (whyOut) *whyOut = "run-up left the ground";
-					return false;
-				}
-
-				if (remaining <= 0.f)
-				{
-					if (jump)
-						sim.RequestJump();
-					launched = true;
-					launchTime = sim.Time();
-				}
-			}
-
 			if (!sim.Step())
 			{
 				record();
-				if (whyOut) *whyOut = launched ? "wedged" : "run-up blocked";
+				if (whyOut) *whyOut = "wedged";
 				return false;
 			}
 
-			if (!launched || !sim.OnGround())
+			if (!sim.OnGround())
 				continue;
 
-			if (sim.Time() - launchTime < kAirmoveSimMinTime)
+			if (sim.Time() < kAirmoveSimMinTime)
 			{
 				sim.ResetFallSpeed();
 				continue;
@@ -659,8 +754,8 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 				else
 					++stats->airmovesFromStored;
 			}
-						if (!usedSim)
-						{
+			if (!usedSim)
+			{
 				if (stats)
 					++stats->airmovesUnplannable;
 				FlushFunnelTo(AtPlayerHeight(conn.launchPos, fromId));
@@ -669,9 +764,10 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 
 			Vector launchPoint = AtPlayerHeight(launch, fromId);
 			Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
+			float runupBack = std::max(launchSpeed * kPlanAirmoveRunupTime, kPlanAirmoveRunupMin);
 
 			PlanWaypoint runupWp;
-			runupWp.point = launchPoint - launchDir * kPlanAirmoveRunupNode;
+			runupWp.point = launchPoint - launchDir * runupBack;
 			runupWp.targetAreaId = static_cast<int>(fromId);
 			FlushFunnelTo(runupWp.point);
 			result.push_back(runupWp);
@@ -690,6 +786,18 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 			launchWp.launchSimAim = simAim;
 			launchWp.requiresCrouch = needsCrouch;
 			launchWp.targetAreaId = static_cast<int>(toId);
+
+			PendingLaunch pl;
+			pl.index = result.size();
+			pl.fromId = fromId;
+			pl.toId = toId;
+			pl.jump = jump;
+			pl.needsCrouch = needsCrouch;
+			pl.launchFloor = launch;
+			pl.yaw = yaw;
+			pl.designSpeed = launchSpeed;
+			launches.push_back(pl);
+
 			result.push_back(launchWp);
 
 			PlanWaypoint landWp;
@@ -756,6 +864,48 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 	if (!areaPath.empty())
 		goalWp.targetAreaId = static_cast<int>(areaPath.back());
 	result.push_back(goalWp);
+
+	if (!traces || launches.empty())
+		return result;
+
+	PlanProfile probe = BuildPathProfile(result, traces->physics, traces);
+
+	for (const PendingLaunch &pl : launches)
+	{
+		float reached = ProfileReachAtWaypoint(probe, pl.index);
+		if (reached <= 0.f || reached >= pl.designSpeed - kPlanAirmoveRespeedEps)
+			continue;
+
+		Vector end;
+		const char *why = "";
+		bool ok = JumpLandsIn(pl.launchFloor, pl.yaw, reached, pl.jump, pl.fromId, pl.toId,
+			pl.needsCrouch, end, &why);
+
+		if (traces->dumpAirmoves)
+		{
+			std::printf("    airmove %u->%u respeed %.0f -> %.0f: %s -> end (%.1f,%.1f,%.1f)\n",
+				pl.fromId, pl.toId, pl.designSpeed, reached, why, end.x, end.y, end.z);
+		}
+
+		if (ok)
+		{
+			result[pl.index].launchSpeed = reached;
+			result[pl.index].launchSimTo = end;
+			result[pl.index + 1].point = AtPlayerHeight(end, pl.toId);
+			if (stats)
+				++stats->airmovesRespeeded;
+			continue;
+		}
+
+		result.resize(pl.index);
+		if (stats)
+		{
+			if (stats->airmovesSimulated > 0)
+				--stats->airmovesSimulated;
+			++stats->airmovesUnplannable;
+		}
+		break;
+	}
 
 	return result;
 }
