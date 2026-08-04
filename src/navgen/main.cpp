@@ -55,7 +55,7 @@ void PrintUsage(const char *argv0)
 		argv0);
 }
 
-constexpr double kFloorNormalZ = 0.7;
+using navgen::kFloorNormalZ;
 
 struct ObjMaterial
 {
@@ -142,7 +142,7 @@ ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> 
 
 		for (const navgen::Face &face : area.polytope.faces)
 		{
-			if (face.plane.normal.z <= kFloorNormalZ || face.winding.size() < 3)
+			if (!face.walkable || face.plane.normal.z <= kFloorNormalZ || face.winding.size() < 3)
 				continue;
 
 			if (!opened)
@@ -945,12 +945,21 @@ int main(int argc, char **argv)
 		}
 
 		navgen::MergeResult merged = noMerge
-			? navgen::NoMerge(leaves, portals, isCrouchLeaf, duckPassables.passable)
+			? navgen::NoMerge(leaves, isCrouchLeaf, duckPassables.passable)
 			: navgen::MergeAreas(leaves, portals, isCrouchLeaf, duckPassables.passable);
 
 		std::printf("%s: %zu raw portals -> %zu areas, %zu inter-area connections (%s)\n",
 			bspPath.c_str(), portals.size(), merged.areas.size(), merged.conns.size(),
 			noMerge ? "NoMerge" : "MergeAreas");
+
+		size_t illFormedAreas = navgen::ValidateAreaFootprints(merged.areas);
+		if (illFormedAreas > 0)
+			std::printf("%s: %zu areas have an ill-formed walkable footprint\n",
+				bspPath.c_str(), illFormedAreas);
+
+		size_t walkConnsBuilt = navgen::BuildWalkConnections(merged.areas, merged.conns);
+		std::printf("%s: %zu candidate walk connections across shared floor seams\n",
+			bspPath.c_str(), walkConnsBuilt);
 
 		size_t steepWalkConns = navgen::FilterWalkConnectionsByStep(merged.areas, merged.conns, navgen::kStepHeight, dumpSteps);
 		if (steepWalkConns > 0)

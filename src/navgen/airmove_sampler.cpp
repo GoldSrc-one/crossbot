@@ -24,7 +24,6 @@ using PmSim::kGroundNormalZ;
 using PmSim::kGroundTraceDist;
 using PmSim::kJumpImpulse;
 
-constexpr double kFloorNormalZ = 0.7;
 constexpr double kWorldBoundsSlop = 64.0;
 
 struct LaunchEdge
@@ -312,7 +311,7 @@ std::vector<LaunchEdge> CollectPerimeterEdges(const Area &area)
 
 	for (const Face &face : area.polytope.faces)
 	{
-		if (face.plane.normal.z <= kFloorNormalZ)
+		if (!face.walkable || face.plane.normal.z <= kFloorNormalZ)
 			continue;
 		if (face.winding.size() < 3)
 			continue;
@@ -782,7 +781,6 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			}
 
 			emitted.emplace(entry.first, traj.duckHull);
-			conn.area = 0.0;
 			conn.connType = crossbot_nav::CONN_AIRMOVE;
 			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
 			if (traj.duckHull)

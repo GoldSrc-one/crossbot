@@ -43,11 +43,18 @@ Winding IntersectCoplanarPolygons(const Winding &subject, const Winding &clip, c
 
 Winding ConvexHullXY(const std::vector<Vec3> &points);
 
+double WindingAreaXY(const Winding &winding);
+
+constexpr double kFloorNormalZ = 0.7;
+
 struct Face
 {
 	Plane plane;
 	Winding winding;
+	bool walkable = true;
 };
+
+bool IsFloorFace(const Face &face);
 
 struct Polytope
 {
@@ -58,6 +65,10 @@ struct Polytope
 	double Volume() const;
 	Vec3 Centroid() const;
 };
+
+Winding WalkableFootprint(const Polytope &poly);
+
+double WalkableFootprintGapArea(const Polytope &poly);
 
 Polytope ClipPolytope(const Polytope &poly, const Plane &plane, bool keepFront, double mapRadius,
 	double epsilon = 0.01);

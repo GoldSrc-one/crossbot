@@ -18,49 +18,12 @@ struct Pt2
 	double x = 0.0, y = 0.0;
 };
 
-double Cross2(const Pt2 &o, const Pt2 &a, const Pt2 &b)
-{
-	return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-}
-
-std::vector<Pt2> ConvexHull2D(std::vector<Pt2> pts)
-{
-	std::sort(pts.begin(), pts.end(), [](const Pt2 &a, const Pt2 &b)
-		{ return a.x < b.x || (a.x == b.x && a.y < b.y); });
-	pts.erase(std::unique(pts.begin(), pts.end(),
-				  [](const Pt2 &a, const Pt2 &b) { return a.x == b.x && a.y == b.y; }),
-		pts.end());
-
-	int n = static_cast<int>(pts.size());
-	if (n < 3)
-		return pts;
-
-	std::vector<Pt2> hull(2 * static_cast<size_t>(n));
-	int k = 0;
-	for (int i = 0; i < n; ++i)
-	{
-		while (k >= 2 && Cross2(hull[static_cast<size_t>(k - 2)], hull[static_cast<size_t>(k - 1)], pts[static_cast<size_t>(i)]) <= 0)
-			--k;
-		hull[static_cast<size_t>(k++)] = pts[static_cast<size_t>(i)];
-	}
-	int lower = k + 1;
-	for (int i = n - 2; i >= 0; --i)
-	{
-		while (k >= lower && Cross2(hull[static_cast<size_t>(k - 2)], hull[static_cast<size_t>(k - 1)], pts[static_cast<size_t>(i)]) <= 0)
-			--k;
-		hull[static_cast<size_t>(k++)] = pts[static_cast<size_t>(i)];
-	}
-	hull.resize(static_cast<size_t>(k - 1));
-	return hull;
-}
-
 std::vector<Pt2> AreaFootprint(const Area &area)
 {
-	std::vector<Pt2> pts;
-	for (const Face &f : area.polytope.faces)
-		for (const Vec3 &v : f.winding)
-			pts.push_back({v.x, -v.y});
-	return ConvexHull2D(std::move(pts));
+	std::vector<Pt2> poly;
+	for (const Vec3 &v : WalkableFootprint(area.polytope))
+		poly.push_back({v.x, -v.y});
+	return poly;
 }
 
 constexpr const char *kBackground = "#12141a";
@@ -91,8 +54,12 @@ double AreaFloorZ(const Area &area)
 {
 	double lowest = 1e30;
 	for (const Face &f : area.polytope.faces)
+	{
+		if (!IsFloorFace(f))
+			continue;
 		for (const Vec3 &v : f.winding)
 			lowest = std::min(lowest, v.z);
+	}
 	return lowest < 1e29 ? lowest : 0.0;
 }
 
@@ -215,14 +182,14 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		kAreaFillOpacity);
 	for (size_t i : drawOrder)
 	{
-		std::vector<Pt2> hull = AreaFootprint(areas[i]);
-		if (hull.size() >= 3)
-		{
-			std::fprintf(f, "<polygon fill=\"%s\" points=\"", FillForArea(areas[i]));
-			for (const Pt2 &v : hull)
-				std::fprintf(f, "%.1f,%.1f ", v.x, v.y);
-			std::fprintf(f, "\"/>\n");
-		}
+		std::vector<Pt2> poly = AreaFootprint(areas[i]);
+		if (poly.size() < 3)
+			continue;
+
+		std::fprintf(f, "<polygon fill=\"%s\" points=\"", FillForArea(areas[i]));
+		for (const Pt2 &p : poly)
+			std::fprintf(f, "%.1f,%.1f ", p.x, p.y);
+		std::fprintf(f, "\"/>\n");
 	}
 	std::fprintf(f, "</g>\n");
 

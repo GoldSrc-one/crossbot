@@ -34,7 +34,6 @@ struct MergedConnection
 
 	int planeA = -1;
 	int planeB = -1;
-	double area = 0.0;
 
 	Vec3 gateALeft, gateARight;
 	Vec3 gateBLeft, gateBRight;
@@ -77,11 +76,15 @@ size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<M
 
 size_t SnapConnectionsToFloor(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 
-MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
+MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves,
 	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables);
 
 MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
 	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables);
+
+size_t BuildWalkConnections(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
+
+size_t ValidateAreaFootprints(const std::vector<Area> &areas);
 
 }
 

@@ -13,13 +13,12 @@ namespace navgen
 namespace
 {
 
-constexpr double kFloorNormalZ = 0.7;
-constexpr double kSupportProbeDepth = 1.0;
 constexpr double kCollinearEpsilon = 0.1;
 constexpr double kMinRimLength = 0.1;
 constexpr double kPlaneNormalEpsilon = 1e-4;
 constexpr double kPlaneDistEpsilon = 0.01;
 constexpr double kOnBoundaryEpsilon = 0.1;
+constexpr double kMinNotchArea = 1.0;
 constexpr double kMinFragmentVolume = 1.0;
 constexpr double kMinSupportedArea = 1.0;
 constexpr double kMinStepRescueArea = 1024.0;
@@ -64,8 +63,11 @@ double Distance2DToWinding(const Winding &w, double x, double y)
 	return inside ? 0.0 : best;
 }
 
-void CarveWindingAgainstTree(const BspFile &bsp, int nodeIndex, Winding w, std::vector<Winding> &solid,
-	std::vector<Winding> &empty)
+namespace
+{
+
+void CarveWindingAgainstTreeSided(const BspFile &bsp, int nodeIndex, Winding w, const Vec3 &bias,
+	std::vector<Winding> &solid, std::vector<Winding> &empty)
 {
 	if (w.size() < 3)
 		return;
@@ -85,8 +87,37 @@ void CarveWindingAgainstTree(const BspFile &bsp, int nodeIndex, Winding w, std::
 	plane.normal = Vec3(dp.normal[0], dp.normal[1], dp.normal[2]);
 	plane.dist = dp.dist;
 
-	CarveWindingAgainstTree(bsp, node.children[0], ClipWinding(w, plane, true), solid, empty);
-	CarveWindingAgainstTree(bsp, node.children[1], ClipWinding(w, plane, false), solid, empty);
+	double biasSide = plane.normal.Dot(bias);
+	if (biasSide != 0.0)
+	{
+		bool coplanar = true;
+		for (const Vec3 &v : w)
+		{
+			if (std::fabs(v.Dot(plane.normal) - plane.dist) > kPlaneDistEpsilon)
+			{
+				coplanar = false;
+				break;
+			}
+		}
+
+		if (coplanar)
+		{
+			CarveWindingAgainstTreeSided(bsp, node.children[biasSide > 0.0 ? 0 : 1], std::move(w), bias,
+				solid, empty);
+			return;
+		}
+	}
+
+	CarveWindingAgainstTreeSided(bsp, node.children[0], ClipWinding(w, plane, true), bias, solid, empty);
+	CarveWindingAgainstTreeSided(bsp, node.children[1], ClipWinding(w, plane, false), bias, solid, empty);
+}
+
+}
+
+void CarveWindingAgainstTree(const BspFile &bsp, int nodeIndex, Winding w, std::vector<Winding> &solid,
+	std::vector<Winding> &empty)
+{
+	CarveWindingAgainstTreeSided(bsp, nodeIndex, std::move(w), Vec3(0.0, 0.0, 0.0), solid, empty);
 }
 
 Winding TranslateWinding(const Winding &w, const Vec3 &offset)
@@ -173,22 +204,8 @@ void AddWindingCoverage(const Winding &w, const Vec3 &a, const Vec3 &ab, double 
 		AddCoverage(a, ab, lenSq, w[i], w[(i + 1) % w.size()], spans);
 }
 
-bool EdgeIsCovered(const std::vector<Winding> *peers, size_t self, const Winding &floorWinding,
-	const Vec3 &a, const Vec3 &b)
+bool SpansCover(std::vector<Span> &spans, double lenSq)
 {
-	Vec3 ab = b - a;
-	double lenSq = ab.Dot(ab);
-	if (lenSq < 1e-9)
-		return true;
-
-	std::vector<Span> spans;
-	AddWindingCoverage(floorWinding, a, ab, lenSq, spans);
-	for (size_t i = 0; peers && i < peers->size(); ++i)
-	{
-		if (i != self)
-			AddWindingCoverage((*peers)[i], a, ab, lenSq, spans);
-	}
-
 	std::sort(spans.begin(), spans.end());
 
 	double slack = kMinRimLength / std::sqrt(lenSq);
@@ -198,24 +215,143 @@ bool EdgeIsCovered(const std::vector<Winding> *peers, size_t self, const Winding
 		if (span.first > reached + slack)
 			return false;
 		reached = std::max(reached, span.second);
-			}
+	}
 
-			return reached >= 1.0 - slack;
+	return reached >= 1.0 - slack;
+}
+
+std::vector<Span> MergeSpans(std::vector<Span> spans)
+{
+	std::sort(spans.begin(), spans.end());
+
+	std::vector<Span> out;
+	for (const Span &span : spans)
+	{
+		if (!out.empty() && span.first <= out.back().second)
+			out.back().second = std::max(out.back().second, span.second);
+		else
+			out.push_back(span);
+	}
+	return out;
+}
+
+bool SpansExceed(const std::vector<Span> &wanted, const std::vector<Span> &have, double lenSq)
+{
+	double slack = kMinRimLength / std::sqrt(lenSq);
+	std::vector<Span> merged = MergeSpans(have);
+
+	for (const Span &span : MergeSpans(wanted))
+	{
+		double cursor = span.first;
+		for (const Span &h : merged)
+		{
+			if (h.second <= cursor)
+				continue;
+			if (h.first >= span.second)
+				break;
+			if (h.first - cursor > slack)
+				return true;
+			cursor = std::max(cursor, h.second);
 		}
 
-		bool HasPlane(const std::vector<Plane> &planes, const Plane &plane)
-		{
-			for (const Plane &p : planes)
-			{
-				bool flipped = p.normal.Dot(plane.normal) < 0.0;
-				Vec3 n = flipped ? p.normal * -1.0 : p.normal;
-				double d = flipped ? -p.dist : p.dist;
+		if (span.second - cursor > slack)
+			return true;
+	}
 
-				if ((n - plane.normal).Length() < kPlaneNormalEpsilon &&
-					std::fabs(d - plane.dist) < kPlaneDistEpsilon)
-					return true;
-			}
-			return false;
+	return false;
+}
+
+bool EdgeNeedsCut(const std::vector<const Face *> &floors, size_t floorIndex,
+	const std::vector<Winding> &supported, size_t self, const Vec3 &a, const Vec3 &b)
+{
+	Vec3 ab = b - a;
+	double lenSq = ab.Dot(ab);
+	if (lenSq < 1e-9)
+		return false;
+
+	std::vector<Span> support;
+	for (size_t i = 0; i < supported.size(); ++i)
+	{
+		if (i != self)
+			AddWindingCoverage(supported[i], a, ab, lenSq, support);
+	}
+
+	std::vector<Span> seam;
+	for (size_t j = 0; j < floors.size(); ++j)
+	{
+		if (j != floorIndex)
+			AddWindingCoverage(floors[j]->winding, a, ab, lenSq, seam);
+	}
+
+	if (SpansExceed(seam, support, lenSq))
+		return true;
+
+	std::vector<Span> covered = support;
+	AddWindingCoverage(floors[floorIndex]->winding, a, ab, lenSq, covered);
+	return !SpansCover(covered, lenSq);
+}
+
+bool FaceNotchesFloor(const Face &f)
+{
+	return f.plane.normal.z > 0.0 && f.plane.normal.z <= kFloorNormalZ && f.winding.size() >= 3 &&
+		WindingAreaXY(f.winding) > kMinNotchArea;
+}
+
+bool EdgeLiesOnFloorFace(const std::vector<const Face *> &floors, const Vec3 &a, const Vec3 &b)
+{
+	for (const Face *f : floors)
+	{
+		if (std::fabs(a.Dot(f->plane.normal) - f->plane.dist) < kOnBoundaryEpsilon &&
+			std::fabs(b.Dot(f->plane.normal) - f->plane.dist) < kOnBoundaryEpsilon)
+			return true;
+	}
+	return false;
+}
+
+bool HasPlane(const std::vector<Plane> &planes, const Plane &plane)
+{
+	for (const Plane &p : planes)
+	{
+		bool flipped = p.normal.Dot(plane.normal) < 0.0;
+		Vec3 n = flipped ? p.normal * -1.0 : p.normal;
+		double d = flipped ? -p.dist : p.dist;
+
+		if ((n - plane.normal).Length() < kPlaneNormalEpsilon &&
+			std::fabs(d - plane.dist) < kPlaneDistEpsilon)
+			return true;
+	}
+	return false;
+}
+
+void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+	const Winding &w, const Vec3 &bias, std::vector<Winding> &solid, std::vector<Winding> &empty)
+{
+	std::vector<Winding> remaining;
+	CarveWindingAgainstTreeSided(bsp, headnode, w, bias, solid, remaining);
+
+	for (const BlockingVolume &blocker : blockers)
+	{
+		if (remaining.empty())
+			break;
+
+		std::vector<Winding> stillRemaining;
+		for (const Winding &piece : remaining)
+		{
+			std::vector<Winding> blockerSolid;
+			std::vector<Winding> blockerEmpty;
+			CarveWindingAgainstTreeSided(bsp, blocker.headnode,
+				TranslateWinding(piece, blocker.origin * -1.0), bias, blockerSolid, blockerEmpty);
+
+			for (const Winding &part : blockerSolid)
+				solid.push_back(TranslateWinding(part, blocker.origin));
+			for (const Winding &part : blockerEmpty)
+				stillRemaining.push_back(TranslateWinding(part, blocker.origin));
+		}
+		remaining.swap(stillRemaining);
+	}
+
+	for (Winding &piece : remaining)
+		empty.push_back(std::move(piece));
 }
 
 double SupportedArea(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
@@ -228,37 +364,6 @@ double SupportedArea(const BspFile &bsp, int headnode, const std::vector<Blockin
 		area += WindingArea(w, floorFace.plane.normal);
 
 	return area;
-}
-
-void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
-	const Winding &w, std::vector<Winding> &solid, std::vector<Winding> &empty)
-{
-	std::vector<Winding> remaining;
-	CarveWindingAgainstTree(bsp, headnode, w, solid, remaining);
-
-	for (const BlockingVolume &blocker : blockers)
-	{
-		if (remaining.empty())
-			break;
-
-		std::vector<Winding> stillRemaining;
-		for (const Winding &piece : remaining)
-		{
-			std::vector<Winding> blockerSolid;
-			std::vector<Winding> blockerEmpty;
-			CarveWindingAgainstTree(bsp, blocker.headnode, TranslateWinding(piece, blocker.origin * -1.0),
-				blockerSolid, blockerEmpty);
-
-			for (const Winding &part : blockerSolid)
-				solid.push_back(TranslateWinding(part, blocker.origin));
-			for (const Winding &part : blockerEmpty)
-				stillRemaining.push_back(TranslateWinding(part, blocker.origin));
-		}
-		remaining.swap(stillRemaining);
-	}
-
-	for (Winding &piece : remaining)
-		empty.push_back(std::move(piece));
 }
 
 double TotalSupportedArea(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
@@ -283,7 +388,7 @@ const Face *LowestFloorFace(const Polytope &poly)
 	const Face *best = nullptr;
 	for (const Face &f : poly.faces)
 	{
-		if (f.plane.normal.z <= kFloorNormalZ)
+		if (!f.walkable || f.plane.normal.z <= kFloorNormalZ)
 			continue;
 		if (f.winding.size() < 3)
 			continue;
@@ -300,7 +405,7 @@ const Face *FloorFaceUnder(const Polytope &poly, double x, double y)
 
 	for (const Face &f : poly.faces)
 	{
-		if (f.plane.normal.z <= kFloorNormalZ)
+		if (!f.walkable || f.plane.normal.z <= kFloorNormalZ)
 			continue;
 		if (f.winding.size() < 3)
 			continue;
@@ -328,34 +433,29 @@ double FloorHeightAt(const Face &floorFace, double x, double y)
 SupportedFloor ComputeSupportedFloorParts(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const Face &floorFace)
 {
-	Vec3 down = floorFace.plane.normal * kSupportProbeDepth;
-
-	Winding probe;
-	probe.reserve(floorFace.winding.size());
-	for (const Vec3 &v : floorFace.winding)
-		probe.push_back(v - down);
+	Vec3 down = floorFace.plane.normal * -1.0;
 
 	SupportedFloor out;
-		std::vector<Winding> unsupported;
-		CarveAgainstSolids(bsp, headnode, blockers, probe, out.direct, unsupported);
+	std::vector<Winding> unsupported;
+	CarveAgainstSolids(bsp, headnode, blockers, floorFace.winding, down, out.direct, unsupported);
 
-		Vec3 stepDrop = Vec3(0.0, 0.0, kStepHeight) - floorFace.plane.normal * kSupportProbeDepth;
-		for (const Winding &w : unsupported)
-		{
-			std::vector<Winding> stepSolid;
-			std::vector<Winding> stepEmpty;
-			CarveAgainstSolids(bsp, headnode, blockers, TranslateWinding(w, stepDrop * -1.0), stepSolid,
-				stepEmpty);
+	Vec3 stepDrop(0.0, 0.0, kStepHeight);
+	for (const Winding &w : unsupported)
+	{
+		std::vector<Winding> stepSolid;
+		std::vector<Winding> stepEmpty;
+		CarveAgainstSolids(bsp, headnode, blockers, TranslateWinding(w, stepDrop * -1.0), down, stepSolid,
+			stepEmpty);
 
-			double patchArea = WindingArea(w, floorFace.plane.normal);
-			double coveredArea = 0.0;
-			for (const Winding &piece : stepSolid)
-				coveredArea += WindingArea(piece, floorFace.plane.normal);
+		double patchArea = WindingArea(w, floorFace.plane.normal);
+		double coveredArea = 0.0;
+		for (const Winding &piece : stepSolid)
+			coveredArea += WindingArea(piece, floorFace.plane.normal);
 
-			bool tilted = floorFace.plane.normal.z < 1.0 - kLevelFaceEpsilon;
+		bool tilted = floorFace.plane.normal.z < 1.0 - kLevelFaceEpsilon;
 
-			if (tilted && coveredArea < patchArea * (1.0 - kStepCoverageTolerance))
-				continue;
+		if (tilted && coveredArea < patchArea * (1.0 - kStepCoverageTolerance))
+			continue;
 
 		for (const Winding &piece : stepSolid)
 		{
@@ -364,11 +464,6 @@ SupportedFloor ComputeSupportedFloorParts(const BspFile &bsp, int headnode,
 			out.stepped.push_back(TranslateWinding(piece, stepDrop));
 		}
 	}
-
-	for (std::vector<Winding> *set : {&out.direct, &out.stepped})
-		for (Winding &w : *set)
-			for (Vec3 &v : w)
-				v = v + down;
 
 	return out;
 }
@@ -391,17 +486,17 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 {
 	std::vector<ExtractedLeaf> out;
 	size_t dropped = 0;
-		size_t split = 0;
-		size_t noFloor = 0;
+	size_t split = 0;
+	size_t noFloor = 0;
 
-		for (const ExtractedLeaf &leaf : leaves)
+	for (const ExtractedLeaf &leaf : leaves)
+	{
+		std::vector<const Face *> floors;
+		for (const Face &f : leaf.polytope.faces)
 		{
-			std::vector<const Face *> floors;
-			for (const Face &f : leaf.polytope.faces)
-			{
-				if (f.plane.normal.z <= kFloorNormalZ)
-					continue;
-				if (f.winding.size() < 3)
+			if (f.plane.normal.z <= kFloorNormalZ)
+				continue;
+			if (f.winding.size() < 3)
 				continue;
 			floors.push_back(&f);
 		}
@@ -410,35 +505,65 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 		{
 			++noFloor;
 			continue;
-					}
+		}
 
-					std::vector<Plane> cuts;
+		std::vector<SupportedFloor> support;
+		support.reserve(floors.size());
+		for (const Face *floor : floors)
+			support.push_back(ComputeSupportedFloorParts(bsp, headnode, blockers, *floor));
 
-					for (const Face *floor : floors)
-					{
-						SupportedFloor supported = ComputeSupportedFloorParts(bsp, headnode, blockers, *floor);
+		std::vector<Winding> supported;
+		std::vector<size_t> supportedFace;
+		for (size_t fi = 0; fi < floors.size(); ++fi)
+		{
+			for (const Winding &w : support[fi].direct)
+			{
+				supported.push_back(w);
+				supportedFace.push_back(fi);
+			}
+			for (const Winding &w : support[fi].stepped)
+			{
+				supported.push_back(w);
+				supportedFace.push_back(fi);
+			}
+		}
 
-						auto outline = [&](const Winding &w, const std::vector<Winding> *peers, size_t self)
-						{
-							for (size_t i = 0; i < w.size(); ++i)
-							{
-								const Vec3 &a = w[i];
-								const Vec3 &b = w[(i + 1) % w.size()];
+		std::vector<Plane> cuts;
 
-								if (EdgeIsCovered(peers, self, floor->winding, a, b))
-									continue;
+		for (size_t si = 0; si < supported.size(); ++si)
+		{
+			const Winding &w = supported[si];
+			for (size_t i = 0; i < w.size(); ++i)
+			{
+				const Vec3 &a = w[i];
+				const Vec3 &b = w[(i + 1) % w.size()];
 
-								Plane plane;
-								if (VerticalPlaneThroughEdge(a, b, plane) && !HasPlane(cuts, plane))
-									cuts.push_back(plane);
-							}
-						};
+				if (!EdgeNeedsCut(floors, supportedFace[si], supported, si, a, b))
+					continue;
 
-						for (size_t wi = 0; wi < supported.direct.size(); ++wi)
-							outline(supported.direct[wi], &supported.direct, wi);
+				Plane plane;
+				if (VerticalPlaneThroughEdge(a, b, plane) && !HasPlane(cuts, plane))
+					cuts.push_back(plane);
+			}
+		}
 
-			for (const Winding &w : supported.stepped)
-				outline(w, nullptr, 0);
+		for (const Face &f : leaf.polytope.faces)
+		{
+			if (!FaceNotchesFloor(f))
+				continue;
+
+			for (size_t i = 0; i < f.winding.size(); ++i)
+			{
+				const Vec3 &a = f.winding[i];
+				const Vec3 &b = f.winding[(i + 1) % f.winding.size()];
+
+				if (!EdgeLiesOnFloorFace(floors, a, b))
+					continue;
+
+				Plane plane;
+				if (VerticalPlaneThroughEdge(a, b, plane) && !HasPlane(cuts, plane))
+					cuts.push_back(plane);
+			}
 		}
 
 		std::vector<Polytope> fragments;
@@ -465,14 +590,28 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 
 		for (Polytope &frag : fragments)
 		{
-			const Face *fragFloor = LowestFloorFace(frag);
+			double totalSupported = 0.0;
+			const Face *fragFloor = nullptr;
+
+			for (Face &f : frag.faces)
+			{
+				if (f.plane.normal.z <= kFloorNormalZ || f.winding.size() < 3)
+					continue;
+
+				double area = SupportedArea(bsp, headnode, blockers, f);
+				f.walkable = area > kMinSupportedArea;
+				totalSupported += area;
+
+				if (!fragFloor || f.winding[0].z < fragFloor->winding[0].z)
+					fragFloor = &f;
+			}
+
 			if (!fragFloor)
 			{
 				++noFloor;
 				continue;
 			}
 
-			double totalSupported = TotalSupportedArea(bsp, headnode, blockers, frag);
 			if (totalSupported <= kMinSupportedArea)
 			{
 				if (dump)

@@ -101,6 +101,123 @@ double WindingArea(const Winding &winding, const Vec3 &normal)
 	return std::fabs(sum.Dot(normal.Normalized())) * 0.5;
 }
 
+double WindingAreaXY(const Winding &winding)
+{
+	if (winding.size() < 3)
+		return 0.0;
+
+	double sum = 0.0;
+	for (size_t i = 0; i < winding.size(); ++i)
+	{
+		const Vec3 &a = winding[i];
+		const Vec3 &b = winding[(i + 1) % winding.size()];
+		sum += a.x * b.y - b.x * a.y;
+	}
+	return std::fabs(sum) * 0.5;
+}
+
+bool IsFloorFace(const Face &face)
+{
+	return face.walkable && face.plane.normal.z > kFloorNormalZ && face.winding.size() >= 3;
+}
+
+Winding WalkableFootprint(const Polytope &poly)
+{
+	std::vector<Vec3> pts;
+	for (const Face &f : poly.faces)
+	{
+		if (!IsFloorFace(f))
+			continue;
+		for (const Vec3 &v : f.winding)
+			pts.push_back(v);
+	}
+	return ConvexHullXY(pts);
+}
+
+namespace
+{
+
+Winding ProjectXY(const Winding &winding)
+{
+	Winding out;
+	out.reserve(winding.size());
+	for (const Vec3 &v : winding)
+		out.push_back(Vec3(v.x, v.y, 0.0));
+
+	double sum = 0.0;
+	for (size_t i = 0; i < out.size(); ++i)
+	{
+		const Vec3 &a = out[i];
+		const Vec3 &b = out[(i + 1) % out.size()];
+		sum += a.x * b.y - b.x * a.y;
+	}
+	if (sum < 0.0)
+		std::reverse(out.begin(), out.end());
+
+	return out;
+}
+
+std::vector<Winding> SubtractConvexXY(const Winding &subject, const Winding &clip)
+{
+	std::vector<Winding> outside;
+	Winding inside = subject;
+
+	for (size_t i = 0; i < clip.size() && inside.size() >= 3; ++i)
+	{
+		const Vec3 &a = clip[i];
+		const Vec3 &b = clip[(i + 1) % clip.size()];
+
+		Vec3 edge = b - a;
+		Vec3 normal(-edge.y, edge.x, 0.0);
+		double len = normal.Length();
+		if (len < 1e-9)
+			continue;
+
+		Plane plane;
+		plane.normal = normal * (1.0 / len);
+		plane.dist = plane.normal.Dot(a);
+
+		Winding beyond = ClipWinding(inside, plane, false);
+		if (beyond.size() >= 3)
+			outside.push_back(std::move(beyond));
+
+		inside = ClipWinding(inside, plane, true);
+	}
+
+	return outside;
+}
+
+}
+
+double WalkableFootprintGapArea(const Polytope &poly)
+{
+	Winding hull = WalkableFootprint(poly);
+	if (hull.size() < 3)
+		return 0.0;
+
+	std::vector<Winding> remainder;
+	remainder.push_back(std::move(hull));
+
+	for (const Face &f : poly.faces)
+	{
+		if (!IsFloorFace(f))
+			continue;
+
+		Winding clip = ProjectXY(f.winding);
+
+		std::vector<Winding> next;
+		for (const Winding &piece : remainder)
+			for (Winding &part : SubtractConvexXY(piece, clip))
+				next.push_back(std::move(part));
+		remainder.swap(next);
+	}
+
+	double gap = 0.0;
+	for (const Winding &w : remainder)
+		gap += WindingAreaXY(w);
+	return gap;
+}
+
 Winding ConvexHullXY(const std::vector<Vec3> &points)
 {
 	Winding pts;

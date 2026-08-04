@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <map>
 #include <numeric>
 #include <set>
+#include <stdexcept>
+#include <unordered_map>
 
 #include "floor_support.h"
 #include "waypoint_plan.h"
@@ -42,14 +46,8 @@ constexpr double kPlaneWallNormalZ = 0.3;
 constexpr double kOnPlaneTolerance = 1.0;
 constexpr double kLaunchEdgeTolerance = 8.0;
 constexpr double kFloorFootprintTolerance = 1.0;
-constexpr double kFloorNormalZ = 0.7;
 constexpr double kFloorAdjacencyEpsilon = 0.5;
 constexpr double kMinStepSpan = 1e-9;
-
-bool IsFloorFace(const Face &f)
-{
-	return f.plane.normal.z > kFloorNormalZ && f.winding.size() >= 3;
-}
 
 bool FloorFaceSpan(const Face &f, const Vec3 &a, const Vec3 &ab, double epsilon, double &lo, double &hi)
 {
@@ -612,12 +610,12 @@ bool LeafIsCrouch(const std::vector<bool> &isCrouchLeaf, int leafId)
 	return static_cast<size_t>(leafId) < isCrouchLeaf.size() && isCrouchLeaf[static_cast<size_t>(leafId)];
 }
 
-void TagCrouchConnections(MergeResult &result)
+void TagCrouchConnections(const std::vector<Area> &areas, std::vector<MergedConnection> &conns)
 {
-	for (MergedConnection &c : result.conns)
+	for (MergedConnection &c : conns)
 	{
-		bool crouchA = (result.areas[static_cast<size_t>(c.areaA)].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
-		bool crouchB = (result.areas[static_cast<size_t>(c.areaB)].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		bool crouchA = (areas[static_cast<size_t>(c.areaA)].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		bool crouchB = (areas[static_cast<size_t>(c.areaB)].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		if (crouchA || crouchB)
 			c.connFlags |= crossbot_nav::CONN_FLAG_NEEDS_CROUCH;
 	}
@@ -642,7 +640,7 @@ void ApplyPassable(Area &area, const std::vector<PassableVolume> &passables, int
 
 }
 
-MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
+MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves,
 	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables)
 {
 	MergeResult result;
@@ -660,20 +658,6 @@ MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves, const std::vector<
 		ApplyPassable(area, passables, leaf.passableIndex);
 		result.areas.push_back(std::move(area));
 	}
-
-	result.conns.reserve(portals.size());
-	for (const Portal &p : portals)
-	{
-		MergedConnection mp;
-		mp.areaA = p.leafA;
-		mp.areaB = p.leafB;
-		mp.pointA = p.pointA;
-		mp.pointB = p.pointB;
-		mp.area = p.area;
-		result.conns.push_back(mp);
-	}
-
-	TagCrouchConnections(result);
 
 	return result;
 }
@@ -722,15 +706,6 @@ bool MergeStaysConvex(const std::vector<const Face *> &facesA, const std::vector
 }
 
 const Vec3 kUp(0, 0, 1);
-
-Winding FootprintOf(const Polytope &poly)
-{
-	std::vector<Vec3> pts;
-	for (const Face &f : poly.faces)
-		for (const Vec3 &v : f.winding)
-			pts.push_back(v);
-	return ConvexHullXY(pts);
-}
 
 Winding MergeFootprints(const Winding &a, const Winding &b)
 {
@@ -880,7 +855,7 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 	std::vector<Winding> leafFootprint(static_cast<size_t>(n));
 	for (int i = 0; i < n; ++i)
-		leafFootprint[static_cast<size_t>(i)] = FootprintOf(leaves[static_cast<size_t>(i)].polytope);
+		leafFootprint[static_cast<size_t>(i)] = WalkableFootprint(leaves[static_cast<size_t>(i)].polytope);
 
 	std::vector<Winding> footprint = leafFootprint;
 
@@ -907,6 +882,9 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 	std::vector<MergeCandidate> candidates;
 	for (const Portal &p : portals)
 	{
+		if (p.winding.size() < 3)
+			continue;
+
 		if (LeafIsCrouch(isCrouchLeaf, p.leafA) != LeafIsCrouch(isCrouchLeaf, p.leafB))
 			continue;
 
@@ -1111,25 +1089,189 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		result.areas.push_back(std::move(area));
 	}
 
-	for (const Portal &p : portals)
-	{
-		int areaA = rootToAreaId[static_cast<size_t>(find(p.leafA))];
-		int areaB = rootToAreaId[static_cast<size_t>(find(p.leafB))];
-		if (areaA == areaB)
-			continue;
+	return result;
+}
 
-		MergedConnection mp;
-		mp.areaA = areaA;
-		mp.areaB = areaB;
-		mp.pointA = p.pointA;
-		mp.pointB = p.pointB;
-		mp.area = p.area;
-		result.conns.push_back(mp);
+namespace
+{
+
+constexpr double kMinSeamLength = 1.0;
+
+struct FloorEdge
+{
+	int areaId;
+	double lo, hi;
+	Vec3 at, along;
+};
+
+struct LineKey
+{
+	long long dx, dy, offset;
+
+	bool operator==(const LineKey &o) const { return dx == o.dx && dy == o.dy && offset == o.offset; }
+};
+
+struct LineKeyHash
+{
+	size_t operator()(const LineKey &k) const
+	{
+		auto mix = [](size_t h, long long v)
+		{
+			size_t hv = std::hash<long long>()(v);
+			return h ^ (hv + static_cast<size_t>(0x9e3779b9UL) + (h << 6) + (h >> 2));
+		};
+		return mix(mix(mix(0, k.dx), k.dy), k.offset);
+	}
+};
+
+bool EdgeAsLine(const Vec3 &a, const Vec3 &b, LineKey &keyOut, FloorEdge &edgeOut)
+{
+	double dx = b.x - a.x;
+	double dy = b.y - a.y;
+	double length = std::sqrt(dx * dx + dy * dy);
+	if (length < kMinSeamLength)
+		return false;
+
+	dx /= length;
+	dy /= length;
+
+	if (dx < -1e-6 || (std::fabs(dx) <= 1e-6 && dy < 0.0))
+	{
+		dx = -dx;
+		dy = -dy;
 	}
 
-	TagCrouchConnections(result);
+	auto quantize = [](double v) { return static_cast<long long>(std::llround(v * 100.0)); };
+	keyOut = {quantize(dx), quantize(dy), quantize(dx * a.y - dy * a.x)};
 
-	return result;
+	edgeOut.at = a;
+	edgeOut.along = Vec3(dx, dy, 0.0);
+	edgeOut.lo = a.x * dx + a.y * dy;
+	edgeOut.hi = b.x * dx + b.y * dy;
+	if (edgeOut.hi < edgeOut.lo)
+		std::swap(edgeOut.lo, edgeOut.hi);
+
+	return true;
+}
+
+Vec3 PointAlong(const FloorEdge &e, double t)
+{
+	double base = e.at.x * e.along.x + e.at.y * e.along.y;
+	return Vec3(e.at.x + e.along.x * (t - base), e.at.y + e.along.y * (t - base), e.at.z);
+}
+
+}
+
+size_t BuildWalkConnections(const std::vector<Area> &areas, std::vector<MergedConnection> &conns)
+{
+	std::unordered_map<LineKey, std::vector<FloorEdge>, LineKeyHash> lines;
+
+	for (const Area &area : areas)
+	{
+		for (const Face &f : area.polytope.faces)
+		{
+			if (!IsFloorFace(f))
+				continue;
+
+			for (size_t i = 0; i < f.winding.size(); ++i)
+			{
+				LineKey key;
+				FloorEdge edge;
+				if (!EdgeAsLine(f.winding[i], f.winding[(i + 1) % f.winding.size()], key, edge))
+					continue;
+
+				edge.areaId = area.id;
+				lines[key].push_back(edge);
+			}
+		}
+	}
+
+	size_t first = conns.size();
+
+	for (const auto &entry : lines)
+	{
+		const std::vector<FloorEdge> &edges = entry.second;
+
+		std::map<std::pair<int, int>, std::vector<std::pair<double, double>>> spans;
+
+		for (size_t i = 0; i + 1 < edges.size(); ++i)
+		{
+			for (size_t j = i + 1; j < edges.size(); ++j)
+			{
+				if (edges[i].areaId == edges[j].areaId)
+					continue;
+
+				double lo = std::max(edges[i].lo, edges[j].lo);
+				double hi = std::min(edges[i].hi, edges[j].hi);
+				if (hi - lo <= kMinSeamLength)
+					continue;
+
+				spans[{std::min(edges[i].areaId, edges[j].areaId),
+					std::max(edges[i].areaId, edges[j].areaId)}].push_back({lo, hi});
+			}
+		}
+
+		for (auto &pair : spans)
+		{
+			std::vector<std::pair<double, double>> &intervals = pair.second;
+			std::sort(intervals.begin(), intervals.end());
+
+			for (size_t i = 0; i < intervals.size(); ++i)
+			{
+				double lo = intervals[i].first;
+				double hi = intervals[i].second;
+				while (i + 1 < intervals.size() && intervals[i + 1].first <= hi)
+				{
+					hi = std::max(hi, intervals[i + 1].second);
+					++i;
+				}
+
+				const FloorEdge &ref = edges[0];
+
+				MergedConnection mc;
+				mc.areaA = pair.first.first;
+				mc.areaB = pair.first.second;
+				mc.pointA = PointAlong(ref, lo);
+				mc.pointB = PointAlong(ref, hi);
+				conns.push_back(mc);
+			}
+		}
+	}
+
+	TagCrouchConnections(areas, conns);
+
+	return conns.size() - first;
+}
+
+size_t ValidateAreaFootprints(const std::vector<Area> &areas)
+{
+	size_t bad = 0;
+
+	for (const Area &area : areas)
+	{
+		Winding footprint = WalkableFootprint(area.polytope);
+		double hull = WindingAreaXY(footprint);
+		Vec3 c = area.polytope.Centroid();
+
+		if (footprint.size() < 3 || hull <= kMinFootprintArea)
+		{
+			std::fprintf(stderr, "warning: area %d near (%.0f %.0f %.0f) has no walkable floor "
+				"(%zu polytope faces)\n", area.id, c.x, c.y, c.z, area.polytope.faces.size());
+			++bad;
+			continue;
+		}
+
+		double gap = WalkableFootprintGapArea(area.polytope);
+		if (gap > std::max(kMinFootprintArea, kFootprintAreaTolerance * hull))
+		{
+			std::fprintf(stderr, "warning: area %d near (%.0f %.0f %.0f) has a concave walkable "
+				"footprint: %.1f of its %.1f convex hull has no floor under it\n",
+				area.id, c.x, c.y, c.z, gap, hull);
+			++bad;
+		}
+	}
+
+	return bad;
 }
 
 }
