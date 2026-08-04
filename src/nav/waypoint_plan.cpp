@@ -48,18 +48,63 @@ bool PointInArea(const Vector &p, const PlanArea &area, float epsilon)
 	return NavMath::PointInsidePlanes(p, area.boundPlanes, epsilon);
 }
 
+// An area's footprint is not fixed by its vertical planes alone. A floor rising one way and a
+// ceiling falling the other pinch the column shut where they meet, and that closure is a vertical
+// half-plane no bound plane records: a wedge under a ramp is capped by the ramp itself, and the
+// sliver between two faces of a pyramid is bounded that way at both ends. Eliminating z from the
+// half-space system recovers those bounds exactly - for a floor f and a ceiling c, "the floor stays
+// under the ceiling" is one linear constraint in x and y, and it is implied by the two planes, so
+// it can only trim overreach, never cut into the area.
+template <typename Fn>
+void ForEachImpliedWall(const PlanArea &area, Fn &&fn)
+{
+	for (const PlanPlane &f : area.boundPlanes)
+	{
+		if (f.normal.z <= kWallNormalZ)
+			continue;
+
+		for (const PlanPlane &c : area.boundPlanes)
+		{
+			if (c.normal.z >= -kWallNormalZ)
+				continue;
+
+			float nx = f.normal.z * c.normal.x - c.normal.z * f.normal.x;
+			float ny = f.normal.z * c.normal.y - c.normal.z * f.normal.y;
+			float dist = f.normal.z * c.dist - c.normal.z * f.dist;
+
+			// Parallel in plan: the two never converge, so they bound nothing here.
+			float len = std::sqrt(nx * nx + ny * ny);
+			if (len < 0.0001f)
+				continue;
+
+			fn(nx / len, ny / len, dist / len);
+		}
+	}
+}
+
 bool InAreaColumn(const Vector &p, const PlanArea &area, float margin)
 {
 	if (area.boundPlanes.empty())
 		return false;
+
+	bool inside = true;
+	auto test = [&](float nx, float ny, float dist)
+	{
+		if (p.x * nx + p.y * ny - dist < margin)
+			inside = false;
+	};
+
 	for (const PlanPlane &pl : area.boundPlanes)
 	{
 		if (std::fabs(pl.normal.z) > kWallNormalZ)
 			continue;
-		if (p.x * pl.normal.x + p.y * pl.normal.y - pl.dist < margin)
+		test(pl.normal.x, pl.normal.y, pl.dist);
+		if (!inside)
 			return false;
 	}
-	return true;
+
+	ForEachImpliedWall(area, test);
+	return inside;
 }
 
 float GateFloorZ(const NavFunnel::Gate &gate, const Vector &p)
@@ -213,40 +258,6 @@ struct EdgeLine
 	float hi = 1e9f;
 	bool valid = false;
 };
-
-// An area's footprint is not fixed by its vertical planes alone. A floor rising one way and a
-// ceiling falling the other pinch the column shut where they meet, and that closure is a vertical
-// half-plane no bound plane records: a wedge under a ramp is capped by the ramp itself, and the
-// sliver between two faces of a pyramid is bounded that way at both ends. Eliminating z from the
-// half-space system recovers those bounds exactly - for a floor f and a ceiling c, "the floor stays
-// under the ceiling" is one linear constraint in x and y, and it is implied by the two planes, so
-// it can only trim overreach, never cut into the area.
-template <typename Fn>
-void ForEachImpliedWall(const PlanArea &area, Fn &&fn)
-{
-	for (const PlanPlane &f : area.boundPlanes)
-	{
-		if (f.normal.z <= kWallNormalZ)
-			continue;
-
-		for (const PlanPlane &c : area.boundPlanes)
-		{
-			if (c.normal.z >= -kWallNormalZ)
-				continue;
-
-			float nx = f.normal.z * c.normal.x - c.normal.z * f.normal.x;
-			float ny = f.normal.z * c.normal.y - c.normal.z * f.normal.y;
-			float dist = f.normal.z * c.dist - c.normal.z * f.dist;
-
-			// Parallel in plan: the two never converge, so they bound nothing here.
-			float len = std::sqrt(nx * nx + ny * ny);
-			if (len < 0.0001f)
-				continue;
-
-			fn(nx / len, ny / len, dist / len);
-		}
-	}
-}
 
 bool ClipLineByWalls(EdgeLine &line, const PlanArea &area, const PlanPlane *skip)
 {
