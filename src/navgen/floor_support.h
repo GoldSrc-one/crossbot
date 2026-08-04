@@ -33,10 +33,6 @@ const Face *FloorFaceUnder(const Polytope &poly, double x, double y);
 
 double FloorHeightAt(const Face &floorFace, double x, double y);
 
-// The parts of a floor face that have something to stand on. `direct` is floor within
-// kSupportProbeDepth, i.e. the face is really the floor there; `stepped` is floor up to kStepHeight
-// below, close enough to walk down onto but not the same surface. The two never overlap, and together
-// with the unsupported remainder they tile the face.
 struct SupportedFloor
 {
 	std::vector<Winding> direct;

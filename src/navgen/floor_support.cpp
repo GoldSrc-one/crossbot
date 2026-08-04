@@ -149,8 +149,6 @@ namespace
 
 using Span = std::pair<double, double>;
 
-// Records the stretch of the edge a + ab * t, t in [0, 1], that the segment c -> d lies along. Only
-// collinear segments cover anything; ones that merely cross the edge's line contribute nothing.
 void AddCoverage(const Vec3 &a, const Vec3 &ab, double lenSq, const Vec3 &c, const Vec3 &d,
 	std::vector<Span> &spans)
 {
@@ -175,12 +173,6 @@ void AddWindingCoverage(const Winding &w, const Vec3 &a, const Vec3 &ab, double 
 		AddCoverage(a, ab, lenSq, w[i], w[(i + 1) % w.size()], spans);
 }
 
-// True when the whole edge either abuts one of `peers` or runs along the leaf's own floor boundary,
-// i.e. no part of it is an edge the leaf has to be cut along. The supported windings tile the floor
-// exactly, so whatever lies past an uncovered stretch belongs to some other class of floor by
-// construction - no probing needed. Coverage is per-stretch rather than per-edge because one edge is
-// routinely both: the strip of upper floor beside a ramp opening meets its neighbour along part of the
-// edge and overhangs the ramp along the rest, and only the overhanging part must be cut away.
 bool EdgeIsCovered(const std::vector<Winding> *peers, size_t self, const Winding &floorWinding,
 	const Vec3 &a, const Vec3 &b)
 {
@@ -206,28 +198,24 @@ bool EdgeIsCovered(const std::vector<Winding> *peers, size_t self, const Winding
 		if (span.first > reached + slack)
 			return false;
 		reached = std::max(reached, span.second);
-	}
+			}
 
-	return reached >= 1.0 - slack;
-}
+			return reached >= 1.0 - slack;
+		}
 
-// Two support patches that meet along an edge each want to cut there, once from either side. Clipping
-// a polytope twice by the same plane leaves it with two coincident faces, which double-counts in
-// Polytope::Volume and gives the portal builder a phantom second face to match against, so a plane goes
-// in the cut list only once regardless of which side asked for it.
-bool HasPlane(const std::vector<Plane> &planes, const Plane &plane)
-{
-	for (const Plane &p : planes)
-	{
-		bool flipped = p.normal.Dot(plane.normal) < 0.0;
-		Vec3 n = flipped ? p.normal * -1.0 : p.normal;
-		double d = flipped ? -p.dist : p.dist;
+		bool HasPlane(const std::vector<Plane> &planes, const Plane &plane)
+		{
+			for (const Plane &p : planes)
+			{
+				bool flipped = p.normal.Dot(plane.normal) < 0.0;
+				Vec3 n = flipped ? p.normal * -1.0 : p.normal;
+				double d = flipped ? -p.dist : p.dist;
 
-		if ((n - plane.normal).Length() < kPlaneNormalEpsilon &&
-			std::fabs(d - plane.dist) < kPlaneDistEpsilon)
-			return true;
-	}
-	return false;
+				if ((n - plane.normal).Length() < kPlaneNormalEpsilon &&
+					std::fabs(d - plane.dist) < kPlaneDistEpsilon)
+					return true;
+			}
+			return false;
 }
 
 double SupportedArea(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
@@ -348,46 +336,26 @@ SupportedFloor ComputeSupportedFloorParts(const BspFile &bsp, int headnode,
 		probe.push_back(v - down);
 
 	SupportedFloor out;
-	std::vector<Winding> unsupported;
-	CarveAgainstSolids(bsp, headnode, blockers, probe, out.direct, unsupported);
+		std::vector<Winding> unsupported;
+		CarveAgainstSolids(bsp, headnode, blockers, probe, out.direct, unsupported);
 
-	// Straight down, not along the face normal. PM_WalkMove steps by moving the origin vertically -
-	// dest[2] += stepsize to step up, dest[2] -= stepsize to step down - so a step is 18 units of z
-	// wherever the floor is tilted. Probing along the normal of a 45 degree face would reach 12.7 units
-	// down and slide 12.7 sideways, testing solidity under a point the bot never stands on. The probe
-	// starts at the already dropped patch, so take the direct probe's offset back out of the step.
-	Vec3 stepDrop = Vec3(0.0, 0.0, kStepHeight) - floorFace.plane.normal * kSupportProbeDepth;
-	for (const Winding &w : unsupported)
-	{
-		std::vector<Winding> stepSolid;
-		std::vector<Winding> stepEmpty;
-		CarveAgainstSolids(bsp, headnode, blockers, TranslateWinding(w, stepDrop * -1.0), stepSolid,
-			stepEmpty);
+		Vec3 stepDrop = Vec3(0.0, 0.0, kStepHeight) - floorFace.plane.normal * kSupportProbeDepth;
+		for (const Winding &w : unsupported)
+		{
+			std::vector<Winding> stepSolid;
+			std::vector<Winding> stepEmpty;
+			CarveAgainstSolids(bsp, headnode, blockers, TranslateWinding(w, stepDrop * -1.0), stepSolid,
+				stepEmpty);
 
-		// A tilted floor face only means anything over the surface it was cut from. Past that surface's
-		// edge its plane is extrapolation, climbing away from whatever ground took over, and the step
-		// contour it crosses sits wherever the two slopes happen to diverge - 12.7 units past a ridge
-		// between two 45 degree faces, further on gentler ones. A bot never stands on those origins; it
-		// is on the surface that took over, which its own leaf floors already. So a tilted face is only
-		// rescued where the drop below it is a wall: solid a step down across the whole patch, as a
-		// riser gives. Where the carve cuts the patch instead, the far edge is a drop contour and the
-		// patch is extrapolation.
-		//
-		// A level face is different and is rescued as found. Its height is the leaf's floor level over
-		// the whole face, which is a standing origin whether or not there is solid under it - walking off
-		// a ledge with ground within stepsize below is exactly what PM_WalkMove's step-down does. This is
-		// also what connects a platform to a ramp descending out of it: hull expansion lifts the ramp's
-		// plane 16 * tan(slope) above the platform's, so the leaf over the ramp sits under the platform's
-		// floor plane rather than beside it, and the two only overlap through this band.
-		double patchArea = WindingArea(w, floorFace.plane.normal);
-		double coveredArea = 0.0;
-		for (const Winding &piece : stepSolid)
-			coveredArea += WindingArea(piece, floorFace.plane.normal);
+			double patchArea = WindingArea(w, floorFace.plane.normal);
+			double coveredArea = 0.0;
+			for (const Winding &piece : stepSolid)
+				coveredArea += WindingArea(piece, floorFace.plane.normal);
 
-		bool tilted = floorFace.plane.normal.z < 1.0 - kLevelFaceEpsilon;
+			bool tilted = floorFace.plane.normal.z < 1.0 - kLevelFaceEpsilon;
 
-		if (tilted && coveredArea < patchArea * (1.0 - kStepCoverageTolerance))
-			continue;
+			if (tilted && coveredArea < patchArea * (1.0 - kStepCoverageTolerance))
+				continue;
 
 		for (const Winding &piece : stepSolid)
 		{
@@ -423,21 +391,17 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 {
 	std::vector<ExtractedLeaf> out;
 	size_t dropped = 0;
-	size_t split = 0;
-	size_t noFloor = 0;
+		size_t split = 0;
+		size_t noFloor = 0;
 
-	for (const ExtractedLeaf &leaf : leaves)
-	{
-		// Every floor face of the leaf, not just the lowest one. A leaf beside a ramp holds both the flat
-		// ground at the ramp's foot and the ramp itself, and taking the lowest picks the ground - which
-		// is real floor everywhere, yields no cuts, and leaves the ramp face untested however far it
-		// extends past the surface it belongs to.
-		std::vector<const Face *> floors;
-		for (const Face &f : leaf.polytope.faces)
+		for (const ExtractedLeaf &leaf : leaves)
 		{
-			if (f.plane.normal.z <= kFloorNormalZ)
-				continue;
-			if (f.winding.size() < 3)
+			std::vector<const Face *> floors;
+			for (const Face &f : leaf.polytope.faces)
+			{
+				if (f.plane.normal.z <= kFloorNormalZ)
+					continue;
+				if (f.winding.size() < 3)
 				continue;
 			floors.push_back(&f);
 		}
@@ -446,37 +410,32 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 		{
 			++noFloor;
 			continue;
-		}
+					}
 
-		std::vector<Plane> cuts;
+					std::vector<Plane> cuts;
 
-		for (const Face *floor : floors)
-		{
-			SupportedFloor supported = ComputeSupportedFloorParts(bsp, headnode, blockers, *floor);
+					for (const Face *floor : floors)
+					{
+						SupportedFloor supported = ComputeSupportedFloorParts(bsp, headnode, blockers, *floor);
 
-			auto outline = [&](const Winding &w, const std::vector<Winding> *peers, size_t self)
-			{
-				for (size_t i = 0; i < w.size(); ++i)
-				{
-					const Vec3 &a = w[i];
-					const Vec3 &b = w[(i + 1) % w.size()];
+						auto outline = [&](const Winding &w, const std::vector<Winding> *peers, size_t self)
+						{
+							for (size_t i = 0; i < w.size(); ++i)
+							{
+								const Vec3 &a = w[i];
+								const Vec3 &b = w[(i + 1) % w.size()];
 
-					if (EdgeIsCovered(peers, self, floor->winding, a, b))
-						continue;
+								if (EdgeIsCovered(peers, self, floor->winding, a, b))
+									continue;
 
-					Plane plane;
-					if (VerticalPlaneThroughEdge(a, b, plane) && !HasPlane(cuts, plane))
-						cuts.push_back(plane);
-				}
-			};
+								Plane plane;
+								if (VerticalPlaneThroughEdge(a, b, plane) && !HasPlane(cuts, plane))
+									cuts.push_back(plane);
+							}
+						};
 
-			// A directly supported patch only has to be cut out where it stops being directly supported,
-			// so an edge it shares with another direct patch is a seam and stays uncut. A stepped patch
-			// gets cut out along its whole outline instead: the leaf's floor is not the real floor
-			// anywhere in it, and neighbouring stepped patches sit at their own heights - two treads of a
-			// staircase share an edge that is a step, not a seam.
-			for (size_t wi = 0; wi < supported.direct.size(); ++wi)
-				outline(supported.direct[wi], &supported.direct, wi);
+						for (size_t wi = 0; wi < supported.direct.size(); ++wi)
+							outline(supported.direct[wi], &supported.direct, wi);
 
 			for (const Winding &w : supported.stepped)
 				outline(w, nullptr, 0);

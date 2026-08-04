@@ -118,16 +118,13 @@ struct PlanStats
 	size_t airmovesUnplannable = 0;
 	size_t airmovesRespeeded = 0;
 	size_t corners = 0;
-	std::vector<std::vector<Vector>> runupTraces;
-	size_t gatesClamped = 0;
-};
+		std::vector<std::vector<Vector>> runupTraces;
+		size_t gatesClamped = 0;
+	};
 
-void BuildAreaGates(PlanArea &area);
+	void BuildAreaGates(PlanArea &area);
 
-// Samples the walkable floor of one area at a 2D point. Returns false where the area has no floor
-// there. PlanArea only models a single floor plane, so callers that know the real geometry (navgen)
-// supply this to keep gates off the parts of a shared wall where the two floors are a cliff apart.
-using PlanFloorFn = std::function<bool(uint32_t areaId, float x, float y, float &zOut)>;
+	using PlanFloorFn = std::function<bool(uint32_t areaId, float x, float y, float &zOut)>;
 
 void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanConnection> &conns,
 	const PlanFloorFn &floorAt = PlanFloorFn(), float maxStep = 0.f);

@@ -321,9 +321,6 @@ constexpr float kStepClipSpacing = 4.f;
 constexpr int kStepClipRefineIters = 8;
 constexpr float kStepClipMinSpan = 1.f;
 
-// A shared wall between two areas runs the full length of the boundary, but only the stretch where
-// the two floors meet within a step is actually crossable -- the rest is a cliff face. Narrows
-// [lo, hi] to the longest run that a walker can step across, and reports whether anything survived.
 bool ClipLineByStep(EdgeLine &line, uint32_t areaA, uint32_t areaB, const PlanFloorFn &floorAt,
 	float maxStep)
 {
@@ -368,7 +365,6 @@ bool ClipLineByStep(EdgeLine &line, uint32_t areaA, uint32_t areaB, const PlanFl
 	if (bestStart < 0)
 		return false;
 
-	// Push each end outwards to the exact crossing, so a gate is not quantized away by the spacing.
 	auto refine = [&](float good, float bad)
 	{
 		for (int i = 0; i < kStepClipRefineIters; ++i)
@@ -437,26 +433,23 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 			continue;
 
 		EdgeLine shared = EdgeOfPlane(a, conn.planeA);
-		bool fromA = shared.valid && ClipLineByWalls(shared, b, nullptr);
+				bool fromA = shared.valid && ClipLineByWalls(shared, b, nullptr);
 
-		// It is the same wall from either side, but only one side may have bound planes that close
-		// it off: a wedge under a ramp is capped by its sloped ceiling, so its own edge line runs to
-		// infinity and EdgeOfPlane rejects it. Take the line from whichever neighbour bounds it.
-		if (!fromA)
-		{
-			shared = EdgeOfPlane(b, conn.planeB);
-			if (shared.valid && !ClipLineByWalls(shared, a, nullptr))
-				shared.valid = false;
-		}
+				if (!fromA)
+				{
+					shared = EdgeOfPlane(b, conn.planeB);
+					if (shared.valid && !ClipLineByWalls(shared, a, nullptr))
+						shared.valid = false;
+				}
 
-		if (shared.valid && (!floorAt || maxStep <= 0.f ||
-			ClipLineByStep(shared, conn.areaA, conn.areaB, floorAt, maxStep)))
-		{
-			Vector inwardA = fromA ? shared.inward
-				: Vector(-shared.inward.x, -shared.inward.y, 0.f);
+				if (shared.valid && (!floorAt || maxStep <= 0.f ||
+					ClipLineByStep(shared, conn.areaA, conn.areaB, floorAt, maxStep)))
+				{
+					Vector inwardA = fromA ? shared.inward
+						: Vector(-shared.inward.x, -shared.inward.y, 0.f);
 
-			conn.gateA = GateFromEdge(shared, a, inwardA);
-			conn.gateB = GateFromEdge(shared, b, Vector(-inwardA.x, -inwardA.y, 0.f));
+					conn.gateA = GateFromEdge(shared, a, inwardA);
+					conn.gateB = GateFromEdge(shared, b, Vector(-inwardA.x, -inwardA.y, 0.f));
 			continue;
 		}
 

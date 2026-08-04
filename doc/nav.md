@@ -307,10 +307,16 @@ Builds waypoint sequence from area/connection path:
 **BuildAreaGates** - builds edgeGates for all bound planes
 
 **BuildConnectionGates** - for walk connections: finds shared face, builds gates on both sides; falls back to pre-built edgeGates
+- A shared wall between two areas runs the full length of the boundary, but only the stretch where the two floors meet within a step is actually crossable -- the rest is a cliff face. Narrows [lo, hi] to the longest run that a walker can step across, and reports whether anything survived.
+- Push each end outwards to the exact crossing, so a gate is not quantized away by the spacing.
+- It is the same wall from either side, but only one side may have bound planes that close it off: a wedge under a ramp is capped by its sloped ceiling, so its own edge line runs to infinity and EdgeOfPlane rejects it. Take the line from whichever neighbour bounds it.
 
 **ConnectionCrossing** - midpoint of gates (or launchPos for non-walk)
 
 ## waypoint_plan.h
+
+### PlanFloorFn
+Samples the walkable floor of one area at a 2D point. Returns false where the area has no floor there. PlanArea only models a single floor plane, so callers that know the real geometry (navgen) supply this to keep gates off the parts of a shared wall where the two floors are a cliff apart.
 
 ### PlanArea
 - `boundPlanes` - inward-facing planes (for prism: footprint walls + z-slab)

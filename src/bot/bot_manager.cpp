@@ -303,7 +303,7 @@ void PrintWaypoints()
 				SERVER_PRINT(line);
 			}
 		}
-			}
+	}
 
-			} // namespace BotManager
+}
 

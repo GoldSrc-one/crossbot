@@ -88,6 +88,30 @@ resolution) and `PointInArea` (spawn/target resolution) both returned nothing an
 - Whole-face portal (`PortalSharesWholeFace`): portal area ≈ both face areas (2% tolerance)
 - Partial-face: `SeamIsWalkable` at portal midpoint (step ≤ 18)
 
+### Seam Walkability Detail
+The step filter samples the portal span at 8 points (configurable) and keeps the connection if *any* point is walkable (step ≤ 18). What is printed with `--dump-steps` is the shallowest crossing found: area pair, where it is, both floor heights, the step, and each chosen floor face's normal z and 2D offset from the query point. A nonzero offset means `FloorFaceUnder` fell back to its nearest face instead of finding a containing one.
+
+### Portal Walkability Test (SeamIsWalkable)
+The stretch of the segment a + ab * t, t in [0, 1], whose XY projection lies within `epsilon` of this face's XY footprint. Windings are convex, so that stretch is one interval, found by clipping the parameter range against each edge's outward half-plane. The epsilon is what makes the answer stable: a portal lies on a leaf boundary, so the segment routinely runs exactly along a floor face's edge, and without slack whether the face counts would come down to floating-point luck.
+
+Parallel to this edge: the segment is either wholly inside the half-plane or wholly out.
+
+The smallest vertical gap between the two floors anywhere along the segment, i.e. the friendliest place to step from one to the other. Each floor face is a plane, so wherever the same pair of faces applies both heights are linear in t and their difference is too; the set of applicable faces only changes at the ends of the spans above. So the gap is piecewise linear with known breakpoints and its minimum is attained at one of them or at a sign change - there is nothing to sample.
+
+Where two faces abut, both are candidates along the shared stretch and the minimum is taken over the pairs as well. That is the same existential question the caller is asking - is there anywhere a bot can step across - and it replaces a tie broken by face iteration order.
+
+`valid` is false when no stretch of the segment has floor on both sides. That is a different answer from "the step is large", and the two callers want opposite things from it, so it is left to them.
+
+One sided over the whole stretch, so the closest approach is at an end.
+
+The floors cross somewhere in here, so they meet exactly.
+
+A wedge closed off by a sloped ceiling (the crawlspace under a ramp) ends where the ceiling meets the floor, and no near-vertical plane records that -- so the gate builder cannot see the end of it from the bound planes alone. Reporting "no floor here" outside the real floor footprint keeps gates inside the area they belong to.
+
+No floor on both sides anywhere along the portal is not the same as a big step, and there is nothing to judge the connection on, so it stays.
+
+Refusing to merge on missing information is the safe direction, so unlike the connection filter this treats "no floor on either side" as not walkable.
+
 ### Processing Order
 Candidates sorted by portal area descending (larger portals first). Each candidate attempts to absorb as many neighbors as possible via `sharedPortals` chain.
 
@@ -183,6 +207,30 @@ For each leaf:
 
 ### ComputeSupportedFloor
 Vertical probe from floor face downward against clip hull + blocking volumes.
+
+### Edge Coverage Recording
+Records the stretch of the edge a + ab * t, t in [0, 1], that the segment c -> d lies along. Only collinear segments cover anything; ones that merely cross the edge's line contribute nothing.
+
+### Edge Support Classification
+True when the whole edge either abuts one of `peers` or runs along the leaf's own floor boundary, i.e. no part of it is an edge the leaf has to be cut along. The supported windings tile the floor exactly, so whatever lies past an uncovered stretch belongs to some other class of floor by construction - no probing needed. Coverage is per-stretch rather than per-edge because one edge is routinely both: the strip of upper floor beside a ramp opening meets its neighbour along part of the edge and overhangs the ramp along the rest, and only the overhanging part must be cut away.
+
+### Duplicate Cut Plane Prevention
+Two support patches that meet along an edge each want to cut there, once from either side. Clipping a polytope twice by the same plane leaves it with two coincident faces, which double-counts in Polytope::Volume and gives the portal builder a phantom second face to match against, so a plane goes in the cut list only once regardless of which side asked for it.
+
+### Support Probe Direction
+Straight down, not along the face normal. PM_WalkMove drops the hull vertically by stepsize to step up, PM_AirMove drops it vertically by 1 when falling. The probe matches that: dest[2] += stepsize to step up, dest[2] -= stepsize to drop, wherever the floor is tilted. Probing along the normal would drop the patch along its slope, sliding 12.7 sideways, testing solidity in the wrong place. The probe starts at the already dropped patch, so take the next step from there.
+
+### Tilted Floor Face Rescue
+A tilted floor face only means anything over the XY region it actually covers; past any edge its plane is extrapolation, climbing away from the real surface. The contour it crosses sits wherever the two slopes balance. Between two 45 degree faces, further on gentle slopes it sits further out. The fragment is rescued where the drop below it is a wall: solid riser gives. Where the carve cuts the patch in half, neither half is the original face - the patch is extrapolation.
+
+### Level Face Rescue
+A level face is different and is rescued as floor: the whole face, which is a standing origin wherever the ground within stepsize below is even. This is also what connects a platform to a ramp descending out of it: hull expansion lifts the ramp's plane 16 * tan(slope) above the platform's, so the leaf over the ramp sits under the platform's floor plane rather than beside it, and the two only overlap through this band.
+
+### Lowest Floor Face Selection
+Every floor face of the leaf, not just the lowest one. A leaf beside a ramp holds both the flat ground at the ramp's foot and the ramp itself, and taking the lowest picks the ground - which is real floor everywhere, yields no cuts, and leaves the ramp face untested however far it extends past the surface it belongs to.
+
+### Direct vs Stepped Patch Cutting
+A directly supported patch only has to be cut out where it stops being directly supported, so an edge it shares with another direct patch is a seam and stays uncut. A stepped patch gets cut out along its whole outline instead: the leaf's floor is not the real floor anywhere in it, and neighbouring stepped patches sit at their own heights - two treads of a staircase share an edge that is a step, not a seam.
 
 ## stand_classifier.cpp
 

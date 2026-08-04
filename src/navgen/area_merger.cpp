@@ -51,11 +51,6 @@ bool IsFloorFace(const Face &f)
 	return f.plane.normal.z > kFloorNormalZ && f.winding.size() >= 3;
 }
 
-// The stretch of the segment a + ab * t, t in [0, 1], whose XY projection lies within `epsilon` of
-// this face's XY footprint. Windings are convex, so that stretch is one interval, found by clipping
-// the parameter range against each edge's outward half-plane. The epsilon is what makes the answer
-// stable: a portal lies on a leaf boundary, so the segment routinely runs exactly along a floor
-// face's edge, and without slack whether the face counts would come down to floating-point luck.
 bool FloorFaceSpan(const Face &f, const Vec3 &a, const Vec3 &ab, double epsilon, double &lo, double &hi)
 {
 	double area2 = 0.0;
@@ -83,26 +78,25 @@ bool FloorFaceSpan(const Face &f, const Vec3 &a, const Vec3 &ab, double epsilon,
 		n = n * (1.0 / len);
 
 		double num = epsilon - ((a.x - p.x) * n.x + (a.y - p.y) * n.y);
-		double den = ab.x * n.x + ab.y * n.y;
+				double den = ab.x * n.x + ab.y * n.y;
 
-		// Parallel to this edge: the segment is either wholly inside the half-plane or wholly out.
-		if (std::fabs(den) < 1e-12)
-		{
-			if (num < 0.0)
-				return false;
-			continue;
-		}
+				if (std::fabs(den) < 1e-12)
+				{
+					if (num < 0.0)
+						return false;
+					continue;
+				}
 
-		if (den > 0.0)
-			hi = std::min(hi, num / den);
-		else
-			lo = std::max(lo, num / den);
+				if (den > 0.0)
+					hi = std::min(hi, num / den);
+				else
+					lo = std::max(lo, num / den);
 
-		if (lo > hi)
-			return false;
-	}
+				if (lo > hi)
+					return false;
+			}
 
-	return true;
+			return true;
 }
 
 struct FloorSpan
@@ -140,18 +134,6 @@ struct StepAcross
 	const Face *floorB = nullptr;
 };
 
-// The smallest vertical gap between the two floors anywhere along the segment, i.e. the friendliest
-// place to step from one to the other. Each floor face is a plane, so wherever the same pair of faces
-// applies both heights are linear in t and their difference is too; the set of applicable faces only
-// changes at the ends of the spans above. So the gap is piecewise linear with known breakpoints and
-// its minimum is attained at one of them or at a sign change - there is nothing to sample.
-//
-// Where two faces abut, both are candidates along the shared stretch and the minimum is taken over
-// the pairs as well. That is the same existential question the caller is asking - is there anywhere
-// a bot can step across - and it replaces a tie broken by face iteration order.
-//
-// `valid` is false when no stretch of the segment has floor on both sides. That is a different answer
-// from "the step is large", and the two callers want opposite things from it, so it is left to them.
 StepAcross MinStepAcross(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB)
 {
 	Vec3 ab = pointB - pointA;
@@ -202,14 +184,12 @@ StepAcross MinStepAcross(const Polytope &a, const Polytope &b, const Vec3 &point
 
 				if ((d0 <= 0.0) == (d1 <= 0.0) && d0 != 0.0 && d1 != 0.0)
 				{
-					// One sided over the whole stretch, so the closest approach is at an end.
 					bool atStart = std::fabs(d0) <= std::fabs(d1);
 					step = atStart ? std::fabs(d0) : std::fabs(d1);
 					t = atStart ? t0 : t1;
 				}
 				else
 				{
-					// The floors cross somewhere in here, so they meet exactly.
 					double denom = d0 - d1;
 					if (std::fabs(denom) > 1e-12)
 						t = t0 + (t1 - t0) * (d0 / denom);
@@ -388,25 +368,21 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 	{
 		planConns[i].areaA = static_cast<uint32_t>(conns[i].areaA);
 		planConns[i].areaB = static_cast<uint32_t>(conns[i].areaB);
-		planConns[i].planeA = planeIndex(conns[i].planeA);
-		planConns[i].planeB = planeIndex(conns[i].planeB);
-		planConns[i].connType = conns[i].connType;
-	}
+				planConns[i].planeA = planeIndex(conns[i].planeA);
+				planConns[i].planeB = planeIndex(conns[i].planeB);
+				planConns[i].connType = conns[i].connType;
+			}
 
-	// A wedge closed off by a sloped ceiling (the crawlspace under a ramp) ends where the ceiling
-	// meets the floor, and no near-vertical plane records that -- so the gate builder cannot see the
-	// end of it from the bound planes alone. Reporting "no floor here" outside the real floor
-	// footprint keeps gates inside the area they belong to.
-	auto floorAt = [&](uint32_t areaId, float x, float y, float &zOut)
-	{
-		if (static_cast<size_t>(areaId) >= areas.size())
-			return false;
-		const Face *floor = FloorFaceUnder(areas[areaId].polytope, x, y);
-		if (!floor || Distance2DToWinding(floor->winding, x, y) > kFloorFootprintTolerance)
-			return false;
-		zOut = static_cast<float>(FloorHeightAt(*floor, x, y));
-		return true;
-	};
+			auto floorAt = [&](uint32_t areaId, float x, float y, float &zOut)
+			{
+				if (static_cast<size_t>(areaId) >= areas.size())
+					return false;
+				const Face *floor = FloorFaceUnder(areas[areaId].polytope, x, y);
+				if (!floor || Distance2DToWinding(floor->winding, x, y) > kFloorFootprintTolerance)
+					return false;
+				zOut = static_cast<float>(FloorHeightAt(*floor, x, y));
+				return true;
+			};
 
 	NavPlan::BuildConnectionGates(planAreas, planConns, floorAt, static_cast<float>(kStepHeight));
 
@@ -482,26 +458,24 @@ size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<M
 			static_cast<size_t>(c.areaA) >= areas.size() || static_cast<size_t>(c.areaB) >= areas.size())
 		{
 			kept.push_back(c);
-			continue;
-		}
+						continue;
+					}
 
-		// No floor on both sides anywhere along the portal is not the same as a big step, and there is
-		// nothing to judge the connection on, so it stays.
-		StepAcross step = MinStepAcross(areas[static_cast<size_t>(c.areaA)].polytope,
-			areas[static_cast<size_t>(c.areaB)].polytope, c.pointA, c.pointB);
+					StepAcross step = MinStepAcross(areas[static_cast<size_t>(c.areaA)].polytope,
+						areas[static_cast<size_t>(c.areaB)].polytope, c.pointA, c.pointB);
 
-		if (!step.valid || step.step <= maxStep)
-		{
-			kept.push_back(c);
-			continue;
-		}
+					if (!step.valid || step.step <= maxStep)
+					{
+						kept.push_back(c);
+						continue;
+					}
 
-		if (dump)
-		{
-			double zA = FloorHeightAt(*step.floorA, step.at.x, step.at.y);
-			double zB = FloorHeightAt(*step.floorB, step.at.x, step.at.y);
-			double distA = Distance2DToWinding(step.floorA->winding, step.at.x, step.at.y);
-			double distB = Distance2DToWinding(step.floorB->winding, step.at.x, step.at.y);
+					if (dump)
+					{
+						double zA = FloorHeightAt(*step.floorA, step.at.x, step.at.y);
+						double zB = FloorHeightAt(*step.floorB, step.at.x, step.at.y);
+						double distA = Distance2DToWinding(step.floorA->winding, step.at.x, step.at.y);
+						double distB = Distance2DToWinding(step.floorB->winding, step.at.x, step.at.y);
 			std::printf("  step drop %3d <-> %3d at (%.1f, %.1f): zA %.1f zB %.1f step %.1f "
 				"[faceA nz %.2f off %.1f, faceB nz %.2f off %.1f]\n",
 				c.areaA, c.areaB, step.at.x, step.at.y, zA, zB, step.step,
@@ -722,8 +696,6 @@ bool PortalSharesWholeFace(double portalArea, double faceAreaA, double faceAreaB
 		std::fabs(portalArea - faceAreaB) <= kCoverageTolerance * faceAreaB;
 }
 
-// Refusing to merge on missing information is the safe direction, so unlike the connection filter
-// this treats "no floor on either side" as not walkable.
 bool SeamIsWalkable(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB,
 	double maxStep)
 {
