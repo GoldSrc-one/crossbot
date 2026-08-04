@@ -1,7 +1,9 @@
 #include "floor_support.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 
 #include "clipnode_tree.h"
 
@@ -13,9 +15,10 @@ namespace
 
 constexpr double kFloorNormalZ = 0.7;
 constexpr double kSupportProbeDepth = 1.0;
-constexpr double kSeamProbeDist = 2.0;
-constexpr double kSeamProbeSpacing = 8.0;
-constexpr int kMaxSeamProbes = 128;
+constexpr double kCollinearEpsilon = 0.1;
+constexpr double kMinRimLength = 0.1;
+constexpr double kPlaneNormalEpsilon = 1e-4;
+constexpr double kPlaneDistEpsilon = 0.01;
 constexpr double kOnBoundaryEpsilon = 0.1;
 constexpr double kMinFragmentVolume = 1.0;
 constexpr double kMinSupportedArea = 1.0;
@@ -142,33 +145,87 @@ bool VerticalPlaneThroughEdge(const Vec3 &a, const Vec3 &b, Plane &out)
 namespace
 {
 
-// True when solid butts up against the whole outside of this edge, i.e. the edge is a seam left by
-// decomposing one continuous floor into windings rather than the rim of a hole. One edge can be both:
-// the strip of upper floor beside a ramp opening meets its neighbour along part of the edge and
-// overhangs the ramp along the rest, so probing the midpoint alone would call the whole thing a seam
-// and leave the overhang uncut. Any non-solid sample makes it a rim.
-bool EdgeIsSeam(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
-	const Vec3 &a, const Vec3 &b, const Vec3 &outward, const Vec3 &down)
+using Span = std::pair<double, double>;
+
+// Records the stretch of the edge a + ab * t, t in [0, 1], that the segment c -> d lies along. Only
+// collinear segments cover anything; ones that merely cross the edge's line contribute nothing.
+void AddCoverage(const Vec3 &a, const Vec3 &ab, double lenSq, const Vec3 &c, const Vec3 &d,
+	std::vector<Span> &spans)
 {
-	Vec3 edge = b - a;
-	double len = edge.Length();
+	double tc = (c - a).Dot(ab) / lenSq;
+	double td = (d - a).Dot(ab) / lenSq;
 
-	int probes = static_cast<int>(len / kSeamProbeSpacing);
-	if (probes < 1)
-		probes = 1;
-	if (probes > kMaxSeamProbes)
-		probes = kMaxSeamProbes;
+	if ((c - (a + ab * tc)).Length() > kCollinearEpsilon)
+		return;
+	if ((d - (a + ab * td)).Length() > kCollinearEpsilon)
+		return;
 
-	Vec3 offset = outward * kSeamProbeDist - down;
+	double lo = std::max(std::min(tc, td), 0.0);
+	double hi = std::min(std::max(tc, td), 1.0);
+	if (hi > lo)
+		spans.emplace_back(lo, hi);
+}
 
-	for (int i = 0; i < probes; ++i)
+void AddWindingCoverage(const Winding &w, const Vec3 &a, const Vec3 &ab, double lenSq,
+	std::vector<Span> &spans)
+{
+	for (size_t i = 0; i < w.size(); ++i)
+		AddCoverage(a, ab, lenSq, w[i], w[(i + 1) % w.size()], spans);
+}
+
+// True when the whole edge either abuts one of `peers` or runs along the leaf's own floor boundary,
+// i.e. no part of it is an edge the leaf has to be cut along. The supported windings tile the floor
+// exactly, so whatever lies past an uncovered stretch belongs to some other class of floor by
+// construction - no probing needed. Coverage is per-stretch rather than per-edge because one edge is
+// routinely both: the strip of upper floor beside a ramp opening meets its neighbour along part of the
+// edge and overhangs the ramp along the rest, and only the overhanging part must be cut away.
+bool EdgeIsCovered(const std::vector<Winding> *peers, size_t self, const Winding &floorWinding,
+	const Vec3 &a, const Vec3 &b)
+{
+	Vec3 ab = b - a;
+	double lenSq = ab.Dot(ab);
+	if (lenSq < 1e-9)
+		return true;
+
+	std::vector<Span> spans;
+	AddWindingCoverage(floorWinding, a, ab, lenSq, spans);
+	for (size_t i = 0; peers && i < peers->size(); ++i)
 	{
-		double t = (static_cast<double>(i) + 0.5) / static_cast<double>(probes);
-		if (!PointInSolid(bsp, headnode, blockers, a + edge * t + offset))
-			return false;
+		if (i != self)
+			AddWindingCoverage((*peers)[i], a, ab, lenSq, spans);
 	}
 
-	return true;
+	std::sort(spans.begin(), spans.end());
+
+	double slack = kMinRimLength / std::sqrt(lenSq);
+	double reached = 0.0;
+	for (const Span &span : spans)
+	{
+		if (span.first > reached + slack)
+			return false;
+		reached = std::max(reached, span.second);
+	}
+
+	return reached >= 1.0 - slack;
+}
+
+// Two support patches that meet along an edge each want to cut there, once from either side. Clipping
+// a polytope twice by the same plane leaves it with two coincident faces, which double-counts in
+// Polytope::Volume and gives the portal builder a phantom second face to match against, so a plane goes
+// in the cut list only once regardless of which side asked for it.
+bool HasPlane(const std::vector<Plane> &planes, const Plane &plane)
+{
+	for (const Plane &p : planes)
+	{
+		bool flipped = p.normal.Dot(plane.normal) < 0.0;
+		Vec3 n = flipped ? p.normal * -1.0 : p.normal;
+		double d = flipped ? -p.dist : p.dist;
+
+		if ((n - plane.normal).Length() < kPlaneNormalEpsilon &&
+			std::fabs(d - plane.dist) < kPlaneDistEpsilon)
+			return true;
+	}
+	return false;
 }
 
 double SupportedArea(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
@@ -278,7 +335,7 @@ double FloorHeightAt(const Face &floorFace, double x, double y)
 	return (floorFace.plane.dist - n.x * x - n.y * y) / n.z;
 }
 
-std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
+SupportedFloor ComputeSupportedFloorParts(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const Face &floorFace)
 {
 	Vec3 down = floorFace.plane.normal * kSupportProbeDepth;
@@ -288,9 +345,9 @@ std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 	for (const Vec3 &v : floorFace.winding)
 		probe.push_back(v - down);
 
-	std::vector<Winding> supported;
+	SupportedFloor out;
 	std::vector<Winding> unsupported;
-	CarveAgainstSolids(bsp, headnode, blockers, probe, supported, unsupported);
+	CarveAgainstSolids(bsp, headnode, blockers, probe, out.direct, unsupported);
 
 	Vec3 stepDrop = floorFace.plane.normal * (kStepHeight - kSupportProbeDepth);
 	for (const Winding &w : unsupported)
@@ -304,13 +361,26 @@ std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 		{
 			if (WindingArea(piece, floorFace.plane.normal) < kMinStepRescueArea)
 				continue;
-			supported.push_back(TranslateWinding(piece, stepDrop));
+			out.stepped.push_back(TranslateWinding(piece, stepDrop));
 		}
 	}
 
-	for (Winding &w : supported)
-		for (Vec3 &v : w)
-			v = v + down;
+	for (std::vector<Winding> *set : {&out.direct, &out.stepped})
+		for (Winding &w : *set)
+			for (Vec3 &v : w)
+				v = v + down;
+
+	return out;
+}
+
+std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
+	const std::vector<BlockingVolume> &blockers, const Face &floorFace)
+{
+	SupportedFloor parts = ComputeSupportedFloorParts(bsp, headnode, blockers, floorFace);
+
+	std::vector<Winding> supported = std::move(parts.direct);
+	for (Winding &w : parts.stepped)
+		supported.push_back(std::move(w));
 
 	return supported;
 }
@@ -333,37 +403,35 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 			continue;
 		}
 
-		std::vector<Winding> supported = ComputeSupportedFloor(bsp, headnode, blockers, *floor);
-		Vec3 down = floor->plane.normal * kSupportProbeDepth;
+		SupportedFloor supported = ComputeSupportedFloorParts(bsp, headnode, blockers, *floor);
 
 		std::vector<Plane> cuts;
-		for (const Winding &w : supported)
+		auto outline = [&](const Winding &w, const std::vector<Winding> *peers, size_t self)
 		{
-			Vec3 centroid = WindingCentroid(w);
-
 			for (size_t i = 0; i < w.size(); ++i)
 			{
 				const Vec3 &a = w[i];
 				const Vec3 &b = w[(i + 1) % w.size()];
-				Vec3 mid = (a + b) * 0.5;
 
-				if (OnWindingBoundary(mid, floor->winding))
+				if (EdgeIsCovered(peers, self, floor->winding, a, b))
 					continue;
 
 				Plane plane;
-				if (!VerticalPlaneThroughEdge(a, b, plane))
-					continue;
-
-				Vec3 outward = plane.normal;
-				if (outward.Dot(centroid) > plane.dist)
-					outward = outward * -1.0;
-
-				if (EdgeIsSeam(bsp, headnode, blockers, a, b, outward, down))
-					continue;
-
-				cuts.push_back(plane);
+				if (VerticalPlaneThroughEdge(a, b, plane) && !HasPlane(cuts, plane))
+					cuts.push_back(plane);
 			}
-		}
+		};
+
+		// A directly supported patch only has to be cut out where it stops being directly supported, so
+		// an edge it shares with another direct patch is a seam and stays uncut. A stepped patch gets
+		// cut out along its whole outline instead: the leaf's floor is not the real floor anywhere in
+		// it, and neighbouring stepped patches sit at their own heights - two treads of a staircase
+		// share an edge that is a step, not a seam.
+		for (size_t wi = 0; wi < supported.direct.size(); ++wi)
+			outline(supported.direct[wi], &supported.direct, wi);
+
+		for (const Winding &w : supported.stepped)
+			outline(w, nullptr, 0);
 
 		std::vector<Polytope> fragments;
 		fragments.push_back(leaf.polytope);
