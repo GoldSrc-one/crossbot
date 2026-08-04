@@ -42,6 +42,193 @@ constexpr double kPlaneWallNormalZ = 0.3;
 constexpr double kOnPlaneTolerance = 1.0;
 constexpr double kLaunchEdgeTolerance = 8.0;
 constexpr double kFloorFootprintTolerance = 1.0;
+constexpr double kFloorNormalZ = 0.7;
+constexpr double kFloorAdjacencyEpsilon = 0.5;
+constexpr double kMinStepSpan = 1e-9;
+
+bool IsFloorFace(const Face &f)
+{
+	return f.plane.normal.z > kFloorNormalZ && f.winding.size() >= 3;
+}
+
+// The stretch of the segment a + ab * t, t in [0, 1], whose XY projection lies within `epsilon` of
+// this face's XY footprint. Windings are convex, so that stretch is one interval, found by clipping
+// the parameter range against each edge's outward half-plane. The epsilon is what makes the answer
+// stable: a portal lies on a leaf boundary, so the segment routinely runs exactly along a floor
+// face's edge, and without slack whether the face counts would come down to floating-point luck.
+bool FloorFaceSpan(const Face &f, const Vec3 &a, const Vec3 &ab, double epsilon, double &lo, double &hi)
+{
+	double area2 = 0.0;
+	for (size_t i = 0; i < f.winding.size(); ++i)
+	{
+		const Vec3 &p = f.winding[i];
+		const Vec3 &q = f.winding[(i + 1) % f.winding.size()];
+		area2 += p.x * q.y - q.x * p.y;
+	}
+
+	double side = (area2 < 0.0) ? -1.0 : 1.0;
+
+	lo = 0.0;
+	hi = 1.0;
+
+	for (size_t i = 0; i < f.winding.size(); ++i)
+	{
+		const Vec3 &p = f.winding[i];
+		const Vec3 &q = f.winding[(i + 1) % f.winding.size()];
+
+		Vec3 n((q.y - p.y) * side, (p.x - q.x) * side, 0.0);
+		double len = n.Length();
+		if (len < 1e-9)
+			continue;
+		n = n * (1.0 / len);
+
+		double num = epsilon - ((a.x - p.x) * n.x + (a.y - p.y) * n.y);
+		double den = ab.x * n.x + ab.y * n.y;
+
+		// Parallel to this edge: the segment is either wholly inside the half-plane or wholly out.
+		if (std::fabs(den) < 1e-12)
+		{
+			if (num < 0.0)
+				return false;
+			continue;
+		}
+
+		if (den > 0.0)
+			hi = std::min(hi, num / den);
+		else
+			lo = std::max(lo, num / den);
+
+		if (lo > hi)
+			return false;
+	}
+
+	return true;
+}
+
+struct FloorSpan
+{
+	const Face *face = nullptr;
+	double lo = 0.0;
+	double hi = 1.0;
+};
+
+void CollectFloorSpans(const Polytope &poly, const Vec3 &a, const Vec3 &ab, std::vector<FloorSpan> &out,
+	std::vector<double> &breaks)
+{
+	for (const Face &f : poly.faces)
+	{
+		if (!IsFloorFace(f))
+			continue;
+
+		FloorSpan span;
+		if (!FloorFaceSpan(f, a, ab, kFloorAdjacencyEpsilon, span.lo, span.hi))
+			continue;
+
+		span.face = &f;
+		out.push_back(span);
+		breaks.push_back(span.lo);
+		breaks.push_back(span.hi);
+	}
+}
+
+struct StepAcross
+{
+	bool valid = false;
+	double step = 0.0;
+	Vec3 at;
+	const Face *floorA = nullptr;
+	const Face *floorB = nullptr;
+};
+
+// The smallest vertical gap between the two floors anywhere along the segment, i.e. the friendliest
+// place to step from one to the other. Each floor face is a plane, so wherever the same pair of faces
+// applies both heights are linear in t and their difference is too; the set of applicable faces only
+// changes at the ends of the spans above. So the gap is piecewise linear with known breakpoints and
+// its minimum is attained at one of them or at a sign change - there is nothing to sample.
+//
+// Where two faces abut, both are candidates along the shared stretch and the minimum is taken over
+// the pairs as well. That is the same existential question the caller is asking - is there anywhere
+// a bot can step across - and it replaces a tie broken by face iteration order.
+//
+// `valid` is false when no stretch of the segment has floor on both sides. That is a different answer
+// from "the step is large", and the two callers want opposite things from it, so it is left to them.
+StepAcross MinStepAcross(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB)
+{
+	Vec3 ab = pointB - pointA;
+
+	std::vector<FloorSpan> spansA, spansB;
+	std::vector<double> breaks{0.0, 1.0};
+	CollectFloorSpans(a, pointA, ab, spansA, breaks);
+	CollectFloorSpans(b, pointA, ab, spansB, breaks);
+
+	std::sort(breaks.begin(), breaks.end());
+
+	StepAcross best;
+	std::vector<const Face *> candA, candB;
+
+	for (size_t i = 0; i + 1 < breaks.size(); ++i)
+	{
+		double t0 = breaks[i];
+		double t1 = breaks[i + 1];
+		if (t1 - t0 < kMinStepSpan)
+			continue;
+
+		double mid = (t0 + t1) * 0.5;
+
+		candA.clear();
+		candB.clear();
+		for (const FloorSpan &s : spansA)
+			if (mid >= s.lo && mid <= s.hi)
+				candA.push_back(s.face);
+		for (const FloorSpan &s : spansB)
+			if (mid >= s.lo && mid <= s.hi)
+				candB.push_back(s.face);
+
+		if (candA.empty() || candB.empty())
+			continue;
+
+		Vec3 p0 = pointA + ab * t0;
+		Vec3 p1 = pointA + ab * t1;
+
+		for (const Face *fa : candA)
+		{
+			for (const Face *fb : candB)
+			{
+				double d0 = FloorHeightAt(*fa, p0.x, p0.y) - FloorHeightAt(*fb, p0.x, p0.y);
+				double d1 = FloorHeightAt(*fa, p1.x, p1.y) - FloorHeightAt(*fb, p1.x, p1.y);
+
+				double step = 0.0;
+				double t = t0;
+
+				if ((d0 <= 0.0) == (d1 <= 0.0) && d0 != 0.0 && d1 != 0.0)
+				{
+					// One sided over the whole stretch, so the closest approach is at an end.
+					bool atStart = std::fabs(d0) <= std::fabs(d1);
+					step = atStart ? std::fabs(d0) : std::fabs(d1);
+					t = atStart ? t0 : t1;
+				}
+				else
+				{
+					// The floors cross somewhere in here, so they meet exactly.
+					double denom = d0 - d1;
+					if (std::fabs(denom) > 1e-12)
+						t = t0 + (t1 - t0) * (d0 / denom);
+				}
+
+				if (!best.valid || step < best.step)
+				{
+					best.valid = true;
+					best.step = step;
+					best.at = pointA + ab * t;
+					best.floorA = fa;
+					best.floorB = fb;
+				}
+			}
+		}
+	}
+
+	return best;
+}
 
 double DistanceToWall(const Plane &plane, const Vec3 &p, bool &ok)
 {
@@ -284,8 +471,6 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
 	double maxStep, bool dump)
 {
-	constexpr int kStepSamples = 8;
-
 	size_t removed = 0;
 
 	std::vector<MergedConnection> kept;
@@ -300,60 +485,30 @@ size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<M
 			continue;
 		}
 
-		const Polytope &polyA = areas[static_cast<size_t>(c.areaA)].polytope;
-		const Polytope &polyB = areas[static_cast<size_t>(c.areaB)].polytope;
+		// No floor on both sides anywhere along the portal is not the same as a big step, and there is
+		// nothing to judge the connection on, so it stays.
+		StepAcross step = MinStepAcross(areas[static_cast<size_t>(c.areaA)].polytope,
+			areas[static_cast<size_t>(c.areaB)].polytope, c.pointA, c.pointB);
 
-		const Face *bestA = nullptr;
-		const Face *bestB = nullptr;
-		Vec3 bestAt = (c.pointA + c.pointB) * 0.5;
-		double bestStep = 0.0;
-		bool haveFloor = false;
-
-		for (int i = 0; i <= kStepSamples; ++i)
-		{
-			double t = static_cast<double>(i) / static_cast<double>(kStepSamples);
-			Vec3 at = c.pointA + (c.pointB - c.pointA) * t;
-
-			const Face *floorA = FloorFaceUnder(polyA, at.x, at.y);
-			const Face *floorB = FloorFaceUnder(polyB, at.x, at.y);
-			if (!floorA || !floorB)
-				continue;
-
-			double step = std::fabs(FloorHeightAt(*floorA, at.x, at.y) - FloorHeightAt(*floorB, at.x, at.y));
-			if (!haveFloor || step < bestStep)
-			{
-				haveFloor = true;
-				bestStep = step;
-				bestAt = at;
-				bestA = floorA;
-				bestB = floorB;
-			}
-		}
-
-		if (!haveFloor)
+		if (!step.valid || step.step <= maxStep)
 		{
 			kept.push_back(c);
 			continue;
 		}
 
-		if (bestStep > maxStep)
+		if (dump)
 		{
-			if (dump)
-			{
-				double zA = FloorHeightAt(*bestA, bestAt.x, bestAt.y);
-				double zB = FloorHeightAt(*bestB, bestAt.x, bestAt.y);
-				double distA = Distance2DToWinding(bestA->winding, bestAt.x, bestAt.y);
-				double distB = Distance2DToWinding(bestB->winding, bestAt.x, bestAt.y);
-				std::printf("  step drop %3d <-> %3d at (%.1f, %.1f): zA %.1f zB %.1f step %.1f "
-					"[faceA nz %.2f off %.1f, faceB nz %.2f off %.1f]\n",
-					c.areaA, c.areaB, bestAt.x, bestAt.y, zA, zB, bestStep,
-					bestA->plane.normal.z, distA, bestB->plane.normal.z, distB);
-			}
-			++removed;
-			continue;
+			double zA = FloorHeightAt(*step.floorA, step.at.x, step.at.y);
+			double zB = FloorHeightAt(*step.floorB, step.at.x, step.at.y);
+			double distA = Distance2DToWinding(step.floorA->winding, step.at.x, step.at.y);
+			double distB = Distance2DToWinding(step.floorB->winding, step.at.x, step.at.y);
+			std::printf("  step drop %3d <-> %3d at (%.1f, %.1f): zA %.1f zB %.1f step %.1f "
+				"[faceA nz %.2f off %.1f, faceB nz %.2f off %.1f]\n",
+				c.areaA, c.areaB, step.at.x, step.at.y, zA, zB, step.step,
+				step.floorA->plane.normal.z, distA, step.floorB->plane.normal.z, distB);
 		}
 
-		kept.push_back(c);
+		++removed;
 	}
 
 	conns.swap(kept);
@@ -557,8 +712,6 @@ constexpr double kConvexEpsilon = 0.5;
 constexpr double kZTouchEpsilon = 0.5;
 constexpr double kMinFootprintArea = 1.0;
 constexpr double kFootprintAreaTolerance = 0.001;
-constexpr double kFloorNormalZ = 0.7;
-constexpr double kFloorAdjacencyEpsilon = 0.5;
 constexpr size_t kMaxMergeGroups = 64;
 
 bool PortalSharesWholeFace(double portalArea, double faceAreaA, double faceAreaB)
@@ -569,16 +722,13 @@ bool PortalSharesWholeFace(double portalArea, double faceAreaA, double faceAreaB
 		std::fabs(portalArea - faceAreaB) <= kCoverageTolerance * faceAreaB;
 }
 
-bool SeamIsWalkable(const Polytope &a, const Polytope &b, const Vec3 &mid, double maxStep)
+// Refusing to merge on missing information is the safe direction, so unlike the connection filter
+// this treats "no floor on either side" as not walkable.
+bool SeamIsWalkable(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB,
+	double maxStep)
 {
-	const Face *floorA = FloorFaceUnder(a, mid.x, mid.y);
-	const Face *floorB = FloorFaceUnder(b, mid.x, mid.y);
-	if (!floorA || !floorB)
-		return false;
-
-	double zA = FloorHeightAt(*floorA, mid.x, mid.y);
-	double zB = FloorHeightAt(*floorB, mid.x, mid.y);
-	return std::fabs(zA - zB) <= maxStep;
+	StepAcross step = MinStepAcross(a, b, pointA, pointB);
+	return step.valid && step.step <= maxStep;
 }
 
 bool MergeStaysConvex(const std::vector<const Face *> &facesA, const std::vector<const Face *> &facesB,
@@ -623,11 +773,6 @@ double FootprintOverlapArea(const Winding &a, const Winding &b)
 {
 	Winding inter = IntersectCoplanarPolygons(a, b, kUp);
 	return (inter.size() < 3) ? 0.0 : WindingArea(inter, kUp);
-}
-
-bool IsFloorFace(const Face &f)
-{
-	return f.plane.normal.z > kFloorNormalZ && f.winding.size() >= 3;
 }
 
 bool FloorsAreWalkable(const Face &f, const Face &g, double maxStep)
@@ -805,9 +950,8 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 		if (!wholeFace)
 		{
-			Vec3 mid = (p.pointA + p.pointB) * 0.5;
 			if (!SeamIsWalkable(leaves[static_cast<size_t>(p.leafA)].polytope,
-					leaves[static_cast<size_t>(p.leafB)].polytope, mid, kStepHeight))
+					leaves[static_cast<size_t>(p.leafB)].polytope, p.pointA, p.pointB, kStepHeight))
 				continue;
 		}
 
