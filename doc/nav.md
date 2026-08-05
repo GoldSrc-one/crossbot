@@ -23,11 +23,112 @@ Global mesh management:
 
 ## nav_path.cpp
 
-### FindPath
-Converts NavMesh to A* graph format and runs NavAStar::FindPath.
+### PlanPath
+The NavMesh-shaped wrapper over `NavPlan::PlanRoute` — builds the connection graph once and hands it
+over. This is what `Repath` calls, and it is the only entry point into planning. There is no
+graph-only `FindPath` and no separate `BuildWaypointPath`: searching and string-pulling are the same
+pass now, so there is nothing meaningful to call in between.
 
-### BuildWaypointPath
-Delegates to NavPlan::BuildWaypointPlan for string-pulled waypoints.
+**The goal is clamped into its area, and the plan ends at the clamped point.** `Repath` resolves the
+requested point to an area and clamps it into that area's bounds; `PlanWalker::Finish` emits that
+clamped point as the `goal` waypoint. When the requested point lies outside the mesh the plan
+therefore ends legitimately short of it, and the bot reports "reached goal" from there. This is not a
+planning failure and there is nothing to fix in the planner — but it looks exactly like one from
+outside, because the caller compares against the point it asked for. `test21_teleport`'s `info_target`
+sits 112 units past the last area, so `--dump-path` ends at `goal (448,336,32)` while the entity is at
+(448,448,32), and `test_nav_goal.ps1` calls that a failure. Read the plan's last waypoint before
+believing a "stopped short" report.
+
+## plan_search.cpp
+
+### NavPlan::PlanRoute
+The planner. A* over the area graph where **each search node carries a `PlanWalker`** — the funnel
+state, the waypoints emitted so far, and the running cost. Expanding an edge copies the parent's
+walker and calls `Cross`, so the string pull, the air-move simulation and the door/teleport waypoints
+all happen *during* the search rather than after it.
+
+This exists because A* and the waypoint planner used to disagree. A* only knew a connection existed;
+the planner decided whether the bot could actually be steered across it, and an air-move edge that
+survived navgen's sampling could still fail at plan time — the funnel re-derives the launch point from
+the actual route, and re-simulating from *that* point can miss the destination area. The old answer
+was to truncate the plan and then re-run the whole search with that connection blocked, up to eight
+times. Now there is only one funnel, the one the search built, so the disagreement cannot arise.
+
+Three things follow from folding them together:
+
+**Cost is real.** `g` is the string-pulled travel time to the node's frontier (`PlanWalker::Time()`,
+pulled distance over `kNavRunSpeed`) plus each connection's `costSeconds`. The old model summed
+centroid → crossing → centroid per hop, which charged the path for visiting every centroid and so
+systematically overpriced routes through many small areas. Measured effect: on test50_stairs the
+planner now walks up through two areas where it used to crouch-jump, because the jump was never
+actually cheaper — the old cost model just could not see the walk.
+
+**Recovery is free.** An air move whose launch cannot be simulated makes `Cross` return false, so the
+edge simply does not relax and the search continues through other edges. Nothing is truncated and
+nothing is retried. `PlannedRoute::airmovesRejected` counts these.
+
+**`h` is sharper.** The heuristic is the straight line from the node's funnel frontier to the goal
+*point*, not centroid to centroid, which is why the search expands so few areas — 165 of crossfire's
+503. `g` and `h` share the same reference point (the last pending gate's midpoint, or the anchor when
+the funnel is empty), so they are consistent with each other. They are not strictly admissible: the
+real route need not cross at the midpoint, so `g + h` can overprice a node whose true crossing is off
+to one side, and the search can return a slightly suboptimal route. It cannot fail to find one.
+
+Two properties worth knowing before changing it:
+
+- **Nodes are keyed by area, not by `(area, incoming connection)`.** Two routes into one area have
+  different funnels; the cheaper one wins and the other funnel is discarded. This is the standard
+  Theta*/TA* approximation. Keying by the pair would be exact but multiplies the node count by the
+  average degree.
+- **Reopening is allowed.** Funnel-derived `g` is path-dependent, so the usual closed-set argument
+  does not hold; a node that receives a strictly better `g` is un-closed and re-pushed. `g` is
+  clamped to never fall below its parent's, which is what makes the parent chain acyclic — the
+  reconstruction loop still carries a hop guard in case that reasoning is ever broken.
+
+The goal node's walker **is** the finished plan: reconstruction calls `Finish` on it and takes its
+waypoints. There is no replay pass, so the plan cannot drift from what the search costed.
+
+### Cost of planning in the search
+Every air-move edge the search relaxes runs a full `PmSim` re-simulation, so the price is worth
+knowing. On crossfire (503 areas, 773 walk and 1377 air-move connections) one `PlanRoute` expands 165
+areas and runs 243 simulations, which navgen measures at ~0.1s against BSP-hull traces. `--dump-path`
+prints both numbers on the `debug search:` line, and `Repath` prints them with a wall-clock time.
+
+One early-out does most of the work and is worth not deleting by accident:
+
+```cpp
+if (state[current].g + kPlanCostEpsilon >= state[neighbor].g)
+    continue;
+```
+
+Because `g` is clamped to never fall below its parent's, a parent that already costs more than the
+neighbour's best cannot improve it no matter what the edge costs — so the edge can be skipped *before*
+`Cross` runs, which is what would have paid for the simulation. It cut crossfire from 402 simulations
+to 243 and the test maps from 207 to 144, with byte-identical routes on all 52 maps. It is a pure
+early-out, not an approximation.
+
+Validating on *pop* instead of on every relaxation would cut simulations further, to at most one per
+expanded node, but it needs dead-edge tracking, node resetting and re-opening already closed
+neighbours to avoid missing routes. Eager validation is correct by construction; if the runtime cost
+ever justifies that trade, these are the numbers to beat.
+
+### What the planner guarantees, and what it does not
+The search only emits an air move whose launch it re-simulated from the funnel's own launch point and
+watched land inside the destination area. So every maneuver in a returned plan is **simulable** — a
+`PmSim` run from that point at that speed reaches that area.
+
+It does not follow that the bot can *execute* it. `PmSim` starts at the exact launch point, at the
+exact yaw, already at the launch speed; the follower has to arrive there having tracked an arc chain,
+and arrives with whatever speed and heading it actually has. `NavFollow::Track` derates speed when it
+is off the chain, so a bot rejoining late reaches the launch slower than planned and undershoots. The
+plan is a proof that the route exists, not a proof that the steering will hit it.
+
+This matters when reading test results, because the two failures look nothing alike. A planning
+failure shows up in `--dump-path` — no route, a rejected connection, a plan ending somewhere
+unexpected. An execution failure has a correct plan and a bot that does not follow it, and the only
+place it shows up is the runtime. Changing the cost model can convert the second into a visible
+regression without any planning bug: a route the follower handles badly becomes cheaper, the search
+starts choosing it, and end-to-end pass rates drop while every plan remains valid.
 
 ## nav_query.cpp
 
@@ -51,21 +152,17 @@ Loads and validates .nav file:
 - Builds PlanArea boundPlanes from Area planes
 - Builds PlanConnection from Connection (including gates, launch params)
 
-## astar_graph.cpp
+## astar_graph.h
 
-### NavAStar::FindPath
-Standard A* on the area graph, **costed in seconds**:
-- Nodes = areas (centroid positions)
-- Edge cost = `(approachDist + crossDist) / kNavRunSpeed + conn.costSeconds`
-- Heuristic = `centroid-to-centroid distance / kNavRunSpeed`, in the same units so it stays admissible —
-  nothing can beat running the straight line
-- Respects one-way flags
-- Reconstructs area path and connection path
+Header only — there is no `astar_graph.cpp` any more. The search itself lives in `plan_search.cpp`;
+what remains here is the two things both it and the graph builders need: `kNavRunSpeed`, and the
+`Connection` view of an edge (endpoints, one-way flag, `costSeconds`, crossing point).
 
 `costSeconds` is **additive time**, not the distance multiplier `traverseCost` used to be. That is what lets a
-door contribute the seconds it takes to open; a multiplier had nowhere to put "wait 4 seconds". Both `g` and `h`
-scale by the same constant, so with `costSeconds` zero everywhere the routes are identical to the old model —
-only door and air-move routing changed.
+door contribute the seconds it takes to open; a multiplier had nowhere to put "wait 4 seconds". It already
+includes an air move's `flightTime` and a door area's `openSeconds` (see `ConnectionCostSeconds` in
+`area_merger.cpp`), so `PlanWalker` must not add either again — the search adds `costSeconds` once per
+edge and the walker only measures string-pulled distance.
 
 ## funnel_graph.cpp
 
@@ -197,7 +294,15 @@ the lookahead distance. Since the arc already encodes the turn, no anticipation 
 **Speed** - the profile speed at the current arclength, derated by `1 - (lateral - C)/C` (floored at
 `derateFloor`) when outside the clearance budget, so the bot slows to rejoin instead of arcing wider.
 
-**Velocity servo** - inverts one engine frame to hit the target velocity `V*`:
+**Velocity servo** - `SolveDrive`, below.
+
+**Abort** - `needRepath` once lateral exceeds `rejoinAbort` (96). Previously nothing detected being
+off-path; the corridor pull fought forever until the 10s stall timer fired.
+
+### NavFollow::SolveDrive
+Inverts one engine frame to hit a target velocity `V*`. This is the only correct way to ask the engine
+for a speed, and everything that drives the bot goes through it — `Track` for ordinary following,
+`RunAirmoveDrive` for the air-move approach.
 
 ```
 v_af      = velocity after this frame's friction   (guard |v| < 0.1, as PM_Friction does)
@@ -210,8 +315,24 @@ The second term matters: `PM_Accelerate` caps its delta at `wishspeed - v.wishdi
 form alone commands zero acceleration when already cruising at the target. One formula covers
 acceleration, braking, counter-strafing and arc tracking, saturating when a frame cannot deliver.
 
-**Abort** - `needRepath` once lateral exceeds `rejoinAbort` (96). Previously nothing detected being
-off-path; the corridor pull fought forever until the 10s stall timer fired.
+The *first* term is what makes low speeds reachable at all, and it is the reason commanding `V*`
+directly as a wish speed is a bug rather than an approximation. Below `sv_stopspeed` the engine's
+friction drop is the constant `stopspeed * f * dt` no matter how slowly the bot is moving, while
+`PM_Accelerate` delivers `sv_accelerate * wishspeed * dt`. A raw wish speed therefore does nothing
+whatsoever until
+
+```
+wishspeed > stopSpeed * groundFriction * edgeFriction / accelerate
+```
+
+which at defaults is 40 on open ground and **80 within a hull's reach of a ledge**, where the engine
+doubles friction by `sv_edgefriction`. `byRate` sidesteps the threshold entirely: the further the
+velocity is from `V*`, the larger the commanded wish speed, so the bot saturates the frame and then
+settles onto `V*`. See `doc/bot.md`, `RunAirmoveApproach`, for the dropoff this stalled.
+
+`physics.edgeFriction` is read from `sv_edgefriction` and stored, but nothing consumes it — neither
+`SolveDrive` nor `BuildPathProfile` models the ledge doubling, so both under-estimate drag near a drop.
+`byRate` covers for it in the follower; the profile just runs slightly optimistic there.
 
 ## pm_sim.cpp
 
@@ -233,8 +354,52 @@ Frame-by-frame HL player movement simulation:
 
 ## waypoint_plan.cpp
 
-### NavPlan::BuildWaypointPlan
-Builds waypoint sequence from area/connection path:
+### NavPlan::PlanWalker
+One partial route: the funnel state, the waypoints emitted so far, the running string-pulled length and
+the accumulated `costSeconds`. It is deliberately **copyable**, because the search keeps one per node and
+expanding an edge means copying the parent's and stepping it forward.
+
+- `Reset(startPoint)` — begin at a point, clearing waypoints, pending gates and stats.
+- `Cross(conn, connIndex, fromId, toId)` — advance over one connection. Returns **false** when the
+  connection cannot be planned, which today means only one thing: an air move whose launch could not be
+  simulated into the destination. The search treats that as "this edge does not exist".
+- `Finish(goalPoint, lastAreaId)` — flush the funnel to the goal and append the goal waypoint.
+- `Respeed()` — the profile pass, see "Re-speeding a launch".
+- `Time()` — committed corners plus the pull to the current frontier, over `kNavRunSpeed`, plus
+  `AddCost` contributions. This is the search's `g`.
+- `Frontier()` — the last pending gate's midpoint, or the anchor when the funnel is empty. This is what
+  the heuristic measures from.
+
+There is no batch `BuildWaypointPlan` any more; `PlanRoute` drives the walker directly and the goal
+node's walker is the finished plan.
+
+**Barriers.** Air moves, teleports, doors, buttons and triggers all flush the funnel and re-anchor it at
+the waypoint they emit. So the string pull never crosses one of them, which is why a forward search can
+resolve each air move exactly once, at the moment it traverses it, and never has to revisit an earlier
+landing.
+
+**Crouch belongs to the segment, not the corner.** `requiresCrouch` on a waypoint means "be ducked while
+travelling to it", so it has to be set on the waypoint that *ends* every pulled segment passing through a
+crouch area. It used to be read off the gate a corner sat on, which silently lost it whenever the funnel
+ran straight through a crouch gate without emitting a corner there — and running straight through is the
+normal case, since a gate only becomes a corner when the funnel constricts. `FlushFunnelTo` therefore
+walks the pending gates alongside the pulled points: a corner sitting on gate `i` ends a segment spanning
+gates `[previous corner's gate, i]`, and if any of those gates is a crouch gate the corner is flagged. It
+returns whether the *tail* segment — the one into the flush target — needs it, because that waypoint is
+pushed by the caller (run-up node, door, button, trigger, teleport trigger, goal), and each of those ORs
+the returned flag with its own area's `crouch`.
+
+The lost flag was not a cosmetic one. On `test45_slopes2` the funnel pulls straight from an air-move
+landing in area 8 to the run-up node in area 9, crossing both 8↔9 gates without a corner; area 9 is
+crouch-only, so the bot walked into the ceiling lip at exactly the 8/9 plane and stalled there. Nothing
+else on the plan said "duck": the follower's only other source is the area it is *already* standing in,
+which a standing bot can never enter.
+
+`PendingGate::crouch` is `fromArea.crouch || toArea.crouch`, so both gates of a crouch connection carry
+it and the flag lands one segment early on the way in and one segment late on the way out. The early one
+is wanted — `PM_Duck` takes 0.4 s on the ground before `FL_DUCKING` and the smaller hull appear, so a
+flag that arrived exactly at the boundary plane would be too late. The late one costs a segment held at
+`kDuckingMultiplier` speed and is the price for it.
 
 **Core data structures:**
 - `PendingGate` - funnel gate with inside area ID, target area ID, crouch flag
@@ -263,7 +428,8 @@ Builds waypoint sequence from area/connection path:
   - Computes funnel crossing on launch gate (exit side)
   - Interpolates yaw/speed from gateAYaw/gateASpeed
   - Re-simulates with PmSim; if lands in dest area, uses simulated params
-  - Falls back to baked params on miss
+  - On a miss, `Cross` returns false and the whole edge is refused — there is no fallback to the baked
+    params, because a launch that does not land where the plan says is worse than no edge at all
 - Pops arrival gate
 - Flushes funnel to launch point
 - Adds launch waypoint (airmoveLaunch=true, requiresJump, launchSpeed/Yaw, jumpBackDist, requiresCrouch, targetArea)
@@ -360,12 +526,45 @@ any arc that does not actually fit — whereas under-estimating stops the bot at
   reads it and nothing fills `PlanStats::runupTraces`.
 
 ### PlanStats
-- `airmovesSimulated`, `airmovesFromStored`, `airmovesRespeeded`, `airmovesUnplannable`, `corners`,
-  `gatesClamped`
-- `airmovesUnplannable` - launches the simulation could not make, each of which truncated the route.
+These are per-walker, so they describe the route that was kept and nothing else — a walker copied down a
+branch the search abandoned takes its counters with it.
+
+- `airmovesSimulated` - launches re-simulated and accepted, i.e. air moves actually on the plan.
+- `airmovesUnplannable` - launches the simulation could not make. On the winning walker this is always
+  0, because a failed launch means `Cross` returned false and the walker was discarded. It is the
+  per-walker view of what `PlannedRoute::airmovesRejected` counts across the whole search.
 - `airmovesRespeeded` - launches the profile could not deliver the design speed to, which were
   re-simulated at the speed it could and still landed.
+- `airmovesRespeedKept` - launches where that slower re-simulation also missed, so the design speed was
+  kept. See "Re-speeding a launch": this no longer truncates.
+- `corners`, `gatesClamped` - funnel diagnostics.
 - `runupTraces` - vestigial, never populated. `--dump-svg` still accepts them and draws nothing.
+
+`airmovesFromStored` and `unplannableConn` are gone. The first never counted what its name said — it was
+incremented on the branch that gave up, so it only ever equalled `airmovesUnplannable`. The second existed
+only so the retry loop knew which connection to block, and there is no retry loop.
+
+### Unplannable air moves
+A launch that `JumpLandsIn` cannot make (or one with no gate to funnel through, so no simulation was
+attempted) makes `Cross` return false. That is all that happens: the search drops the edge and carries
+on. Nothing is truncated, nothing is retried, and the route that comes back has no unplannable air moves
+in it by construction.
+
+This is worth stating plainly because it used to be the opposite. The planner would truncate the route at
+the bad launch, and `PlanRoute` would then block that connection and re-run A* from scratch, up to eight
+times. Both of those are gone.
+
+The failure is genuinely route-dependent, not a property of the connection alone: the stored launch comes
+from `ProbeAirMoves` sampling a whole edge, while the plan launches from wherever the funnel crosses that
+edge on *this* route. `test45_slopes2` is the worked example — a drop off the upper floor's south lip is
+sampled fine, but the funnel pulls the launch to the corner of the gate, from where the mover clears the
+lip and lands on the ramp below instead of the pit floor, outside the destination area's bound planes.
+
+Because rejection now happens inside the search, `--dump-airmove`'s `sim miss` lines are no longer
+failures — they are the edges the search routed around, and their count matches `rejected in search`
+exactly. Three on test45_slopes2, four each on test28_slopecase and test15_staircase. A connection that
+appears there on every route is still an air move `ProbeAirMoves` should not have exported, and chasing
+it belongs there rather than here.
 
 ### JumpLandsIn (waypoint_plan.cpp)
 `JumpLandsIn` re-simulates one air move at plan time and accepts it only if the mover ends up inside
@@ -399,13 +598,24 @@ The stored `exitSpeed` is what the air-move sampler launched at, not what the ro
 corner 30 units before the launch caps the bot well under it, and nothing used to notice: the plan
 asserted the design speed and the jump was validated at a speed the bot would never reach.
 
-`BuildWaypointPlan` therefore builds a probe `PlanProfile` over its own finished waypoint list before
-returning. `ProfileReachAtWaypoint` reads the forward pass's achieved speed on the segment ending at
+`PlanWalker::Respeed` therefore builds a probe `PlanProfile` over the finished waypoint list.
+`ProfileReachAtWaypoint` reads the forward pass's achieved speed on the segment ending at
 each launch — the arc fit, the backward braking pass and the acceleration integral all folded into one
 number — and if it falls short of the design speed by more than `kPlanAirmoveRespeedEps`, the jump is
-re-simulated at that speed. The landing waypoint moves to wherever it actually lands. If it no longer
-lands in the destination area the route truncates at the run-up node, same as any other unplannable
-launch. The yaw needs no adjustment: the last leg is straight along the launch heading by construction.
+re-simulated at that speed. The landing waypoint moves to wherever it actually lands. The yaw needs no
+adjustment: the last leg is straight along the launch heading by construction.
+
+**A slower jump that no longer lands does not truncate the route.** The design speed is kept and
+`airmovesRespeedKept` counts it. Truncating here was the last place a complete plan could still be cut
+short, and with the retry loop gone there is nothing left to recover it — a jump the bot may come up
+short on beats a plan that stops dead in the middle of the map, and the follower already has
+`launchSimFailed` to reason about. In practice this branch has never fired: `airmovesRespeeded` and
+`airmovesRespeedKept` are both 0 on all 52 test maps and on crossfire, because the profile has so far
+always delivered the design speed.
+
+This is also why the search does not carry an incremental reach-speed estimate. Folding one into
+`PlanWalker` would let launches be simulated at the right speed the first time, but it would change
+launch speeds on every map to replace a pass that never fires.
 
 Only one iteration runs. The node's own position depends on the design speed, and the funnel was
 already string-pulled through it, so re-placing it from the re-speeded result would invalidate the
@@ -421,8 +631,8 @@ Two corners of the profile are what make the number meaningful, and both had to 
 
 - `BuildAreaGates(PlanArea&)` - fills edgeGates from boundPlanes
 - `BuildConnectionGates(areas, conns)` - builds shared face gates
-- `ConnectionCrossing(areas, conn)` - crossing point for A* cost
-- `BuildWaypointPlan(...)` - main entry point
+- `ConnectionCrossing(areas, conn)` - crossing point, still stored on the graph edge
+- `PlanWalker` - the entry point; `NavPlan::PlanRoute` drives it
 
 ## nav_format.h
 
@@ -446,7 +656,8 @@ plus a z-slab rather than its true faces.
 ## pm_sim.h
 
 ### PmPhysics
-- `accelerate`, `groundFriction`, `stopSpeed` - sv_accelerate, sv_friction and sv_stopspeed. Only the ground phase uses them; air movement is governed by airAccelerate and its own 30-unit wish cap.
+- `accelerate`, `groundFriction`, `stopSpeed` - sv_accelerate, sv_friction and sv_stopspeed. `PmSimulator` never reads them; they are carried for `BuildPathProfile` and `NavFollow::SolveDrive`, which are where ground physics is actually modelled.
+- `edgeFriction` - sv_edgefriction. Read, stored, and consumed by nothing. See `NavFollow::SolveDrive`.
 - `friction` - pmove->friction, the per-entity multiplier. Not sv_friction.
 
 ### PmSimulator
@@ -455,14 +666,19 @@ plus a z-slab rather than its true faces.
 
 ## pm_sim.cpp
 
-### Friction
-PM_Friction. Only the horizontal speed matters here because the caller zeroes velocity[2] while on the ground, so the drop is applied to the ground speed alone.
+### Step
+One frame of **airborne** movement only: gravity, the pending jump impulse, `AirAccelerate`, `FlyMove`,
+`CatagorizePosition`. There is no `PM_Friction` and no ground accelerator anywhere in this file.
 
-### Accelerate
-PM_Accelerate. Unlike the air variant there is no 30-unit cap on the wish speed, so commanding a lower speed really does hold the mover at that speed once friction balances it.
+That is the right shape for what the simulator is for — proving where a launch lands — but it is the
+reason a plan can assert an air move the bot cannot begin. `JumpLandsIn` starts the mover *at* the launch
+point already travelling at the launch speed; nothing simulates the run-up, so a launch speed the bot
+cannot accelerate to on the ground is indistinguishable from one it can. The ground approach is checked
+by `BuildPathProfile` instead, which does model friction and braking, and executed by
+`NavFollow::SolveDrive`.
 
 ### FlyMove
 Reaching here with i == numplanes means the loop above found no single plane the velocity could slide along, which is PM_FlyMove's "go along the crease" case. The early break out of that loop already stored the sliding velocity, so it must not fall in here -- testing i != numplanes instead zeroes the velocity of every successful slide.
 
-### PM_PlayerMove
-PM_PlayerMove rubs friction off before the move and then hands the ground and the air to different accelerators. The air one caps its wish speed at 30, so it can only ever nudge a trajectory; the ground one does not, which is what makes a run-up controllable at all.
+### AirAccelerate
+PM_AirAccelerate, wish speed capped at 30, so it can only ever nudge a trajectory in flight.

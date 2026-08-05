@@ -717,28 +717,6 @@ void ApplyPassable(Area &area, const std::vector<PassableVolume> &passables, int
 
 }
 
-MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves,
-	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables)
-{
-	MergeResult result;
-	result.areas.reserve(leaves.size());
-	for (const ExtractedLeaf &leaf : leaves)
-	{
-		Area area;
-		area.id = static_cast<int>(result.areas.size());
-		area.memberLeafIds.push_back(leaf.id);
-		area.polytope = leaf.polytope;
-		for (const Face &f : area.polytope.faces)
-			AddPlaneUnique(area.boundPlanes, f.plane);
-		if (LeafIsCrouch(isCrouchLeaf, leaf.id))
-			area.areaFlags |= crossbot_nav::NAV_AREA_CROUCH;
-		ApplyPassable(area, passables, leaf.passableIndex);
-		result.areas.push_back(std::move(area));
-	}
-
-	return result;
-}
-
 namespace
 {
 
@@ -746,9 +724,7 @@ constexpr double kCoverageTolerance = 0.02;
 constexpr double kConvexEpsilon = 0.5;
 constexpr double kZTouchEpsilon = 0.5;
 constexpr double kMinFootprintArea = 1.0;
-constexpr double kFootprintAreaTolerance = 0.001;
 constexpr double kMinSharedFaceArea = 1.0;
-constexpr size_t kMaxMergeGroups = 64;
 
 bool PortalSharesWholeFace(double portalArea, double faceAreaA, double faceAreaB)
 {
@@ -828,17 +804,6 @@ bool MergedFloorStaysWalkable(const std::vector<const Face *> &facesA, const std
 		}
 	}
 	return true;
-}
-
-bool UnionFootprintIsConvex(const Winding &a, const Winding &b, const Winding &merged)
-{
-	double areaA = WindingArea(a, kUp);
-	double areaB = WindingArea(b, kUp);
-	double areaMerged = WindingArea(merged, kUp);
-	double covered = areaA + areaB - FootprintOverlapArea(a, b);
-
-	double tolerance = std::max(kMinFootprintArea, kFootprintAreaTolerance * areaMerged);
-	return areaMerged - covered <= tolerance;
 }
 
 struct Bounds
@@ -1076,7 +1041,7 @@ void FindSharedFace(const Polytope &a, const Polytope &b, MergeCandidate &out)
 }
 
 MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<bool> &isCrouchLeaf,
-	const std::vector<PassableVolume> &passables, size_t *seamsOut)
+	const std::vector<PassableVolume> &passables, size_t maxMergeGroup, size_t *seamsOut)
 {
 	int n = static_cast<int>(leaves.size());
 
@@ -1144,6 +1109,55 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 				continue;
 
 			if (FootprintOverlapArea(mergedFootprint, leafFootprint[static_cast<size_t>(i)]) > kMinFootprintArea)
+				return r;
+		}
+
+		return -1;
+	};
+
+	auto memberFootprints = [&](const std::vector<int> &pending, std::vector<const Winding *> &out)
+	{
+		for (int root : pending)
+			for (int leafId : members[static_cast<size_t>(root)])
+				out.push_back(&leafFootprint[static_cast<size_t>(leafId)]);
+	};
+
+	auto CoverageOk = [&](const std::vector<int> &pending, const Winding &mergedFootprint)
+	{
+		std::vector<const Winding *> fps;
+		memberFootprints(pending, fps);
+
+		double covered = 0.0;
+		for (size_t i = 0; i < fps.size(); ++i)
+		{
+			covered += WindingArea(*fps[i], kUp);
+			for (size_t j = 0; j < i; ++j)
+				covered -= FootprintOverlapArea(*fps[i], *fps[j]);
+		}
+
+		return WindingArea(mergedFootprint, kUp) - covered <= kMinFootprintArea;
+	};
+
+	auto FirstFootprintGap = [&](const std::vector<int> &pending, const Winding &mergedFootprint)
+	{
+		std::vector<const Winding *> fps;
+		memberFootprints(pending, fps);
+
+		for (int i = 0; i < n; ++i)
+		{
+			int r = find(i);
+			if (std::find(pending.begin(), pending.end(), r) != pending.end())
+				continue;
+
+			const Winding &fp = leafFootprint[static_cast<size_t>(i)];
+			double claim = FootprintOverlapArea(mergedFootprint, fp);
+			if (claim <= kMinFootprintArea)
+				continue;
+
+			for (const Winding *member : fps)
+				claim -= FootprintOverlapArea(*member, fp);
+
+			if (claim > kMinFootprintArea)
 				return r;
 		}
 
@@ -1226,6 +1240,9 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 			while (true)
 			{
+				if (pending.size() + 1 > maxMergeGroup)
+					break;
+
 				std::vector<const MergeCandidate *> seam;
 				sharedSeams(pending, next, seam);
 
@@ -1261,9 +1278,6 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 				bool stays3DConvex = MergeStaysConvex(facesU, facesNext, kConvexEpsilon);
 				bool resultIsPrism = !stays3DConvex || isPrismU || isPrism[static_cast<size_t>(next)];
 
-				if (resultIsPrism && !UnionFootprintIsConvex(footprintU, fpNext, footprintNew))
-					break;
-
 				if (!MergedFloorStaysWalkable(floorU, floorNext, kStepHeight))
 					break;
 
@@ -1282,13 +1296,16 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 				}
 
 				int conflict = FirstSlabConflict(pending, boundsU, footprintU);
-				if (conflict < 0)
+				if (conflict < 0 && CoverageOk(pending, footprintU))
 				{
 					accepted = true;
 					break;
 				}
 
-				if (pending.size() >= kMaxMergeGroups)
+				if (conflict < 0)
+					conflict = FirstFootprintGap(pending, footprintU);
+
+				if (conflict < 0)
 					break;
 
 				std::vector<const MergeCandidate *> reachable;
@@ -1413,7 +1430,7 @@ size_t ValidateAreaFootprints(const std::vector<Area> &areas)
 		}
 
 		double gap = WalkableFootprintGapArea(area.polytope);
-		if (gap > std::max(kMinFootprintArea, kFootprintAreaTolerance * hull))
+		if (gap > kMinFootprintArea)
 		{
 			std::fprintf(stderr, "warning: area %d near (%.0f %.0f %.0f) has a concave walkable "
 				"footprint: %.1f of its %.1f convex hull has no floor under it\n",

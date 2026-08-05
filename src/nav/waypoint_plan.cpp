@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include "astar_graph.h"
 #include "funnel_graph.h"
 #include "nav_math.h"
 #include "path_profile.h"
@@ -31,17 +32,6 @@ constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
 constexpr float kPlanAirmoveRunupTime = 0.1f;
 constexpr float kPlanAirmoveRunupMin = 8.f;
 constexpr float kPlanAirmoveRespeedEps = 1.f;
-
-struct PendingLaunch
-{
-	size_t index = 0;
-	uint32_t fromId = 0, toId = 0;
-	bool jump = false;
-	bool needsCrouch = false;
-	Vector launchFloor;
-	float yaw = 0.f;
-	float designSpeed = 0.f;
-};
 
 bool PointInArea(const Vector &p, const PlanArea &area, float epsilon)
 {
@@ -221,16 +211,6 @@ float LerpYaw(float a, float b, float t)
 		d += 360.f;
 	return a + d * t;
 }
-
-struct PendingGate
-{
-	NavFunnel::Gate gate;
-
-	uint32_t insideArea = 0;
-	uint32_t toArea = 0;
-	bool crouch = false;
-	float clearance = kPlanClearance;
-};
 
 const PlanPlane *FloorPlaneOf(const PlanArea &area)
 {
@@ -541,383 +521,460 @@ Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnecti
 	return sum;
 }
 
-std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
-	const std::vector<PlanConnection> &conns, const std::vector<uint32_t> &areaPath,
-	const std::vector<uint32_t> &connPath, const Vector &startPoint, const Vector &goalPoint,
-	const PlanTraceContext *traces, PlanStats *stats)
+PlanWalker::PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces)
+	: m_areas(&areas), m_traces(traces)
 {
-	std::vector<PlanWaypoint> result;
-	result.push_back({startPoint});
+}
 
-	Vector anchorPoint = startPoint;
-	std::vector<PendingGate> pendingGates;
-	std::vector<PendingLaunch> launches;
+void PlanWalker::Reset(const Vector &startPoint)
+{
+	m_result.clear();
+	m_pendingGates.clear();
+	m_launches.clear();
 
-	auto AtPlayerHeight = [&](const Vector &floorPoint, uint32_t areaId)
+	m_anchor = startPoint;
+	m_frontier = startPoint;
+	m_committedLength = 0.f;
+	m_pendingLength = 0.f;
+	m_extraTime = 0.f;
+	m_stats = PlanStats();
+
+	m_result.push_back({startPoint});
+}
+
+float PlanWalker::Time() const
+{
+	return (m_committedLength + m_pendingLength) / NavAStar::kNavRunSpeed + m_extraTime;
+}
+
+Vector PlanWalker::AtPlayerHeight(const Vector &floorPoint, uint32_t areaId) const
+{
+	bool crouch = (areaId < m_areas->size()) && (*m_areas)[areaId].crouch;
+	return Vector(floorPoint.x, floorPoint.y, floorPoint.z + (crouch ? 0.f : kPlanStandHeight));
+}
+
+const PlanGate *PlanWalker::GateFor(const PlanConnection &conn, uint32_t insideId) const
+{
+	const PlanGate &g = (conn.areaA == insideId) ? conn.gateA : conn.gateB;
+	return g.valid ? &g : nullptr;
+}
+
+void PlanWalker::PushGateInside(const PlanConnection &conn, uint32_t insideId, uint32_t fromId,
+	uint32_t toId)
+{
+	const PlanGate *g = GateFor(conn, insideId);
+	if (!g)
+		return;
+
+	const PlanArea &fromArea = (*m_areas)[fromId];
+	const PlanArea &toArea = (*m_areas)[toId];
+
+	if (g->clamped)
+		++m_stats.gatesClamped;
+
+	PendingGate pg;
+	pg.insideArea = insideId;
+	pg.toArea = toId;
+	pg.crouch = fromArea.crouch || toArea.crouch;
+	pg.clearance = GateClearance(*g);
+	pg.gate = NavFunnel::MakeGate(g->left, g->right, toArea.centroid - fromArea.centroid);
+	m_pendingGates.push_back(pg);
+}
+
+void PlanWalker::PushGate(const PlanConnection &conn, uint32_t fromId, uint32_t toId)
+{
+	PushGateInside(conn, fromId, fromId, toId);
+	PushGateInside(conn, toId, fromId, toId);
+}
+
+std::vector<NavFunnel::PulledPoint> PlanWalker::PeekFunnel(const Vector &target) const
+{
+	std::vector<NavFunnel::Gate> gates;
+	gates.reserve(m_pendingGates.size());
+	for (const PendingGate &pg : m_pendingGates)
+		gates.push_back(pg.gate);
+
+	return NavFunnel::StringPull(m_anchor, target, gates);
+}
+
+void PlanWalker::PushWaypoint(const PlanWaypoint &wp, bool countLength)
+{
+	if (countLength && !m_result.empty())
+		m_committedLength += (wp.point - m_result.back().point).Length();
+	m_result.push_back(wp);
+}
+
+bool PlanWalker::FlushFunnelTo(const Vector &target)
+{
+	std::vector<NavFunnel::PulledPoint> pulled = PeekFunnel(target);
+
+	size_t gateCount = m_pendingGates.size();
+	size_t spanStart = 0;
+	bool tailCrouch = false;
+
+	auto SpanCrouch = [&](size_t lo, size_t hi)
 	{
-		bool crouch = (areaId < areas.size()) && areas[areaId].crouch;
-		return Vector(floorPoint.x, floorPoint.y, floorPoint.z + (crouch ? 0.f : kPlanStandHeight));
-	};
-
-	auto GateFor = [&](const PlanConnection &conn, uint32_t insideId) -> const PlanGate *
-	{
-		const PlanGate &g = (conn.areaA == insideId) ? conn.gateA : conn.gateB;
-		return g.valid ? &g : nullptr;
-	};
-
-	auto PushGateInside = [&](const PlanConnection &conn, uint32_t insideId, uint32_t fromId,
-		uint32_t toId)
-	{
-		const PlanGate *g = GateFor(conn, insideId);
-		if (!g)
-			return;
-
-		const PlanArea &fromArea = areas[fromId];
-		const PlanArea &toArea = areas[toId];
-
-		if (g->clamped && stats)
-			++stats->gatesClamped;
-
-		PendingGate pg;
-		pg.insideArea = insideId;
-		pg.toArea = toId;
-		pg.crouch = fromArea.crouch || toArea.crouch;
-		pg.clearance = GateClearance(*g);
-		pg.gate = NavFunnel::MakeGate(g->left, g->right, toArea.centroid - fromArea.centroid);
-		pendingGates.push_back(pg);
-	};
-
-	auto PushGate = [&](const PlanConnection &conn, uint32_t fromId, uint32_t toId)
-	{
-		PushGateInside(conn, fromId, fromId, toId);
-		PushGateInside(conn, toId, fromId, toId);
-	};
-
-	auto PeekFunnel = [&](const Vector &target)
-	{
-		std::vector<NavFunnel::Gate> gates;
-		gates.reserve(pendingGates.size());
-		for (const PendingGate &pg : pendingGates)
-			gates.push_back(pg.gate);
-
-		return NavFunnel::StringPull(anchorPoint, target, gates);
-	};
-
-	auto FlushFunnelTo = [&](const Vector &target)
-	{
-		std::vector<NavFunnel::Gate> gates;
-		gates.reserve(pendingGates.size());
-		for (const PendingGate &pg : pendingGates)
-			gates.push_back(pg.gate);
-
-		std::vector<NavFunnel::PulledPoint> pulled = NavFunnel::StringPull(anchorPoint, target, gates);
-
-		for (size_t k = 1; k + 1 < pulled.size(); ++k)
-		{
-			PlanWaypoint corner;
-			corner.point = pulled[k].point;
-
-			if (pulled[k].gateIndex < pendingGates.size())
-			{
-				const PendingGate &pg = pendingGates[pulled[k].gateIndex];
-				Vector p = pulled[k].point;
-				p.z = GateFloorZ(pg.gate, p);
-				corner.point = AtPlayerHeight(p, pg.insideArea);
-				corner.requiresCrouch = pg.crouch;
-				corner.targetAreaId = static_cast<int>(pg.toArea);
-				corner.clearance = pg.clearance;
-			}
-
-			if (stats)
-				++stats->corners;
-			result.push_back(corner);
-		}
-
-		pendingGates.clear();
-	};
-
-	auto JumpLandsIn = [&](const Vector &launchFloor, float yaw, float speed, bool jump,
-		uint32_t fromAreaId, uint32_t destAreaId, bool needsCrouch, Vector &endOut,
-		const char **whyOut = nullptr) -> bool
-	{
-		endOut = launchFloor;
-		if (whyOut)
-			*whyOut = "no traces";
-
-		if (!traces)
-			return false;
-
-		const PmSim::PmTraceFn &trace = needsCrouch ? traces->duckTrace : traces->standTrace;
-		if (!trace)
-			return false;
-
-		bool duckLaunch = (fromAreaId < areas.size()) && areas[fromAreaId].crouch;
-		float launchLift = duckLaunch ? 0.f : kPlanStandHeight;
-		float zAdjust = needsCrouch ? 0.f : kPlanStandHeight;
-
-		PmSim::PmPhysics physics = traces->physics;
-		PmSim::PmSimulator sim(trace, physics);
-		sim.Begin(Vector(launchFloor.x, launchFloor.y, launchFloor.z + launchLift + kPlanLaunchLift),
-			yaw, speed, false);
-
-		auto record = [&]()
-		{
-			const Vector &p = sim.Origin();
-			endOut = Vector(p.x, p.y, p.z - zAdjust);
-		};
-
-		if (jump)
-			sim.RequestJump();
-
-		while (sim.Time() < kAirmoveSimMaxTime)
-		{
-			if (!sim.Step())
-			{
-				record();
-				if (whyOut) *whyOut = "wedged";
-				return false;
-			}
-
-			if (!sim.OnGround())
-				continue;
-
-			if (sim.Time() < kAirmoveSimMinTime)
-			{
-				sim.ResetFallSpeed();
-				continue;
-			}
-
-			record();
-			bool in = PointInArea(endOut, areas[destAreaId], 1.f);
-			if (whyOut) *whyOut = in ? "landed in area" : "landed elsewhere";
-			return in;
-		}
-
-		record();
-		if (whyOut) *whyOut = "timed out";
+		for (size_t g = lo; g < hi && g < gateCount; ++g)
+			if (m_pendingGates[g].crouch)
+				return true;
 		return false;
 	};
 
-	for (size_t i = 0; i < connPath.size(); ++i)
+	if (pulled.size() < 2)
+		tailCrouch = SpanCrouch(0, gateCount);
+
+	for (size_t k = 1; k < pulled.size(); ++k)
 	{
-		const PlanConnection &conn = conns[connPath[i]];
-		uint32_t fromId = areaPath[i];
-		uint32_t toId = areaPath[i + 1];
-		const PlanArea &fromArea = areas[fromId];
-		const PlanArea &toArea = areas[toId];
+		size_t gate = pulled[k].gateIndex;
+		bool crouch = SpanCrouch(spanStart, gate == NavFunnel::kNoGate ? gateCount : gate + 1);
+		if (gate != NavFunnel::kNoGate)
+			spanStart = gate;
 
-		if (conn.connType == crossbot_nav::CONN_TELEPORT)
+		if (k + 1 == pulled.size())
 		{
-			FlushFunnelTo(conn.launchPos);
-
-			PlanWaypoint triggerWp;
-			triggerWp.point = conn.launchPos;
-			triggerWp.requiresTeleport = true;
-			triggerWp.teleportDest = conn.landingPos;
-			result.push_back(triggerWp);
-
-			PlanWaypoint destWp;
-			destWp.point = conn.landingPos;
-			result.push_back(destWp);
-			anchorPoint = destWp.point;
-			continue;
+			tailCrouch = crouch;
+			break;
 		}
 
-		if (conn.connType == crossbot_nav::CONN_AIRMOVE)
+		PlanWaypoint corner;
+		corner.point = pulled[k].point;
+		corner.requiresCrouch = crouch;
+
+		if (gate < gateCount)
 		{
-			bool needsCrouch = (conn.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH) != 0;
-			bool jump = (conn.connFlags & crossbot_nav::CONN_FLAG_JUMP) != 0;
-
-			size_t gatesBefore = pendingGates.size();
-			PushGateInside(conn, toId, fromId, toId);
-
-			Vector launch = conn.launchPos;
-			Vector land = conn.landingPos;
-			float yaw = conn.exitAngle;
-			float launchSpeed = conn.exitSpeed;
-			bool usedSim = false;
-			Vector simFrom = launch, simTo = land, simAim = land;
-
-			if (traces && pendingGates.size() > gatesBefore)
-			{
-				std::vector<NavFunnel::PulledPoint> pulled =
-					PeekFunnel(AtPlayerHeight(conn.landingPos, toId));
-
-				std::vector<Vector> line;
-				line.reserve(pulled.size());
-				for (const NavFunnel::PulledPoint &p : pulled)
-					line.push_back(p.point);
-
-				const PlanGate *exitG = GateFor(conn, fromId);
-				Vector exitPoint = exitG
-					? NearestPointOnGate(line, exitG->left, exitG->right)
-					: conn.launchPos;
-
-				Vector entryPoint = AtPlayerHeight(conn.landingPos, toId);
-				if (pendingGates.size() > gatesBefore)
-				{
-					entryPoint = CrossingOnGate(line, pendingGates[gatesBefore].gate);
-					for (const NavFunnel::PulledPoint &p : pulled)
-						if (p.gateIndex == gatesBefore)
-							entryPoint = p.point;
-				}
-
-				float t = GateFraction(conn.gateA, exitPoint);
-				float candYaw = LerpYaw(conn.gateAYaw[0], conn.gateAYaw[1], t);
-				float candSpeed = conn.gateASpeed[0] + (conn.gateASpeed[1] - conn.gateASpeed[0]) * t;
-				if (candSpeed <= 0.f)
-					candSpeed = conn.exitSpeed;
-
-				Vector end;
-				const char *why = "";
-				simFrom = exitPoint;
-				simAim = entryPoint;
-				usedSim = JumpLandsIn(exitPoint, candYaw, candSpeed, jump, fromId, toId, needsCrouch,
-					end, &why);
-				simTo = end;
-
-				if (usedSim)
-				{
-					launch = exitPoint;
-					land = end;
-					yaw = candYaw;
-					launchSpeed = candSpeed;
-				}
-				else if (traces->dumpAirmoves)
-				{
-					std::printf("    airmove %u->%u sim miss: %s  t %.2f launch (%.1f,%.1f,%.1f) "
-						"yaw %.0f speed %.0f jump %d -> end (%.1f,%.1f,%.1f)  entry (%.1f,%.1f)\n",
-						fromId, toId, why, t, exitPoint.x, exitPoint.y, exitPoint.z, candYaw,
-						candSpeed, jump ? 1 : 0, end.x, end.y, end.z, entryPoint.x, entryPoint.y);
-				}
-			}
-
-			pendingGates.resize(gatesBefore);
-
-			if (stats)
-			{
-				if (usedSim)
-					++stats->airmovesSimulated;
-				else
-					++stats->airmovesFromStored;
-			}
-			if (!usedSim)
-			{
-				if (stats)
-					++stats->airmovesUnplannable;
-				FlushFunnelTo(AtPlayerHeight(conn.launchPos, fromId));
-				return result;
-			}
-
-			Vector launchPoint = AtPlayerHeight(launch, fromId);
-			Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
-			float runupBack = std::max(launchSpeed * kPlanAirmoveRunupTime, kPlanAirmoveRunupMin);
-
-			PlanWaypoint runupWp;
-			runupWp.point = launchPoint - launchDir * runupBack;
-			runupWp.targetAreaId = static_cast<int>(fromId);
-			FlushFunnelTo(runupWp.point);
-			result.push_back(runupWp);
-
-			PlanWaypoint launchWp;
-			launchWp.point = launchPoint;
-			launchWp.airmoveLaunch = true;
-			launchWp.requiresJump = jump;
-			launchWp.launchSpeed = launchSpeed;
-			launchWp.launchYaw = yaw;
-			launchWp.jumpBackDist = conn.jumpBackDist;
-			launchWp.launchSimulated = usedSim;
-			launchWp.launchSimFailed = !usedSim;
-			launchWp.launchSimFrom = simFrom;
-			launchWp.launchSimTo = simTo;
-			launchWp.launchSimAim = simAim;
-			launchWp.requiresCrouch = needsCrouch;
-			launchWp.targetAreaId = static_cast<int>(toId);
-
-			PendingLaunch pl;
-			pl.index = result.size();
-			pl.fromId = fromId;
-			pl.toId = toId;
-			pl.jump = jump;
-			pl.needsCrouch = needsCrouch;
-			pl.launchFloor = launch;
-			pl.yaw = yaw;
-			pl.designSpeed = launchSpeed;
-			launches.push_back(pl);
-
-			result.push_back(launchWp);
-
-			PlanWaypoint landWp;
-			landWp.point = AtPlayerHeight(land, toId);
-			landWp.targetAreaId = static_cast<int>(toId);
-			result.push_back(landWp);
-
-			anchorPoint = landWp.point;
-			continue;
+			const PendingGate &pg = m_pendingGates[gate];
+			Vector p = pulled[k].point;
+			p.z = GateFloorZ(pg.gate, p);
+			corner.point = AtPlayerHeight(p, pg.insideArea);
+			corner.targetAreaId = static_cast<int>(pg.toArea);
+			corner.clearance = pg.clearance;
 		}
 
-		bool needsStop = toArea.door || toArea.breakable;
-		if (!needsStop)
-		{
-			PushGate(conn, fromId, toId);
-			continue;
-		}
-
-		const PlanGate *doorGate = GateFor(conn, toId);
-		Vector doorPoint = doorGate
-			? Vector((doorGate->left.x + doorGate->right.x) * 0.5f,
-				(doorGate->left.y + doorGate->right.y) * 0.5f,
-				(doorGate->left.z + doorGate->right.z) * 0.5f)
-			: toArea.centroid;
-
-		PlanWaypoint wp;
-		wp.point = AtPlayerHeight(doorPoint, toId);
-		wp.requiresDoor = toArea.door;
-		wp.requiresBreak = toArea.breakable;
-		wp.doorWaitTime = toArea.doorWaitTime;
-		wp.targetAreaId = static_cast<int>(toId);
-		wp.requiresCrouch = fromArea.crouch || toArea.crouch;
-
-		if (toArea.doorActivation == crossbot_nav::DOOR_ACTIVATION_BUTTON)
-		{
-			PlanWaypoint buttonWp;
-			buttonWp.point = toArea.doorActivatorPos;
-			buttonWp.requiresButtonUse = true;
-			buttonWp.buttonWaitTime = toArea.doorWaitTime;
-			buttonWp.targetAreaId = static_cast<int>(fromId);
-			FlushFunnelTo(buttonWp.point);
-			result.push_back(buttonWp);
-			anchorPoint = buttonWp.point;
-		}
-		else if (toArea.doorActivation == crossbot_nav::DOOR_ACTIVATION_TRIGGER)
-		{
-			PlanWaypoint triggerWp;
-			triggerWp.point = toArea.doorActivatorPos;
-			triggerWp.requiresTriggerTouch = true;
-			triggerWp.targetAreaId = static_cast<int>(fromId);
-			FlushFunnelTo(triggerWp.point);
-			result.push_back(triggerWp);
-			anchorPoint = triggerWp.point;
-		}
-
-		FlushFunnelTo(wp.point);
-		result.push_back(wp);
-		anchorPoint = wp.point;
+		++m_stats.corners;
+		PushWaypoint(corner);
 	}
 
+	m_pendingGates.clear();
+	m_pendingLength = 0.f;
+	return tailCrouch;
+}
+
+void PlanWalker::UpdateFrontier()
+{
+	if (m_pendingGates.empty())
+	{
+		m_frontier = m_anchor;
+		m_pendingLength = 0.f;
+		return;
+	}
+
+	const NavFunnel::Gate &last = m_pendingGates.back().gate;
+	Vector target = (last.left + last.right) * 0.5f;
+
+	std::vector<NavFunnel::PulledPoint> pulled = PeekFunnel(target);
+
+	float len = 0.f;
+	for (size_t k = 1; k < pulled.size(); ++k)
+		len += (pulled[k].point - pulled[k - 1].point).Length();
+
+	m_frontier = target;
+	m_pendingLength = len;
+}
+
+bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, bool jump,
+	uint32_t fromAreaId, uint32_t destAreaId, bool needsCrouch, Vector &endOut,
+	const char **whyOut) const
+{
+	endOut = launchFloor;
+	if (whyOut)
+		*whyOut = "no traces";
+
+	if (!m_traces)
+		return false;
+
+	const PmSim::PmTraceFn &trace = needsCrouch ? m_traces->duckTrace : m_traces->standTrace;
+	if (!trace)
+		return false;
+
+	bool duckLaunch = (fromAreaId < m_areas->size()) && (*m_areas)[fromAreaId].crouch;
+	float launchLift = duckLaunch ? 0.f : kPlanStandHeight;
+	float zAdjust = needsCrouch ? 0.f : kPlanStandHeight;
+
+	PmSim::PmPhysics physics = m_traces->physics;
+	PmSim::PmSimulator sim(trace, physics);
+	sim.Begin(Vector(launchFloor.x, launchFloor.y, launchFloor.z + launchLift + kPlanLaunchLift),
+		yaw, speed, false);
+
+	auto record = [&]()
+	{
+		const Vector &p = sim.Origin();
+		endOut = Vector(p.x, p.y, p.z - zAdjust);
+	};
+
+	if (jump)
+		sim.RequestJump();
+
+	while (sim.Time() < kAirmoveSimMaxTime)
+	{
+		if (!sim.Step())
+		{
+			record();
+			if (whyOut) *whyOut = "wedged";
+			return false;
+		}
+
+		if (!sim.OnGround())
+			continue;
+
+		if (sim.Time() < kAirmoveSimMinTime)
+		{
+			sim.ResetFallSpeed();
+			continue;
+		}
+
+		record();
+		bool in = PointInArea(endOut, (*m_areas)[destAreaId], 1.f);
+		if (whyOut) *whyOut = in ? "landed in area" : "landed elsewhere";
+		return in;
+	}
+
+	record();
+	if (whyOut) *whyOut = "timed out";
+	return false;
+}
+
+bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t fromId, uint32_t toId)
+{
+	const PlanArea &fromArea = (*m_areas)[fromId];
+	const PlanArea &toArea = (*m_areas)[toId];
+
+	if (conn.connType == crossbot_nav::CONN_TELEPORT)
+	{
+		bool tailCrouch = FlushFunnelTo(conn.launchPos);
+
+		PlanWaypoint triggerWp;
+		triggerWp.point = conn.launchPos;
+		triggerWp.requiresTeleport = true;
+		triggerWp.teleportDest = conn.landingPos;
+		triggerWp.requiresCrouch = tailCrouch || fromArea.crouch;
+		PushWaypoint(triggerWp);
+
+		PlanWaypoint destWp;
+		destWp.point = conn.landingPos;
+		destWp.requiresCrouch = toArea.crouch;
+		PushWaypoint(destWp, false);
+
+		m_anchor = destWp.point;
+		UpdateFrontier();
+		return true;
+	}
+
+	if (conn.connType == crossbot_nav::CONN_AIRMOVE)
+	{
+		bool needsCrouch = (conn.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH) != 0;
+		bool jump = (conn.connFlags & crossbot_nav::CONN_FLAG_JUMP) != 0;
+
+		size_t gatesBefore = m_pendingGates.size();
+		PushGateInside(conn, toId, fromId, toId);
+
+		Vector launch = conn.launchPos;
+		Vector land = conn.landingPos;
+		float yaw = conn.exitAngle;
+		float launchSpeed = conn.exitSpeed;
+		bool usedSim = false;
+		Vector simFrom = launch, simTo = land, simAim = land;
+
+		if (m_traces && m_pendingGates.size() > gatesBefore)
+		{
+			std::vector<NavFunnel::PulledPoint> pulled =
+				PeekFunnel(AtPlayerHeight(conn.landingPos, toId));
+
+			std::vector<Vector> line;
+			line.reserve(pulled.size());
+			for (const NavFunnel::PulledPoint &p : pulled)
+				line.push_back(p.point);
+
+			const PlanGate *exitG = GateFor(conn, fromId);
+			Vector exitPoint = exitG
+				? NearestPointOnGate(line, exitG->left, exitG->right)
+				: conn.launchPos;
+
+			Vector entryPoint = AtPlayerHeight(conn.landingPos, toId);
+			if (m_pendingGates.size() > gatesBefore)
+			{
+				entryPoint = CrossingOnGate(line, m_pendingGates[gatesBefore].gate);
+				for (const NavFunnel::PulledPoint &p : pulled)
+					if (p.gateIndex == gatesBefore)
+						entryPoint = p.point;
+			}
+
+			float t = GateFraction(conn.gateA, exitPoint);
+			float candYaw = LerpYaw(conn.gateAYaw[0], conn.gateAYaw[1], t);
+			float candSpeed = conn.gateASpeed[0] + (conn.gateASpeed[1] - conn.gateASpeed[0]) * t;
+			if (candSpeed <= 0.f)
+				candSpeed = conn.exitSpeed;
+
+			Vector end;
+			const char *why = "";
+			simFrom = exitPoint;
+			simAim = entryPoint;
+			usedSim = JumpLandsIn(exitPoint, candYaw, candSpeed, jump, fromId, toId, needsCrouch,
+				end, &why);
+			simTo = end;
+
+			if (usedSim)
+			{
+				launch = exitPoint;
+				land = end;
+				yaw = candYaw;
+				launchSpeed = candSpeed;
+			}
+			else if (m_traces->dumpAirmoves)
+			{
+				std::printf("    airmove %u->%u sim miss: %s  t %.2f launch (%.1f,%.1f,%.1f) "
+					"yaw %.0f speed %.0f jump %d -> end (%.1f,%.1f,%.1f)  entry (%.1f,%.1f)\n",
+					fromId, toId, why, t, exitPoint.x, exitPoint.y, exitPoint.z, candYaw,
+					candSpeed, jump ? 1 : 0, end.x, end.y, end.z, entryPoint.x, entryPoint.y);
+			}
+		}
+
+		m_pendingGates.resize(gatesBefore);
+
+		if (!usedSim)
+		{
+			++m_stats.airmovesUnplannable;
+			return false;
+		}
+
+		++m_stats.airmovesSimulated;
+
+		Vector launchPoint = AtPlayerHeight(launch, fromId);
+		Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
+		float runupBack = std::max(launchSpeed * kPlanAirmoveRunupTime, kPlanAirmoveRunupMin);
+
+		PlanWaypoint runupWp;
+		runupWp.point = launchPoint - launchDir * runupBack;
+		runupWp.targetAreaId = static_cast<int>(fromId);
+		runupWp.requiresCrouch = FlushFunnelTo(runupWp.point) || fromArea.crouch;
+		PushWaypoint(runupWp);
+
+		PlanWaypoint launchWp;
+		launchWp.point = launchPoint;
+		launchWp.airmoveLaunch = true;
+		launchWp.requiresJump = jump;
+		launchWp.launchSpeed = launchSpeed;
+		launchWp.launchYaw = yaw;
+		launchWp.jumpBackDist = conn.jumpBackDist;
+		launchWp.launchSimulated = usedSim;
+		launchWp.launchSimFailed = !usedSim;
+		launchWp.launchSimFrom = simFrom;
+		launchWp.launchSimTo = simTo;
+		launchWp.launchSimAim = simAim;
+		launchWp.requiresCrouch = needsCrouch;
+		launchWp.targetAreaId = static_cast<int>(toId);
+
+		PendingLaunch pl;
+		pl.index = m_result.size();
+		pl.connIndex = connIndex;
+		pl.fromId = fromId;
+		pl.toId = toId;
+		pl.jump = jump;
+		pl.needsCrouch = needsCrouch;
+		pl.launchFloor = launch;
+		pl.yaw = yaw;
+		pl.designSpeed = launchSpeed;
+		m_launches.push_back(pl);
+
+		PushWaypoint(launchWp);
+
+		PlanWaypoint landWp;
+		landWp.point = AtPlayerHeight(land, toId);
+		landWp.targetAreaId = static_cast<int>(toId);
+		landWp.requiresCrouch = toArea.crouch;
+		PushWaypoint(landWp, false);
+
+		m_anchor = landWp.point;
+		UpdateFrontier();
+		return true;
+	}
+
+	bool needsStop = toArea.door || toArea.breakable;
+	if (!needsStop)
+	{
+		PushGate(conn, fromId, toId);
+		UpdateFrontier();
+		return true;
+	}
+
+	const PlanGate *doorGate = GateFor(conn, toId);
+	Vector doorPoint = doorGate
+		? Vector((doorGate->left.x + doorGate->right.x) * 0.5f,
+			(doorGate->left.y + doorGate->right.y) * 0.5f,
+			(doorGate->left.z + doorGate->right.z) * 0.5f)
+		: toArea.centroid;
+
+	PlanWaypoint wp;
+	wp.point = AtPlayerHeight(doorPoint, toId);
+	wp.requiresDoor = toArea.door;
+	wp.requiresBreak = toArea.breakable;
+	wp.doorWaitTime = toArea.doorWaitTime;
+	wp.targetAreaId = static_cast<int>(toId);
+	wp.requiresCrouch = fromArea.crouch || toArea.crouch;
+
+	if (toArea.doorActivation == crossbot_nav::DOOR_ACTIVATION_BUTTON)
+	{
+		PlanWaypoint buttonWp;
+		buttonWp.point = toArea.doorActivatorPos;
+		buttonWp.requiresButtonUse = true;
+		buttonWp.buttonWaitTime = toArea.doorWaitTime;
+		buttonWp.targetAreaId = static_cast<int>(fromId);
+		buttonWp.requiresCrouch = FlushFunnelTo(buttonWp.point) || fromArea.crouch;
+		PushWaypoint(buttonWp);
+		m_anchor = buttonWp.point;
+	}
+	else if (toArea.doorActivation == crossbot_nav::DOOR_ACTIVATION_TRIGGER)
+	{
+		PlanWaypoint triggerWp;
+		triggerWp.point = toArea.doorActivatorPos;
+		triggerWp.requiresTriggerTouch = true;
+		triggerWp.targetAreaId = static_cast<int>(fromId);
+		triggerWp.requiresCrouch = FlushFunnelTo(triggerWp.point) || fromArea.crouch;
+		PushWaypoint(triggerWp);
+		m_anchor = triggerWp.point;
+	}
+
+	if (FlushFunnelTo(wp.point))
+		wp.requiresCrouch = true;
+	PushWaypoint(wp);
+	m_anchor = wp.point;
+
+	UpdateFrontier();
+	return true;
+}
+
+void PlanWalker::Finish(const Vector &goalPoint, int lastAreaId)
+{
 	PlanWaypoint goalWp;
-	FlushFunnelTo(goalPoint);
+	goalWp.requiresCrouch = FlushFunnelTo(goalPoint);
 	goalWp.point = goalPoint;
-	if (!areaPath.empty())
-		goalWp.targetAreaId = static_cast<int>(areaPath.back());
-	result.push_back(goalWp);
+	if (lastAreaId >= 0)
+	{
+		goalWp.targetAreaId = lastAreaId;
+		size_t id = static_cast<size_t>(lastAreaId);
+		if (id < m_areas->size() && (*m_areas)[id].crouch)
+			goalWp.requiresCrouch = true;
+	}
+	PushWaypoint(goalWp);
+}
 
-	if (!traces || launches.empty())
-		return result;
+void PlanWalker::Respeed()
+{
+	if (!m_traces || m_launches.empty())
+		return;
 
-	PlanProfile probe = BuildPathProfile(result, traces->physics, traces);
+	PlanProfile probe = BuildPathProfile(m_result, m_traces->physics, m_traces);
 
-	for (const PendingLaunch &pl : launches)
+	for (const PendingLaunch &pl : m_launches)
 	{
 		float reached = ProfileReachAtWaypoint(probe, pl.index);
 		if (reached <= 0.f || reached >= pl.designSpeed - kPlanAirmoveRespeedEps)
@@ -928,7 +985,7 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 		bool ok = JumpLandsIn(pl.launchFloor, pl.yaw, reached, pl.jump, pl.fromId, pl.toId,
 			pl.needsCrouch, end, &why);
 
-		if (traces->dumpAirmoves)
+		if (m_traces->dumpAirmoves)
 		{
 			std::printf("    airmove %u->%u respeed %.0f -> %.0f: %s -> end (%.1f,%.1f,%.1f)\n",
 				pl.fromId, pl.toId, pl.designSpeed, reached, why, end.x, end.y, end.z);
@@ -936,25 +993,15 @@ std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
 
 		if (ok)
 		{
-			result[pl.index].launchSpeed = reached;
-			result[pl.index].launchSimTo = end;
-			result[pl.index + 1].point = AtPlayerHeight(end, pl.toId);
-			if (stats)
-				++stats->airmovesRespeeded;
+			m_result[pl.index].launchSpeed = reached;
+			m_result[pl.index].launchSimTo = end;
+			m_result[pl.index + 1].point = AtPlayerHeight(end, pl.toId);
+			++m_stats.airmovesRespeeded;
 			continue;
 		}
 
-		result.resize(pl.index);
-		if (stats)
-		{
-			if (stats->airmovesSimulated > 0)
-				--stats->airmovesSimulated;
-			++stats->airmovesUnplannable;
-		}
-		break;
+		++m_stats.airmovesRespeedKept;
 	}
-
-	return result;
 }
 
 }

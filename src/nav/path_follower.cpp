@@ -21,6 +21,42 @@ float HorizDist(const Vector &a, const Vector &b)
 
 }
 
+Drive SolveDrive(const Vector &wanted, const Vector &vel, const PmSim::PmPhysics &physics)
+{
+	Drive d;
+
+	float dt = physics.frameTime;
+	float speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
+
+	float f = physics.groundFriction * physics.friction;
+	Vector afterFriction = vel;
+	afterFriction.z = 0.f;
+	if (speed >= 0.1f)
+	{
+		float drop = f * std::max(speed, physics.stopSpeed) * dt;
+		float scaled = std::max(speed - drop, 0.f) / speed;
+		afterFriction.x = vel.x * scaled;
+		afterFriction.y = vel.y * scaled;
+	}
+
+	Vector need(wanted.x - afterFriction.x, wanted.y - afterFriction.y, 0.f);
+	float needLen = std::sqrt(need.x * need.x + need.y * need.y);
+	if (needLen < 0.0001f)
+		return d;
+
+	d.wishDir = Vector(need.x / needLen, need.y / needLen, 0.f);
+
+	float rate = physics.accelerate * dt * physics.friction;
+	float along = afterFriction.x * d.wishDir.x + afterFriction.y * d.wishDir.y;
+	float byRate = (rate > 0.0001f) ? (needLen / rate) : physics.maxSpeed;
+	float byCap = along + needLen;
+
+	d.wishSpeed = std::max(byRate, byCap);
+	d.wishSpeed = std::max(0.f, std::min(physics.maxSpeed, d.wishSpeed));
+
+	return d;
+}
+
 Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vector &vel,
 	const PmSim::PmPhysics &physics, TrackState &state, const Config &cfg)
 {
@@ -94,37 +130,9 @@ Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vec
 	float target = std::min(here.speed, physics.maxSpeed) * derate;
 	d.targetSpeed = target;
 
-	Vector wanted = aimDir * target;
-
-	float f = physics.groundFriction * physics.friction;
-	Vector afterFriction = vel;
-	afterFriction.z = 0.f;
-	if (speed >= 0.1f)
-	{
-		float drop = f * std::max(speed, physics.stopSpeed) * dt;
-		float scaled = std::max(speed - drop, 0.f) / speed;
-		afterFriction.x = vel.x * scaled;
-		afterFriction.y = vel.y * scaled;
-	}
-
-	Vector need(wanted.x - afterFriction.x, wanted.y - afterFriction.y, 0.f);
-	float needLen = std::sqrt(need.x * need.x + need.y * need.y);
-	if (needLen < 0.0001f)
-	{
-		d.wishDir = aimDir;
-		d.wishSpeed = 0.f;
-		return d;
-	}
-
-	d.wishDir = Vector(need.x / needLen, need.y / needLen, 0.f);
-
-	float rate = physics.accelerate * dt * physics.friction;
-	float along = afterFriction.x * d.wishDir.x + afterFriction.y * d.wishDir.y;
-	float byRate = (rate > 0.0001f) ? (needLen / rate) : physics.maxSpeed;
-	float byCap = along + needLen;
-
-	d.wishSpeed = std::max(byRate, byCap);
-	d.wishSpeed = std::max(0.f, std::min(physics.maxSpeed, d.wishSpeed));
+	Drive solved = SolveDrive(aimDir * target, vel, physics);
+	d.wishDir = (solved.wishSpeed > 0.f) ? solved.wishDir : aimDir;
+	d.wishSpeed = solved.wishSpeed;
 
 	return d;
 }

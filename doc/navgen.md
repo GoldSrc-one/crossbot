@@ -22,14 +22,23 @@ Command-line tool with extensive debug flags:
   budget at the worst point — the headline number for whether the bot actually held its arcs.
 - `--airmove-samples <n>` - launch samples per unit edge length (default 1; 0.5 halves; 0 disables)
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
-- `--no-merge` - skip MergeAreas (debug: each BSP hull-3 leaf becomes its own area)
+- `--max-merge-group <n>` - most leaf groups one merge may fuse (default 64). `1` blocks the first
+  absorption, so nothing merges at all and each BSP hull-3 leaf becomes its own area — this replaces the
+  old `--no-merge`, whose output it reproduces exactly
 - `--no-prune` - skip PruneUnreachableAreas (debug: keep areas unreachable from any spawn)
 - `-o <path>` - write baked .nav file
 
 ### Debug Path Building
 `BuildDebugPath`:
 - Finds spawn areas (info_player_start/deathmatch) and target areas (info_target)
-- Runs A* + string-pull from first spawn to first target (or farthest area centroid)
+- Runs `NavPlan::PlanRoute` from first spawn to first target (or farthest area centroid) — the same
+  single-pass planner the runtime uses, which string-pulls and simulates air moves *during* the A*
+  search. An air move the planner cannot steer across never enters the route: the edge does not relax
+  and the search continues. The summary line counts those as `rejected in search`, and a second
+  `debug search:` line reports how many areas were expanded and how many air-move simulations that
+  cost. A connection that keeps being rejected is an air move `ProbeAirMoves` should not have exported;
+  `--dump-airmove` prints each miss with its launch, yaw, speed and where it actually landed, and its
+  count matches `rejected in search`
 - Re-simulates air moves from funnel's preferred launch point if traces available
 - Validates route stays over areas (skips air-move segments)
 - Builds the `PlanProfile` and tessellates it, so the exported route is the arc chain the bot will
@@ -57,20 +66,56 @@ Command-line tool with extensive debug flags:
 ## area_merger.cpp
 
 ### MergeAreas
-Union-find merge of leaves through walkable floor seams, with three merge modes:
+Union-find merge of leaves through walkable floor seams, with two merge modes:
 
 **1. 3D Convex Merge**
 - `MergeStaysConvex`: all vertices of B inside all planes of A, and vice versa (epsilon 0.5)
 
 **2. Prism Merge (vertical extrusion)**
-- Allowed when 3D convex fails but XY footprint union stays convex
-- `UnionFootprintIsConvex`: merged footprint area ≈ sum of parts (tolerance 0.1% of merged or 1.0)
+- Allowed when 3D convex fails but the XY footprint union stays convex
 - `MergedFloorStaysWalkable`: no internal step > 18 units between any floor face pair
+- `CoverageOk`: the group's footprint hull equals the union of its *member leaves'* footprints to within
+  1 unit². Coverage is `Σ area(fp_i) − Σ_{i<j} overlap(fp_i, fp_j)`; by Bonferroni, truncating
+  inclusion–exclusion at the pairwise terms is always a **lower bound** on the true union, so the test can
+  only reject, never falsely accept — which is what lets it work at any group size without a polygon-union
+  primitive. It iterates member leaves rather than the groups' stored hulls on purpose: a group's stored
+  footprint is a hull, and hull-of-hull compounds across successive merges
+- The 1 unit² is floating-point noise slack, not a fudge factor. It used to scale with the merged area
+  (0.1%), which on a room-sized footprint bought ~50 units² of unearned claim — enough for the hull to
+  chamfer straight across a pillar, which is exactly what test49_pyrascew used to do
 - `FirstSlabConflict`: no leaf outside group has XY overlap with merged footprint AND Z overlap with merged slab
 - Slab test evaluated against *leaves*, never groups (earlier prism can't be invalidated by later merge)
 - If slab conflict: absorbs conflicting group if a candidate seam reaches it, retries (ramp closes as whole)
 
-**3. No Merge** (--no-merge flag)
+**Growth past a non-monotone predicate.** Coverage is checked only at accept time, never as a reason to
+abandon a candidate pair. This matters because coverage is *not monotone*: on a pyramid, the ring of
+wedges plus the apex column is one convex prism, yet every proper subset of it leaves a hole and fails.
+Validating after each addition — as the merger used to — can therefore never reach the valid group, no
+matter what order candidates are tried in. Instead, when coverage fails, `FirstFootprintGap` asks which
+outside leaf claims the uncovered part of the hull and the group absorbs it, exactly as it already did for
+slab conflicts. A gap **nobody** claims means the space is solid (a wall, or the inside of a slope), and
+the merge is abandoned.
+
+`FirstFootprintGap` is `FirstSlabConflict` without the Z-overlap requirement, and that difference is load
+bearing rather than an optimisation: an apex column sits *on top of* the frustum its wedges bound, so the
+two Z ranges touch at exactly one plane and `OverlapsZ` is false. Dropping the Z test is safe because the
+`sharedSeams(...)` guard still requires a walkable floor seam into the group, which a leaf on an unrelated
+floor does not have. Keeping the two finders separate leaves `FirstSlabConflict`'s Z rule — the thing that
+stops stacked floors merging — untouched.
+
+**Group cap.** `maxMergeGroup` (`--max-merge-group`, default `kDefaultMaxMergeGroup` = 64) bounds how many
+leaf groups one merge operation may fuse. It is checked at the top of the growth loop, *before* absorbing,
+so `1` refuses even the first pair and no merging happens at all — that is why there is no separate
+"no merge" mode. Checking it after absorption instead would let a 3D-convex pair through at `1`, since
+that path accepts without ever reaching the cap.
+
+Raising the cap from `1` upwards is also the cheapest way to bisect a merge bug: it bounds *how much*
+merging it takes to reproduce, which is usually faster than reading the growth loop.
+
+**The same tolerance validates the result.** `ValidateAreaFootprints` re-measures the finished areas with
+`WalkableFootprintGapArea` and warns (`ill-formed walkable footprint`) past the same 1 unit². Keep the two
+numbers equal. When the merge test was the looser of the two, the validator could never fire on anything
+the merger had just accepted, which is how the test49_pyrascew overclaim went unreported.
 
 ### Area geometry vs exported region
 An area carries two descriptions of itself and they are not interchangeable:

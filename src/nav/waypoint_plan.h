@@ -7,6 +7,7 @@
 #include "mathlib.h"
 #include "vector.h"
 
+#include "funnel_graph.h"
 #include "nav_format.h"
 #include "pm_sim.h"
 
@@ -114,9 +115,9 @@ struct PlanTraceContext
 struct PlanStats
 {
 	size_t airmovesSimulated = 0;
-	size_t airmovesFromStored = 0;
 	size_t airmovesUnplannable = 0;
 	size_t airmovesRespeeded = 0;
+	size_t airmovesRespeedKept = 0;
 	size_t corners = 0;
 		std::vector<std::vector<Vector>> runupTraces;
 		size_t gatesClamped = 0;
@@ -131,10 +132,74 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 
 Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnection &conn);
 
-std::vector<PlanWaypoint> BuildWaypointPlan(const std::vector<PlanArea> &areas,
-	const std::vector<PlanConnection> &conns, const std::vector<uint32_t> &areaPath,
-	const std::vector<uint32_t> &connPath, const Vector &startPoint, const Vector &goalPoint,
-	const PlanTraceContext *traces = nullptr, PlanStats *stats = nullptr);
+struct PendingGate
+{
+	NavFunnel::Gate gate;
+
+	uint32_t insideArea = 0;
+	uint32_t toArea = 0;
+	bool crouch = false;
+	float clearance = kPlanClearance;
+};
+
+struct PendingLaunch
+{
+	size_t index = 0;
+	uint32_t connIndex = 0;
+	uint32_t fromId = 0, toId = 0;
+	bool jump = false;
+	bool needsCrouch = false;
+	Vector launchFloor;
+	float yaw = 0.f;
+	float designSpeed = 0.f;
+};
+
+class PlanWalker
+{
+public:
+	PlanWalker() = default;
+	PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces);
+
+	void Reset(const Vector &startPoint);
+	bool Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t fromId, uint32_t toId);
+	void Finish(const Vector &goalPoint, int lastAreaId);
+	void Respeed();
+
+	void AddCost(float seconds) { m_extraTime += seconds; }
+
+	float Time() const;
+	const Vector &Frontier() const { return m_frontier; }
+	const PlanStats &Stats() const { return m_stats; }
+	const std::vector<PlanWaypoint> &Waypoints() const { return m_result; }
+	std::vector<PlanWaypoint> TakeWaypoints() { return std::move(m_result); }
+
+private:
+	Vector AtPlayerHeight(const Vector &floorPoint, uint32_t areaId) const;
+	const PlanGate *GateFor(const PlanConnection &conn, uint32_t insideId) const;
+	void PushGateInside(const PlanConnection &conn, uint32_t insideId, uint32_t fromId, uint32_t toId);
+	void PushGate(const PlanConnection &conn, uint32_t fromId, uint32_t toId);
+	std::vector<NavFunnel::PulledPoint> PeekFunnel(const Vector &target) const;
+	bool FlushFunnelTo(const Vector &target);
+	void PushWaypoint(const PlanWaypoint &wp, bool countLength = true);
+	void UpdateFrontier();
+
+	bool JumpLandsIn(const Vector &launchFloor, float yaw, float speed, bool jump, uint32_t fromAreaId,
+		uint32_t destAreaId, bool needsCrouch, Vector &endOut, const char **whyOut) const;
+
+	const std::vector<PlanArea> *m_areas = nullptr;
+	const PlanTraceContext *m_traces = nullptr;
+	PlanStats m_stats;
+
+	std::vector<PlanWaypoint> m_result;
+	std::vector<PendingGate> m_pendingGates;
+	std::vector<PendingLaunch> m_launches;
+
+	Vector m_anchor;
+	Vector m_frontier;
+	float m_committedLength = 0.f;
+	float m_pendingLength = 0.f;
+	float m_extraTime = 0.f;
+};
 
 }
 

@@ -75,11 +75,11 @@ size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<M
 
 size_t SnapConnectionsToFloor(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 
-MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves,
-	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables);
+constexpr size_t kDefaultMaxMergeGroup = 64;
 
 MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<bool> &isCrouchLeaf,
-	const std::vector<PassableVolume> &passables, size_t *seamsOut = nullptr);
+	const std::vector<PassableVolume> &passables, size_t maxMergeGroup = kDefaultMaxMergeGroup,
+	size_t *seamsOut = nullptr);
 
 size_t BuildWalkConnections(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 

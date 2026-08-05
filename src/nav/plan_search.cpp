@@ -1,0 +1,155 @@
+#include "plan_search.h"
+
+#include <algorithm>
+#include <limits>
+#include <queue>
+
+namespace NavPlan
+{
+
+namespace
+{
+
+constexpr float kPlanCostEpsilon = 1e-4f;
+
+struct OpenEntry
+{
+	float fScore;
+	uint32_t areaId;
+};
+
+struct OpenEntryCompare
+{
+	bool operator()(const OpenEntry &a, const OpenEntry &b) const { return a.fScore > b.fScore; }
+};
+
+struct SearchNode
+{
+	PlanWalker walker;
+	float g = std::numeric_limits<float>::max();
+	int64_t parentArea = -1;
+	int64_t parentConn = -1;
+};
+
+}
+
+PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices,
+	const std::vector<NavAStar::Connection> &graphConns, const std::vector<PlanArea> &planAreas,
+	const std::vector<PlanConnection> &planConns, uint32_t startArea, uint32_t goalArea,
+	const Vector &startPoint, const Vector &goalPoint, const PlanTraceContext *traces,
+	PlanStats *stats)
+{
+	PlannedRoute result;
+
+	size_t n = planAreas.size();
+	if (startArea >= n || goalArea >= n || areaConnIndices.size() < n)
+		return result;
+
+	auto Heuristic = [&](const Vector &from)
+	{
+		return (goalPoint - from).Length() / NavAStar::kNavRunSpeed;
+	};
+
+	std::vector<SearchNode> state(n);
+	std::vector<bool> closed(n, false);
+
+	state[startArea].walker = PlanWalker(planAreas, traces);
+	state[startArea].walker.Reset(startPoint);
+	state[startArea].g = 0.f;
+
+	std::priority_queue<OpenEntry, std::vector<OpenEntry>, OpenEntryCompare> open;
+	open.push({Heuristic(startPoint), startArea});
+
+	while (!open.empty())
+	{
+		uint32_t current = open.top().areaId;
+		open.pop();
+
+		if (closed[current])
+			continue;
+		closed[current] = true;
+		++result.expansions;
+
+		if (current == goalArea)
+			break;
+
+		for (uint32_t connIdx : areaConnIndices[current])
+		{
+			if (connIdx >= graphConns.size() || connIdx >= planConns.size())
+				continue;
+
+			const NavAStar::Connection &gc = graphConns[connIdx];
+			uint32_t neighbor = (gc.areaA == current) ? gc.areaB : gc.areaA;
+
+			if (gc.oneWay && gc.areaA != current)
+				continue;
+			if (neighbor >= n)
+				continue;
+
+			if (state[current].g + kPlanCostEpsilon >= state[neighbor].g)
+				continue;
+
+			if (planConns[connIdx].connType == crossbot_nav::CONN_AIRMOVE)
+				++result.airmovesTried;
+
+			PlanWalker next = state[current].walker;
+			if (!next.Cross(planConns[connIdx], connIdx, current, neighbor))
+			{
+				++result.airmovesRejected;
+				continue;
+			}
+
+			next.AddCost(gc.costSeconds);
+
+			float g = std::max(next.Time(), state[current].g);
+			if (g + kPlanCostEpsilon >= state[neighbor].g)
+				continue;
+
+			state[neighbor].g = g;
+			state[neighbor].walker = std::move(next);
+			state[neighbor].parentArea = static_cast<int64_t>(current);
+			state[neighbor].parentConn = static_cast<int64_t>(connIdx);
+
+			closed[neighbor] = false;
+			open.push({g + Heuristic(state[neighbor].walker.Frontier()), neighbor});
+		}
+	}
+
+	if (state[goalArea].g >= std::numeric_limits<float>::max())
+		return result;
+
+	std::vector<uint32_t> areaPath, connPath;
+	uint32_t cur = goalArea;
+	size_t guard = 0;
+
+	while (cur != startArea)
+	{
+		if (state[cur].parentArea < 0 || ++guard > n)
+			return result;
+
+		areaPath.push_back(cur);
+		connPath.push_back(static_cast<uint32_t>(state[cur].parentConn));
+		cur = static_cast<uint32_t>(state[cur].parentArea);
+	}
+
+	areaPath.push_back(startArea);
+	std::reverse(areaPath.begin(), areaPath.end());
+	std::reverse(connPath.begin(), connPath.end());
+
+	PlanWalker walker = std::move(state[goalArea].walker);
+	walker.Finish(goalPoint, static_cast<int>(goalArea));
+	walker.Respeed();
+
+	result.found = true;
+	result.complete = true;
+	result.areaPath = std::move(areaPath);
+	result.connPath = std::move(connPath);
+
+	if (stats)
+		*stats = walker.Stats();
+
+	result.waypoints = walker.TakeWaypoints();
+	return result;
+}
+
+}

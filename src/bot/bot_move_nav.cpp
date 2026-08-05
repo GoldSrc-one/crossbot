@@ -2,6 +2,7 @@
 #include <meta_api.h>
 #include <in_buttons.h>
 #include <algorithm>
+#include <chrono>
 
 #include "bot_move_nav.h"
 #include "bot_move.h"
@@ -137,8 +138,26 @@ namespace
 		bot.desiredAngles = Vector(0.f, aimYaw, 0.f);
 		Vector angles = Bot_UpdateFacing(bot);
 
+		Vector wishDir = moveDir;
+		if ((pEdict->v.flags & FL_ONGROUND) != 0)
+		{
+			NavFollow::Drive solved =
+				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, BotPhysics(pEdict));
+			if (solved.wishSpeed > 0.f)
+			{
+				wishDir = solved.wishDir;
+				drive = solved.wishSpeed;
+			}
+		}
+
+		if ((pEdict->v.flags & FL_DUCKING) != 0)
+			drive /= PmSim::kDuckingMultiplier;
+		float maxSpeed = BotMaxSpeed(pEdict);
+		if (drive > maxSpeed)
+			drive = maxSpeed;
+
 		float fmove = 0.f, smove = 0.f;
-		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, wishDir, drive, fmove, smove);
 		bot.moveForward = fmove;
 		bot.moveSide = smove;
 
@@ -297,13 +316,17 @@ namespace
 		clampedGoal.y = std::max(goalArea->mins.y, std::min(goalArea->maxs.y, clampedGoal.y));
 		clampedGoal.z = std::max(goalArea->mins.z, std::min(goalArea->maxs.z, clampedGoal.z));
 
-		Nav::PathResult path = Nav::FindPath(mesh, startArea->id, goalArea->id);
+		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
+		NavPlan::PlanStats planStats;
+		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
+		Nav::PlannedPath path = Nav::PlanPath(mesh, startArea->id, goalArea->id, pEdict->v.origin,
+			clampedGoal, &traces, &planStats);
+		float planMs = std::chrono::duration<float, std::milli>(
+			std::chrono::steady_clock::now() - planBegin).count();
 		if (!path.found)
 			return false;
 
-		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
-		NavPlan::PlanStats planStats;
-		bot.waypoints = Nav::BuildWaypointPath(mesh, path, pEdict->v.origin, clampedGoal, &traces, &planStats);
+		bot.waypoints = std::move(path.waypoints);
 		bot.waypointIndex = 0;
 		bot.airmoveActive = false;
 		bot.plannedAreaPath = path.areaPath;
@@ -322,11 +345,13 @@ namespace
 			char wpMsg[512];
 			snprintf(wpMsg, sizeof(wpMsg),
 				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
-				"airmoves=%zu simulated/%zu from_stored/%zu unplannable | profile segs=%zu len=%.0f "
+				"airmoves=%zu simulated/%zu respeeded/%zu kept/%zu rejected | search %zu areas/%zu sims "
+				"in %.1fms | profile segs=%zu len=%.0f "
 				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
-				planStats.airmovesSimulated, planStats.airmovesFromStored, planStats.airmovesUnplannable,
+				planStats.airmovesSimulated, planStats.airmovesRespeeded, planStats.airmovesRespeedKept,
+				path.airmovesRejected, path.expansions, path.airmovesTried, planMs,
 				bot.followProfile.segs.size(), bot.followProfile.totalLength,
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,
 				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk);

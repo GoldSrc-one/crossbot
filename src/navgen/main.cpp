@@ -21,6 +21,7 @@
 #include "hull_defs.h"
 #include "leaf_extractor.h"
 #include "nav_file.h"
+#include "plan_search.h"
 #include "reachability.h"
 #include "stand_classifier.h"
 #include "svg_debug.h"
@@ -56,11 +57,12 @@ void PrintUsage(const char *argv0)
 		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
 		"                    edge gets 128 samples; 0.5 halves it; 0 disables air-move sampling)\n"
+		"  --max-merge-group <n> most leaf groups one merge may fuse (default %zu). 1 disables merging\n"
+		"                    entirely (debug: each BSP hull-3 leaf becomes its own area)\n"
 		"  --no-floor-split  keep leaves whose floor is not solid (debug: pre-floor-support behaviour)\n"
-		"  --no-merge        skip MergeAreas (debug only): each BSP hull-3 leaf becomes its own area\n"
 		"  --no-prune        skip PruneUnreachableAreas (debug only): keep areas unreachable from any spawn\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
-		argv0);
+		argv0, navgen::kDefaultMaxMergeGroup);
 }
 
 using navgen::kFloorNormalZ;
@@ -334,12 +336,10 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		return Vector(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z));
 	};
 
-	std::vector<NavAStar::AreaNode> nodes(merged.areas.size());
 	std::vector<NavPlan::PlanArea> planAreas(merged.areas.size());
 	for (size_t i = 0; i < merged.areas.size(); ++i)
 	{
 		Vector centroid = ToVector(merged.areas[i].polytope.Centroid());
-		nodes[i].centroid = centroid;
 		planAreas[i].centroid = centroid;
 		planAreas[i].crouch = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		planAreas[i].door = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
@@ -413,7 +413,7 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	std::vector<int> targetAreas = navgen::FindTargetAreas(entities, merged.areas, &targetPoints);
 	uint32_t goalArea = startArea;
 	bool goalFromTarget = false;
-	Vector goalPoint = nodes[startArea].centroid;
+	Vector goalPoint = planAreas[startArea].centroid;
 	if (!targetAreas.empty() && targetAreas.front() != static_cast<int>(startArea))
 	{
 		goalArea = static_cast<uint32_t>(targetAreas.front());
@@ -435,24 +435,24 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 				goalArea = static_cast<uint32_t>(i);
 			}
 		}
-		goalPoint = nodes[goalArea].centroid;
+		goalPoint = planAreas[goalArea].centroid;
 	}
 
 	if (goalArea == startArea)
 		return points;
 
-	NavAStar::GraphResult result = NavAStar::FindPath(nodes, areaConnIndices, graphConns, startArea, goalArea);
+	goalPoint = ClampToAreaBounds(goalPoint, merged.areas[goalArea].polytope);
+
+	NavPlan::PlanStats planStats;
+	NavPlan::PlannedRoute result = NavPlan::PlanRoute(areaConnIndices, graphConns, planAreas,
+		planConns, startArea, goalArea, startPoint, goalPoint, traces, &planStats);
 	if (!result.found || result.connPath.empty())
 	{
 		std::printf("debug path: no route from area %u to area %u\n", startArea, goalArea);
 		return points;
 	}
 
-	goalPoint = ClampToAreaBounds(goalPoint, merged.areas[goalArea].polytope);
-
-	NavPlan::PlanStats planStats;
-	std::vector<NavPlan::PlanWaypoint> plan = NavPlan::BuildWaypointPlan(planAreas, planConns, result.areaPath,
-		result.connPath, startPoint, goalPoint, traces, &planStats);
+	std::vector<NavPlan::PlanWaypoint> plan = std::move(result.waypoints);
 
 	NavPlan::PlanProfile profile = NavPlan::BuildPathProfile(plan,
 		traces ? traces->physics : PmSim::PmPhysics(), traces);
@@ -558,11 +558,15 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	}
 
 	std::printf("debug path: area %u -> %u via %zu connections, %zu waypoints "
-		"(%zu air moves re-simulated, %zu from stored, %zu re-speeded, %zu unplannable; %zu corners, "
+		"(%zu air moves re-simulated, %zu re-speeded, %zu re-speed kept design, "
+		"%zu rejected in search; %zu corners, "
 		"%zu gates short of full clearance, %zu segments leaving the mesh)\n",
 		startArea, goalArea, result.connPath.size(), plan.size(), planStats.airmovesSimulated,
-		planStats.airmovesFromStored, planStats.airmovesRespeeded, planStats.airmovesUnplannable,
-		planStats.corners, planStats.gatesClamped, offMesh);
+		planStats.airmovesRespeeded, planStats.airmovesRespeedKept,
+		result.airmovesRejected, planStats.corners, planStats.gatesClamped, offMesh);
+
+	std::printf("debug search: %zu areas expanded, %zu air move simulations\n", result.expansions,
+		result.airmovesTried);
 
 	std::printf("debug profile: %zu segments, %.0f units, %.1fs, %zu corners arced, "
 		"%zu slowed, %zu shrunk by trace\n",
@@ -639,8 +643,8 @@ int main(int argc, char **argv)
 	bool dumpPath = false;
 	bool dumpAirmove = false;
 	bool noFloorSplit = false;
-	bool noMerge = false;
 	bool noPrune = false;
+	size_t maxMergeGroup = navgen::kDefaultMaxMergeGroup;
 	float airmoveSamplesPerUnit = navgen::AirmoveSampleParams().samplesPerUnit;
 	int dumpPlanesAreaId = -1;
 	std::string objPath;
@@ -683,9 +687,22 @@ int main(int argc, char **argv)
 		{
 			noFloorSplit = true;
 		}
-		else if (arg == "--no-merge")
+		else if (arg == "--max-merge-group")
 		{
-			noMerge = true;
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1)
+			{
+				std::fprintf(stderr, "--max-merge-group: expected a positive integer, got \"%s\"\n", value);
+				return 1;
+			}
+			maxMergeGroup = static_cast<size_t>(parsed);
 		}
 		else if (arg == "--no-prune")
 		{
@@ -933,13 +950,12 @@ int main(int argc, char **argv)
 		}
 
 		size_t leafSeams = 0;
-		navgen::MergeResult merged = noMerge
-			? navgen::NoMerge(leaves, isCrouchLeaf, duckPassables.passable)
-			: navgen::MergeAreas(leaves, isCrouchLeaf, duckPassables.passable, &leafSeams);
+		navgen::MergeResult merged = navgen::MergeAreas(leaves, isCrouchLeaf, duckPassables.passable,
+			maxMergeGroup, &leafSeams);
 
-		std::printf("%s: %zu leaf floor seams -> %zu areas, %zu inter-area connections (%s)\n",
-			bspPath.c_str(), leafSeams, merged.areas.size(), merged.conns.size(),
-			noMerge ? "NoMerge" : "MergeAreas");
+		std::printf("%s: %zu leaf floor seams -> %zu areas, %zu inter-area connections "
+			"(MergeAreas, max group %zu)\n",
+			bspPath.c_str(), leafSeams, merged.areas.size(), merged.conns.size(), maxMergeGroup);
 
 		size_t illFormedAreas = navgen::ValidateAreaFootprints(merged.areas);
 		if (illFormedAreas > 0)
@@ -1135,7 +1151,7 @@ int main(int argc, char **argv)
 		std::vector<float> pathSegmentSpeeds;
 		NavPlan::PlanProfile pathProfile;
 		std::vector<navgen::FailedAirmove> failedAirmoves;
-		if (!objPath.empty() || !svgPath.empty() || dumpPath)
+		if (!objPath.empty() || !svgPath.empty() || dumpPath || dumpAirmove)
 		{
 
 			navgen::PM_MoveSimulator duckSim(bsp, worldModel.headnode[navgen::kHullDuck], blockers,

@@ -80,8 +80,8 @@ file(GLOB NAVGEN_SOURCES CONFIGURE_DEPENDS
 )
 
 add_executable(navgen ${NAVGEN_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/nav/astar_graph.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/funnel_graph.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/plan_search.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/waypoint_plan.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/path_profile.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/path_follower.cpp

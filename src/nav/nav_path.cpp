@@ -5,17 +5,17 @@
 namespace Nav
 {
 
-PathResult FindPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea)
+namespace
 {
-	std::vector<NavAStar::AreaNode> areas(mesh.areas.size());
-	std::vector<std::vector<uint32_t>> areaConnIndices(mesh.areas.size());
-	for (size_t i = 0; i < mesh.areas.size(); ++i)
-	{
-		areas[i].centroid = mesh.areas[i].centroid;
-		areaConnIndices[i] = mesh.areas[i].connIndices;
-	}
 
-	std::vector<NavAStar::Connection> conns(mesh.conns.size());
+void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaConnIndices,
+	std::vector<NavAStar::Connection> &conns)
+{
+	areaConnIndices.assign(mesh.areas.size(), std::vector<uint32_t>());
+	for (size_t i = 0; i < mesh.areas.size(); ++i)
+		areaConnIndices[i] = mesh.areas[i].connIndices;
+
+	conns.assign(mesh.conns.size(), NavAStar::Connection());
 	for (size_t i = 0; i < mesh.conns.size(); ++i)
 	{
 		const Connection &c = mesh.conns[i];
@@ -26,21 +26,20 @@ PathResult FindPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea)
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 		gc.costSeconds = c.costSeconds;
 	}
-
-	NavAStar::GraphResult graphResult = NavAStar::FindPath(areas, areaConnIndices, conns, startArea, goalArea);
-
-	PathResult result;
-	result.found = graphResult.found;
-	result.areaPath = std::move(graphResult.areaPath);
-	result.connPath = std::move(graphResult.connPath);
-	return result;
 }
 
-std::vector<Waypoint> BuildWaypointPath(const NavMesh &mesh, const PathResult &path, const Vector &startPoint,
-	const Vector &goalPoint, const NavPlan::PlanTraceContext *traces, NavPlan::PlanStats *stats)
+}
+
+PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
+	const Vector &startPoint, const Vector &goalPoint, const NavPlan::PlanTraceContext *traces,
+	NavPlan::PlanStats *stats)
 {
-	return NavPlan::BuildWaypointPlan(mesh.planAreas, mesh.planConns, path.areaPath, path.connPath,
-		startPoint, goalPoint, traces, stats);
+	std::vector<std::vector<uint32_t>> areaConnIndices;
+	std::vector<NavAStar::Connection> graphConns;
+	BuildGraph(mesh, areaConnIndices, graphConns);
+
+	return NavPlan::PlanRoute(areaConnIndices, graphConns, mesh.planAreas, mesh.planConns, startArea,
+		goalArea, startPoint, goalPoint, traces, stats);
 }
 
 }

@@ -1,13 +1,14 @@
 ---
 name: crossbot-navgen
-description: Geometry invariants and the debugging playbook for CrossBot's navgen nav-mesh compiler (src/navgen/, navgen.exe). Use this whenever work touches navgen — areas, leaves, floor seams, walk/air-move connections, merging, hull-3 geometry, .nav output — and especially when a nav mesh comes out wrong: phantom or missing areas, a staircase or slope that fragments, connections that should exist and don't, gateless-connection or ill-formed-footprint warnings, or an SVG/OBJ dump that looks off. Also use it before changing any navgen pipeline stage, since the stages have unwritten contracts that are easy to break silently. Triggers even when the user just names a test map (test15_staircase, test49_pyrascew, crossfire) or a dump flag (--dump-support, --dump-areas, --no-floor-split).
+description: Geometry invariants and the debugging playbook for CrossBot's navgen nav-mesh compiler (src/navgen/, navgen.exe). Use this whenever work touches navgen — areas, leaves, floor seams, walk/air-move connections, merging, hull-3 geometry, .nav output — and especially when a nav mesh comes out wrong: phantom or missing areas, a staircase or slope that fragments, connections that should exist and don't, gateless-connection or ill-formed-footprint warnings, or an SVG/OBJ dump that looks off. Also use it when a bot has no route from spawn to target at all, or an air move gets rejected on every route, since both usually mean a missing or badly sampled connection and this skill has the mesh-versus-route triage — hand off to the `crossbot-nav` skill once the mesh is cleared and the question becomes planning or steering. Also use it before changing any navgen pipeline stage, since the stages have unwritten contracts that are easy to break silently. Triggers even when the user just names a test map (test15_staircase, test49_pyrascew, crossfire) or a dump flag (--dump-support, --dump-areas, --no-floor-split, --dump-path).
 ---
 
 # navgen: geometry and debugging
 
 ## Read these first, they are not duplicated here
 
-- `AGENTS.md` — build (`& .\build.bat`, nothing else), house rules, the run/test scripts.
+- `AGENTS.md` — build (`& .\build.bat`, nothing else), house rules, the command lines.
+- `doc/testing.md` — what the sweeps and `test_nav_goal.ps1` do, and which sweep a change needs.
 - `doc/navgen.md` — what each source file does, stage by stage. The authority on behaviour.
 
 This skill is the part that isn't in either: the geometry you would otherwise re-derive, and how to
@@ -78,8 +79,8 @@ formula instead.
 16, so the upper walkable surface extends 16 *past* the block's side. The same block's side wall
 expands by 16, pushing the lower floor 16 back from it. Both land on the identical XY line. This holds
 for an 8-unit step and a 200-unit cliff alike. It is why floor seams exist at all — and why a seam on
-its own tells you nothing about whether a bot can cross. `FilterWalkConnectionsByStep` drops 198 and
-trims 5 of test15_staircase's 242 candidate seams; those are drops, not bugs. (Treat that count as a
+its own tells you nothing about whether a bot can cross. `FilterWalkConnectionsByStep` drops 199 and
+trims 4 of test15_staircase's 242 candidate seams; those are drops, not bugs. (Treat that count as a
 rough gauge, not a fixture — it moves whenever an upstream stage changes. Re-read it from the run.)
 
 **A wall can never sit on a seam.** A wall of thickness *t* with floor on both sides erodes each floor
@@ -100,6 +101,22 @@ when that fails, so whether a given ramp lands on the prism path depends on how 
 split it. Do not read the presence or absence of `prism` as a defect on its own — the same ramp can
 merge convexly on one map and as a prism on another.
 
+**A prism being non-convex is never the bug — overclaiming is.** The invariant is that the exported
+footprint hull covers *only* space the area's own floors cover, to within 1 unit². So when a merge looks
+wrong, do not measure convexity; measure the gap. Read the leaves' walkable footprints out of
+`--max-merge-group 1 --dump-planes <id>` (floor faces are the ones with `normal.z > 0.7`), take their
+convex hull, and compare its area against the sum of the parts. A hull edge that no leaf face justifies —
+typically a chamfer cutting a corner off — is the tell. That is exactly how test49_pyrascew's apex column
+was found being swallowed by 32.56 units², which is half of its 8.07×8.07 cross-section. `doc/navgen.md`
+has the coverage rule and why the tolerance is absolute rather than a fraction of the footprint.
+
+**Merged areas legitimately delete connections.** A merge turns inter-area connections into intra-area
+space, so `walk` and `air` counts falling alongside `areas` is the healthy pattern, not a loss. Judge a
+merge change by `nogate` / `illformed` / `noroute` staying flat and by `walk` not converting into `air`
+between areas that did *not* merge. Beware reading a per-area diff across two builds by id:
+`PruneUnreachableAreas` renumbers, so a regrouping shifts every id after it and makes an ordinary diff
+look like carnage.
+
 ## Conventions that are easy to get backwards
 
 **Plane normals point inward.** A region is `{p : p·n >= d}`. A leaf's *floor* has `normal.z > 0`
@@ -116,12 +133,43 @@ that this bug ate connectivity twice.
 air-move launch edges all flow from `IsFloorFace`. A floor face that is geometrically fine but
 unsupported is marked `walkable = false` and must stay that way.
 
+## First: is it the mesh, or the route?
+
+"The bot never reaches the target" reads exactly like a connectivity bug and usually is not one. Establish
+which half is broken before opening the ladder below. One command settles it:
+
+```powershell
+.\build\tools\navgen\navgen.exe maps\<map>.bsp --dump-path
+```
+
+`no route from area A to area B` is a mesh problem — the ladder below is the right tool. Anything else
+means the planner found a route, and a bot that still fails is failing to *follow* it, which is
+`path_follower.cpp` / `bot_move_nav.cpp` territory, not navgen's.
+
+There is no longer a third case where the route exists but the plan gets truncated. `NavPlan::PlanRoute`
+string-pulls and simulates air moves *inside* the A\* search, so an air move it cannot steer across never
+enters the route — the edge simply does not relax and the search continues. The `debug path:` line counts
+those as `rejected in search`, and `--dump-airmove` prints each one with its launch, yaw, speed and where
+it actually landed. **A `sim miss` is not a failure.** It is the planner declining an edge, and its count
+should equal `rejected in search`.
+
+What it *is* evidence of: a connection rejected on every route is an air move `ProbeAirMoves` should not
+have exported. The stored launch comes from sampling a whole edge, while the plan launches from wherever
+the funnel crosses that edge — usually a gate corner. That is a navgen bug even though it surfaces in the
+planner, and it belongs in `ProbeAirMoves`.
+
+Route behaviour lives in `doc/nav.md`, not `doc/navgen.md`, and the `crossbot-nav` skill carries the rest
+of this triage — how to read `crossbot_nav_status`, how to tell a steering failure from a planning one,
+and why `--dump-path` is not the route the bot actually takes. Switch to it as soon as the verdict above
+comes back "not the mesh". Sending a planner bug through the mesh ladder below costs an hour and finds
+nothing — the leaves, areas, seams and step filter will all be innocent.
+
 ## Diagnosing a bad mesh
 
 Work from the widest lens inward. Each step tells you which *stage* is at fault, which is far more
 valuable than staring at the final output.
 
-1. **Reproduce on the smallest map that shows it.** `maps/` has 51 maps built for exactly this;
+1. **Reproduce on the smallest map that shows it.** `maps/` has 52 maps built for exactly this;
    prefer a `testNN_*` over crossfire. If none isolates the defect, say so — the user builds new test
    maps readily, and a minimal repro is usually worth asking for.
 
@@ -130,8 +178,9 @@ valuable than staring at the final output.
    later stage. This one command has repeatedly turned "mysterious phantom area" into "oh, that's just
    the leaf".
 
-3. **Is it the merge?** `--no-merge` gives one area per leaf. If the defect survives, merging is
-   innocent. `--no-prune` keeps unreachable areas.
+3. **Is it the merge?** `--max-merge-group 1` gives one area per leaf. If the defect survives, merging is
+   innocent. Raising the cap (`2`, `3`, ...) then bisects *how much* merging it takes to reproduce, which
+   is usually faster than reading the growth loop. `--no-prune` keeps unreachable areas.
 
 4. **Which fragments got thrown away?** `--dump-support` prints every leaf fragment dropped as
    unsupported, with floor centroid, normal and volume. Deleted volume is a common root cause of
@@ -146,12 +195,29 @@ valuable than staring at the final output.
    `--dump-planes <id>` for one area's exact bound planes and face windings.
 
 Run `navgen.exe` with no arguments for the current flag list, and prefer it over a list from memory or
-from `AGENTS.md`. Keep it honest: the usage text has itself gone stale before — four working
+from `doc/navgen.md`. Keep it honest: the usage text has itself gone stale before — four working
 `--dump-*` flags went unlisted for a while, so "not in `--help`" briefly meant "does not exist". If you
 add a flag, add its usage line in the same edit; if a flag you expect is missing, grep the parser in
 `main.cpp` before concluding it is gone.
 
 ## Traps that have cost real time
+
+**`--dump-path` labels its last waypoint `goal` whichever waypoint that is.** The label is positional, not
+semantic, so a route that gave up 400 units short still prints a confident `goal` line — and the plan looks
+finished. Always check that waypoint's coordinates against the `info_target` origin in the `.map` rather
+than trusting the word. This is what hid the truncation on test45_slopes2, test28_slopecase and
+test15_staircase back when the planner could still truncate; the coordinate check is what caught it, and
+it is still the only thing that proves a route arrived.
+
+**Never head-limit a `--dump-conns` or `--dump-steps` dump.** Each connection prints a header line plus two
+gate lines, so `Select-Object -First 60` shows about twenty of them — and the one you are looking for is
+usually below the cut. Truncating that dump made a present-and-healthy walk connection look missing and sent
+this session hand-deriving ramp geometry for a seam that was fine. Filter to the header lines instead, which
+is both complete and shorter:
+
+```powershell
+.\build\tools\navgen\navgen.exe maps\<map>.bsp --dump-conns 2>&1 | Select-String '^  (walk|air|teleport)'
+```
 
 **Area ids are renumbered by `PruneUnreachableAreas`.** `--dump-areas` and the SVG show *post*-prune
 ids; leaf dumps and anything earlier use pre-prune numbering. The same visual area has two different
@@ -204,3 +270,24 @@ wherever they appear on a map that was previously clean.
 
 Improving one map while quietly wrecking five others is the normal failure mode here, and the sweep is
 the only thing that catches it.
+
+**The sweep measures the mesh, not the route.** `sweep.ps1` runs navgen bare, and `BuildDebugPath` only
+runs when a `--dump-path` / `--dump-obj` / `--dump-svg` / `--dump-airmove` flag asks for it — so a change
+under `src/nav/` (the search, the funnel, `PlanWalker`, the profile) produces an *empty* sweep diff no
+matter what it did to routing. Sweep those over the plan instead:
+
+```powershell
+Get-ChildItem maps\*.bsp | ForEach-Object {
+    "$($_.Name): " + ((& .\build\tools\navgen\navgen.exe $_.FullName --dump-path 2>&1 |
+        Select-String '^debug path: area|^debug search:') -join ' | ')
+} | Set-Content before_plan.txt
+```
+
+Read it for waypoint counts collapsing relative to connection counts, `rejected in search` rising, any map
+flipping to `no route`, and — on the `debug search:` line — expansions or simulations climbing, which is
+the search doing more work for the same answer. Both sweeps are needed for a change that touches a
+pipeline stage *and* the shared planner.
+
+**The summary line hides coordinate changes.** Counts can match exactly while every waypoint moved, so a
+change that reroutes without changing the shape of the plan looks like a no-op. Dump `'^  wp'` per map and
+diff that too — it is what proved the `PlanWalker` extraction was behaviour-preserving across all 52 maps.

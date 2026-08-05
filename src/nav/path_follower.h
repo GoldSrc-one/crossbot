@@ -37,6 +37,14 @@ struct Decision
 	bool onGap = false;
 };
 
+struct Drive
+{
+	Vector wishDir;
+	float wishSpeed = 0.f;
+};
+
+Drive SolveDrive(const Vector &wanted, const Vector &vel, const PmSim::PmPhysics &physics);
+
 Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vector &vel,
 	const PmSim::PmPhysics &physics, TrackState &state, const Config &cfg = {});
 

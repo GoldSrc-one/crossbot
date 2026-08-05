@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "nav_mesh.h"
+#include "plan_search.h"
 #include "waypoint_plan.h"
 
 namespace Nav
@@ -13,18 +14,11 @@ namespace Nav
 
 using Waypoint = NavPlan::PlanWaypoint;
 
-struct PathResult
-{
-	bool found = false;
-	std::vector<uint32_t> areaPath;
-	std::vector<uint32_t> connPath;
-};
+using PlannedPath = NavPlan::PlannedRoute;
 
-PathResult FindPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea);
-
-std::vector<Waypoint> BuildWaypointPath(const NavMesh &mesh, const PathResult &path, const Vector &startPoint,
-	const Vector &goalPoint, const NavPlan::PlanTraceContext *traces = nullptr,
-	NavPlan::PlanStats *stats = nullptr);
+PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
+	const Vector &startPoint, const Vector &goalPoint,
+	const NavPlan::PlanTraceContext *traces = nullptr, NavPlan::PlanStats *stats = nullptr);
 
 }
 

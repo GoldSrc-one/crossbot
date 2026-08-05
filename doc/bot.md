@@ -62,18 +62,75 @@ Main navigation-driven movement function:
 - Sets movement buttons (forward/back, left/right, duck, jump).
 - For jumps: checks on-ground, distance, facing tolerance; adds duck while rising.
 
+### RunAirmoveApproach / RunAirmoveDrive
+The steering that takes over once the tracker's `wpIndex` reaches an air-move launch waypoint. It aims
+`kAirmoveApproachLead` past the launch along the launch heading and commits when the bot is within one
+frame of the launch plane.
+
+Two things about the drive are easy to get wrong and both stalled real routes:
+
+- **The command is a target velocity, not a wish speed.** `RunAirmoveDrive` puts `drive` through
+  `NavFollow::SolveDrive` while on the ground, exactly as `Track` does. Passing `launchSpeed` straight to
+  `pfnRunPlayerMove` looks equivalent and is not: below `sv_stopspeed` the engine's friction drop is
+  constant, so a raw wish speed under `stopSpeed * friction * edgeFriction / accelerate` moves the bot
+  nowhere at all. At a ledge — which is where every dropoff launches from — `sv_edgefriction` doubles
+  that to 80 at defaults. A dropoff planned at 57 pressed at full drive and crawled at 2 u/s until the
+  stall timer repathed it, forever. `doc/nav.md` has the derivation.
+- **Ducking scales the command, so the command has to be scaled back.** `PM_Duck` multiplies
+  forwardmove/sidemove by `kDuckingMultiplier` *after* `PM_CheckParamters` has clamped them, so
+  delivering wish speed `W` while `FL_DUCKING` means commanding `W / kDuckingMultiplier` and accepting
+  that nothing above `maxspeed * kDuckingMultiplier` is reachable. `Bot_MoveNav` did this and
+  `RunAirmoveDrive` did not, so every crouched air move was driven at a third of its planned speed.
+
+`RunAirmoveFlight` keeps commanding the raw heading — no servo — because `PM_AirAccelerate` caps its wish
+speed at 30 in flight and the trajectory is already committed.
+
+**Repathing has no memory, so a maneuver the follower cannot execute becomes an unbounded loop.** Both
+repath triggers — `follow.needRepath` when lateral exceeds `rejoinAbort`, and the `kRepathInterval`
+stall timer — re-plan from the bot's current position with the full graph. Nothing records that the
+bot just failed this jump, so the planner is free to hand back a route through it again. Worse, the
+new start position can flip which route is cheapest, and the bot alternates: on test50_stairs it ran
+areas 11 → 12 → 13, missed the launch at (124,221,-124), fell back to 11, re-planned onto the
+crouch-jump 11 → 13 instead, landed in 13, missed the same launch, and repeated — `actual=` grows as
+`[11,12,13,11,12,13,...]` for the whole run. Two routes into the same dead end read as progress to
+every check the bot has. Penalising recently-failed connections across repaths is the missing piece;
+until it exists, an oscillating `actual=` list means "the follower cannot do this maneuver", not "the
+planner keeps changing its mind".
+
+A repath inside an air move's run-up leg makes this worse in a way worth recognising. `Repath` starts
+the plan at the bot's own position and `Cross` then places the run-up node a fixed distance back along
+the launch heading, so a bot that has already closed most of that distance gets a first waypoint
+*behind* it and walks backwards to reach it. The plan is not wrong — it is the same plan it would
+build from anywhere — but the bot arrives at the run-up node with no speed, which is the worst state
+to start a launch that has to build speed at a ledge. Two waypoints at the same 2D point at the head
+of the list in `crossbot_nav_status` are the tell.
+
 ## bot_manager.cpp
 
 ### AppendAreaList
 Helper to format area ID lists for debug output, truncating to 24 entries with ellipsis.
 
 ### PrintNavStatus
-Prints comprehensive bot status including:
+Backs `crossbot_nav_status`, and is the only view of what the runtime planner actually decided —
+`--dump-path` shows what navgen would plan for its own spawn/target pair, which is usually a different
+pair and often the opposite direction. Prints:
 - Origin, velocity, angles, move speeds
 - Goal state, target waypoint
 - Elapsed time vs ETA (with OVERDUE flag)
 - Planned and actual area paths (truncated)
 - Full waypoint list with jump/crouch flags
+
+The pairs that carry the diagnosis:
+- `vel` against `move` — `move` is the forward/side pair last handed to `pfnRunPlayerMove`. Large
+  `move` with `vel=(0,0,0)` is the bot pressing at full drive and not moving: it is against geometry,
+  not lost and not idle.
+- `planned=` against `actual=` — planned is the route's area sequence, actual is the areas walked.
+  Actual diverging once is a repath; actual cycling is the loop described under `Bot_MoveNav`.
+- `waypoint=i/n` against the waypoint list — which maneuver it is stuck before. `n` also reveals a
+  repath, since a fresh plan renumbers from the bot's position.
+- `hasGoal=0` with `waypoint=0/0` is ambiguous by itself: it is both "arrived and cleared the goal"
+  and "gave up". Distinguish with the distance to the goal, and remember the goal was clamped
+  (see `doc/nav.md`, `PlanPath`).
 
 ### PrintWaypoints
 Prints detailed waypoint list for each bot.
