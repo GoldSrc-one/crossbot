@@ -48,6 +48,7 @@ constexpr double kLaunchEdgeTolerance = 8.0;
 constexpr double kFloorFootprintTolerance = 1.0;
 constexpr double kFloorAdjacencyEpsilon = 0.5;
 constexpr double kMinStepSpan = 1e-9;
+constexpr double kMinSeamLength = 1.0;
 
 bool FloorFaceSpan(const Face &f, const Vec3 &a, const Vec3 &ab, double epsilon, double &lo, double &hi)
 {
@@ -123,16 +124,52 @@ void CollectFloorSpans(const Polytope &poly, const Vec3 &a, const Vec3 &ab, std:
 	}
 }
 
-struct StepAcross
+using Span = std::pair<double, double>;
+
+struct SeamSteps
 {
 	bool valid = false;
-	double step = 0.0;
+	std::vector<Span> walkable;
+	double minStep = 0.0;
 	Vec3 at;
 	const Face *floorA = nullptr;
 	const Face *floorB = nullptr;
+
+	bool CoversWholeSeam() const
+	{
+		return walkable.size() == 1 && walkable[0].first <= kMinStepSpan &&
+			walkable[0].second >= 1.0 - kMinStepSpan;
+	}
 };
 
-StepAcross MinStepAcross(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB)
+bool LinearWithin(double d0, double d1, double limit, double &loOut, double &hiOut)
+{
+	double slope = d1 - d0;
+
+	if (std::fabs(slope) < 1e-12)
+	{
+		if (std::fabs(d0) > limit)
+			return false;
+		loOut = 0.0;
+		hiOut = 1.0;
+		return true;
+	}
+
+	double sa = (limit - d0) / slope;
+	double sb = (-limit - d0) / slope;
+
+	double lo = std::max(0.0, std::min(sa, sb));
+	double hi = std::min(1.0, std::max(sa, sb));
+	if (hi <= lo)
+		return false;
+
+	loOut = lo;
+	hiOut = hi;
+	return true;
+}
+
+SeamSteps WalkableSpansAcross(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB,
+	double maxStep)
 {
 	Vec3 ab = pointB - pointA;
 
@@ -143,8 +180,9 @@ StepAcross MinStepAcross(const Polytope &a, const Polytope &b, const Vec3 &point
 
 	std::sort(breaks.begin(), breaks.end());
 
-	StepAcross best;
+	SeamSteps out;
 	std::vector<const Face *> candA, candB;
+	std::vector<Span> runs;
 
 	for (size_t i = 0; i + 1 < breaks.size(); ++i)
 	{
@@ -177,6 +215,11 @@ StepAcross MinStepAcross(const Polytope &a, const Polytope &b, const Vec3 &point
 				double d0 = FloorHeightAt(*fa, p0.x, p0.y) - FloorHeightAt(*fb, p0.x, p0.y);
 				double d1 = FloorHeightAt(*fa, p1.x, p1.y) - FloorHeightAt(*fb, p1.x, p1.y);
 
+				double lo = 0.0;
+				double hi = 0.0;
+				if (LinearWithin(d0, d1, maxStep, lo, hi))
+					runs.emplace_back(t0 + (t1 - t0) * lo, t0 + (t1 - t0) * hi);
+
 				double step = 0.0;
 				double t = t0;
 
@@ -193,19 +236,28 @@ StepAcross MinStepAcross(const Polytope &a, const Polytope &b, const Vec3 &point
 						t = t0 + (t1 - t0) * (d0 / denom);
 				}
 
-				if (!best.valid || step < best.step)
+				if (!out.valid || step < out.minStep)
 				{
-					best.valid = true;
-					best.step = step;
-					best.at = pointA + ab * t;
-					best.floorA = fa;
-					best.floorB = fb;
+					out.valid = true;
+					out.minStep = step;
+					out.at = pointA + ab * t;
+					out.floorA = fa;
+					out.floorB = fb;
 				}
 			}
 		}
 	}
 
-	return best;
+	std::sort(runs.begin(), runs.end());
+	for (const Span &run : runs)
+	{
+		if (!out.walkable.empty() && run.first <= out.walkable.back().second + kMinStepSpan)
+			out.walkable.back().second = std::max(out.walkable.back().second, run.second);
+		else
+			out.walkable.push_back(run);
+	}
+
+	return out;
 }
 
 double DistanceToWall(const Plane &plane, const Vec3 &p, bool &ok)
@@ -443,9 +495,10 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 }
 
 size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
-	double maxStep, bool dump)
+	double maxStep, size_t *splitOut, bool dump)
 {
 	size_t removed = 0;
+	size_t split = 0;
 
 	std::vector<MergedConnection> kept;
 	kept.reserve(conns.size());
@@ -456,34 +509,58 @@ size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<M
 			static_cast<size_t>(c.areaA) >= areas.size() || static_cast<size_t>(c.areaB) >= areas.size())
 		{
 			kept.push_back(c);
-						continue;
-					}
-
-					StepAcross step = MinStepAcross(areas[static_cast<size_t>(c.areaA)].polytope,
-						areas[static_cast<size_t>(c.areaB)].polytope, c.pointA, c.pointB);
-
-					if (!step.valid || step.step <= maxStep)
-					{
-						kept.push_back(c);
-						continue;
-					}
-
-					if (dump)
-					{
-						double zA = FloorHeightAt(*step.floorA, step.at.x, step.at.y);
-						double zB = FloorHeightAt(*step.floorB, step.at.x, step.at.y);
-						double distA = Distance2DToWinding(step.floorA->winding, step.at.x, step.at.y);
-						double distB = Distance2DToWinding(step.floorB->winding, step.at.x, step.at.y);
-			std::printf("  step drop %3d <-> %3d at (%.1f, %.1f): zA %.1f zB %.1f step %.1f "
-				"[faceA nz %.2f off %.1f, faceB nz %.2f off %.1f]\n",
-				c.areaA, c.areaB, step.at.x, step.at.y, zA, zB, step.step,
-				step.floorA->plane.normal.z, distA, step.floorB->plane.normal.z, distB);
+			continue;
 		}
 
-		++removed;
+		SeamSteps step = WalkableSpansAcross(areas[static_cast<size_t>(c.areaA)].polytope,
+			areas[static_cast<size_t>(c.areaB)].polytope, c.pointA, c.pointB, maxStep);
+
+		if (!step.valid || step.CoversWholeSeam())
+		{
+			kept.push_back(c);
+			continue;
+		}
+
+		if (dump)
+		{
+			double zA = FloorHeightAt(*step.floorA, step.at.x, step.at.y);
+			double zB = FloorHeightAt(*step.floorB, step.at.x, step.at.y);
+			double distA = Distance2DToWinding(step.floorA->winding, step.at.x, step.at.y);
+			double distB = Distance2DToWinding(step.floorB->winding, step.at.x, step.at.y);
+			std::printf("  step %s %3d <-> %3d at (%.1f, %.1f): zA %.1f zB %.1f min step %.1f, %zu "
+				"walkable run(s) [faceA nz %.2f off %.1f, faceB nz %.2f off %.1f]\n",
+				step.walkable.empty() ? "drop" : "cut ", c.areaA, c.areaB, step.at.x, step.at.y, zA, zB,
+				step.minStep, step.walkable.size(), step.floorA->plane.normal.z, distA,
+				step.floorB->plane.normal.z, distB);
+		}
+
+		Vec3 ab = c.pointB - c.pointA;
+		double seamLength = ab.Length();
+		size_t emitted = 0;
+
+		for (const Span &run : step.walkable)
+		{
+			if ((run.second - run.first) * seamLength < kMinSeamLength)
+				continue;
+
+			MergedConnection nc = c;
+			nc.pointA = c.pointA + ab * run.first;
+			nc.pointB = c.pointA + ab * run.second;
+			kept.push_back(nc);
+			++emitted;
+		}
+
+		if (emitted > 0)
+			++split;
+		else
+			++removed;
 	}
 
 	conns.swap(kept);
+
+	if (splitOut)
+		*splitOut = split;
+
 	return removed;
 }
 
@@ -670,6 +747,7 @@ constexpr double kConvexEpsilon = 0.5;
 constexpr double kZTouchEpsilon = 0.5;
 constexpr double kMinFootprintArea = 1.0;
 constexpr double kFootprintAreaTolerance = 0.001;
+constexpr double kMinSharedFaceArea = 1.0;
 constexpr size_t kMaxMergeGroups = 64;
 
 bool PortalSharesWholeFace(double portalArea, double faceAreaA, double faceAreaB)
@@ -683,8 +761,8 @@ bool PortalSharesWholeFace(double portalArea, double faceAreaA, double faceAreaB
 bool SeamIsWalkable(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB,
 	double maxStep)
 {
-	StepAcross step = MinStepAcross(a, b, pointA, pointB);
-	return step.valid && step.step <= maxStep;
+	SeamSteps step = WalkableSpansAcross(a, b, pointA, pointB, maxStep);
+	return step.valid && step.CoversWholeSeam();
 }
 
 bool MergeStaysConvex(const std::vector<const Face *> &facesA, const std::vector<const Face *> &facesB,
@@ -796,16 +874,209 @@ struct Bounds
 	}
 };
 
+struct FloorEdge
+{
+	int owner;
+	double lo, hi;
+	Vec3 at, along;
+};
+
+struct LineKey
+{
+	long long dx, dy, offset;
+
+	bool operator==(const LineKey &o) const { return dx == o.dx && dy == o.dy && offset == o.offset; }
+};
+
+struct LineKeyHash
+{
+	size_t operator()(const LineKey &k) const
+	{
+		auto mix = [](size_t h, long long v)
+		{
+			size_t hv = std::hash<long long>()(v);
+			return h ^ (hv + static_cast<size_t>(0x9e3779b9UL) + (h << 6) + (h >> 2));
+		};
+		return mix(mix(mix(0, k.dx), k.dy), k.offset);
+	}
+};
+
+bool EdgeAsLine(const Vec3 &a, const Vec3 &b, LineKey &keyOut, FloorEdge &edgeOut)
+{
+	double dx = b.x - a.x;
+	double dy = b.y - a.y;
+	double length = std::sqrt(dx * dx + dy * dy);
+	if (length < kMinSeamLength)
+		return false;
+
+	dx /= length;
+	dy /= length;
+
+	if (dx < -1e-6 || (std::fabs(dx) <= 1e-6 && dy < 0.0))
+	{
+		dx = -dx;
+		dy = -dy;
+	}
+
+	auto quantize = [](double v) { return static_cast<long long>(std::llround(v * 100.0)); };
+	keyOut = {quantize(dx), quantize(dy), quantize(dx * a.y - dy * a.x)};
+
+	edgeOut.at = a;
+	edgeOut.along = Vec3(dx, dy, 0.0);
+	edgeOut.lo = a.x * dx + a.y * dy;
+	edgeOut.hi = b.x * dx + b.y * dy;
+	if (edgeOut.hi < edgeOut.lo)
+		std::swap(edgeOut.lo, edgeOut.hi);
+
+	return true;
+}
+
+Vec3 PointAlong(const FloorEdge &e, double t)
+{
+	double base = e.at.x * e.along.x + e.at.y * e.along.y;
+	return Vec3(e.at.x + e.along.x * (t - base), e.at.y + e.along.y * (t - base), e.at.z);
+}
+
+struct SeamSegment
+{
+	int a = -1;
+	int b = -1;
+	Vec3 pointA;
+	Vec3 pointB;
+	double length = 0.0;
+};
+
+std::vector<SeamSegment> CollectFloorSeams(const std::vector<const Polytope *> &polys)
+{
+	std::unordered_map<LineKey, std::vector<FloorEdge>, LineKeyHash> lines;
+
+	for (size_t pi = 0; pi < polys.size(); ++pi)
+	{
+		for (const Face &f : polys[pi]->faces)
+		{
+			if (!IsFloorFace(f))
+				continue;
+
+			for (size_t i = 0; i < f.winding.size(); ++i)
+			{
+				LineKey key;
+				FloorEdge edge;
+				if (!EdgeAsLine(f.winding[i], f.winding[(i + 1) % f.winding.size()], key, edge))
+					continue;
+
+				edge.owner = static_cast<int>(pi);
+				lines[key].push_back(edge);
+			}
+		}
+	}
+
+	std::vector<SeamSegment> out;
+
+	for (const auto &entry : lines)
+	{
+		const std::vector<FloorEdge> &edges = entry.second;
+
+		std::map<std::pair<int, int>, std::vector<std::pair<double, double>>> spans;
+
+		for (size_t i = 0; i + 1 < edges.size(); ++i)
+		{
+			for (size_t j = i + 1; j < edges.size(); ++j)
+			{
+				if (edges[i].owner == edges[j].owner)
+					continue;
+
+				double lo = std::max(edges[i].lo, edges[j].lo);
+				double hi = std::min(edges[i].hi, edges[j].hi);
+				if (hi - lo <= kMinSeamLength)
+					continue;
+
+				spans[{std::min(edges[i].owner, edges[j].owner),
+					std::max(edges[i].owner, edges[j].owner)}].push_back({lo, hi});
+			}
+		}
+
+		for (auto &pair : spans)
+		{
+			std::vector<std::pair<double, double>> &intervals = pair.second;
+			std::sort(intervals.begin(), intervals.end());
+
+			for (size_t i = 0; i < intervals.size(); ++i)
+			{
+				double lo = intervals[i].first;
+				double hi = intervals[i].second;
+				while (i + 1 < intervals.size() && intervals[i + 1].first <= hi)
+				{
+					hi = std::max(hi, intervals[i + 1].second);
+					++i;
+				}
+
+				const FloorEdge &ref = edges[0];
+
+				SeamSegment seam;
+				seam.a = pair.first.first;
+				seam.b = pair.first.second;
+				seam.pointA = PointAlong(ref, lo);
+				seam.pointB = PointAlong(ref, hi);
+				seam.length = hi - lo;
+				out.push_back(seam);
+			}
+		}
+	}
+
+	return out;
+}
+
 struct MergeCandidate
 {
-	const Portal *portal = nullptr;
+	int leafA = -1;
+	int leafB = -1;
+	int faceIndexA = -1;
+	int faceIndexB = -1;
+	Vec3 pointA;
+	Vec3 pointB;
+	double length = 0.0;
 	bool wholeFace = false;
 };
 
+void FindSharedFace(const Polytope &a, const Polytope &b, MergeCandidate &out)
+{
+	for (size_t i = 0; i < a.faces.size(); ++i)
+	{
+		const Face &fa = a.faces[i];
+		if (fa.winding.size() < 3)
+			continue;
+
+		for (size_t j = 0; j < b.faces.size(); ++j)
+		{
+			const Face &fb = b.faces[j];
+			if (fb.winding.size() < 3)
+				continue;
+
+			if ((fa.plane.normal + fb.plane.normal).Length() > kPlaneMatchEpsilon ||
+				std::fabs(fa.plane.dist + fb.plane.dist) > kDistMatchEpsilon)
+				continue;
+
+			Winding overlap = IntersectCoplanarPolygons(fa.winding, fb.winding, fa.plane.normal);
+			if (overlap.size() < 3)
+				continue;
+
+			double area = WindingArea(overlap, fa.plane.normal);
+			if (area < kMinSharedFaceArea)
+				continue;
+
+			out.faceIndexA = static_cast<int>(i);
+			out.faceIndexB = static_cast<int>(j);
+			out.wholeFace = PortalSharesWholeFace(area, WindingArea(fa.winding, fa.plane.normal),
+				WindingArea(fb.winding, fb.plane.normal));
+			return;
+		}
+	}
 }
 
-MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
-	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables)
+}
+
+MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<bool> &isCrouchLeaf,
+	const std::vector<PassableVolume> &passables, size_t *seamsOut)
 {
 	int n = static_cast<int>(leaves.size());
 
@@ -879,50 +1150,54 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		return -1;
 	};
 
+	std::vector<const Polytope *> polys;
+	polys.reserve(leaves.size());
+	for (const ExtractedLeaf &leaf : leaves)
+		polys.push_back(&leaf.polytope);
+
+	std::vector<SeamSegment> seams = CollectFloorSeams(polys);
+	if (seamsOut)
+		*seamsOut = seams.size();
+
 	std::vector<MergeCandidate> candidates;
-	for (const Portal &p : portals)
+	for (const SeamSegment &seam : seams)
 	{
-		if (p.winding.size() < 3)
+		if (LeafIsCrouch(isCrouchLeaf, seam.a) != LeafIsCrouch(isCrouchLeaf, seam.b))
 			continue;
 
-		if (LeafIsCrouch(isCrouchLeaf, p.leafA) != LeafIsCrouch(isCrouchLeaf, p.leafB))
+		if (LeafPassable(leaves, seam.a) != LeafPassable(leaves, seam.b))
 			continue;
 
-		if (LeafPassable(leaves, p.leafA) != LeafPassable(leaves, p.leafB))
+		if (!SeamIsWalkable(leaves[static_cast<size_t>(seam.a)].polytope,
+				leaves[static_cast<size_t>(seam.b)].polytope, seam.pointA, seam.pointB, kStepHeight))
 			continue;
 
-		const Face &fa = leaves[static_cast<size_t>(p.leafA)].polytope.faces[static_cast<size_t>(p.faceIndexA)];
-		const Face &fb = leaves[static_cast<size_t>(p.leafB)].polytope.faces[static_cast<size_t>(p.faceIndexB)];
-
-		double faceAreaA = WindingArea(fa.winding, fa.plane.normal);
-		double faceAreaB = WindingArea(fb.winding, fb.plane.normal);
-		bool wholeFace = PortalSharesWholeFace(p.area, faceAreaA, faceAreaB);
-
-		if (!wholeFace)
-		{
-			if (!SeamIsWalkable(leaves[static_cast<size_t>(p.leafA)].polytope,
-					leaves[static_cast<size_t>(p.leafB)].polytope, p.pointA, p.pointB, kStepHeight))
-				continue;
-		}
-
-		candidates.push_back({&p, wholeFace});
+		MergeCandidate cand;
+		cand.leafA = seam.a;
+		cand.leafB = seam.b;
+		cand.pointA = seam.pointA;
+		cand.pointB = seam.pointB;
+		cand.length = seam.length;
+		FindSharedFace(leaves[static_cast<size_t>(seam.a)].polytope,
+			leaves[static_cast<size_t>(seam.b)].polytope, cand);
+		candidates.push_back(cand);
 	}
 	std::sort(candidates.begin(), candidates.end(),
-		[](const MergeCandidate &a, const MergeCandidate &b) { return a.portal->area > b.portal->area; });
+		[](const MergeCandidate &a, const MergeCandidate &b) { return a.length > b.length; });
 
 	std::vector<std::vector<const MergeCandidate *>> incident(static_cast<size_t>(n));
 	for (const MergeCandidate &c : candidates)
 	{
-		incident[static_cast<size_t>(c.portal->leafA)].push_back(&c);
-		incident[static_cast<size_t>(c.portal->leafB)].push_back(&c);
+		incident[static_cast<size_t>(c.leafA)].push_back(&c);
+		incident[static_cast<size_t>(c.leafB)].push_back(&c);
 	}
 
-	auto sharedPortals = [&](const std::vector<int> &pending, int other, std::vector<const MergeCandidate *> &out)
+	auto sharedSeams = [&](const std::vector<int> &pending, int other, std::vector<const MergeCandidate *> &out)
 	{
 		for (int root : pending)
 			for (int leafId : members[static_cast<size_t>(root)])
 				for (const MergeCandidate *q : incident[static_cast<size_t>(leafId)])
-					if (find(q->portal->leafA) == other || find(q->portal->leafB) == other)
+					if (find(q->leafA) == other || find(q->leafB) == other)
 						out.push_back(q);
 	};
 
@@ -932,9 +1207,8 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		progress = false;
 		for (const MergeCandidate &cand : candidates)
 		{
-			const Portal *p = cand.portal;
-			int rootA = find(p->leafA);
-			int rootB = find(p->leafB);
+			int rootA = find(cand.leafA);
+			int rootB = find(cand.leafB);
 			if (rootA == rootB)
 				continue;
 
@@ -953,7 +1227,7 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 			while (true)
 			{
 				std::vector<const MergeCandidate *> seam;
-				sharedPortals(pending, next, seam);
+				sharedSeams(pending, next, seam);
 
 				std::vector<const Face *> facesNext, floorNext;
 				groupFaces(next, hiddenFaces, facesNext);
@@ -961,9 +1235,11 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 				for (const MergeCandidate *q : seam)
 				{
-					const Portal *qp = q->portal;
-					const Face *f1 = &leaves[static_cast<size_t>(qp->leafA)].polytope.faces[static_cast<size_t>(qp->faceIndexA)];
-					const Face *f2 = &leaves[static_cast<size_t>(qp->leafB)].polytope.faces[static_cast<size_t>(qp->faceIndexB)];
+					if (q->faceIndexA < 0)
+						continue;
+
+					const Face *f1 = &leaves[static_cast<size_t>(q->leafA)].polytope.faces[static_cast<size_t>(q->faceIndexA)];
+					const Face *f2 = &leaves[static_cast<size_t>(q->leafB)].polytope.faces[static_cast<size_t>(q->faceIndexB)];
 
 					std::vector<std::vector<const Face *> *> sides{&facesU, &facesNext};
 					if (q->wholeFace)
@@ -1016,7 +1292,7 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 					break;
 
 				std::vector<const MergeCandidate *> reachable;
-				sharedPortals(pending, conflict, reachable);
+				sharedSeams(pending, conflict, reachable);
 				if (reachable.empty())
 					break;
 
@@ -1028,13 +1304,15 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 			for (const MergeCandidate *q : internal)
 			{
-				const Portal *qp = q->portal;
-				hiddenFaces[static_cast<size_t>(qp->leafA)].insert(qp->faceIndexA);
-				hiddenFaces[static_cast<size_t>(qp->leafB)].insert(qp->faceIndexB);
+				if (q->faceIndexA < 0)
+					continue;
+
+				hiddenFaces[static_cast<size_t>(q->leafA)].insert(q->faceIndexA);
+				hiddenFaces[static_cast<size_t>(q->leafB)].insert(q->faceIndexB);
 				if (q->wholeFace)
 				{
-					removedFaces[static_cast<size_t>(qp->leafA)].insert(qp->faceIndexA);
-					removedFaces[static_cast<size_t>(qp->leafB)].insert(qp->faceIndexB);
+					removedFaces[static_cast<size_t>(q->leafA)].insert(q->faceIndexA);
+					removedFaces[static_cast<size_t>(q->leafB)].insert(q->faceIndexB);
 				}
 			}
 
@@ -1092,150 +1370,23 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 	return result;
 }
 
-namespace
-{
-
-constexpr double kMinSeamLength = 1.0;
-
-struct FloorEdge
-{
-	int areaId;
-	double lo, hi;
-	Vec3 at, along;
-};
-
-struct LineKey
-{
-	long long dx, dy, offset;
-
-	bool operator==(const LineKey &o) const { return dx == o.dx && dy == o.dy && offset == o.offset; }
-};
-
-struct LineKeyHash
-{
-	size_t operator()(const LineKey &k) const
-	{
-		auto mix = [](size_t h, long long v)
-		{
-			size_t hv = std::hash<long long>()(v);
-			return h ^ (hv + static_cast<size_t>(0x9e3779b9UL) + (h << 6) + (h >> 2));
-		};
-		return mix(mix(mix(0, k.dx), k.dy), k.offset);
-	}
-};
-
-bool EdgeAsLine(const Vec3 &a, const Vec3 &b, LineKey &keyOut, FloorEdge &edgeOut)
-{
-	double dx = b.x - a.x;
-	double dy = b.y - a.y;
-	double length = std::sqrt(dx * dx + dy * dy);
-	if (length < kMinSeamLength)
-		return false;
-
-	dx /= length;
-	dy /= length;
-
-	if (dx < -1e-6 || (std::fabs(dx) <= 1e-6 && dy < 0.0))
-	{
-		dx = -dx;
-		dy = -dy;
-	}
-
-	auto quantize = [](double v) { return static_cast<long long>(std::llround(v * 100.0)); };
-	keyOut = {quantize(dx), quantize(dy), quantize(dx * a.y - dy * a.x)};
-
-	edgeOut.at = a;
-	edgeOut.along = Vec3(dx, dy, 0.0);
-	edgeOut.lo = a.x * dx + a.y * dy;
-	edgeOut.hi = b.x * dx + b.y * dy;
-	if (edgeOut.hi < edgeOut.lo)
-		std::swap(edgeOut.lo, edgeOut.hi);
-
-	return true;
-}
-
-Vec3 PointAlong(const FloorEdge &e, double t)
-{
-	double base = e.at.x * e.along.x + e.at.y * e.along.y;
-	return Vec3(e.at.x + e.along.x * (t - base), e.at.y + e.along.y * (t - base), e.at.z);
-}
-
-}
-
 size_t BuildWalkConnections(const std::vector<Area> &areas, std::vector<MergedConnection> &conns)
 {
-	std::unordered_map<LineKey, std::vector<FloorEdge>, LineKeyHash> lines;
-
+	std::vector<const Polytope *> polys;
+	polys.reserve(areas.size());
 	for (const Area &area : areas)
-	{
-		for (const Face &f : area.polytope.faces)
-		{
-			if (!IsFloorFace(f))
-				continue;
-
-			for (size_t i = 0; i < f.winding.size(); ++i)
-			{
-				LineKey key;
-				FloorEdge edge;
-				if (!EdgeAsLine(f.winding[i], f.winding[(i + 1) % f.winding.size()], key, edge))
-					continue;
-
-				edge.areaId = area.id;
-				lines[key].push_back(edge);
-			}
-		}
-	}
+		polys.push_back(&area.polytope);
 
 	size_t first = conns.size();
 
-	for (const auto &entry : lines)
+	for (const SeamSegment &seam : CollectFloorSeams(polys))
 	{
-		const std::vector<FloorEdge> &edges = entry.second;
-
-		std::map<std::pair<int, int>, std::vector<std::pair<double, double>>> spans;
-
-		for (size_t i = 0; i + 1 < edges.size(); ++i)
-		{
-			for (size_t j = i + 1; j < edges.size(); ++j)
-			{
-				if (edges[i].areaId == edges[j].areaId)
-					continue;
-
-				double lo = std::max(edges[i].lo, edges[j].lo);
-				double hi = std::min(edges[i].hi, edges[j].hi);
-				if (hi - lo <= kMinSeamLength)
-					continue;
-
-				spans[{std::min(edges[i].areaId, edges[j].areaId),
-					std::max(edges[i].areaId, edges[j].areaId)}].push_back({lo, hi});
-			}
-		}
-
-		for (auto &pair : spans)
-		{
-			std::vector<std::pair<double, double>> &intervals = pair.second;
-			std::sort(intervals.begin(), intervals.end());
-
-			for (size_t i = 0; i < intervals.size(); ++i)
-			{
-				double lo = intervals[i].first;
-				double hi = intervals[i].second;
-				while (i + 1 < intervals.size() && intervals[i + 1].first <= hi)
-				{
-					hi = std::max(hi, intervals[i + 1].second);
-					++i;
-				}
-
-				const FloorEdge &ref = edges[0];
-
-				MergedConnection mc;
-				mc.areaA = pair.first.first;
-				mc.areaB = pair.first.second;
-				mc.pointA = PointAlong(ref, lo);
-				mc.pointB = PointAlong(ref, hi);
-				conns.push_back(mc);
-			}
-		}
+		MergedConnection mc;
+		mc.areaA = areas[static_cast<size_t>(seam.a)].id;
+		mc.areaB = areas[static_cast<size_t>(seam.b)].id;
+		mc.pointA = seam.pointA;
+		mc.pointB = seam.pointB;
+		conns.push_back(mc);
 	}
 
 	TagCrouchConnections(areas, conns);

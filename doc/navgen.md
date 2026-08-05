@@ -5,11 +5,16 @@
 ### Entry Point & Debug Output
 Command-line tool with extensive debug flags:
 - `--dump-leaves` - per-leaf (pre-merge) id/faces/volume/centroid stats
-- `--dump-areas` - per-area (post-merge) id/faces/volume/centroid/portal stats
+- `--dump-areas` - per-area (post-merge) id/faces/volume/centroid/member-leaf stats
 - `--dump-conns` - every final connection: type, flags, endpoints, air-move parameters
+- `--dump-steps` - every walk connection the step filter trimmed or dropped: area pair, shallowest
+  crossing, both floor heights, surviving walkable runs, each floor face's normal z and 2D offset
+- `--dump-support` - every leaf fragment dropped as unsupported: floor centroid, floor normal, volume
+- `--dump-airmove` - air-move launch derivation: why no funnel launch was found, and every
+  re-simulation miss with its launch, yaw, speed and where it landed
 - `--dump-planes <id>` - one final area's exact plane list (normal+dist) and face windings
 - `--dump-obj <path>` - walkable floor of every area as OBJ mesh (+ MTL): crouch areas colored apart, planned route as ribbon
-- `--dump-svg <path>` - top-down SVG of final area/portal graph
+- `--dump-svg <path>` - top-down SVG of final area graph
 - `--dump-path` - per-waypoint clearance and per-segment arc/line/gap rows (radius, turn, length,
   entry/exit speed, cap) for the debug route, plus the profile summary line
 - `--trace <path>` - overlays recorded bot trajectory on SVG (one "x y z" per line, empty file = nothing).
@@ -52,7 +57,7 @@ Command-line tool with extensive debug flags:
 ## area_merger.cpp
 
 ### MergeAreas
-Union-find merge of leaves through portals, with three merge modes:
+Union-find merge of leaves through walkable floor seams, with three merge modes:
 
 **1. 3D Convex Merge**
 - `MergeStaysConvex`: all vertices of B inside all planes of A, and vice versa (epsilon 0.5)
@@ -63,7 +68,7 @@ Union-find merge of leaves through portals, with three merge modes:
 - `MergedFloorStaysWalkable`: no internal step > 18 units between any floor face pair
 - `FirstSlabConflict`: no leaf outside group has XY overlap with merged footprint AND Z overlap with merged slab
 - Slab test evaluated against *leaves*, never groups (earlier prism can't be invalidated by later merge)
-- If slab conflict: absorbs conflicting group if candidate portal reaches it, retries (ramp closes as whole)
+- If slab conflict: absorbs conflicting group if a candidate seam reaches it, retries (ramp closes as whole)
 
 **3. No Merge** (--no-merge flag)
 
@@ -83,22 +88,43 @@ resolution) and `PointInArea` (spawn/target resolution) both returned nothing an
 
 `--dump-planes <id>` prints the exported bound planes first, then the true face windings.
 
-### Portal Filtering
+### Why seams and not portals
+Merging is a volume operation, so for a long time it ran off `BuildPortals` — a global list of shared faces
+between leaves. That coupling was the bug behind the staircase regression: deleting the floorless air column
+above a tread also deleted the faces that made two treads portal-adjacent, and the flight stopped merging even
+though every walk connection survived. Raw portals collapsed 261 → 150 on test15_staircase while leaf count
+barely moved.
+
+Floor seams carry the same adjacency without the coupling, because `BuildBoundPlanes` already derives a prism's
+region from the walkable footprint rather than from faces. What portals still supplied was face *cancellation*
+for the convex path, and that is now computed on demand per candidate pair by `FindSharedFace` (opposed planes
+plus `IntersectCoplanarPolygons`) instead of globally up front. Seam-adjacent leaves separated by a riser share
+no face at all; they simply take the prism path.
+
+Two leaves whose walkable floors meet on an XY line are not necessarily the same open space — hull-3 expansion
+makes floor edges meet at *every* vertical drop, an 8-unit step and a 200-unit cliff alike, because the top
+face expands outward by 16 and the side wall expands the lower floor back by the same 16. What makes a seam a
+merge candidate is the step test, not the seam.
+
+### Seam Filtering
 - Crouch mismatch: skip
-- Whole-face portal (`PortalSharesWholeFace`): portal area ≈ both face areas (2% tolerance)
-- Partial-face: `SeamIsWalkable` at portal midpoint (step ≤ 18)
+- Passable (door/breakable) mismatch: skip
+- `SeamIsWalkable`: the walkable spans must cover the *whole* seam
 
-### Seam Walkability Detail
-The step filter samples the portal span at 8 points (configurable) and keeps the connection if *any* point is walkable (step ≤ 18). What is printed with `--dump-steps` is the shallowest crossing found: area pair, where it is, both floor heights, the step, and each chosen floor face's normal z and 2D offset from the query point. A nonzero offset means `FloorFaceUnder` fell back to its nearest face instead of finding a containing one.
+Full coverage is the point. A slope running alongside a floor meets it on one XY line but is only steppable at
+one end, and a predicate that asked "is it walkable anywhere" would fuse the two into a single area whose
+footprint claims ground a bot cannot reach.
 
-### Portal Walkability Test (SeamIsWalkable)
-The stretch of the segment a + ab * t, t in [0, 1], whose XY projection lies within `epsilon` of this face's XY footprint. Windings are convex, so that stretch is one interval, found by clipping the parameter range against each edge's outward half-plane. The epsilon is what makes the answer stable: a portal lies on a leaf boundary, so the segment routinely runs exactly along a floor face's edge, and without slack whether the face counts would come down to floating-point luck.
+### Walkable Spans (WalkableSpansAcross)
+The stretch of the segment a + ab * t, t in [0, 1], whose XY projection lies within `epsilon` of this face's XY footprint. Windings are convex, so that stretch is one interval, found by clipping the parameter range against each edge's outward half-plane. The epsilon is what makes the answer stable: a seam lies on a leaf boundary, so the segment routinely runs exactly along a floor face's edge, and without slack whether the face counts would come down to floating-point luck.
 
 Parallel to this edge: the segment is either wholly inside the half-plane or wholly out.
 
-The smallest vertical gap between the two floors anywhere along the segment, i.e. the friendliest place to step from one to the other. Each floor face is a plane, so wherever the same pair of faces applies both heights are linear in t and their difference is too; the set of applicable faces only changes at the ends of the spans above. So the gap is piecewise linear with known breakpoints and its minimum is attained at one of them or at a sign change - there is nothing to sample.
+Each floor face is a plane, so wherever the same pair of faces applies both heights are linear in t and their difference is too; the set of applicable faces only changes at the ends of the spans above. The gap is therefore piecewise linear with known breakpoints, and `|gap| <= maxStep` solves on each piece to a single sub-interval - there is nothing to sample. The union of those sub-intervals is the answer: the exact stretches of the seam a bot can step across.
 
-Where two faces abut, both are candidates along the shared stretch and the minimum is taken over the pairs as well. That is the same existential question the caller is asking - is there anywhere a bot can step across - and it replaces a tie broken by face iteration order.
+Where two faces abut, both are candidates along the shared stretch and a point counts as walkable if *any* face pair clears the step there. That is the same existential question the caller is asking, and it replaces a tie broken by face iteration order.
+
+The shallowest crossing found is kept alongside the spans purely so `--dump-steps` has something to report: area pair, where it is, both floor heights, the step, and each floor face's normal z and 2D offset from the query point. A nonzero offset means `FloorFaceUnder` fell back to its nearest face instead of finding a containing one.
 
 `valid` is false when no stretch of the segment has floor on both sides. That is a different answer from "the step is large", and the two callers want opposite things from it, so it is left to them.
 
@@ -108,15 +134,18 @@ The floors cross somewhere in here, so they meet exactly.
 
 A wedge closed off by a sloped ceiling (the crawlspace under a ramp) ends where the ceiling meets the floor, and no near-vertical plane records that -- so the gate builder cannot see the end of it from the bound planes alone. Reporting "no floor here" outside the real floor footprint keeps gates inside the area they belong to.
 
-No floor on both sides anywhere along the portal is not the same as a big step, and there is nothing to judge the connection on, so it stays.
+No floor on both sides anywhere along the seam is not the same as a big step, and there is nothing to judge the connection on, so it stays.
 
 Refusing to merge on missing information is the safe direction, so unlike the connection filter this treats "no floor on either side" as not walkable.
 
 ### Processing Order
-Candidates sorted by portal area descending (larger portals first). Each candidate attempts to absorb as many neighbors as possible via `sharedPortals` chain.
+Candidates sorted by seam length descending (longest seams first). Each candidate attempts to absorb as many neighbors as possible via the `sharedSeams` chain.
 
 ### Post-Merge
-- `FilterWalkConnectionsByStep`: samples portal span (8 points), keeps if ANY point walkable (step ≤ 18), prints shallowest crossing with face normals/offsets
+- `FilterWalkConnectionsByStep`: replaces each connection with its walkable runs. A seam walkable end to end
+  passes through untouched; a partially walkable one is cut down to the stretches that clear the step, one
+  connection each, dropping runs shorter than `kMinSeamLength`; a seam walkable nowhere is dropped. This is
+  what stops a slope beside a floor from exporting a gate spanning the part of the seam that is 60 units up
 - `ProbeAirMoves`: samples launch edges, simulates jumps/drops, fits gates to successful samples
 - `SnapConnectionsToFloor`: walk = both endpoints to side A floor; air move = launch only (landing = sim result)
 - `PruneUnreachableAreas`: BFS from spawn areas over connections (respects one-way)
@@ -139,8 +168,8 @@ time, which is the whole point of expressing cost as time.
 A merge never crosses `ExtractedLeaf::passableIndex`. A door or breakable has to stay its own area so it keeps
 its activation, and it must not absorb a different one either.
 
-### Portal Connection Logic
-Both halves come out of the same clip planes, so their shared faces are exactly coplanar and BuildPortals connects the door piece to its neighbours with no extra linking.
+### Door Connection Logic
+Both halves come out of the same clip planes, so their floors tile without a gap and the seam collector connects the door piece to its neighbours with no extra linking.
 
 ## airmove_sampler.cpp
 
@@ -198,12 +227,31 @@ The climb has to retrace the drop, so its yaw only ever wants to be one of the d
 
 ### SplitLeavesByFloorSupport
 For each leaf:
-1. Find lowest floor face (highest normal.z > 0.7)
-2. Probe 1 unit down from floor face → carves against world + blockers
-3. Supported pieces kept; unsupported pieces get second chance: probe additional 17 units (step height - 1) → if solid, rescue if area ≥ 1024
-4. Cut planes from seams between supported/unsupported (vertical through edge midpoints, outward from supported centroid, check 2 units beyond for void)
-5. Fragment leaf by cut planes; drop fragments with total supported area ≤ 1.0 or no floor face
-6. Outputs stats: dropped, split, steep-bottomed
+1. Take every floor face (normal.z > 0.7)
+2. Probe 1 unit down from each → carves against world + blockers
+3. Cut planes from seams between supported/unsupported (vertical through edge midpoints, outward from supported centroid, check 2 units beyond for void)
+4. Fragment leaf by cut planes
+5. Fragments with supported floor become leaves; the rest go to `AbsorbFloorlessPieces`
+6. Outputs stats: split, absorbed, dropped, steep-bottomed
+
+### Floorless Fragment Absorption
+The air above a staircase tread is routinely cut off at the *neighbouring* step's height: hull-3 expansion
+leaves a step-shaped ceiling, and the clipnode plane that caps one tread runs straight over the next one, so
+the column above tread N gets a bottom face floating 8 units up. Deleting it as unsupported is what used to
+shred staircases — the tread was left as an 8-unit sliver with no standing room and no faces touching its
+neighbours.
+
+So a fragment with no supported floor is not dropped, it is handed *down*. `AbsorbFloorlessPieces` looks for a
+leaf whose top face the fragment rests on and whose union with it is convex, verified by comparing the merged
+volume against the sum. If the fragment overhangs several steps, `SplitAgainstHostColumn` carves off the column
+directly above one host — clipping only by that host's side planes, and only by planes the fragment is not
+already inside, since `ClipPolytope` would otherwise append a duplicate coplanar face and corrupt `Volume()` —
+absorbs that, and returns the remainder to the pool. Whatever cannot be placed under any leaf is dropped.
+
+Absorption is strictly downward: the shared facet must be the host's top and the fragment's bottom. Sideways
+absorption looks superficially reasonable and is badly wrong — a floorless band beside a pyramid's apex
+plateau will happily union with it and produce a full-width phantom area with floor over 8 units of an
+80-unit span.
 
 ### ComputeSupportedFloor
 Vertical probe from floor face downward against clip hull + blocking volumes.
@@ -215,32 +263,51 @@ Records the stretch of the edge a + ab * t, t in [0, 1], that the segment c -> d
 True when the whole edge either abuts one of `peers` or runs along the leaf's own floor boundary, i.e. no part of it is an edge the leaf has to be cut along. The supported windings tile the floor exactly, so whatever lies past an uncovered stretch belongs to some other class of floor by construction - no probing needed. Coverage is per-stretch rather than per-edge because one edge is routinely both: the strip of upper floor beside a ramp opening meets its neighbour along part of the edge and overhangs the ramp along the rest, and only the overhanging part must be cut away.
 
 ### Duplicate Cut Plane Prevention
-Two support patches that meet along an edge each want to cut there, once from either side. Clipping a polytope twice by the same plane leaves it with two coincident faces, which double-counts in Polytope::Volume and gives the portal builder a phantom second face to match against, so a plane goes in the cut list only once regardless of which side asked for it.
+Two support patches that meet along an edge each want to cut there, once from either side. Clipping a polytope twice by the same plane leaves it with two coincident faces, which double-counts in Polytope::Volume, so a plane goes in the cut list only once regardless of which side asked for it. `ClipPolytope` appends its cross-section face unconditionally, so clipping by a plane a polytope already has a face on produces the same duplicate — callers that clip against another polytope's planes must skip the ones it is already inside.
 
 ### Support Probe Direction
 Straight down, not along the face normal. PM_WalkMove drops the hull vertically by stepsize to step up, PM_AirMove drops it vertically by 1 when falling. The probe matches that: dest[2] += stepsize to step up, dest[2] -= stepsize to drop, wherever the floor is tilted. Probing along the normal would drop the patch along its slope, sliding 12.7 sideways, testing solidity in the wrong place. The probe starts at the already dropped patch, so take the next step from there.
 
-### Tilted Floor Face Rescue
-A tilted floor face only means anything over the XY region it actually covers; past any edge its plane is extrapolation, climbing away from the real surface. The contour it crosses sits wherever the two slopes balance. Between two 45 degree faces, further on gentle slopes it sits further out. The fragment is rescued where the drop below it is a wall: solid riser gives. Where the carve cuts the patch in half, neither half is the original face - the patch is extrapolation.
-
-### Level Face Rescue
-A level face is different and is rescued as floor: the whole face, which is a standing origin wherever the ground within stepsize below is even. This is also what connects a platform to a ramp descending out of it: hull expansion lifts the ramp's plane 16 * tan(slope) above the platform's, so the leaf over the ramp sits under the platform's floor plane rather than beside it, and the two only overlap through this band.
-
 ### Lowest Floor Face Selection
 Every floor face of the leaf, not just the lowest one. A leaf beside a ramp holds both the flat ground at the ramp's foot and the ramp itself, and taking the lowest picks the ground - which is real floor everywhere, yields no cuts, and leaves the ramp face untested however far it extends past the surface it belongs to.
 
-### Direct vs Stepped Patch Cutting
-A directly supported patch only has to be cut out where it stops being directly supported, so an edge it shares with another direct patch is a seam and stays uncut. A stepped patch gets cut out along its whole outline instead: the leaf's floor is not the real floor anywhere in it, and neighbouring stepped patches sit at their own heights - two treads of a staircase share an edge that is a step, not a seam.
+### Patch Cutting
+A supported patch only has to be cut out where it stops being supported, so an edge it shares with another supported patch is a seam and stays uncut. There is no such thing as a patch supported by ground a step below any more: a floor face is supported where solid is directly under it and nowhere else, and the space over the ground below is reunited with that ground by absorption rather than by inventing floor at the upper height.
 
 ## stand_classifier.cpp
 
 ### SplitLeavesByStandClearance
 For each leaf:
-1. Probe stand hull (lift = duckClipMinZ - humanMinZ = 18 + epsilon) from floor face
-2. Compute standable area fraction
+1. Probe stand hull (lift = duckClipMinZ - humanMinZ = 18 + epsilon) from every floor face
+2. Compute standable area fraction over all of them together
 3. ≤1% or no floor → crouch-only
 4. ≥99% → standable
-5. Partial → cut at standable/crouch boundaries (vertical planes through standable winding edges), classify each fragment by centroid probe
+5. Partial → cut at standable/crouch boundaries (vertical planes through standable winding edges), classify each
+   fragment by centroid probe
+
+### Every Floor Face, Not The Lowest One
+The same trap `SplitLeavesByFloorSupport` fell into, and for the same reason. Hull-3 expansion routinely leaves
+the flat ground at a ramp's foot and the ramp itself in one convex leaf — the region above both is the
+intersection of two halfspaces — so a leaf's lowest floor face is the ground, which has all the headroom in the
+world. Classifying off it alone reports the leaf fully standable, no cut is made, and the ramp's high end keeps
+whatever clearance the ground had.
+
+test51_pyraduck is the map that exposed it: a 45° pyramid under a ceiling 48 above its apex, so the top 24 units
+of every face are crouch-only. Three faces came out right because the BSP happened to split their slope away
+from the surrounding floor; the east face arrived as one leaf holding both, and its crouch cap vanished. With
+all floor faces classified the four faces are identical — same area volumes, same 24-unit band.
+
+Which face a standable winding came from matters when deciding whether its edge is a cut: `OnWindingBoundary`
+has to test against that face's own winding, or the ramp's bottom edge (a real face boundary) is mistaken for a
+crouch/stand boundary and cuts the leaf in half for nothing.
+
+Cut planes are deduplicated with `HasPlane`. Two standable windings that meet along an edge each want to cut
+there, and clipping a polytope twice by the same plane leaves it with coincident faces and a `Polytope::Volume`
+that silently double-counts — on test51 that inflated leaf volumes by up to 15% before the dedup went in.
+
+`ClassifyPolytope` likewise probes every floor face of a fragment and calls it crouch if any of them is
+crouch-only. Cutting is supposed to make fragments uniform; where it does not quite, ducking in a spot that
+allows standing costs nothing, while standing in a spot that does not wedges the bot.
 
 ## reachability.cpp
 
@@ -269,17 +336,6 @@ GoldSrc RecursiveHullCheck:
 - Plane test at each node → recurse front/back or split
 - On solid leaf: backtrack along fraction to find exact contact
 - Entities: trace each blocker in local space, keep earliest hit
-
-## portal_builder.cpp
-
-### BuildPortals
-1. Canonicalize planes (flip to positive octant)
-2. Quantize (normal*100, dist*100) → hash buckets
-3. For each bucket: split faces by sign
-4. Cross-pair opposite-sign faces from different leaves
-5. Intersect windings on plane (coplanar polygon intersection)
-6. Keep if area ≥ 1.0 sq units
-7. Portal endpoints = diameter of overlap polygon
 
 ## blocking_entities.cpp
 
@@ -345,7 +401,7 @@ door loses its identity the moment its leaf is split again.
 `angles == (0 -1 0)` → up and `(0 -2 0)` → down. It is not a yaw-only convention.
 
 ### Door/Neighbor Connection
-Both halves come out of the same clip planes, so their shared faces are exactly coplanar and `BuildPortals`
+Both halves come out of the same clip planes, so their floors tile without a gap and `CollectFloorSeams`
 connects the door piece to its neighbours with no extra linking. This is the same property prism merging relies
 on, and it is why splitting needs no new linking code at all.
 

@@ -71,14 +71,14 @@ Add `--dump-conns` to print every final connection with its type, flags, endpoin
 Never gate diagnostics behind environment variables. Every debug dump is a `--dump-*` flag on
 navgen, so a run is reproducible from its command line alone and shows up in `--help`.
 
-- `--dump-steps` — every walk connection the step filter drops. The filter samples the portal span
-  and keeps the connection if *any* point on it is walkable, so what is printed is the shallowest
-  crossing found: area pair, where it is, both floor heights, the step, and each chosen floor
-  face's normal z and 2D offset from the query point. A nonzero offset means `FloorFaceUnder` fell
-  back to its nearest face instead of finding a containing one.
+- `--dump-steps` — every walk connection the step filter cuts down or drops. The filter solves for
+  the stretches of the seam that clear the step and keeps those, so what is printed is the
+  shallowest crossing found plus how many walkable runs survived: area pair, where it is, both
+  floor heights, the step, and each chosen floor face's normal z and 2D offset from the query
+  point. A nonzero offset means `FloorFaceUnder` fell back to its nearest face instead of finding a
+  containing one.
 - `--dump-support` — every leaf fragment dropped as unsupported: floor centroid, floor normal,
-  total supported area over all of the fragment's floor faces, fragment volume.
-- `--dump-portals` — raw leaf-to-leaf portals with midpoints, before merging.
+  fragment volume.
 - `--dump-path` — the waypoint plan: each waypoint's kind, position, area, flags and speed.
 - `--dump-airmove` — air-move launch derivation: why no funnel launch was found, and every
   re-simulation miss with its launch, yaw, speed and where it actually landed.
@@ -93,7 +93,9 @@ Runs navgen on every `.bsp` in `maps/`, writes `.svg` and `.nav` files directly 
 ```powershell
 .\build\tools\navgen\navgen.exe maps\test1_simple.bsp --dump-areas --dump-svg test1_simple.svg
 ```
-Test maps live in `maps/`. See `--dump-leaves`, `--dump-tactical`, `--dump-planes <id>`, `--dump-obj <out.obj>` for other debug outputs.
+Test maps live in `maps/`. See `--dump-leaves`, `--dump-planes <id>`, `--dump-obj <out.obj>` for other
+debug outputs. Run `navgen.exe` with no arguments for the authoritative flag list — this file has gone
+stale before.
 
 ### Automatic nav goal test (full HLDS run)
 ```powershell
@@ -125,6 +127,18 @@ Get-Job | Wait-Job | Receive-Job
 
 
 ## Testing
+
+### Never judge a navgen change on one map
+
+Any change to a navgen pipeline stage gets a before/after sweep over every map in `maps/`. Improving
+one map while quietly wrecking five others is the normal failure mode, and nothing else catches it.
+
+```powershell
+& .\.claude\skills\crossbot-navgen\scripts\sweep.ps1 -Out before.txt
+```
+
+The script ships with the `crossbot-navgen` skill (it is not in `scripts/`); that skill explains how to
+read the diff.
 
 - `scripts/nav_target_test.ps1` greps qconsole.log for "CrossBot: <name> reached goal" lines (a short goal can complete within one rcon poll interval)
 - Debug visualization: `NavDebug::Draw()` emits `TE_BEAMPOINTS` temp entities; toggled via `crossbot_nav_debug_path` / `crossbot_nav_debug_area`

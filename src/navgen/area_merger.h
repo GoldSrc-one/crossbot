@@ -6,7 +6,6 @@
 #include "leaf_extractor.h"
 #include "nav_format.h"
 #include "polytope.h"
-#include "portal_builder.h"
 
 namespace navgen
 {
@@ -72,15 +71,15 @@ int WallFacingDirection(const Area &area, const Vec3 &dir2D);
 size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 
 size_t FilterWalkConnectionsByStep(const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
-	double maxStep, bool dump = false);
+	double maxStep, size_t *splitOut = nullptr, bool dump = false);
 
 size_t SnapConnectionsToFloor(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 
 MergeResult NoMerge(const std::vector<ExtractedLeaf> &leaves,
 	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables);
 
-MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<Portal> &portals,
-	const std::vector<bool> &isCrouchLeaf, const std::vector<PassableVolume> &passables);
+MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vector<bool> &isCrouchLeaf,
+	const std::vector<PassableVolume> &passables, size_t *seamsOut = nullptr);
 
 size_t BuildWalkConnections(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 

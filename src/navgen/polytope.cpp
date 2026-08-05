@@ -346,7 +346,7 @@ Polytope ClipPolytope(const Polytope &poly, const Plane &plane, bool keepFront, 
 	{
 		Winding w = ClipWinding(f.winding, plane, keepFront, epsilon);
 		if (w.size() >= 3)
-			result.faces.push_back({f.plane, std::move(w)});
+			result.faces.push_back({f.plane, std::move(w), f.walkable});
 	}
 
 	Plane facePlane = plane;
@@ -378,6 +378,7 @@ Polytope TranslatePolytope(const Polytope &poly, const Vec3 &offset)
 		Face nf;
 		nf.plane.normal = f.plane.normal;
 		nf.plane.dist = f.plane.dist + f.plane.normal.Dot(offset);
+		nf.walkable = f.walkable;
 		nf.winding.reserve(f.winding.size());
 		for (const Vec3 &v : f.winding)
 			nf.winding.push_back(v + offset);

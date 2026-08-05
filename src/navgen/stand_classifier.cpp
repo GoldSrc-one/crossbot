@@ -29,14 +29,26 @@ bool FloorPointIsCrouchOnly(const BspFile &bsp, int standHeadnode,
 	return PointInSolid(bsp, standHeadnode, standBlockers, floorPoint + StandProbeOffset());
 }
 
+std::vector<const Face *> CollectFloorFaces(const Polytope &poly)
+{
+	std::vector<const Face *> floors;
+	for (const Face &f : poly.faces)
+	{
+		if (IsFloorFace(f))
+			floors.push_back(&f);
+	}
+	return floors;
+}
+
 bool ClassifyPolytope(const BspFile &bsp, int standHeadnode, const std::vector<BlockingVolume> &standBlockers,
 	const Polytope &poly)
 {
-	const Face *floor = LowestFloorFace(poly);
-	if (!floor)
-		return false;
-
-	return FloorPointIsCrouchOnly(bsp, standHeadnode, standBlockers, WindingCentroid(floor->winding));
+	for (const Face *floor : CollectFloorFaces(poly))
+	{
+		if (FloorPointIsCrouchOnly(bsp, standHeadnode, standBlockers, WindingCentroid(floor->winding)))
+			return true;
+	}
+	return false;
 }
 
 }
@@ -95,19 +107,31 @@ std::vector<ExtractedLeaf> SplitLeavesByStandClearance(const BspFile &bsp, int s
 
 	for (const ExtractedLeaf &leaf : leaves)
 	{
-		const Face *floor = LowestFloorFace(leaf.polytope);
-		if (!floor)
+		std::vector<const Face *> floors = CollectFloorFaces(leaf.polytope);
+		if (floors.empty())
 		{
 			emit(leaf.polytope, false, leaf.passableIndex);
 			continue;
 		}
 
-		double floorArea = WindingArea(floor->winding, floor->plane.normal);
-		std::vector<Winding> standable = ComputeStandableFloor(bsp, standHeadnode, standBlockers, *floor);
+		double floorArea = 0.0;
+		for (const Face *floor : floors)
+			floorArea += WindingArea(floor->winding, floor->plane.normal);
+
+		std::vector<Winding> standable;
+		std::vector<size_t> standableFace;
+		for (size_t fi = 0; fi < floors.size(); ++fi)
+		{
+			for (Winding &w : ComputeStandableFloor(bsp, standHeadnode, standBlockers, *floors[fi]))
+			{
+				standable.push_back(std::move(w));
+				standableFace.push_back(fi);
+			}
+		}
 
 		double standableArea = 0.0;
-		for (const Winding &w : standable)
-			standableArea += WindingArea(w, floor->plane.normal);
+		for (size_t si = 0; si < standable.size(); ++si)
+			standableArea += WindingArea(standable[si], floors[standableFace[si]]->plane.normal);
 
 		if (standableArea <= kMinStandableArea)
 		{
@@ -122,18 +146,21 @@ std::vector<ExtractedLeaf> SplitLeavesByStandClearance(const BspFile &bsp, int s
 		}
 
 		std::vector<Plane> cuts;
-		for (const Winding &w : standable)
+		for (size_t si = 0; si < standable.size(); ++si)
 		{
+			const Winding &w = standable[si];
+			const Winding &owner = floors[standableFace[si]]->winding;
+
 			for (size_t i = 0; i < w.size(); ++i)
 			{
 				const Vec3 &a = w[i];
 				const Vec3 &b = w[(i + 1) % w.size()];
 
-				if (OnWindingBoundary((a + b) * 0.5, floor->winding))
+				if (OnWindingBoundary((a + b) * 0.5, owner))
 					continue;
 
 				Plane plane;
-				if (VerticalPlaneThroughEdge(a, b, plane))
+				if (VerticalPlaneThroughEdge(a, b, plane) && !HasPlane(cuts, plane))
 					cuts.push_back(plane);
 			}
 		}

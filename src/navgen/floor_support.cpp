@@ -21,9 +21,8 @@ constexpr double kOnBoundaryEpsilon = 0.1;
 constexpr double kMinNotchArea = 1.0;
 constexpr double kMinFragmentVolume = 1.0;
 constexpr double kMinSupportedArea = 1.0;
-constexpr double kMinStepRescueArea = 1024.0;
-constexpr double kStepCoverageTolerance = 1e-3;
-constexpr double kLevelFaceEpsilon = 1e-6;
+constexpr double kUnionVolumeTolerance = 1e-3;
+constexpr size_t kMaxAbsorbPasses = 8;
 
 double DistanceToSegment(const Vec3 &p, const Vec3 &a, const Vec3 &b)
 {
@@ -175,6 +174,21 @@ bool VerticalPlaneThroughEdge(const Vec3 &a, const Vec3 &b, Plane &out)
 	return true;
 }
 
+bool HasPlane(const std::vector<Plane> &planes, const Plane &plane)
+{
+	for (const Plane &p : planes)
+	{
+		bool flipped = p.normal.Dot(plane.normal) < 0.0;
+		Vec3 n = flipped ? p.normal * -1.0 : p.normal;
+		double d = flipped ? -p.dist : p.dist;
+
+		if ((n - plane.normal).Length() < kPlaneNormalEpsilon &&
+			std::fabs(d - plane.dist) < kPlaneDistEpsilon)
+			return true;
+	}
+	return false;
+}
+
 namespace
 {
 
@@ -308,21 +322,6 @@ bool EdgeLiesOnFloorFace(const std::vector<const Face *> &floors, const Vec3 &a,
 	return false;
 }
 
-bool HasPlane(const std::vector<Plane> &planes, const Plane &plane)
-{
-	for (const Plane &p : planes)
-	{
-		bool flipped = p.normal.Dot(plane.normal) < 0.0;
-		Vec3 n = flipped ? p.normal * -1.0 : p.normal;
-		double d = flipped ? -p.dist : p.dist;
-
-		if ((n - plane.normal).Length() < kPlaneNormalEpsilon &&
-			std::fabs(d - plane.dist) < kPlaneDistEpsilon)
-			return true;
-	}
-	return false;
-}
-
 void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 	const Winding &w, const Vec3 &bias, std::vector<Winding> &solid, std::vector<Winding> &empty)
 {
@@ -381,6 +380,279 @@ double TotalSupportedArea(const BspFile &bsp, int headnode, const std::vector<Bl
 	return total;
 }
 
+struct Bounds
+{
+	Vec3 mins = Vec3(1e30, 1e30, 1e30);
+	Vec3 maxs = Vec3(-1e30, -1e30, -1e30);
+};
+
+Bounds PolytopeBounds(const Polytope &poly)
+{
+	Bounds b;
+	for (const Face &f : poly.faces)
+		for (const Vec3 &v : f.winding)
+		{
+			b.mins.x = std::min(b.mins.x, v.x);
+			b.mins.y = std::min(b.mins.y, v.y);
+			b.mins.z = std::min(b.mins.z, v.z);
+			b.maxs.x = std::max(b.maxs.x, v.x);
+			b.maxs.y = std::max(b.maxs.y, v.y);
+			b.maxs.z = std::max(b.maxs.z, v.z);
+		}
+	return b;
+}
+
+bool BoundsTouch(const Bounds &a, const Bounds &b)
+{
+	return a.mins.x <= b.maxs.x + kOnBoundaryEpsilon && b.mins.x <= a.maxs.x + kOnBoundaryEpsilon &&
+		a.mins.y <= b.maxs.y + kOnBoundaryEpsilon && b.mins.y <= a.maxs.y + kOnBoundaryEpsilon &&
+		a.mins.z <= b.maxs.z + kOnBoundaryEpsilon && b.mins.z <= a.maxs.z + kOnBoundaryEpsilon;
+}
+
+bool PlanesOpposed(const Plane &a, const Plane &b)
+{
+	return (a.normal + b.normal).Length() < kPlaneNormalEpsilon &&
+		std::fabs(a.dist + b.dist) < kPlaneDistEpsilon;
+}
+
+bool SameDirectedPlane(const Plane &a, const Plane &b)
+{
+	return (a.normal - b.normal).Length() < kPlaneNormalEpsilon &&
+		std::fabs(a.dist - b.dist) < kPlaneDistEpsilon;
+}
+
+bool PolytopeInsidePlane(const Polytope &poly, const Plane &plane)
+{
+	for (const Face &f : poly.faces)
+		for (const Vec3 &v : f.winding)
+		{
+			if (v.Dot(plane.normal) - plane.dist < -kPlaneDistEpsilon)
+				return false;
+		}
+	return true;
+}
+
+Polytope PolytopeFromPlanes(const std::vector<Plane> &planes, double mapRadius)
+{
+	Polytope poly;
+
+	for (size_t i = 0; i < planes.size(); ++i)
+	{
+		Winding w = BaseWindingForPlane(planes[i], mapRadius);
+		for (size_t j = 0; j < planes.size() && !w.empty(); ++j)
+		{
+			if (j == i)
+				continue;
+			w = ClipWinding(w, planes[j], true);
+		}
+
+		if (w.size() >= 3)
+			poly.faces.push_back({planes[i], std::move(w)});
+	}
+
+	return poly;
+}
+
+bool CollectUnionPlanes(const Polytope &self, const Polytope &other, std::vector<Plane> &planes)
+{
+	for (const Face &fs : self.faces)
+	{
+		bool shared = false;
+		for (const Face &fo : other.faces)
+		{
+			if (PlanesOpposed(fs.plane, fo.plane))
+			{
+				shared = true;
+				break;
+			}
+		}
+
+		if (shared)
+			continue;
+
+		if (!PolytopeInsidePlane(other, fs.plane))
+			return false;
+
+		bool known = false;
+		for (const Plane &p : planes)
+		{
+			if (SameDirectedPlane(p, fs.plane))
+			{
+				known = true;
+				break;
+			}
+		}
+
+		if (!known)
+			planes.push_back(fs.plane);
+	}
+
+	return true;
+}
+
+bool StacksOnTopOf(const Polytope &host, const Polytope &frag)
+{
+	for (const Face &fh : host.faces)
+	{
+		if (fh.plane.normal.z > -kFloorNormalZ)
+			continue;
+
+		for (const Face &ff : frag.faces)
+		{
+			if (PlanesOpposed(fh.plane, ff.plane))
+				return true;
+		}
+	}
+	return false;
+}
+
+bool ConvexUnion(const Polytope &host, const Polytope &frag, double mapRadius, Polytope &out)
+{
+	if (!StacksOnTopOf(host, frag))
+		return false;
+
+	std::vector<Plane> planes;
+	if (!CollectUnionPlanes(host, frag, planes) || !CollectUnionPlanes(frag, host, planes))
+		return false;
+
+	Polytope merged = PolytopeFromPlanes(planes, mapRadius);
+	if (merged.Empty())
+		return false;
+
+	double want = host.Volume() + frag.Volume();
+	if (std::fabs(merged.Volume() - want) > kUnionVolumeTolerance * std::max(1.0, want))
+		return false;
+
+	for (Face &f : merged.faces)
+	{
+		f.walkable = false;
+		for (const Face &src : host.faces)
+		{
+			if (SameDirectedPlane(src.plane, f.plane))
+			{
+				f.walkable = f.walkable || src.walkable;
+				break;
+			}
+		}
+		for (const Face &src : frag.faces)
+		{
+			if (SameDirectedPlane(src.plane, f.plane))
+			{
+				f.walkable = f.walkable || src.walkable;
+				break;
+			}
+		}
+	}
+
+	out = std::move(merged);
+	return true;
+}
+
+void SplitAgainstHostColumn(const Polytope &frag, const Polytope &host, double mapRadius, Polytope &column,
+	std::vector<Polytope> &outside)
+{
+	column = frag;
+
+	for (const Face &f : host.faces)
+	{
+		if (std::fabs(f.plane.normal.z) >= kFloorNormalZ)
+			continue;
+		if (PolytopeInsidePlane(column, f.plane))
+			continue;
+
+		Polytope back = ClipPolytope(column, f.plane, false, mapRadius);
+		if (!back.Empty() && back.Volume() > kMinFragmentVolume)
+			outside.push_back(std::move(back));
+
+		column = ClipPolytope(column, f.plane, true, mapRadius);
+		if (column.Empty())
+			break;
+	}
+}
+
+struct FloorlessPiece
+{
+	ExtractedLeaf leaf;
+	Bounds bounds;
+	bool hadFloor = false;
+};
+
+size_t AbsorbFloorlessPieces(std::vector<ExtractedLeaf> &pieces, std::vector<FloorlessPiece> &floorless,
+	double mapRadius)
+{
+	std::vector<Bounds> hostBounds;
+	hostBounds.reserve(pieces.size());
+	for (const ExtractedLeaf &piece : pieces)
+		hostBounds.push_back(PolytopeBounds(piece.polytope));
+
+	size_t absorbed = 0;
+	bool progress = true;
+
+	for (size_t pass = 0; progress && pass < kMaxAbsorbPasses; ++pass)
+	{
+		progress = false;
+		std::vector<FloorlessPiece> spawned;
+
+		for (size_t fi = 0; fi < floorless.size(); ++fi)
+		{
+			if (floorless[fi].leaf.polytope.Empty())
+				continue;
+
+			for (size_t hi = 0; hi < pieces.size(); ++hi)
+			{
+				if (pieces[hi].passableIndex != floorless[fi].leaf.passableIndex)
+					continue;
+				if (!BoundsTouch(hostBounds[hi], floorless[fi].bounds))
+					continue;
+
+				Polytope merged;
+				if (ConvexUnion(pieces[hi].polytope, floorless[fi].leaf.polytope, mapRadius, merged))
+				{
+					pieces[hi].polytope = std::move(merged);
+					hostBounds[hi] = PolytopeBounds(pieces[hi].polytope);
+					floorless[fi].leaf.polytope = Polytope();
+					++absorbed;
+					progress = true;
+					break;
+				}
+
+				Polytope column;
+				std::vector<Polytope> outside;
+				SplitAgainstHostColumn(floorless[fi].leaf.polytope, pieces[hi].polytope, mapRadius, column,
+					outside);
+
+				if (outside.empty() || column.Empty() || column.Volume() <= kMinFragmentVolume)
+					continue;
+				if (!ConvexUnion(pieces[hi].polytope, column, mapRadius, merged))
+					continue;
+
+				pieces[hi].polytope = std::move(merged);
+				hostBounds[hi] = PolytopeBounds(pieces[hi].polytope);
+				floorless[fi].leaf.polytope = Polytope();
+
+				for (Polytope &rest : outside)
+				{
+					FloorlessPiece piece;
+					piece.bounds = PolytopeBounds(rest);
+					piece.hadFloor = floorless[fi].hadFloor;
+					piece.leaf.passableIndex = floorless[fi].leaf.passableIndex;
+					piece.leaf.polytope = std::move(rest);
+					spawned.push_back(std::move(piece));
+				}
+
+				++absorbed;
+				progress = true;
+				break;
+			}
+		}
+
+		for (FloorlessPiece &piece : spawned)
+			floorless.push_back(std::move(piece));
+	}
+
+	return absorbed;
+}
+
 }
 
 const Face *LowestFloorFace(const Polytope &poly)
@@ -430,64 +702,24 @@ double FloorHeightAt(const Face &floorFace, double x, double y)
 	return (floorFace.plane.dist - n.x * x - n.y * y) / n.z;
 }
 
-SupportedFloor ComputeSupportedFloorParts(const BspFile &bsp, int headnode,
-	const std::vector<BlockingVolume> &blockers, const Face &floorFace)
-{
-	Vec3 down = floorFace.plane.normal * -1.0;
-
-	SupportedFloor out;
-	std::vector<Winding> unsupported;
-	CarveAgainstSolids(bsp, headnode, blockers, floorFace.winding, down, out.direct, unsupported);
-
-	Vec3 stepDrop(0.0, 0.0, kStepHeight);
-	for (const Winding &w : unsupported)
-	{
-		std::vector<Winding> stepSolid;
-		std::vector<Winding> stepEmpty;
-		CarveAgainstSolids(bsp, headnode, blockers, TranslateWinding(w, stepDrop * -1.0), down, stepSolid,
-			stepEmpty);
-
-		double patchArea = WindingArea(w, floorFace.plane.normal);
-		double coveredArea = 0.0;
-		for (const Winding &piece : stepSolid)
-			coveredArea += WindingArea(piece, floorFace.plane.normal);
-
-		bool tilted = floorFace.plane.normal.z < 1.0 - kLevelFaceEpsilon;
-
-		if (tilted && coveredArea < patchArea * (1.0 - kStepCoverageTolerance))
-			continue;
-
-		for (const Winding &piece : stepSolid)
-		{
-			if (WindingArea(piece, floorFace.plane.normal) < kMinStepRescueArea)
-				continue;
-			out.stepped.push_back(TranslateWinding(piece, stepDrop));
-		}
-	}
-
-	return out;
-}
-
 std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const Face &floorFace)
 {
-	SupportedFloor parts = ComputeSupportedFloorParts(bsp, headnode, blockers, floorFace);
-
-	std::vector<Winding> supported = std::move(parts.direct);
-	for (Winding &w : parts.stepped)
-		supported.push_back(std::move(w));
+	std::vector<Winding> supported;
+	std::vector<Winding> unsupported;
+	CarveAgainstSolids(bsp, headnode, blockers, floorFace.winding, floorFace.plane.normal * -1.0, supported,
+		unsupported);
 
 	return supported;
 }
 
 std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const std::vector<ExtractedLeaf> &leaves, double mapRadius,
-	size_t *droppedOut, size_t *splitOut, size_t *noFloorOut, bool dump)
+	FloorSupportStats *statsOut, bool dump)
 {
 	std::vector<ExtractedLeaf> out;
-	size_t dropped = 0;
-	size_t split = 0;
-	size_t noFloor = 0;
+	std::vector<FloorlessPiece> floorless;
+	FloorSupportStats stats;
 
 	for (const ExtractedLeaf &leaf : leaves)
 	{
@@ -503,27 +735,17 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 
 		if (floors.empty())
 		{
-			++noFloor;
+			++stats.noFloor;
 			continue;
 		}
-
-		std::vector<SupportedFloor> support;
-		support.reserve(floors.size());
-		for (const Face *floor : floors)
-			support.push_back(ComputeSupportedFloorParts(bsp, headnode, blockers, *floor));
 
 		std::vector<Winding> supported;
 		std::vector<size_t> supportedFace;
 		for (size_t fi = 0; fi < floors.size(); ++fi)
 		{
-			for (const Winding &w : support[fi].direct)
+			for (Winding &w : ComputeSupportedFloor(bsp, headnode, blockers, *floors[fi]))
 			{
-				supported.push_back(w);
-				supportedFace.push_back(fi);
-			}
-			for (const Winding &w : support[fi].stepped)
-			{
-				supported.push_back(w);
+				supported.push_back(std::move(w));
 				supportedFace.push_back(fi);
 			}
 		}
@@ -586,7 +808,7 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 		}
 
 		if (fragments.size() > 1)
-			++split;
+			++stats.split;
 
 		for (Polytope &frag : fragments)
 		{
@@ -606,40 +828,63 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 					fragFloor = &f;
 			}
 
-			if (!fragFloor)
-			{
-				++noFloor;
-				continue;
-			}
-
-			if (totalSupported <= kMinSupportedArea)
-			{
-				if (dump)
-				{
-					Vec3 c = WindingCentroid(fragFloor->winding);
-					std::printf("  unsupported floor at (%.1f, %.1f, %.1f) normal (%.2f, %.2f, %.2f) "
-						"area %.1f volume %.0f\n", c.x, c.y, c.z, fragFloor->plane.normal.x,
-						fragFloor->plane.normal.y, fragFloor->plane.normal.z,
-						totalSupported, frag.Volume());
-				}
-				++dropped;
-				continue;
-			}
-
 			ExtractedLeaf piece;
-			piece.id = static_cast<int>(out.size());
 			piece.polytope = std::move(frag);
 			piece.passableIndex = leaf.passableIndex;
-			out.push_back(std::move(piece));
+
+			if (fragFloor && totalSupported > kMinSupportedArea)
+			{
+				piece.id = static_cast<int>(out.size());
+				out.push_back(std::move(piece));
+				continue;
+			}
+
+			FloorlessPiece pending;
+			pending.bounds = PolytopeBounds(piece.polytope);
+			pending.hadFloor = fragFloor != nullptr;
+			pending.leaf = std::move(piece);
+			floorless.push_back(std::move(pending));
 		}
 	}
 
-	if (droppedOut)
-		*droppedOut = dropped;
-	if (splitOut)
-		*splitOut = split;
-	if (noFloorOut)
-		*noFloorOut = noFloor;
+	stats.absorbed = AbsorbFloorlessPieces(out, floorless, mapRadius);
+
+	for (const FloorlessPiece &frag : floorless)
+	{
+		if (frag.leaf.polytope.Empty())
+			continue;
+
+		if (!frag.hadFloor)
+		{
+			++stats.noFloor;
+			continue;
+		}
+
+		if (dump)
+		{
+			const Face *fragFloor = nullptr;
+			for (const Face &f : frag.leaf.polytope.faces)
+			{
+				if (f.plane.normal.z <= kFloorNormalZ || f.winding.size() < 3)
+					continue;
+				if (!fragFloor || f.winding[0].z < fragFloor->winding[0].z)
+					fragFloor = &f;
+			}
+
+			Vec3 c = WindingCentroid(fragFloor->winding);
+			std::printf("  unsupported floor at (%.1f, %.1f, %.1f) normal (%.2f, %.2f, %.2f) "
+				"volume %.0f\n", c.x, c.y, c.z, fragFloor->plane.normal.x, fragFloor->plane.normal.y,
+				fragFloor->plane.normal.z, frag.leaf.polytope.Volume());
+		}
+
+		++stats.dropped;
+	}
+
+	for (size_t i = 0; i < out.size(); ++i)
+		out[i].id = static_cast<int>(i);
+
+	if (statsOut)
+		*statsOut = stats;
 
 	return out;
 }

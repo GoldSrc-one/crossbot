@@ -21,7 +21,6 @@
 #include "hull_defs.h"
 #include "leaf_extractor.h"
 #include "nav_file.h"
-#include "portal_builder.h"
 #include "reachability.h"
 #include "stand_classifier.h"
 #include "svg_debug.h"
@@ -36,14 +35,23 @@ constexpr double kMapRadius = 8192.0;
 void PrintUsage(const char *argv0)
 {
 	std::fprintf(stderr,
-		"usage: %s <map.bsp> [--dump-leaves] [--dump-areas] [--dump-planes <id>] [--dump-obj <out.obj>] [--dump-svg <out.svg>] [--trace <trace.txt>] [--airmove-samples <n>] [--no-merge] [--no-prune] [-o <out.nav>]\n"
+		"usage: %s <map.bsp> [options]\n"
 		"  --dump-leaves     print per-leaf (pre-merge) id/faces/volume/centroid stats\n"
-		"  --dump-areas      print per-area (post-merge) id/faces/volume/centroid/portal stats\n"
+		"  --dump-areas      print per-area (post-merge) id/faces/volume/centroid/member-leaf stats\n"
 		"  --dump-conns      print every final connection: type, flags, endpoints, air-move parameters\n"
+		"  --dump-steps      print every walk connection the step filter trimmed or dropped: area pair,\n"
+		"                    shallowest crossing, both floor heights, surviving walkable runs, and each\n"
+		"                    floor face's normal z plus its 2D offset from the query point\n"
+		"  --dump-support    print every leaf fragment dropped as unsupported: floor centroid, floor\n"
+		"                    normal, fragment volume\n"
+		"  --dump-path       print the waypoint plan for the debug route: per-waypoint clearance and\n"
+		"                    per-segment arc/line/gap rows, plus the profile summary line\n"
+		"  --dump-airmove    print air-move launch derivation: why no funnel launch was found, and every\n"
+		"                    re-simulation miss with its launch, yaw, speed and where it actually landed\n"
 		"  --dump-planes <id> print one final area's exact plane list (normal+dist) and face windings\n"
 		"  --dump-obj <path> write the walkable floor of every area as an OBJ mesh (plus a sidecar\n"
 		"                    .mtl): crouch areas are coloured apart, the planned route is a ribbon\n"
-		"  --dump-svg <path> write a top-down SVG of the final area/portal graph, for offline inspection\n"
+		"  --dump-svg <path> write a top-down SVG of the final area graph, for offline inspection\n"
 		"  --trace <path>    overlay a recorded bot trajectory on the SVG: one \"x y z\" per line, as\n"
 		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
@@ -629,7 +637,6 @@ int main(int argc, char **argv)
 	bool dumpSteps = false;
 	bool dumpSupport = false;
 	bool dumpPath = false;
-	bool dumpPortals = false;
 	bool dumpAirmove = false;
 	bool noFloorSplit = false;
 	bool noMerge = false;
@@ -667,10 +674,6 @@ int main(int argc, char **argv)
 		else if (arg == "--dump-path")
 		{
 			dumpPath = true;
-		}
-		else if (arg == "--dump-portals")
-		{
-			dumpPortals = true;
 		}
 		else if (arg == "--dump-airmove")
 		{
@@ -876,17 +879,14 @@ int main(int argc, char **argv)
 
 		if (!noFloorSplit)
 		{
-			size_t unsupportedDropped = 0;
-			size_t floorSplitLeaves = 0;
-			size_t noFloorDropped = 0;
+			navgen::FloorSupportStats floorStats;
 			size_t beforeFloorSplit = leaves.size();
 			leaves = navgen::SplitLeavesByFloorSupport(bsp, worldModel.headnode[navgen::kHullDuck],
-				supportBlockers, leaves, kMapRadius, &unsupportedDropped, &floorSplitLeaves, &noFloorDropped,
-				dumpSupport);
-			std::printf("%s: floor support split %zu leaves, dropped %zu unsupported and %zu steep-bottomed "
-				"pieces (%zu -> %zu leaves)\n",
-				bspPath.c_str(), floorSplitLeaves, unsupportedDropped, noFloorDropped, beforeFloorSplit,
-				leaves.size());
+				supportBlockers, leaves, kMapRadius, &floorStats, dumpSupport);
+			std::printf("%s: floor support split %zu leaves, absorbed %zu floorless pieces into the leaf "
+				"below, dropped %zu unsupported and %zu steep-bottomed pieces (%zu -> %zu leaves)\n",
+				bspPath.c_str(), floorStats.split, floorStats.absorbed, floorStats.dropped,
+				floorStats.noFloor, beforeFloorSplit, leaves.size());
 		}
 
 		std::vector<bool> isCrouchLeaf;
@@ -932,24 +932,13 @@ int main(int argc, char **argv)
 			}
 		}
 
-		std::vector<navgen::Portal> portals = navgen::BuildPortals(leaves);
-
-		if (dumpPortals)
-		{
-			for (const navgen::Portal &p : portals)
-			{
-				navgen::Vec3 mid = (p.pointA + p.pointB) * 0.5;
-				std::printf("  portal leaf%d<->leaf%d area=%.1f mid=(%.1f,%.1f,%.1f)\n", p.leafA, p.leafB, p.area,
-					mid.x, mid.y, mid.z);
-			}
-		}
-
+		size_t leafSeams = 0;
 		navgen::MergeResult merged = noMerge
 			? navgen::NoMerge(leaves, isCrouchLeaf, duckPassables.passable)
-			: navgen::MergeAreas(leaves, portals, isCrouchLeaf, duckPassables.passable);
+			: navgen::MergeAreas(leaves, isCrouchLeaf, duckPassables.passable, &leafSeams);
 
-		std::printf("%s: %zu raw portals -> %zu areas, %zu inter-area connections (%s)\n",
-			bspPath.c_str(), portals.size(), merged.areas.size(), merged.conns.size(),
+		std::printf("%s: %zu leaf floor seams -> %zu areas, %zu inter-area connections (%s)\n",
+			bspPath.c_str(), leafSeams, merged.areas.size(), merged.conns.size(),
 			noMerge ? "NoMerge" : "MergeAreas");
 
 		size_t illFormedAreas = navgen::ValidateAreaFootprints(merged.areas);
@@ -961,10 +950,12 @@ int main(int argc, char **argv)
 		std::printf("%s: %zu candidate walk connections across shared floor seams\n",
 			bspPath.c_str(), walkConnsBuilt);
 
-		size_t steepWalkConns = navgen::FilterWalkConnectionsByStep(merged.areas, merged.conns, navgen::kStepHeight, dumpSteps);
-		if (steepWalkConns > 0)
-			std::printf("%s: dropped %zu walk connections exceeding %.0f-unit step height\n",
-				bspPath.c_str(), steepWalkConns, navgen::kStepHeight);
+		size_t splitWalkConns = 0;
+		size_t steepWalkConns = navgen::FilterWalkConnectionsByStep(merged.areas, merged.conns,
+			navgen::kStepHeight, &splitWalkConns, dumpSteps);
+		if (steepWalkConns > 0 || splitWalkConns > 0)
+			std::printf("%s: dropped %zu and trimmed %zu walk connections exceeding %.0f-unit step height\n",
+				bspPath.c_str(), steepWalkConns, splitWalkConns, navgen::kStepHeight);
 
 		navgen::PhysicsParams physics;
 		navgen::AirmoveSampleParams airmoveParams;
