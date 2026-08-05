@@ -10,5 +10,9 @@ void Unload();
 bool IsLoaded();
 const NavMesh *Get();
 
+void PenalizeConnection(uint32_t connIndex);
+void RewardConnection(uint32_t connIndex);
+float ConnectionPenalty(uint32_t connIndex);
+
 }
 

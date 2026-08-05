@@ -28,6 +28,7 @@ struct CBot
 	float airmoveSpeed = 0.f;
 	float airmoveStartTime = 0.f;
 	int airmoveTargetArea = -1;
+	int airmoveConnIndex = -1;
 
 	bool fallTelemetryLogged = false;
 

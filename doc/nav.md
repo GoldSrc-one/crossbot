@@ -9,6 +9,31 @@ Global mesh management:
 - `IsLoaded()` - checks if mesh loaded
 - `Get()` - returns pointer to NavMesh
 
+### Runtime connection penalties
+`PenalizeConnection` / `RewardConnection` / `ConnectionPenalty` are the runtime's only way to write to
+the mesh. They move `Connection::runtimePenalty`, which `BuildGraph` adds to `costSeconds`, so a
+connection the bot failed on gets more expensive and the next plan routes around it if it can. Failure
+adds `kConnFailPenalty` (5 s), success halves it and snaps to zero under 0.1.
+
+Four properties are deliberate:
+
+- **Not a ban.** The edge stays in the graph at a higher price, because it may be the only way into an
+  area. 5 s is far below the `1.0e4f` soft-infinity `ConnectionCostSeconds` uses for lethal falls, so a
+  penalized one-way drop still gets planned rather than stranding the bot.
+- **Mesh-global and in-memory.** One table shared by every bot, cleared when `Unload` frees the mesh.
+  `runtimePenalty` is not in the file format — it is learned state, and navgen would overwrite it.
+- **Offline planning never sees it.** It defaults to 0 and only the runtime writes it, and navgen
+  builds its own graph, so `--dump-path` output is unchanged by this whole mechanism. A route sweep
+  that diffs after a change here must come out empty.
+- **The reward only fires on edges still being planned.** Once a penalty is large enough that an
+  alternative wins, nothing brings that edge back — there is no exploration term. Acceptable because an
+  edge never planned is an edge never paid for.
+
+Attribution runs launch waypoint → bot → mesh: `Cross` stamps `PlanWaypoint::connIndex` on the air-move
+launch waypoint, `RunAirmoveApproach` latches it into `CBot::airmoveConnIndex`, and `RunAirmoveFlight`
+spends it on landing. Only the air-move branch stamps it today; teleport and walk/door keep `-1` and
+are the extension points when those grow failure detection.
+
 ## nav_mesh.h
 
 ### NavMesh struct
@@ -163,6 +188,10 @@ door contribute the seconds it takes to open; a multiplier had nowhere to put "w
 includes an air move's `flightTime` and a door area's `openSeconds` (see `ConnectionCostSeconds` in
 `area_merger.cpp`), so `PlanWalker` must not add either again — the search adds `costSeconds` once per
 edge and the walker only measures string-pulled distance.
+
+Being seconds is also what lets `runtimePenalty` be added straight on top in `BuildGraph` (see
+`nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
+everything.
 
 ## funnel_graph.cpp
 

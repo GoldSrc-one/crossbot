@@ -37,6 +37,7 @@ struct Connection
 	uint8_t connType = crossbot_nav::CONN_WALK;
 	uint8_t connFlags = crossbot_nav::CONN_FLAG_NONE;
 	float costSeconds = 0.f;
+	float runtimePenalty = 0.f;
 
 	float exitSpeed = 0.f;
 	float exitAngle = 0.f;

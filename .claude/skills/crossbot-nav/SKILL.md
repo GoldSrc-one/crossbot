@@ -111,10 +111,13 @@ different causes produce an identical line and you have to tell them apart:
 Ducking hides both: `PM_Duck` scales the command by `kDuckingMultiplier` after the engine clamps it, so
 a `move` of 270 is really a wish speed of 90.
 
-**Thrashing** — `actual=` cycling, `[11,12,13,11,12,13,...]`. Repathing has no memory of what just
-failed, and the new start position can flip which route is cheapest, so the bot alternates between two
-routes into the same dead end. The maneuver at the junction is the thing that cannot be executed; the
-route change is a symptom. `doc/bot.md` has the worked example.
+**Thrashing** — `actual=` cycling, `[11,12,13,11,12,13,...]`. The bot is alternating between two routes
+into the same dead end; the maneuver at the junction is what cannot be executed, and the route change
+is a symptom. A failed air move now penalizes its connection, so a cycle should break after one lap —
+`crossbot_nav_penalties` says whether it is learning, and `penalized=` on the `Replan` line says
+whether the new route actually avoids the bad edge. A cycle that does *not* decay means either the
+penalty never landed (check `conn -1` on the landing line — the launch waypoint carried no connection
+index) or every remaining route is equally bad. `doc/bot.md` has the worked example.
 
 **Short of the goal** — `hasGoal=0`, `waypoint=0/0`, and a distance the test calls a failure. This is
 ambiguous: identical output for "arrived and cleared the goal" and "gave up". **Check the clamped goal
@@ -155,6 +158,11 @@ plan sweep will show a shorter, cheaper, entirely valid route while the bot fail
 an end-to-end baseline *before* the change, not after — after is too late, the old binary is gone, and
 you are left unable to say whether anything regressed.
 
+Runtime penalties are the exception, and the exception is worth knowing because it inverts the check.
+`Connection::runtimePenalty` is 0 until a bot fails and navgen builds its own graph, so the route sweep
+**must come out empty** — an empty diff is the evidence, not a formality, and a nonempty one means the
+penalty leaked into offline planning.
+
 **`test_nav_goal.ps1` prints its verdict with `Write-Host`.** `... | Select-String '=== RESULT'`
 captures nothing — the line reaches the console but never the pipeline. Redirect the whole run to a
 file and parse that. Its exit code is also easy to lose through a pipeline; parse the transcript.
@@ -185,6 +193,15 @@ of them. There is no cheap version of this.
 when the tree already has other uncommitted work in the same headers — the stashed version stops
 compiling against the rest. Copy the files aside and revert your own hunks by hand, or accept that you
 cannot answer the regression question and say so plainly rather than implying the change is clean.
+
+**When the change is gated by a tuning constant, set the constant to its identity value instead.**
+Zero for an added penalty, 1 for a multiplier: one edit, one rebuild, and the binary reproduces the old
+behaviour exactly while keeping the new logging — which is usually what makes the old behaviour legible
+in the first place. It answers the before/after question in two runs with no git surgery, and it also
+proves the constant is the only thing doing the work. Setting `kConnFailPenalty` to 0 turned
+test50_stairs from a 2 s pass back into a 12 s timeout looping conn 38 → conn 35 → conn 38, which no
+amount of reading the diff would have shown. Put the constant back and rebuild before you do anything
+else — a neutered binary that looks built is the same trap as a stale deploy.
 
 A refactor that is meant to preserve behaviour should be checked *on its own*, before the behavioural
 change goes on top. Extracting `PlanWalker` was verified byte-identical across all 52 maps before the

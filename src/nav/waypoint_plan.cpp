@@ -872,6 +872,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		launchWp.launchSimAim = simAim;
 		launchWp.requiresCrouch = needsCrouch;
 		launchWp.targetAreaId = static_cast<int>(toId);
+		launchWp.connIndex = static_cast<int>(connIndex);
 
 		PendingLaunch pl;
 		pl.index = m_result.size();

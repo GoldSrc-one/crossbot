@@ -24,7 +24,7 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 		gc.areaB = c.areaB;
 		gc.crossing = NavPlan::ConnectionCrossing(mesh.planAreas, mesh.planConns[i]);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
-		gc.costSeconds = c.costSeconds;
+		gc.costSeconds = c.costSeconds + c.runtimePenalty;
 	}
 }
 

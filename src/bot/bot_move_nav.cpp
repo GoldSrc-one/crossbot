@@ -201,6 +201,7 @@ namespace
 			bot.airmoveCrouch = wp.requiresCrouch;
 			bot.airmoveStartTime = gpGlobals->time;
 			bot.airmoveTargetArea = wp.targetAreaId;
+			bot.airmoveConnIndex = wp.connIndex;
 			++bot.waypointIndex;
 
 			Vector offTrack(toLaunch.x - launchDir.x * remaining,
@@ -242,14 +243,29 @@ namespace
 			const Nav::Area *landedArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
 			int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
 
-			char msg[224];
+			bool failed = (bot.airmoveTargetArea >= 0 && landedId != bot.airmoveTargetArea);
+
+			if (bot.airmoveConnIndex >= 0)
+			{
+				uint32_t connIndex = static_cast<uint32_t>(bot.airmoveConnIndex);
+				if (failed)
+					Nav::PenalizeConnection(connIndex);
+				else
+					Nav::RewardConnection(connIndex);
+			}
+
+			char msg[288];
 			snprintf(msg, sizeof(msg),
-				"CrossBot: %s airmove %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d)\n", bot.name,
+				"CrossBot: %s airmove %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) "
+				"conn %d penalty %.1f\n", bot.name,
 				onGround ? "landed" : "timed out", airTime, pEdict->v.origin.x, pEdict->v.origin.y,
-				pEdict->v.origin.z, landedId, bot.airmoveTargetArea);
+				pEdict->v.origin.z, landedId, bot.airmoveTargetArea, bot.airmoveConnIndex,
+				(bot.airmoveConnIndex >= 0)
+					? Nav::ConnectionPenalty(static_cast<uint32_t>(bot.airmoveConnIndex))
+					: 0.f);
 			SERVER_PRINT(msg);
 
-			if (bot.airmoveTargetArea >= 0 && landedId != bot.airmoveTargetArea)
+			if (failed)
 				bot.nextRepathTime = gpGlobals->time;
 
 			return false;
@@ -268,6 +284,7 @@ namespace
 		bot.trackState = NavFollow::TrackState();
 		bot.airmoveActive = false;
 		bot.airmoveTargetArea = -1;
+		bot.airmoveConnIndex = -1;
 		bot.plannedAreaPath.clear();
 		bot.visitedAreaPath.clear();
 		bot.pathStartTime = 0.f;
@@ -335,6 +352,11 @@ namespace
 		bot.trackState = NavFollow::TrackState();
 		bot.lastProgressS = 0.f;
 
+		size_t penalizedOnRoute = 0;
+		for (uint32_t connIndex : path.connPath)
+			if (Nav::ConnectionPenalty(connIndex) > 0.f)
+				++penalizedOnRoute;
+
 		if (freshAttempt)
 		{
 			bot.pathStartTime = gpGlobals->time;
@@ -347,14 +369,14 @@ namespace
 				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
 				"airmoves=%zu simulated/%zu respeeded/%zu kept/%zu rejected | search %zu areas/%zu sims "
 				"in %.1fms | profile segs=%zu len=%.0f "
-				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu\n",
+				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu | penalized=%zu\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
 				planStats.airmovesSimulated, planStats.airmovesRespeeded, planStats.airmovesRespeedKept,
 				path.airmovesRejected, path.expansions, path.airmovesTried, planMs,
 				bot.followProfile.segs.size(), bot.followProfile.totalLength,
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,
-				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk);
+				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk, penalizedOnRoute);
 			SERVER_PRINT(wpMsg);
 			for (size_t i = 0; i < bot.waypoints.size(); ++i)
 			{
@@ -376,6 +398,15 @@ namespace
 				}
 				SERVER_PRINT(wpMsg);
 			}
+		}
+		else
+		{
+			char wpMsg[256];
+			snprintf(wpMsg, sizeof(wpMsg),
+				"CrossBot: Replan from=(%.1f,%.1f,%.1f) waypoints=%zu areas=%zu eta=%.1fs | penalized=%zu\n",
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.waypoints.size(),
+				path.areaPath.size(), bot.followProfile.totalTime, penalizedOnRoute);
+			SERVER_PRINT(wpMsg);
 		}
 		return true;
 	}

@@ -3,6 +3,7 @@
 
 #include "commands.h"
 #include "../bot/bot_manager.h"
+#include "../nav/nav.h"
 
 namespace
 {
@@ -87,6 +88,36 @@ namespace
 			SERVER_PRINT(msg);
 		}
 	}
+
+	void Cmd_CrossBotNavPenalties()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+			return;
+		}
+
+		size_t shown = 0;
+		for (size_t i = 0; i < mesh->conns.size(); ++i)
+		{
+			const Nav::Connection &c = mesh->conns[i];
+			if (c.runtimePenalty <= 0.f)
+				continue;
+
+			char msg[160];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: conn %zu %u->%u type %u cost %.2fs penalty %.2fs\n", i, c.areaA, c.areaB,
+				static_cast<unsigned>(c.connType), c.costSeconds, c.runtimePenalty);
+			SERVER_PRINT(msg);
+			++shown;
+		}
+
+		char summary[96];
+		snprintf(summary, sizeof(summary), "CrossBot: %zu/%zu connections penalized\n", shown,
+			mesh->conns.size());
+		SERVER_PRINT(summary);
+	}
 }
 
 namespace CrossBotCommands
@@ -101,6 +132,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_spawns", Cmd_CrossBotListSpawns);
 	ADD_SERVER_COMMAND("crossbot_list_targets", Cmd_CrossBotListTargets);
 	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
+	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
 }
 
 }

@@ -31,6 +31,12 @@ map, so a full-suite run is heavy and will collide with anyone using the server 
 `... | Select-String '=== RESULT'` captures nothing. Redirect the whole run to a file and parse that;
 the exit code is easy to lose through a pipeline too.
 
+**The script's output does not contain the plugin's.** The transcript is the script talking over RCON;
+every `SERVER_PRINT` — `Repath`, `Replan`, the air-move launch and landing lines — goes to
+`hlds/qconsole.log` instead. A run that passes tells you nothing about *why*; the log is where the
+route, the failures and the penalties are. It is shared across parallel runs and appended to, so read
+it by tail, not from the top.
+
 ## Sweeping a change
 
 Three different things can move, and each needs its own sweep. Running the wrong one is how a change

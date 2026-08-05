@@ -77,6 +77,7 @@ struct PlanWaypoint
 	float buttonWaitTime = 0.f;
 	bool requiresTriggerTouch = false;
 	int targetAreaId = -1;
+	int connIndex = -1;
 	float clearance = 16.f;
 
 	bool requiresTeleport = false;

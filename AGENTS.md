@@ -71,6 +71,9 @@ Runs navgen on every `.bsp` in `maps/`, writes `.svg` and `.nav` files to `nav_d
 .\scripts\test_nav_goal.ps1 -Map maps\test1_simple.bsp
 ```
 
+The script's own output is the pass/fail verdict only. Everything the plugin printed goes to
+`hlds\qconsole.log`.
+
 ### Sweep the mesh, then the routes
 ```powershell
 & .\.claude\skills\crossbot-navgen\scripts\sweep.ps1 -Out before.txt
