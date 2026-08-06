@@ -6,6 +6,7 @@
 
 #include "../nav/nav_path.h"
 #include "../nav/path_follower.h"
+#include "bot_avoid.h"
 
 struct CBot
 {
@@ -29,6 +30,8 @@ struct CBot
 	float airmoveStartTime = 0.f;
 	int airmoveTargetArea = -1;
 	int airmoveConnIndex = -1;
+
+	BotAvoid::State avoid;
 
 	bool fallTelemetryLogged = false;
 

@@ -13,6 +13,7 @@ in `doc/`.
 - **Use floats in the bot code, use doubles in navgen, in shared code use floats.**
 - **Tools and scripts: Use PowerShell! Don't use CMD! Use Powershell! Don't use Python! Use powershell! Don't use Node.JS!**
 - **Comments: Do not add comments. All comments will be deleted! If you cannot escape you irresistable urge to write comments, put them in doc/ instead.**
+- **Keep the size of AGENTS.md and all SKILL.md files to be between 50 to 100 lines. Don't duplicate what is already in doc/**
 
 ## Important Notes
 

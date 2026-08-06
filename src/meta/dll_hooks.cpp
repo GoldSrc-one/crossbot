@@ -10,10 +10,17 @@ cvar_t g_tracePathCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_navAvoidCvar = {
+	"crossbot_nav_avoid",
+	"1",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
 	RETURN_META(MRES_IGNORED);
 }
 

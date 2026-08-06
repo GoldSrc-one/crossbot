@@ -6,6 +6,7 @@
 
 #include "bot_move_nav.h"
 #include "bot_move.h"
+#include "bot_avoid.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
@@ -285,6 +286,7 @@ namespace
 		bot.airmoveActive = false;
 		bot.airmoveTargetArea = -1;
 		bot.airmoveConnIndex = -1;
+		bot.avoid = BotAvoid::State();
 		bot.plannedAreaPath.clear();
 		bot.visitedAreaPath.clear();
 		bot.pathStartTime = 0.f;
@@ -564,13 +566,28 @@ void Bot_MoveNav(CBot &bot)
 
 	Vector angles = Bot_UpdateFacing(bot);
 
-	bool crouch = wp->requiresCrouch || (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH));
+	BotAvoid::Decision avoid;
+	if (BotAvoid::Enabled())
+	{
+		Vector pathDir = Norm2D(follow.aimPoint - pEdict->v.origin);
+		if (pathDir.x == 0.f && pathDir.y == 0.f)
+			pathDir = moveDir;
+		avoid = BotAvoid::Update(bot, *mesh, pathDir, physics);
+	}
+
+	bool planCrouch = wp->requiresCrouch
+		|| (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH));
+	bool crouch = planCrouch || avoid.duck;
+	if (avoid.suppressPlanCrouch && !planCrouch)
+		crouch = false;
 
 	float drive = follow.wishSpeed;
 	if ((pEdict->v.flags & FL_DUCKING) != 0)
 		drive /= PmSim::kDuckingMultiplier;
 	if (drive > physics.maxSpeed)
 		drive = physics.maxSpeed;
+	if (avoid.slowApproach)
+		drive = std::min(drive, physics.maxSpeed * PmSim::kDuckingMultiplier);
 
 	float fmove = 0.f, smove = 0.f;
 	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
@@ -585,6 +602,8 @@ void Bot_MoveNav(CBot &bot)
 
 	if (crouch)
 		buttons |= IN_DUCK;
+	if (avoid.jump)
+		buttons |= IN_JUMP;
 
 	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
 }
