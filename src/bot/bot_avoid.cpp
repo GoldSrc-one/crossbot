@@ -37,6 +37,24 @@ namespace
 
 	constexpr size_t kAvoidRouteLookahead = 3;
 
+	constexpr float kAvoidHullHalf = 16.f;
+	constexpr float kAvoidCornerMargin = 2.f;
+	constexpr float kAvoidGroundDrop = 64.f;
+	constexpr float kAvoidFloorNormal = 0.7f;
+
+	constexpr int kAvoidMaxDepth = 6;
+	constexpr int kAvoidMaxTraces = 256;
+
+	constexpr size_t kAvoidDestLookahead = 4;
+	constexpr float kAvoidDestStep = 16.f;
+	constexpr int kAvoidDestProbes = 16;
+	constexpr float kAvoidDetourMaxLength = 768.f;
+	constexpr float kAvoidSearchCooldown = 1.f;
+	constexpr float kAvoidDetourMaxTime = 10.f;
+	constexpr float kAvoidMoverSpeed = 16.f;
+	constexpr float kAvoidSpinRadiusMin = 4.f;
+	constexpr float kAvoidDegToRad = 0.01745329252f;
+
 	const char *ClassOf(edict_t *ent)
 	{
 		if (!ent || !gpGlobals->pStringBase)
@@ -48,6 +66,44 @@ namespace
 	float Length2D(const Vector &v)
 	{
 		return sqrtf(v.x * v.x + v.y * v.y);
+	}
+
+	float Dist2D(const Vector &a, const Vector &b)
+	{
+		float dx = a.x - b.x;
+		float dy = a.y - b.y;
+		return sqrtf(dx * dx + dy * dy);
+	}
+
+	float Dot2D(const Vector &a, const Vector &b)
+	{
+		return a.x * b.x + a.y * b.y;
+	}
+
+	Vector MoverVelocityAt(edict_t *ent, const Vector &point)
+	{
+		const Vector &av = ent->v.avelocity;
+		if (av.x == 0.f && av.y == 0.f && av.z == 0.f)
+			return ent->v.velocity;
+
+		Vector r = point - ent->v.origin;
+		float len = Length2D(r);
+		if (len < kAvoidSpinRadiusMin)
+			return ent->v.velocity;
+
+		float ex = std::max(fabsf(ent->v.mins.x), fabsf(ent->v.maxs.x));
+		float ey = std::max(fabsf(ent->v.mins.y), fabsf(ent->v.maxs.y));
+		float reach = sqrtf(ex * ex + ey * ey);
+		if (reach > len)
+		{
+			float scale = reach / len;
+			r.x *= scale;
+			r.y *= scale;
+		}
+
+		Vector w(av.z * kAvoidDegToRad, av.x * kAvoidDegToRad, av.y * kAvoidDegToRad);
+		Vector spin(w.y * r.z - w.z * r.y, w.z * r.x - w.x * r.z, w.x * r.y - w.y * r.x);
+		return ent->v.velocity + spin;
 	}
 
 	bool AabbOverlap(const Vector &aMin, const Vector &aMax, const Vector &bMin, const Vector &bMax)
@@ -74,8 +130,9 @@ namespace
 		if (solid != SOLID_BSP)
 			return false;
 
-		size_t end = std::min(bot.waypoints.size(), bot.waypointIndex + kAvoidRouteLookahead);
-		for (size_t i = bot.waypointIndex; i < end; ++i)
+		size_t begin = std::max(bot.waypointIndex, bot.avoid.detourEnd);
+		size_t end = std::min(bot.waypoints.size(), begin + kAvoidRouteLookahead);
+		for (size_t i = begin; i < end; ++i)
 		{
 			const Nav::Waypoint &wp = bot.waypoints[i];
 			if (wp.requiresElevatorRide)
@@ -110,6 +167,246 @@ namespace
 		return !RouteExemptsHit(bot, mesh, hit, solid);
 	}
 
+	bool WaypointIsFlagged(const Nav::Waypoint &wp)
+	{
+		return wp.requiresCrouch || wp.requiresDoor || wp.requiresBreak || wp.requiresButtonUse
+			|| wp.requiresTriggerTouch || wp.requiresTeleport || wp.requiresElevatorRide
+			|| wp.airmoveLaunch || wp.requiresJump;
+	}
+
+	struct SearchCtx
+	{
+		const CBot *bot = nullptr;
+		const Nav::NavMesh *mesh = nullptr;
+		edict_t *ignore = nullptr;
+		int hull = kHullHuman;
+		int traces = 0;
+	};
+
+	enum ProbeResult
+	{
+		PROBE_CLEAR = 0,
+		PROBE_WORLD,
+		PROBE_ENTITY
+	};
+
+	ProbeResult Probe(SearchCtx &ctx, const Vector &a, const Vector &b, TraceResult &tr)
+	{
+		if (ctx.traces >= kAvoidMaxTraces)
+			return PROBE_WORLD;
+		++ctx.traces;
+
+		g_engfuncs.pfnTraceHull(a, b, dont_ignore_monsters, ctx.hull, ctx.ignore, &tr);
+		if (tr.fStartSolid || tr.fAllSolid)
+			return PROBE_WORLD;
+		if (tr.flFraction >= 1.f)
+			return PROBE_CLEAR;
+		if (HitQualifies(*ctx.bot, *ctx.mesh, tr.pHit))
+			return PROBE_ENTITY;
+
+		if (tr.vecPlaneNormal.z < kAvoidFloorNormal)
+			return PROBE_WORLD;
+		if (ctx.traces >= kAvoidMaxTraces)
+			return PROBE_WORLD;
+		++ctx.traces;
+
+		Vector lift(0.f, 0.f, kAvoidStepHeight);
+		TraceResult up;
+		g_engfuncs.pfnTraceHull(a + lift, b + lift, dont_ignore_monsters, ctx.hull, ctx.ignore, &up);
+		if (up.fStartSolid || up.fAllSolid)
+			return PROBE_WORLD;
+		if (up.flFraction >= 1.f)
+			return PROBE_CLEAR;
+		if (HitQualifies(*ctx.bot, *ctx.mesh, up.pHit))
+		{
+			tr = up;
+			return PROBE_ENTITY;
+		}
+		return PROBE_WORLD;
+	}
+
+	bool Ground(SearchCtx &ctx, float x, float y, float refZ, Vector &out)
+	{
+		if (ctx.traces >= kAvoidMaxTraces)
+			return false;
+		++ctx.traces;
+
+		Vector from(x, y, refZ + kAvoidStepHeight);
+		Vector to(x, y, refZ - kAvoidGroundDrop);
+		TraceResult tr;
+		g_engfuncs.pfnTraceHull(from, to, dont_ignore_monsters, ctx.hull, ctx.ignore, &tr);
+		if (tr.fStartSolid || tr.fAllSolid || tr.flFraction >= 1.f)
+			return false;
+
+		out = tr.vecEndPos;
+		return true;
+	}
+
+	bool SolveAround(SearchCtx &ctx, const Vector &from, const Vector &to, edict_t *hit,
+		const Vector &contact, std::vector<int> &visited, int depth, std::vector<Vector> &out,
+		float &length);
+
+	bool Solve(SearchCtx &ctx, const Vector &from, const Vector &to, std::vector<int> &visited,
+		int depth, std::vector<Vector> &out, float &length)
+	{
+		TraceResult tr;
+		ProbeResult probe = Probe(ctx, from, to, tr);
+		if (probe == PROBE_CLEAR)
+		{
+			length += Dist2D(from, to);
+			return true;
+		}
+		if (probe == PROBE_WORLD)
+			return false;
+		return SolveAround(ctx, from, to, tr.pHit, tr.vecEndPos, visited, depth, out, length);
+	}
+
+	bool SolveAround(SearchCtx &ctx, const Vector &from, const Vector &to, edict_t *hit,
+		const Vector &contact, std::vector<int> &visited, int depth, std::vector<Vector> &out,
+		float &length)
+	{
+		if (depth >= kAvoidMaxDepth)
+			return false;
+
+		int hitIndex = g_engfuncs.pfnIndexOfEdict(hit);
+		for (int seen : visited)
+		{
+			if (seen == hitIndex)
+				return false;
+		}
+
+		float pad = kAvoidHullHalf + kAvoidCornerMargin;
+		float minX = hit->v.absmin.x - pad;
+		float minY = hit->v.absmin.y - pad;
+		float maxX = hit->v.absmax.x + pad;
+		float maxY = hit->v.absmax.y + pad;
+
+		Vector fwd((minX + maxX) * 0.5f - from.x, (minY + maxY) * 0.5f - from.y, 0.f);
+		float fwdLen = Length2D(fwd);
+		if (fwdLen < 0.0001f)
+		{
+			fwd = Vector(to.x - from.x, to.y - from.y, 0.f);
+			fwdLen = Length2D(fwd);
+			if (fwdLen < 0.0001f)
+				return false;
+		}
+		fwd.x /= fwdLen;
+		fwd.y /= fwdLen;
+		Vector right(fwd.y, -fwd.x, 0.f);
+
+		struct Corner
+		{
+			float x, y, sx, sy;
+		};
+		Corner corners[4] = {
+			{ minX, minY, 0.f, 0.f },
+			{ maxX, minY, 0.f, 0.f },
+			{ minX, maxY, 0.f, 0.f },
+			{ maxX, maxY, 0.f, 0.f }
+		};
+		for (Corner &c : corners)
+		{
+			float dx = c.x - from.x;
+			float dy = c.y - from.y;
+			c.sx = dx * right.x + dy * right.y;
+			c.sy = dx * fwd.x + dy * fwd.y;
+		}
+		std::sort(corners, corners + 4, [](const Corner &a, const Corner &b) { return a.sx < b.sx; });
+		if (corners[1].sy > corners[0].sy)
+			std::swap(corners[0], corners[1]);
+		if (corners[3].sy < corners[2].sy)
+			std::swap(corners[2], corners[3]);
+
+		const Corner *sides[2][4] = {
+			{ &corners[1], &corners[0], &corners[3], &corners[2] },
+			{ &corners[2], &corners[3], &corners[0], &corners[1] }
+		};
+
+		int order[2] = { 1, 0 };
+		bool exclusive = false;
+		float vlat = Dot2D(MoverVelocityAt(hit, contact), right);
+		if (fabsf(vlat) > kAvoidMoverSpeed)
+		{
+			order[0] = (vlat < 0.f) ? 1 : 0;
+			order[1] = 1 - order[0];
+			exclusive = true;
+		}
+
+		std::vector<Vector> best;
+		float bestLength = 0.f;
+		bool haveBest = false;
+		size_t mark = visited.size();
+
+		for (int k = 0; k < 2; ++k)
+		{
+			int side = order[k];
+
+			visited.resize(mark);
+			visited.push_back(hitIndex);
+
+			std::vector<Vector> points;
+			float sideLength = 0.f;
+			Vector cur = from;
+			bool done = false;
+
+			for (int i = 0; i < 4 && !done; ++i)
+			{
+				Vector corner;
+				if (!Ground(ctx, sides[side][i]->x, sides[side][i]->y, cur.z, corner))
+					corner = Vector(sides[side][i]->x, sides[side][i]->y, cur.z);
+
+				TraceResult leg;
+				ProbeResult legProbe = Probe(ctx, cur, corner, leg);
+				if (legProbe == PROBE_WORLD)
+					continue;
+
+				std::vector<Vector> tail;
+				float tailLength = 0.f;
+
+				if (legProbe == PROBE_ENTITY)
+				{
+					if (!SolveAround(ctx, cur, to, leg.pHit, leg.vecEndPos, visited, depth + 1, tail,
+							tailLength))
+						continue;
+				}
+				else
+				{
+					sideLength += Dist2D(cur, corner);
+					points.push_back(corner);
+					cur = corner;
+
+					if (!Solve(ctx, cur, to, visited, depth + 1, tail, tailLength))
+						continue;
+				}
+
+				points.insert(points.end(), tail.begin(), tail.end());
+				sideLength += tailLength;
+				done = true;
+			}
+
+			if (!done)
+				continue;
+
+			if (!haveBest || sideLength < bestLength)
+			{
+				best = std::move(points);
+				bestLength = sideLength;
+				haveBest = true;
+			}
+			if (exclusive)
+				break;
+		}
+
+		visited.resize(mark);
+		if (!haveBest)
+			return false;
+		visited.push_back(hitIndex);
+
+		out.insert(out.end(), best.begin(), best.end());
+		length += bestLength;
+		return true;
+	}
+
 	void Record(BotAvoid::State &state, BotAvoid::Kind kind, edict_t *hit, float gap, float top)
 	{
 		state.lastKind = kind;
@@ -130,6 +427,145 @@ namespace
 			bot.name, what, ClassOf(hit), origin.x, origin.y, origin.z, gap, top, dist, speed, hold);
 		SERVER_PRINT(msg);
 	}
+
+	bool DetourActive(const CBot &bot, const BotAvoid::State &state, float now)
+	{
+		return bot.waypointIndex < state.detourEnd && now < state.detourExpire;
+	}
+
+	bool PickDestination(const CBot &bot, SearchCtx &ctx, edict_t *hit, const Vector &origin,
+		float hullHalf, Vector &destOut, size_t &indexOut)
+	{
+		float pad = kAvoidHullHalf + kAvoidCornerMargin;
+		float minX = hit->v.absmin.x - pad;
+		float minY = hit->v.absmin.y - pad;
+		float maxX = hit->v.absmax.x + pad;
+		float maxY = hit->v.absmax.y + pad;
+
+		int probes = 0;
+		Vector prev = origin;
+		size_t limit = std::min(bot.waypoints.size(), bot.waypointIndex + kAvoidDestLookahead);
+		for (size_t i = bot.waypointIndex; i < limit; ++i)
+		{
+			const Nav::Waypoint &wp = bot.waypoints[i];
+			Vector target(wp.point.x, wp.point.y,
+				wp.point.z + hullHalf - NavPlan::kPlanStandHeight);
+
+			float len = Dist2D(prev, target);
+			int steps = std::max(1, static_cast<int>(len / kAvoidDestStep));
+			for (int s = 1; s <= steps; ++s)
+			{
+				float t = static_cast<float>(s) / static_cast<float>(steps);
+				float x = prev.x + (target.x - prev.x) * t;
+				float y = prev.y + (target.y - prev.y) * t;
+				if (x >= minX && x <= maxX && y >= minY && y <= maxY)
+					continue;
+				if (probes >= kAvoidDestProbes)
+					return false;
+				++probes;
+				if (!Ground(ctx, x, y, prev.z, destOut))
+					continue;
+				indexOut = i;
+				return true;
+			}
+
+			if (WaypointIsFlagged(wp))
+				break;
+			prev = target;
+		}
+		return false;
+	}
+
+	void RunSideSearch(CBot &bot, const Nav::NavMesh &mesh, BotAvoid::Decision &out, edict_t *hit,
+		const Vector &contact, const Vector &pathDir, float gap, float top, int hull, float hullHalf,
+		float now)
+	{
+		BotAvoid::State &state = bot.avoid;
+		const Vector &origin = bot.pEdict->v.origin;
+
+		Record(state, BotAvoid::AVOID_SIDE, hit, gap, top);
+		state.nextSearchTime = now + kAvoidSearchCooldown;
+
+		Vector travel = pathDir;
+		if (bot.waypointIndex < bot.waypoints.size())
+		{
+			Vector step = bot.waypoints[bot.waypointIndex].point - origin;
+			step.z = 0.f;
+			float stepLen = Length2D(step);
+			if (stepLen > 1.f)
+			{
+				travel.x = step.x / stepLen;
+				travel.y = step.y / stepLen;
+				travel.z = 0.f;
+			}
+		}
+
+		float closing = Dot2D(MoverVelocityAt(hit, contact), travel);
+		bool recedes = closing > kAvoidMoverSpeed;
+
+		SearchCtx ctx;
+		ctx.bot = &bot;
+		ctx.mesh = &mesh;
+		ctx.ignore = bot.pEdict;
+		ctx.hull = hull;
+
+		char msg[288];
+		Vector dest;
+		size_t d = bot.waypointIndex;
+		if (!PickDestination(bot, ctx, hit, origin, hullHalf, dest, d))
+		{
+			out.searchFailed = true;
+			out.hitRecedes = recedes;
+			state.lastKind = recedes ? BotAvoid::AVOID_FOLLOW : BotAvoid::AVOID_BLOCKED;
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) no clear rejoin point "
+				"closing %.0f traces %d\n",
+				bot.name, recedes ? "following" : "blocked by", ClassOf(hit), origin.x, origin.y,
+				origin.z, closing, ctx.traces);
+			SERVER_PRINT(msg);
+			return;
+		}
+
+		std::vector<int> visited;
+		std::vector<Vector> points;
+		float length = 0.f;
+		bool ok = Solve(ctx, origin, dest, visited, 0, points, length);
+
+		if (ok && points.empty())
+			return;
+		if (ok)
+			points.push_back(dest);
+
+		float direct = Dist2D(origin, dest);
+		float budget = kAvoidDetourMaxLength;
+
+		if (ok && length <= budget)
+		{
+			out.detourPoints = std::move(points);
+			out.detourReplaceUntil = d;
+			state.detourHit = g_engfuncs.pfnIndexOfEdict(hit);
+			state.detourExpire = now + kAvoidDetourMaxTime;
+
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s avoid side %s at (%.1f,%.1f,%.1f) points %zu length %.0f direct %.0f "
+				"traces %d to wp %zu/%zu\n",
+				bot.name, ClassOf(hit), origin.x, origin.y, origin.z, out.detourPoints.size(), length,
+				direct, ctx.traces, d, bot.waypoints.size());
+			SERVER_PRINT(msg);
+			return;
+		}
+
+		out.searchFailed = true;
+		out.hitRecedes = recedes;
+		state.lastKind = recedes ? BotAvoid::AVOID_FOLLOW : BotAvoid::AVOID_BLOCKED;
+
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) %s length %.0f budget %.0f "
+			"closing %.0f traces %d\n",
+			bot.name, recedes ? "following" : "blocked by", ClassOf(hit), origin.x, origin.y,
+			origin.z, ok ? "too long" : "no way around", length, budget, closing, ctx.traces);
+		SERVER_PRINT(msg);
+	}
 }
 
 namespace BotAvoid
@@ -141,6 +577,9 @@ const char *KindName(Kind kind)
 	{
 	case AVOID_DUCK: return "duck";
 	case AVOID_JUMP: return "jump";
+	case AVOID_SIDE: return "side";
+	case AVOID_FOLLOW: return "follow";
+	case AVOID_BLOCKED: return "blocked";
 	default: return "none";
 	}
 }
@@ -178,7 +617,8 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 	if (onGround && !state.jumpArmed && (pathDir.x != 0.f || pathDir.y != 0.f))
 	{
 		int hull = ducking ? kHullDuck : kHullHuman;
-		float feetZ = origin.z - (ducking ? kDuckHullHalf : kStandHullHalf);
+		float hullHalf = ducking ? kDuckHullHalf : kStandHullHalf;
+		float feetZ = origin.z - hullHalf;
 
 		float lookahead = speed * kAvoidLookaheadTime;
 		lookahead = std::max(kAvoidLookaheadMin, std::min(kAvoidLookaheadMax, lookahead));
@@ -203,7 +643,10 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 			float plainJump = PmSim::PlainJumpHeight(physics.gravity);
 			float crouchJump = plainJump + kDuckHullHalf;
 
-			if (top > kAvoidStepHeight && top <= crouchJump - kAvoidJumpMargin)
+			bool canJump = top > kAvoidStepHeight && top <= crouchJump - kAvoidJumpMargin;
+			bool canDuck = gap >= kAvoidDuckClearance;
+
+			if (canJump)
 			{
 				if (ducking && top > plainJump)
 				{
@@ -231,17 +674,30 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 					Record(state, AVOID_JUMP, hit, gap, top);
 				}
 			}
-			else if (!ducking && gap >= kAvoidDuckClearance)
+			else if (canDuck)
 			{
-				float hold = (dist + depth + 2.f * NavPlan::kPlanClearance) / duckSpeed
-					* kAvoidCrawlPenalty;
-				hold = std::max(kAvoidDuckMinHold, std::min(kAvoidDuckMaxHold, hold));
+				if (ducking)
+				{
+					Record(state, AVOID_DUCK, hit, gap, top);
+				}
+				else
+				{
+					float hold = (dist + depth + 2.f * NavPlan::kPlanClearance) / duckSpeed
+						* kAvoidCrawlPenalty;
+					hold = std::max(kAvoidDuckMinHold, std::min(kAvoidDuckMaxHold, hold));
 
-				if (state.duckUntil <= now)
-					Announce(bot, "duck", hit, gap, top, dist, speed, hold);
+					if (state.duckUntil <= now)
+						Announce(bot, "duck", hit, gap, top, dist, speed, hold);
 
-				state.duckUntil = std::max(state.duckUntil, now + hold);
-				Record(state, AVOID_DUCK, hit, gap, top);
+					state.duckUntil = std::max(state.duckUntil, now + hold);
+					Record(state, AVOID_DUCK, hit, gap, top);
+				}
+			}
+			else if (now >= state.nextSearchTime && !DetourActive(bot, state, now)
+				&& bot.waypointIndex < bot.waypoints.size())
+			{
+				RunSideSearch(bot, mesh, out, hit, tr.vecEndPos, pathDir, gap, top, hull, hullHalf,
+					now);
 			}
 		}
 	}
@@ -253,7 +709,11 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 
 	out.slowApproach = out.duck && !ducking;
 
-	if (!out.duck && !out.jump && !out.suppressPlanCrouch && !state.jumpArmed)
+	bool sideSticky = (state.lastKind == AVOID_SIDE || state.lastKind == AVOID_FOLLOW
+			|| state.lastKind == AVOID_BLOCKED)
+		&& (now < state.detourExpire || now < state.nextSearchTime);
+
+	if (!out.duck && !out.jump && !out.suppressPlanCrouch && !state.jumpArmed && !sideSticky)
 	{
 		state.lastKind = AVOID_NONE;
 		state.lastHit[0] = '\0';

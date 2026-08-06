@@ -31,7 +31,7 @@ constexpr double kBreakSecondsPerHealth = 0.1;
 
 bool IsBlockingClassname(const std::string &classname)
 {
-	return classname == "func_wall" || classname == "func_detail";
+	return classname == "func_wall";
 }
 
 bool IsDoorClassname(const std::string &classname)

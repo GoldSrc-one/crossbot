@@ -2,6 +2,9 @@
 
 #include <extdll.h>
 
+#include <cstddef>
+#include <vector>
+
 #include "../nav/pm_sim.h"
 
 struct CBot;
@@ -18,14 +21,24 @@ enum Kind
 {
 	AVOID_NONE = 0,
 	AVOID_DUCK,
-	AVOID_JUMP
+	AVOID_JUMP,
+	AVOID_SIDE,
+	AVOID_FOLLOW,
+	AVOID_BLOCKED
 };
+
+constexpr float kDetourClearance = 4.f;
 
 struct State
 {
 	float duckUntil = 0.f;
 	float jumpCooldownUntil = 0.f;
 	bool jumpArmed = false;
+
+	size_t detourEnd = 0;
+	int detourHit = 0;
+	float detourExpire = 0.f;
+	float nextSearchTime = 0.f;
 
 	Kind lastKind = AVOID_NONE;
 	char lastHit[32] = {};
@@ -39,6 +52,11 @@ struct Decision
 	bool jump = false;
 	bool suppressPlanCrouch = false;
 	bool slowApproach = false;
+
+	std::vector<Vector> detourPoints;
+	size_t detourReplaceUntil = 0;
+	bool searchFailed = false;
+	bool hitRecedes = false;
 };
 
 Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,

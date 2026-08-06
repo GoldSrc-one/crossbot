@@ -46,6 +46,7 @@ struct CBot
 	int currentAreaId = -1;
 
 	std::vector<uint32_t> plannedAreaPath;
+	std::vector<uint32_t> plannedConnPath;
 	std::vector<uint32_t> visitedAreaPath;
 
 	float pathStartTime = 0.f;

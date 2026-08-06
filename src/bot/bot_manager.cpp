@@ -243,17 +243,21 @@ void PrintNavStatus()
 		if (duckLeft < 0.f)
 			duckLeft = 0.f;
 
-		char line[560];
+		size_t detourLeft = (bot.waypointIndex < bot.avoid.detourEnd)
+			? bot.avoid.detourEnd - bot.waypointIndex : 0;
+
+		char line[600];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s origin=(%.0f,%.0f,%.0f) vel=(%.0f,%.0f,%.0f) angles=(%.0f,%.0f) move=(%.0f,%.0f) "
 			"hasGoal=%d goal=(%.0f,%.0f,%.0f) target=%s waypoint=%zu/%zu movetype=%d area=%d onground=%d "
-			"avoid=%s duckLeft=%.2f hit=%s gap=%.0f top=%.0f",
+			"avoid=%s duckLeft=%.2f hit=%s gap=%.0f top=%.0f detour=%zu",
 			bot.name, origin.x, origin.y, origin.z, vel.x, vel.y, vel.z, angles.x, angles.y,
 			bot.moveForward, bot.moveSide,
 			bot.hasGoal ? 1 : 0, bot.goalPoint.x, bot.goalPoint.y, bot.goalPoint.z, targetBuf,
 			bot.waypointIndex, bot.waypoints.size(), bot.pEdict->v.movetype, bot.currentAreaId, onGround ? 1 : 0,
 			BotAvoid::KindName(bot.avoid.lastKind), duckLeft,
-			bot.avoid.lastHit[0] ? bot.avoid.lastHit : "-", bot.avoid.lastGap, bot.avoid.lastTop);
+			bot.avoid.lastHit[0] ? bot.avoid.lastHit : "-", bot.avoid.lastGap, bot.avoid.lastTop,
+			detourLeft);
 		std::string msg = line;
 
 		if (bot.hasGoal && bot.estimatedArrivalTime > 0.f)

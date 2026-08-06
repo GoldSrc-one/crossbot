@@ -387,8 +387,9 @@ GoldSrc RecursiveHullCheck:
 ### Carved vs passable
 Two classes of brush entity, handled oppositely:
 
-- **`func_wall`, `func_detail`** are permanently solid, so `ExtractBlockingVolumes` returns them and they are
-  **carved** out of the world leaves — the space simply ceases to exist.
+- **`func_wall`** is permanently solid, so `ExtractBlockingVolumes` returns it and it is
+  **carved** out of the world leaves — the space simply ceases to exist. `func_detail` is not listed: the
+  compiler folds it into world geometry, so it never reaches the entity lump.
 - **`func_door`, `func_door_rotating`, `func_breakable`** are not, so `ExtractPassableVolumes` returns them and
   they **split** the leaf they sit in. The interior piece survives as its own area tagged `NAV_AREA_DOOR` or
   `NAV_AREA_BREAKABLE`, carrying activation, activator position and opening time.

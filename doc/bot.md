@@ -107,12 +107,8 @@ Reactive obstacle handling, layered between the follower's steering decision and
 nav mesh only knows world geometry and the brush entities navgen carves, so anything else solid — a
 `cycler`, a monster, another player, a door that has swung out of its own doorway — is invisible to
 the planner: it routes straight through and the follower drives into it and stalls. `BotAvoid::Update`
-traces forward along the planned path each frame and either crouch-jumps onto the obstacle or ducks
-under it.
-
-It handles exactly those two answers. An obstacle that is neither too low to jump nor high enough to
-crawl under produces no decision and the bot still stalls against it; steering around is not
-implemented.
+traces forward along the planned path each frame and answers with one of three moves: crouch-jump onto
+the obstacle, duck under it, or go around it.
 
 ### Which entities get avoided
 
@@ -143,7 +139,7 @@ This matters because `NavAreaRecord` stores no entity or model index — a direc
 not exist in the format. `requiresElevatorRide` in the same window exempts every `SOLID_BSP` hit, so
 the bot does not fight a plat it is about to board.
 
-### The two maneuvers
+### The three maneuvers
 
 The forward trace runs in the hull the bot currently occupies (1 standing, 3 ducked) with
 `dont_ignore_monsters`, over `speed * kAvoidLookaheadTime` clamped to
@@ -187,8 +183,146 @@ probe to maintain the latch; it was solving a problem the engine already solves.
 A plan-mandated crouch always wins: avoidance may add a duck and may drop *its own* duck, but it never
 overrides `requiresCrouch` or `NAV_AREA_CROUCH`.
 
+**Going around** is the third answer, taken when neither height predicate applies — a standing player,
+a full-height crate, a door that has swung open. It searches for a route past the obstacle and splices
+it into the front of the plan.
+
+### The side search
+
+The obstacle's `absmin`/`absmax` is expanded in x and y by `kAvoidHullHalf + kAvoidCornerMargin`, so
+its four corners are positions the bot's own hull can occupy with two units to spare. Projected into a
+frame where *forward* is the direction from the bot to the obstacle centre and *right* is the bot's
+right, two corners fall on each side. The search then walks the box perimeter: from the current point,
+trace to the first corner on the chosen side, and after each corner it reaches, try to trace straight
+to the destination. Up to all four corners are used, so the route can wrap around a far face.
+
+**Two corners is not enough,** which is why the walk exists. Two suffice only when the destination is
+roughly opposite the approach; when it is off to the side the leg from the far corner re-enters the
+expanded box and clips the obstacle it just cleared.
+
+**Corners are not required to be standable.** The downward hull probe at a corner supplies its z, but
+when it comes back `startsolid` — the corner is buried inside a neighbouring obstacle — the corner is
+kept at the previous point's height and the leg is traced to it anyway. The leg then reports the
+neighbour, and *that* is the useful outcome: the search recurses on the neighbour with the **final
+destination** as its target, not the unreachable corner, starting from the point the blocked trace
+began. On a cluster of touching obstacles this is the only thing that works; requiring standable
+corners abandons the side, and merging touching obstacles into one box over-blocks whenever the
+merged rectangle spans empty diagonal quadrants.
+
+A leg blocked by *world* geometry does not fail the side — the walk skips that corner and tries the
+next. A leg blocked by an already-visited obstacle fails, which with `kAvoidMaxDepth` and
+`kAvoidMaxTraces` is what terminates the recursion. The visited set is restored to its entry state
+before each side is tried, so the two sides never poison each other.
+
+**Which side first.** If the obstacle is moving, go where it is not: `dot(MoverVelocityAt, right)`
+above `kAvoidMoverSpeed` picks the opposite side and takes it without evaluating the other — an
+entity sliding to the bot's left sends the bot right. Otherwise both sides are evaluated and the shorter
+route wins, ties going right. Right-on-tie is the useful convention for two bots meeting head-on:
+their `right` vectors point opposite ways in world space, so both stepping right passes them cleanly.
+
+**A flat hull trace has no step-up,** so a stair nosing or a slope lip reads as a wall. When a leg is
+blocked by non-qualifying geometry whose plane normal is floor-like (`z >= kAvoidFloorNormal`), the
+same leg is retried raised by `kAvoidStepHeight` and accepted if that clears. This is the navgen idiom
+from `airmove_sampler.cpp`.
+
+### Where the detour rejoins the plan
+
+Not at a waypoint. navgen cannot see a `cycler` or a player, so a planned waypoint is frequently
+*inside* the obstacle — no route to it exists at all, and aiming at one is how the search fails
+without any geometry being to blame. Instead the remaining planned polyline is sampled forward at
+`kAvoidDestStep`, and the destination is the first sample that is both outside the expanded box and
+passes the ground probe. The waypoint that sample belongs to becomes `detourReplaceUntil`; waypoints
+before it are dropped, since they are the ones inside the obstacle.
+
+The detour is capped at `kAvoidDetourMaxLength` of total path. **This cap must not be relative to the
+distance to the rejoin point** — the rejoin point is deliberately close, so a relative cap rejects
+exactly the long routes that a cluster legitimately requires. The five-can corner on `test52_avoid`
+needs 432 units to clear a rejoin point 60 units away.
+
+### Splicing
+
+`BotAvoid::Update` returns the points; `SpliceDetour` in `bot_move_nav.cpp` owns the surgery, because
+it already has `MakePlanTraces`. The waypoint list is rebuilt as
+`[bot origin] + [detour points] + [plan from detourReplaceUntil]` with the index reset to 0, then
+`BuildPathProfile`, a fresh `TrackState`, and `lastProgressS`/`lastProgressTime` reset — the same
+sequence `Repath` performs. Splicing rather than running a second follower means the detour gets the
+arc profile, the speed solve, the stall detector and the status dump for free.
+
+**The list has to start at the bot's own origin.** A profile whose first segment begins at the far
+corner leaves the bot over `Config::rejoinAbort` (96) lateral on frame one, and `follow.needRepath`
+undoes the detour immediately. Dropping the already-traversed waypoints matters for the same reason
+`Repath` does it: a from-scratch projection over a profile that still contains the route behind the
+bot can snap backwards onto it.
+
+Detour waypoints carry `BotAvoid::kDetourClearance` rather than the default 16. `BuildPathProfile`
+sizes corner arcs from clearance, and a wide arc at a detour corner cuts back into the obstacle the
+corner was placed to clear. `estimatedArrivalTime` is extended by the added length so the test's
+ETA-derived timeout stays honest. The splice invalidates the `wp` pointer, so the frame ends with
+`RunIdleMove` and a return.
+
+### When no route exists
+
+Treated like a failed air move: `Nav::PenalizeConnection` on the connection the bot is trying to
+cross, then an immediate repath. `PlanWaypoint::connIndex` is only set on airmove launches, so the
+connection is recovered from `plannedConnPath` (captured from `path.connPath` in `Repath`) at the
+index where `plannedAreaPath` holds `currentAreaId`.
+
+Airmove penalties are paired with `RewardConnection` on success and walk connections need that pairing
+more, not less: the blocker may be a player who moves on a second later, and without the reward one
+transient obstruction poisons a corridor for the rest of the map. `RewardEnteredConnection` fires when
+`currentAreaId` advances to the next planned area over a connection that carries a penalty.
+`kAvoidSearchCooldown` bounds the failure loop to one penalty per second when the map genuinely has
+only one way through.
+
 `crossbot_nav_avoid 0` disables the layer, which is how to A/B a suspected regression without
 rebuilding.
+
+### Obstacles that are leaving anyway
+
+A `func_door_rotating` has `v.velocity == 0` — all of its motion is in `v.avelocity` — so without
+help it reads as a stationary wall, gets penalised, and forces a repath over an obstacle that will
+have removed itself within a second. `MoverVelocityAt` gives the linear velocity of a chosen point on
+a mover, `v.velocity + omega x r`, and both the side ordering and the failure handling use it.
+
+**`avelocity` is a rate on the angles triple `(pitch, yaw, roll)` in degrees per second, and the
+mapping to world axes is not the identity.** From `AngleVectors`, `forward = (cp*cy, cp*sy, -sp)`, so
+at yaw 0 a positive pitch swings `+X` toward `-Z`: pitch is rotation about **+Y**. `right` at
+pitch = yaw = 0 is `(0, -cos r, -sin r)`, so roll swings `-Y` toward `-Z`: roll is about **+X**. Yaw
+is about **+Z** — `avelocity (0,30,0)` is 30 degrees per second counterclockwise seen from above. So
+`omega = (av.z, av.x, av.y)` in radians, and getting this wrong costs a sign, which is the whole
+answer.
+
+**`r` starts at the trace contact point, then is stretched to the model's own reach.** It cannot come
+from `absmin`/`absmax`: whenever a `SOLID_BSP` entity's `angles` are non-zero, `SV_LinkEdict` throws
+away the real bounds and publishes a cube of the largest half-extent found over all three axes,
+centred on `v.origin`. `test9_door`'s door leaf is 18 x 66 x 98 and its box is measured at
+`(318,78,-2)…(450,210,130)` — a 132-unit cube centred on its own hinge. Any radius taken from that is
+meaningless, and a point on the wrong side of the hinge inverts the result.
+
+Note the condition is `angles != 0`, not "is moving": a door that has finished opening and come to a
+dead stop still sits at 90 degrees, so it keeps the cube permanently. Only a door closed in its spawn
+orientation gets a tight box. That, not the swing, is why `PickDestination`'s lookahead is swamped
+near an open rotating door. The contact point is a real position on the leaf, so its *direction* from the axis is right —
+but its *distance* is whatever the probe happened to graze, and a probe that clips the leaf near the
+hinge reports a few units per second for a door doing 100 degrees per second. Scaling `r` out to
+`sqrt(max|mins.x|,|maxs.x|)^2 + (max|mins.y|,|maxs.y|)^2)` treats the leaf as the bar it is. The
+magnitude can only be overestimated, and the sign — the thing being decided — never changes.
+
+**The direction to dot against is the next waypoint, not `pathDir`.** `pathDir` is the follower's aim
+point, which leads the bot around corner arcs and can already be pointing at the far side of a turn
+while the bot still needs to travel the near leg. On `test9_door` the aim was `(0.16,0.99)` — north,
+around the corner — while the door was sweeping `(+112,-24)` east out of the corridor the bot was
+about to walk down. Dotting against the aim gave `-6` and the door was called a wall; dotting against
+the next waypoint gives `+102` and it is correctly called receding.
+
+Above `kAvoidMoverSpeed` a failed search sets `AVOID_FOLLOW` instead of `AVOID_BLOCKED`, and
+`bot_move_nav.cpp` skips **both** the connection penalty and the forced repath, so the bot keeps
+driving at its current waypoint and walks after the door. Three things bound that: the door reaches
+its stop and `avelocity` goes to zero, at which point the next search penalises normally;
+`kAvoidSearchCooldown` re-takes the verdict at most once a second; and the 10 s `kRepathInterval`
+stall detector is the outer net if the classification is ever wrong. A stationary obstacle scores
+exactly zero and keeps the old behaviour, which is what the `closing` field in the decision line is
+for.
 
 ## bot_manager.cpp
 
@@ -214,11 +348,14 @@ The pairs that carry the diagnosis:
 - `hasGoal=0` with `waypoint=0/0` is ambiguous by itself: it is both "arrived and cleared the goal"
   and "gave up". Distinguish with the distance to the goal, and remember the goal was clamped
   (see `doc/nav.md`, `PlanPath`).
-- `avoid=` with `hit=` — the last obstacle decision and the classname it was made against, plus
-  `duckLeft` on the crawl latch and the `gap`/`top` the decision was made from. `avoid=none hit=-`
+- `avoid=` with `hit=` — the last obstacle decision (`duck`, `jump`, `side`, `blocked`) and the
+  classname it was made against, plus `duckLeft` on the crawl latch, the `gap`/`top` the decision was
+  made from, and `detour=` for how many spliced detour waypoints are still ahead. `avoid=none hit=-`
   on a bot stalled against something means the trace never qualified a hit, which is a different bug
-  from a mistimed maneuver; each new decision also prints its own line to the server console with
-  distance and speed, which is what makes the timing tunable from one run.
+  from a mistimed maneuver; `avoid=blocked` means it qualified and no route past it was found. Each
+  new decision also prints its own line to the server console with distance, speed and trace count,
+  which is what makes this tunable from one run — note those lines go to `qconsole.log`, not to the
+  RCON transcript the test scripts capture.
 
 ## bot_move.h
 

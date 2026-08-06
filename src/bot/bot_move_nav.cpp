@@ -288,6 +288,7 @@ namespace
 		bot.airmoveConnIndex = -1;
 		bot.avoid = BotAvoid::State();
 		bot.plannedAreaPath.clear();
+		bot.plannedConnPath.clear();
 		bot.visitedAreaPath.clear();
 		bot.pathStartTime = 0.f;
 		bot.estimatedArrivalTime = 0.f;
@@ -321,6 +322,99 @@ namespace
 		bot.traceLog.clear();
 	}
 
+	void SpliceDetour(CBot &bot, edict_t *pEdict, const BotAvoid::Decision &avoid,
+		const PmSim::PmPhysics &physics)
+	{
+		size_t from = std::min(avoid.detourReplaceUntil, bot.waypoints.size());
+
+		std::vector<Nav::Waypoint> rebuilt;
+		rebuilt.reserve(1 + avoid.detourPoints.size() + (bot.waypoints.size() - from));
+
+		Nav::Waypoint here;
+		here.point = pEdict->v.origin;
+		rebuilt.push_back(here);
+
+		for (const Vector &p : avoid.detourPoints)
+		{
+			Nav::Waypoint wp;
+			wp.point = p;
+			wp.clearance = BotAvoid::kDetourClearance;
+			rebuilt.push_back(wp);
+		}
+		for (size_t i = from; i < bot.waypoints.size(); ++i)
+			rebuilt.push_back(bot.waypoints[i]);
+
+		Vector rejoin = (from < bot.waypoints.size()) ? bot.waypoints[from].point
+			: avoid.detourPoints.back();
+		float detourLen = 0.f;
+		for (size_t i = 1; i < rebuilt.size() && i <= avoid.detourPoints.size() + 1; ++i)
+		{
+			const Vector &a = rebuilt[i - 1].point;
+			const Vector &b = rebuilt[i].point;
+			detourLen += sqrtf((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+		}
+		Vector straight = rejoin - pEdict->v.origin;
+		float extra = detourLen - sqrtf(straight.x * straight.x + straight.y * straight.y);
+
+		bot.waypoints = std::move(rebuilt);
+		bot.waypointIndex = 0;
+		bot.airmoveActive = false;
+
+		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
+		bot.followProfile = NavPlan::BuildPathProfile(bot.waypoints, traces.physics, &traces);
+		bot.trackState = NavFollow::TrackState();
+		bot.lastProgressS = 0.f;
+		bot.lastProgressTime = gpGlobals->time;
+
+		bot.avoid.detourEnd = 1 + avoid.detourPoints.size();
+
+		if (extra > 0.f && physics.maxSpeed > 1.f && bot.estimatedArrivalTime > 0.f)
+			bot.estimatedArrivalTime += extra / physics.maxSpeed;
+	}
+
+	void PenalizeCurrentConnection(CBot &bot)
+	{
+		if (bot.currentAreaId < 0)
+			return;
+
+		uint32_t cur = static_cast<uint32_t>(bot.currentAreaId);
+		size_t areaSteps = bot.plannedAreaPath.empty() ? 0 : bot.plannedAreaPath.size() - 1;
+		size_t count = std::min(bot.plannedConnPath.size(), areaSteps);
+		for (size_t i = 0; i < count; ++i)
+		{
+			if (bot.plannedAreaPath[i] != cur)
+				continue;
+
+			Nav::PenalizeConnection(bot.plannedConnPath[i]);
+
+			char msg[192];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s penalizing conn %u (area %u->%u) after a blocked detour, penalty %.1f\n",
+				bot.name, bot.plannedConnPath[i], cur, bot.plannedAreaPath[i + 1],
+				Nav::ConnectionPenalty(bot.plannedConnPath[i]));
+			SERVER_PRINT(msg);
+			return;
+		}
+	}
+
+	void RewardEnteredConnection(CBot &bot, uint32_t enteredId)
+	{
+		if (bot.visitedAreaPath.empty())
+			return;
+
+		uint32_t prev = bot.visitedAreaPath.back();
+		size_t areaSteps = bot.plannedAreaPath.empty() ? 0 : bot.plannedAreaPath.size() - 1;
+		size_t count = std::min(bot.plannedConnPath.size(), areaSteps);
+		for (size_t i = 0; i < count; ++i)
+		{
+			if (bot.plannedAreaPath[i] != prev || bot.plannedAreaPath[i + 1] != enteredId)
+				continue;
+			if (Nav::ConnectionPenalty(bot.plannedConnPath[i]) > 0.f)
+				Nav::RewardConnection(bot.plannedConnPath[i]);
+			return;
+		}
+	}
+
 	bool Repath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict)
 	{
 		bool freshAttempt = bot.waypoints.empty();
@@ -349,6 +443,10 @@ namespace
 		bot.waypointIndex = 0;
 		bot.airmoveActive = false;
 		bot.plannedAreaPath = path.areaPath;
+		bot.plannedConnPath = path.connPath;
+		bot.avoid.detourEnd = 0;
+		bot.avoid.detourHit = 0;
+		bot.avoid.detourExpire = 0.f;
 
 		bot.followProfile = NavPlan::BuildPathProfile(bot.waypoints, traces.physics, &traces);
 		bot.trackState = NavFollow::TrackState();
@@ -472,7 +570,10 @@ void Bot_MoveNav(CBot &bot)
 	}
 
 	if (curArea && (bot.visitedAreaPath.empty() || bot.visitedAreaPath.back() != curArea->id))
+	{
+		RewardEnteredConnection(bot, curArea->id);
 		bot.visitedAreaPath.push_back(curArea->id);
+	}
 
 	if (bot.traceLog.size() < 100000)
 		bot.traceLog.push_back(pEdict->v.origin);
@@ -573,6 +674,19 @@ void Bot_MoveNav(CBot &bot)
 		if (pathDir.x == 0.f && pathDir.y == 0.f)
 			pathDir = moveDir;
 		avoid = BotAvoid::Update(bot, *mesh, pathDir, physics);
+	}
+
+	if (!avoid.detourPoints.empty())
+	{
+		SpliceDetour(bot, pEdict, avoid, physics);
+		RunIdleMove(bot, angles);
+		return;
+	}
+
+	if (avoid.searchFailed && !avoid.hitRecedes)
+	{
+		PenalizeCurrentConnection(bot);
+		bot.nextRepathTime = gpGlobals->time;
 	}
 
 	bool planCrouch = wp->requiresCrouch
