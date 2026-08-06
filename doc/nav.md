@@ -497,6 +497,10 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
 
 **ClipLineByWalls** - clips line segment by other wall planes in area
 
+### Implied Walls from Floor/Ceiling Pairs
+
+**ForEachImpliedWall** - an area's footprint is not fixed by its vertical planes alone. A floor rising one way and a ceiling falling the other pinch the column shut where they meet, and that closure is a vertical half-plane no bound plane records: a wedge under a ramp is capped by the ramp itself, and the sliver between two faces of a pyramid is bounded that way at both ends. Eliminating z from the half-space system recovers those bounds exactly - for a floor f and a ceiling c, "the floor stays under the ceiling" is one linear constraint in x and y, and it is implied by the two planes, so it can only trim overreach, never cut into the area. The function iterates all floor/ceiling pairs; parallel in plan pairs (they never converge, so they bound nothing here) are skipped. Each implied wall is emitted as an inward-facing half-plane in x/y.
+
 **GateFromEdge** - builds gate from edge line: insets ends, pushes inward by kPlanClearance (16), clamps if too narrow
 
 **BuildAreaGates** - builds edgeGates for all bound planes
