@@ -25,7 +25,6 @@ namespace
 	constexpr int kHullDuck = 3;
 
 	constexpr float kAirmoveApproachLead = 32.f;
-	constexpr float kAirmoveLaunchSlack = 4.f;
 	constexpr float kAirmoveMinAirTime = 0.1f;
 	constexpr float kAirmoveMaxAirTime = 6.f;
 
@@ -188,11 +187,31 @@ namespace
 
 		float drive = (wp.launchSpeed > 1.f) ? wp.launchSpeed : kFullDrive;
 
-		bool atLaunchPlane = remaining <= speed * gpGlobals->frametime + kAirmoveLaunchSlack;
+		bool atLaunchPlane = remaining <= NavPlan::AirmoveLaunchLead(speed, gpGlobals->frametime);
+		bool upToSpeed = (wp.launchSpeed <= 1.f) ||
+			(speed >= wp.launchSpeed * NavPlan::kAirmoveLaunchSpeedTolerance);
 
-		bool launching = onGround && atLaunchPlane;
+		bool launching = onGround && atLaunchPlane && upToSpeed;
 		if (!wp.requiresJump && !onGround && remaining <= kAirmoveApproachLead)
 			launching = true;
+
+		if (onGround && atLaunchPlane && !upToSpeed)
+		{
+			if (wp.connIndex >= 0)
+				Nav::PenalizeConnection(static_cast<uint32_t>(wp.connIndex));
+
+			char msg[256];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s airmove aborted at (%.1f,%.1f,%.1f) plan speed %.0f actual %.0f "
+				"(%.0f%% of design) conn %d, repathing\n",
+				bot.name, origin.x, origin.y, origin.z, drive, speed,
+				(drive > 1.f) ? (100.f * speed / drive) : 0.f, wp.connIndex);
+			SERVER_PRINT(msg);
+
+			bot.nextRepathTime = gpGlobals->time;
+			RunAirmoveDrive(bot, launchDir, 0.f, wp.launchYaw, false, false);
+			return;
+		}
 
 		if (launching)
 		{
@@ -211,11 +230,12 @@ namespace
 			char msg[256];
 			snprintf(msg, sizeof(msg),
 				"CrossBot: %s airmove launch at (%.1f,%.1f,%.1f) plan yaw %.0f speed %.0f "
-				"jump %d crouch %d | actual yaw %.0f speed %.0f lateral %.1f\n",
+				"jump %d crouch %d | actual yaw %.0f speed %.0f (%.0f%%) lateral %.1f early %.1f\n",
 				bot.name, origin.x, origin.y, origin.z, wp.launchYaw, drive, wp.requiresJump ? 1 : 0,
 				wp.requiresCrouch ? 1 : 0,
 				(speed > kAimVelocitySpeed) ? atan2f(vel.y, vel.x) * (180.f / kPiF) : wp.launchYaw, speed,
-				sqrtf(offTrack.x * offTrack.x + offTrack.y * offTrack.y));
+				(drive > 1.f) ? (100.f * speed / drive) : 0.f,
+				sqrtf(offTrack.x * offTrack.x + offTrack.y * offTrack.y), remaining);
 			SERVER_PRINT(msg);
 
 			RunAirmoveDrive(bot, launchDir, drive, wp.launchYaw, wp.requiresCrouch,

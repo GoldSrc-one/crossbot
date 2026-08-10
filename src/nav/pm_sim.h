@@ -54,6 +54,7 @@ public:
 	PmSimulator(PmTraceFn trace, const PmPhysics &physics);
 
 	void Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump);
+	void BeginAirborne(const Vector &origin, const Vector &velocity, float yawDegrees, float commandedSpeed);
 	bool Step();
 
 	void RequestJump() { m_jumpPending = true; }
@@ -65,6 +66,8 @@ public:
 	void ResetFallSpeed() { m_fallSpeed = 0.f; }
 
 private:
+	void Reset(const Vector &origin, const Vector &velocity, float yawDegrees, float commandedSpeed,
+		bool onGround, bool jump);
 	void AddCorrectGravity(float *velocity) const;
 	void FixupGravityVelocity(float *velocity) const;
 	void PreventMegaBunnyJumping(float *velocity) const;

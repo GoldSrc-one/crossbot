@@ -7,7 +7,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 10;
+constexpr uint32_t kNavVersion = 11;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
 
@@ -27,6 +27,7 @@ enum ConnType : uint8_t
 	CONN_WALK     = 0,
 	CONN_TELEPORT = 1,
 	CONN_AIRMOVE  = 2,
+	CONN_LADDER   = 3,
 };
 
 enum ConnFlags : uint8_t

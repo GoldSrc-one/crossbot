@@ -267,12 +267,23 @@ A backward pass propagates each node cap through `BrakeBack`, with the final way
 airmove launches capped at `launchSpeed`. Entry speeds are additionally clamped by the cap of the node
 the segment starts from. `vEntry`/`vExit` are ceilings, not predictions: a segment leaving an arc may
 report 320 while the bot is still accelerating from the arc exit speed. A forward pass integrates the
-real speed against those ceilings to produce `totalTime`, which replaces the old fabricated ETA, and
-records what it actually reached at the end of each segment in `vReach`.
+real speed against those ceilings to produce `totalTime`, which replaces the old fabricated ETA.
 
-`ProfileReachAtWaypoint(profile, i)` reads that back for the segment ending at waypoint `i`.
-`BuildWaypointPlan` uses it to re-validate air moves at the speed the route can really deliver rather
-than the one the sampler assumed.
+A second forward pass records the prediction the ceilings deliberately omit. Walking front to back, it
+carries the reachable speed through `AccelForward` — the exact solution of `dv/ds = (a - f·max(v,s0))/v`,
+bisected on the closed form, the mirror of `BrakeBack` — and stores it per segment as
+`vReachEntry`/`vReachExit`. A flight neither accelerates nor decelerates horizontally, so a gap segment
+passes the launch speed straight through. `--dump-path` prints this as the `reach` column beside `v`,
+and the two disagreeing is the point: on `test37_walkent` the segment into the launch reads
+`v 320 -> 288` next to `reach 81 -> 288`, which is the 155° hairpin before it showing up as a number.
+
+**The reachable ramp is not a ceiling.** Feeding `AccelForward(vEntry, local)` into `SegSpeedAt` looks
+like the honest thing to do and breaks every map: the follower's target speed is `here.speed`, at `s=0`
+the ramp is 0, `SolveDrive` gets `wanted = 0` and commands nothing, and the bot never leaves the spawn.
+Less obviously it also throttles any long segment that should accelerate and then brake, because
+`max(vEntry, vExit)` with an honest entry collapses the trapezoid — ETAs rose 50% on `test28_slopecase`
+before the deadlock was even reached. A prediction of the bot's speed is a lower bound on nothing; the
+bot may well arrive faster. Ceilings steer, predictions validate, and they are separate fields.
 
 `NodeMaxSpeed` applies `kDuckingMultiplier` for `requiresCrouch`, except at a launch waypoint, where
 the flag means duck in flight and the approach is a full-speed run.
@@ -619,6 +630,20 @@ is straight and aligned. Roughly six frames of approach at a full-speed launch, 
 for the slow drops, where a fixed distance used to leave the node stranded far off the natural route —
 `test15_staircase` had two plan segments leaving the mesh entirely for that reason.
 
+Two things bound that distance from underneath and above. `AccelDistance(0, launchSpeed)` plus one
+`AirmoveLaunchLead` is the distance the physics actually needs to reach the design speed from a
+standstill, and the node is never placed closer than that. It never binds in the current speed range —
+0.1 s of travel is the larger term from roughly 70 u/s upward — but the 0.1 s is a travel-time guess
+and this is the real requirement, so the guess can no longer silently fall under it.
+
+`ClampTravelInsideArea` then walks the wall planes of the source area and shortens the offset so the
+node lands inside it, `kLaunchInset` clear of the wall. Placing it blindly put the node **through** the
+wall whenever the launch sat less than the offset from the far side: on `test37_walkent` the 5→4 launch
+at y=43.6 in an area starting at y=16 got a run-up node at y=14.9, 1.1 units inside solid. The funnel
+then pulled the approach against geometry that is not walkable and the arc fitter had nothing to work
+with. The offset is length, not direction: it does not stop the node landing behind the bot when the
+route arrives perpendicular to the launch heading, which is what produces the hairpin above.
+
 It is load-bearing for a second reason that has nothing to do with alignment. `Bot_MoveNav` hands
 control to `RunAirmoveApproach` when the tracker's `wpIndex` reaches the launch waypoint, and
 `wpIndex` comes from whichever profile segment the bot projects onto. `BuildPathProfile` drops
@@ -626,17 +651,46 @@ segments shorter than `kEpsLen`, and the funnel's last corner lands on the launc
 without this node the segment ending at the launch is zero-length, gets dropped, and no segment ever
 carries the launch's index. The bot then walks straight through the launch point and never jumps.
 
+### Launch speed is clamped to the server
+`candSpeed` comes out of the nav file's `gateASpeed`, which the sampler produced at navgen's assumed
+`maxSpeed` — 320 by default. The server need not agree: `hlds/valve/server.cfg` ships `sv_maxspeed 270`,
+and `BotPhysics` reads the live value into `PlanTraceContext::physics`. `Cross` therefore clamps
+`candSpeed` to `physics.maxSpeed` before handing it to `JumpLandsIn`.
+
+This is what keeps a nav file server-independent. Sampling stores the fastest jump the geometry allows;
+each server's planner then asks whether *it* can make that jump, and an air move needing 315 on a
+270 server simply fails `JumpLandsIn` and is rejected in the search like any other unplannable launch.
+No regen, no per-server nav.
+
+The clamp has to live here because nothing downstream applies it. `PmSim::Begin` sets the launch
+velocity to the commanded speed **unclamped** — its `maxSpeed` check bounds the air-accel wish speed
+during flight, not the launch — so an unclamped `candSpeed` produces a simulation that succeeds at a
+speed the bot can never hold, and a plan that asserts it. `RunAirmoveDrive` does clamp its drive to
+`BotMaxSpeed`, so the bot then chases a launch speed it is not allowed to reach and the approach never
+arms: `test40_walljump` planned 315, drove at 270, and aborted every attempt.
+
+`Respeed` alone did not cover this. It measures the shortfall correctly, but when the slower
+re-simulation also misses it keeps the design speed by design, so the unreachable 315 survived to the
+follower as `airmovesRespeedKept`.
+
 ### Re-speeding a launch
 The stored `exitSpeed` is what the air-move sampler launched at, not what the route can deliver. A
 corner 30 units before the launch caps the bot well under it, and nothing used to notice: the plan
 asserted the design speed and the jump was validated at a speed the bot would never reach.
 
 `PlanWalker::Respeed` therefore builds a probe `PlanProfile` over the finished waypoint list.
-`ProfileReachAtWaypoint` reads the forward pass's achieved speed on the segment ending at
-each launch — the arc fit, the backward braking pass and the acceleration integral all folded into one
-number — and if it falls short of the design speed by more than `kPlanAirmoveRespeedEps`, the jump is
-re-simulated at that speed. The landing waypoint moves to wherever it actually lands. The yaw needs no
-adjustment: the last leg is straight along the launch heading by construction.
+`ProfileLaunchReach` reads the reachable-speed pass on the segment ending at each launch — the arc fit,
+the backward braking pass and the acceleration integral all folded into one number — and if it falls
+short of the design speed by more than `kPlanAirmoveRespeedEps`, the jump is re-simulated at that
+speed. The landing waypoint moves to wherever it actually lands. The yaw needs no adjustment: the last
+leg is straight along the launch heading by construction.
+
+**The reach is taken one `AirmoveLaunchLead` short of the launch point, not at it.** The bot commits to
+the jump a frame of travel before the plane, so that is where its speed stops rising, and measuring at
+the launch point over-reports by exactly the speed gained in that last frame. Measuring at the point of
+no return is also what makes the check bite at all: read at the launch point it saturates, because
+`vExit` on that segment *is* the design speed, so the comparison could only ever fail when the profile
+fell short over the whole segment.
 
 **A slower jump that no longer lands does not truncate the route.** The design speed is kept and
 `airmovesRespeedKept` counts it. Truncating here was the last place a complete plan could still be cut
@@ -669,7 +723,7 @@ Two corners of the profile are what make the number meaningful, and both had to 
 
 ## nav_format.h
 
-### Nav File Format (version 10)
+### Nav File Format (version 11)
 - Magic: "CBNV"
 - Header: magic, version, mapName[64], bspChecksum, flags, counts
 - AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, doorActivation, doorActivatorPos[3], doorWaitTime
@@ -681,7 +735,9 @@ plus a z-slab rather than its true faces.
 
 ### Enums
 - AreaFlags: CROUCH(1), LADDER_TOP(2), WATER(4), DOOR(128), BREAKABLE(256)
-- ConnType: WALK(0), TELEPORT(1), AIRMOVE(2)
+- ConnType: WALK(0), TELEPORT(1), AIRMOVE(2), LADDER(3) - a ladder reuses the air-move fields rather than
+  adding its own: launchPos is the mount, landingPos the dismount, exitAngle the climbing yaw, exitSpeed
+  the climb speed, and flightTime/fallDamage belong to the dismount hop
 - ConnFlags: ONE_WAY(1), NEEDS_CROUCH(2), JUMP(4) - jump means left ground under impulse, not derivable from jumpBackDist
 - DoorActivation: TOUCH(0), BUTTON(1), TRIGGER(2)
 - GateValidFlags: VALID_A(1), VALID_B(2), CLAMPED_A(4), CLAMPED_B(8)
@@ -694,8 +750,11 @@ plus a z-slab rather than its true faces.
 - `friction` - pmove->friction, the per-entity multiplier. Not sv_friction.
 
 ### PmSimulator
-- `SetWish(dir, speed)` - overrides the wish direction and speed used from the next Step onward, which is what lets a controller steer the mover frame by frame instead of holding the heading Begin was given. dir need not be normalised; only its horizontal part is used.
-- `SetVelocity(velocity)` - seeds the velocity directly rather than deriving it from a yaw and a speed, for starting a simulation from a state that was measured rather than commanded.
+- `Begin(origin, yaw, speed, jump)` - starts on the ground with velocity derived from the yaw and speed.
+- `BeginAirborne(origin, velocity, yaw, speed)` - starts mid-flight with the velocity given directly,
+  for a state that was measured rather than commanded. This is how a ladder dismount launches: the climb
+  velocity is a fact of `PM_LadderMove`, not something a yaw and a speed can express. Both entry points
+  delegate to the same private `Reset`.
 
 ## pm_sim.cpp
 

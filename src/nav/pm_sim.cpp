@@ -68,7 +68,8 @@ PmSimulator::PmSimulator(PmTraceFn trace, const PmPhysics &physics)
 {
 }
 
-void PmSimulator::Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump)
+void PmSimulator::Reset(const Vector &origin, const Vector &velocity, float yawDegrees,
+	float commandedSpeed, bool onGround, bool jump)
 {
 	float yawRad = yawDegrees * kPiF / 180.f;
 	m_forward[0] = std::cos(yawRad);
@@ -80,15 +81,28 @@ void PmSimulator::Begin(const Vector &origin, float yawDegrees, float commandedS
 	m_pos[2] = origin.z;
 
 	m_commandedSpeed = commandedSpeed;
-	m_vel[0] = m_forward[0] * commandedSpeed;
-	m_vel[1] = m_forward[1] * commandedSpeed;
-	m_vel[2] = 0.f;
+	m_vel[0] = velocity.x;
+	m_vel[1] = velocity.y;
+	m_vel[2] = velocity.z;
 
 	m_origin = origin;
-	m_onGround = true;
+	m_onGround = onGround;
 	m_jumpPending = jump;
 	m_fallSpeed = 0.f;
 	m_time = 0.f;
+}
+
+void PmSimulator::Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump)
+{
+	float yawRad = yawDegrees * kPiF / 180.f;
+	Vector velocity(std::cos(yawRad) * commandedSpeed, std::sin(yawRad) * commandedSpeed, 0.f);
+	Reset(origin, velocity, yawDegrees, commandedSpeed, true, jump);
+}
+
+void PmSimulator::BeginAirborne(const Vector &origin, const Vector &velocity, float yawDegrees,
+	float commandedSpeed)
+{
+	Reset(origin, velocity, yawDegrees, commandedSpeed, false, false);
 }
 
 void PmSimulator::AddCorrectGravity(float *velocity) const

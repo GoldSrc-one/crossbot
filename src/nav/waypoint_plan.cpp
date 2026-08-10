@@ -31,7 +31,32 @@ constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
 
 constexpr float kPlanAirmoveRunupTime = 0.1f;
 constexpr float kPlanAirmoveRunupMin = 8.f;
+constexpr float kPlanAirmoveRunupEps = 1.f;
 constexpr float kPlanAirmoveRespeedEps = 1.f;
+
+float ClampTravelInsideArea(const PlanArea &area, const Vector &from, const Vector &dir, float want,
+	float inset)
+{
+	float limit = want;
+
+	for (const PlanPlane &p : area.boundPlanes)
+	{
+		if (std::fabs(p.normal.z) > kWallNormalZ)
+			continue;
+
+		float denom = p.normal.x * dir.x + p.normal.y * dir.y;
+		if (denom >= -0.0001f)
+			continue;
+
+		float margin = from.x * p.normal.x + from.y * p.normal.y + from.z * p.normal.z - p.dist - inset;
+		if (margin <= 0.f)
+			return 0.f;
+
+		limit = std::min(limit, margin / -denom);
+	}
+
+	return std::max(limit, 0.f);
+}
 
 bool PointInArea(const Vector &p, const PlanArea &area, float epsilon)
 {
@@ -455,7 +480,7 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 		const PlanArea &a = areas[conn.areaA];
 		const PlanArea &b = areas[conn.areaB];
 
-		if (conn.connType == crossbot_nav::CONN_AIRMOVE)
+		if (conn.connType == crossbot_nav::CONN_AIRMOVE || conn.connType == crossbot_nav::CONN_LADDER)
 			continue;
 
 		EdgeLine shared = EdgeOfPlane(a, conn.planeA);
@@ -805,6 +830,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 			float candSpeed = conn.gateASpeed[0] + (conn.gateASpeed[1] - conn.gateASpeed[0]) * t;
 			if (candSpeed <= 0.f)
 				candSpeed = conn.exitSpeed;
+			candSpeed = std::min(candSpeed, m_traces->physics.maxSpeed);
 
 			Vector end;
 			const char *why = "";
@@ -842,13 +868,28 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 
 		Vector launchPoint = AtPlayerHeight(launch, fromId);
 		Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
-		float runupBack = std::max(launchSpeed * kPlanAirmoveRunupTime, kPlanAirmoveRunupMin);
+		float accel = m_traces->physics.accelerate * m_traces->physics.maxSpeed;
+		float ground = m_traces->physics.groundFriction * m_traces->physics.friction;
+		float needed = AccelDistance(0.f, launchSpeed, accel, ground, m_traces->physics.stopSpeed) +
+			AirmoveLaunchLead(launchSpeed, m_traces->physics.frameTime);
 
-		PlanWaypoint runupWp;
-		runupWp.point = launchPoint - launchDir * runupBack;
-		runupWp.targetAreaId = static_cast<int>(fromId);
-		runupWp.requiresCrouch = FlushFunnelTo(runupWp.point) || fromArea.crouch;
-		PushWaypoint(runupWp);
+		float runupBack = std::max(launchSpeed * kPlanAirmoveRunupTime, kPlanAirmoveRunupMin);
+		runupBack = std::max(runupBack, needed);
+		runupBack = ClampTravelInsideArea(fromArea, launchPoint, launchDir * -1.f, runupBack,
+			kLaunchInset);
+
+		bool hasRunup = runupBack > kPlanAirmoveRunupEps;
+		Vector runupPoint = launchPoint - launchDir * runupBack;
+		bool runupCrouch = FlushFunnelTo(hasRunup ? runupPoint : launchPoint);
+
+		if (hasRunup)
+		{
+			PlanWaypoint runupWp;
+			runupWp.point = runupPoint;
+			runupWp.targetAreaId = static_cast<int>(fromId);
+			runupWp.requiresCrouch = runupCrouch || fromArea.crouch;
+			PushWaypoint(runupWp);
+		}
 
 		PlanWaypoint launchWp;
 		launchWp.point = launchPoint;
@@ -969,7 +1010,8 @@ void PlanWalker::Respeed()
 
 	for (const PendingLaunch &pl : m_launches)
 	{
-		float reached = ProfileReachAtWaypoint(probe, pl.index);
+		float lead = AirmoveLaunchLead(pl.designSpeed, m_traces->physics.frameTime);
+		float reached = ProfileLaunchReach(probe, pl.index, lead);
 		if (reached <= 0.f || reached >= pl.designSpeed - kPlanAirmoveRespeedEps)
 			continue;
 

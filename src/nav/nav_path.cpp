@@ -13,7 +13,14 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 {
 	areaConnIndices.assign(mesh.areas.size(), std::vector<uint32_t>());
 	for (size_t i = 0; i < mesh.areas.size(); ++i)
-		areaConnIndices[i] = mesh.areas[i].connIndices;
+	{
+		for (uint32_t ci : mesh.areas[i].connIndices)
+		{
+			if (ci < mesh.conns.size() && mesh.conns[ci].connType == crossbot_nav::CONN_LADDER)
+				continue;
+			areaConnIndices[i].push_back(ci);
+		}
+	}
 
 	conns.assign(mesh.conns.size(), NavAStar::Connection());
 	for (size_t i = 0; i < mesh.conns.size(); ++i)

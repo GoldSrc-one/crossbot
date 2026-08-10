@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "area_merger.h"
+#include "airmove_prune.h"
 #include "airmove_sampler.h"
 #include "blocking_entities.h"
 #include "bsp_file.h"
@@ -19,6 +20,7 @@
 #include "entity_parser.h"
 #include "floor_support.h"
 #include "hull_defs.h"
+#include "ladder_connections.h"
 #include "leaf_extractor.h"
 #include "nav_file.h"
 #include "plan_search.h"
@@ -57,12 +59,25 @@ void PrintUsage(const char *argv0)
 		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
 		"                    edge gets 128 samples; 0.5 halves it; 0 disables air-move sampling)\n"
+		"  --max-speed <n>   ground speed the bot is assumed to reach, in units/sec (default %.0f). Must\n"
+		"                    match the server's sv_maxspeed or air moves are sampled at speeds the bot\n"
+		"                    can never deliver\n"
+		"  --airmove-walk-ratio <n> drop an air move when a walk-only route between the same two areas\n"
+		"                    costs less than n times the air move (default %.1f; 0 keeps every air move)\n"
+		"  --dump-airmove-prune print the walk-vs-air comparison for every sampled air move, and the\n"
+		"                    walk+air-vs-ladder comparison for every ladder connection\n"
+		"  --dump-ladders    print ladder discovery: each func_ladder's hull-3 volume, why each face was\n"
+		"                    kept or rejected, the mount and top positions, and every dismount simulation\n"
+		"  --ladder-prune-ratio <n> drop a ladder connection when a walk+air-move route between the same\n"
+		"                    two areas costs less than n times the ladder (default %.1f; 0 keeps every\n"
+		"                    ladder)\n"
 		"  --max-merge-group <n> most leaf groups one merge may fuse (default %zu). 1 disables merging\n"
 		"                    entirely (debug: each BSP hull-3 leaf becomes its own area)\n"
 		"  --no-floor-split  keep leaves whose floor is not solid (debug: pre-floor-support behaviour)\n"
 		"  --no-prune        skip PruneUnreachableAreas (debug only): keep areas unreachable from any spawn\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
-		argv0, navgen::kDefaultMaxMergeGroup);
+		argv0, navgen::PhysicsParams().maxSpeed, navgen::kDefaultAirmoveWalkRatio,
+		navgen::kDefaultLadderRatio, navgen::kDefaultMaxMergeGroup);
 }
 
 using navgen::kFloorNormalZ;
@@ -399,6 +414,9 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		pc.launchPos = pointA;
 		pc.landingPos = pointB;
 
+		if (c.connType == crossbot_nav::CONN_LADDER)
+			continue;
+
 		areaConnIndices[static_cast<size_t>(c.areaA)].push_back(static_cast<uint32_t>(i));
 		areaConnIndices[static_cast<size_t>(c.areaB)].push_back(static_cast<uint32_t>(i));
 	}
@@ -611,13 +629,15 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 			const NavPlan::ProfileSeg &seg = profile.segs[i];
 			if (seg.isArc)
 				std::printf("  seg[%2zu] arc  wp %2zu r %6.1f turn %6.1fdeg len %6.1f "
-					"v %5.0f -> %5.0f cap %5.0f clearance %.1f\n",
+					"v %5.0f -> %5.0f cap %5.0f reach %5.0f -> %5.0f clearance %.1f\n",
 					i, seg.wpIndex, seg.radius, seg.turn * 180.f / 3.14159265f, seg.sLen,
-					seg.vEntry, seg.vExit, seg.vCap, seg.clearance);
+					seg.vEntry, seg.vExit, seg.vCap, seg.vReachEntry, seg.vReachExit,
+					seg.clearance);
 			else
-				std::printf("  seg[%2zu] %-4s wp %2zu %26slen %6.1f v %5.0f -> %5.0f cap %5.0f\n",
+				std::printf("  seg[%2zu] %-4s wp %2zu %26slen %6.1f v %5.0f -> %5.0f cap %5.0f "
+					"reach %5.0f -> %5.0f\n",
 					i, seg.gap ? "gap" : "line", seg.wpIndex, "", seg.sLen, seg.vEntry, seg.vExit,
-					seg.vCap);
+					seg.vCap, seg.vReachEntry, seg.vReachExit);
 		}
 	}
 
@@ -646,6 +666,11 @@ int main(int argc, char **argv)
 	bool noPrune = false;
 	size_t maxMergeGroup = navgen::kDefaultMaxMergeGroup;
 	float airmoveSamplesPerUnit = navgen::AirmoveSampleParams().samplesPerUnit;
+	double airmoveWalkRatio = navgen::kDefaultAirmoveWalkRatio;
+	double ladderPruneRatio = navgen::kDefaultLadderRatio;
+	bool dumpAirmovePrune = false;
+	bool dumpLadders = false;
+	float maxSpeed = navgen::PhysicsParams().maxSpeed;
 	int dumpPlanesAreaId = -1;
 	std::string objPath;
 	std::string svgPath;
@@ -682,6 +707,10 @@ int main(int argc, char **argv)
 		else if (arg == "--dump-airmove")
 		{
 			dumpAirmove = true;
+		}
+		else if (arg == "--dump-ladders")
+		{
+			dumpLadders = true;
 		}
 		else if (arg == "--no-floor-split")
 		{
@@ -724,6 +753,66 @@ int main(int argc, char **argv)
 				return 1;
 			}
 			airmoveSamplesPerUnit = static_cast<float>(parsed);
+		}
+		else if (arg == "--max-speed")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed <= 0.0)
+			{
+				std::fprintf(stderr, "--max-speed: expected a positive number, got \"%s\"\n", value);
+				return 1;
+			}
+			maxSpeed = static_cast<float>(parsed);
+		}
+		else if (arg == "--dump-airmove-prune")
+		{
+			dumpAirmovePrune = true;
+		}
+		else if (arg == "--airmove-walk-ratio")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 0.0)
+			{
+				std::fprintf(stderr, "--airmove-walk-ratio: expected a non-negative number, got \"%s\"\n",
+					value);
+				return 1;
+			}
+			airmoveWalkRatio = parsed;
+		}
+		else if (arg == "--ladder-prune-ratio")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 0.0)
+			{
+				std::fprintf(stderr, "--ladder-prune-ratio: expected a non-negative number, got \"%s\"\n",
+					value);
+				return 1;
+			}
+			ladderPruneRatio = parsed;
 		}
 		else if (arg == "--dump-planes")
 		{
@@ -974,16 +1063,46 @@ int main(int argc, char **argv)
 				bspPath.c_str(), steepWalkConns, splitWalkConns, navgen::kStepHeight);
 
 		navgen::PhysicsParams physics;
+		physics.maxSpeed = maxSpeed;
 		navgen::AirmoveSampleParams airmoveParams;
 		airmoveParams.samplesPerUnit = airmoveSamplesPerUnit;
+		navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers};
 		if (airmoveSamplesPerUnit <= 0.0f)
 			std::printf("air move sampling skipped (--airmove-samples 0)\n");
 		else
 		{
-			navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers};
 			navgen::HullContext standHull{worldModel.headnode[navgen::kHullHuman], &standBlockers};
 			navgen::ProbeAirMoves(bsp, duckHull, standHull, merged.areas, merged.conns, physics,
 				airmoveParams);
+		}
+
+		navgen::LadderStats ladders = navgen::BuildLadderConnections(bsp, entities, duckHull, merged.areas,
+			merged.conns, physics, dumpLadders);
+		if (ladders.entities > 0)
+			std::printf("%s: %zu func_ladder entities, %zu climbable faces, %zu mounted, "
+				"%zu ladder connections\n",
+				bspPath.c_str(), ladders.entities, ladders.climbFaces, ladders.mounts, ladders.conns);
+
+		if (airmoveWalkRatio > 0.0)
+		{
+			navgen::AirmovePruneStats pruned = navgen::PruneWalkableAirmoves(merged.areas, merged.conns,
+				physics.maxSpeed, airmoveWalkRatio, dumpAirmovePrune);
+			if (pruned.examined > 0)
+				std::printf("%s: air move walk check dropped %zu of %zu (%zu had no walk route), "
+					"ratio %.1f\n",
+					bspPath.c_str(), pruned.dropped, pruned.examined, pruned.noWalkRoute,
+					airmoveWalkRatio);
+		}
+
+		if (ladderPruneRatio > 0.0)
+		{
+			navgen::AirmovePruneStats pruned = navgen::PruneRedundantLadders(merged.areas, merged.conns,
+				physics.maxSpeed, ladderPruneRatio, dumpAirmovePrune);
+			if (pruned.examined > 0)
+				std::printf("%s: ladder route check dropped %zu of %zu (%zu had no alternative route), "
+					"ratio %.1f\n",
+					bspPath.c_str(), pruned.dropped, pruned.examined, pruned.noWalkRoute,
+					ladderPruneRatio);
 		}
 
 		size_t snappedConns = navgen::SnapConnectionsToFloor(merged.areas, merged.conns);
@@ -1008,7 +1127,7 @@ int main(int argc, char **argv)
 		size_t gatelessConns = navgen::BakeConnectionGates(merged.areas, merged.conns);
 		if (gatelessConns > 0)
 		{
-			size_t walkless = 0, airless = 0;
+			size_t walkless = 0, airless = 0, ladderless = 0;
 			for (const navgen::MergedConnection &c : merged.conns)
 			{
 				if (c.connType == crossbot_nav::CONN_TELEPORT)
@@ -1017,31 +1136,41 @@ int main(int argc, char **argv)
 					continue;
 				if (c.connType == crossbot_nav::CONN_WALK)
 					++walkless;
+				else if (c.connType == crossbot_nav::CONN_LADDER)
+					++ladderless;
 				else
 					++airless;
 			}
-			std::printf("%s: %zu connections have no gate on one or both sides (%zu walk, %zu air move)\n",
-				bspPath.c_str(), gatelessConns, walkless, airless);
+			std::printf("%s: %zu connections have no gate on one or both sides (%zu walk, %zu air move, "
+				"%zu ladder)\n",
+				bspPath.c_str(), gatelessConns, walkless, airless, ladderless);
 		}
 
-		int walkConns = 0, airMoveConns = 0;
+		int walkConns = 0, airMoveConns = 0, ladderConns = 0;
 		for (const navgen::MergedConnection &c : merged.conns)
 		{
 			if (c.connType == crossbot_nav::CONN_WALK)
 				++walkConns;
 			else if (c.connType == crossbot_nav::CONN_AIRMOVE)
 				++airMoveConns;
+			else if (c.connType == crossbot_nav::CONN_LADDER)
+				++ladderConns;
 		}
 
-		std::printf("%s: %d walk connections, %d air move connections\n",
-			bspPath.c_str(), walkConns, airMoveConns);
+		if (ladderConns > 0)
+			std::printf("%s: %d walk connections, %d air move connections, %d ladder connections\n",
+				bspPath.c_str(), walkConns, airMoveConns, ladderConns);
+		else
+			std::printf("%s: %d walk connections, %d air move connections\n",
+				bspPath.c_str(), walkConns, airMoveConns);
 
 		if (dumpConns)
 		{
 			for (const navgen::MergedConnection &c : merged.conns)
 			{
 				const char *typeName = (c.connType == crossbot_nav::CONN_AIRMOVE) ? "airmove"
-					: (c.connType == crossbot_nav::CONN_TELEPORT) ? "teleport" : "walk";
+					: (c.connType == crossbot_nav::CONN_TELEPORT) ? "teleport"
+					: (c.connType == crossbot_nav::CONN_LADDER) ? "ladder" : "walk";
 				bool oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 
 				std::printf("  %-8s %3d %s %3d  from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)  planes %d/%d",
@@ -1058,6 +1187,11 @@ int main(int argc, char **argv)
 				if (c.connType == crossbot_nav::CONN_AIRMOVE)
 					std::printf("  speed %.0f yaw %.1f jumpBack %.1f fallDamage %.1f flightTime %.2f",
 						c.exitSpeed, c.exitAngle, c.jumpBackDist, c.fallDamage, c.flightTime);
+
+				if (c.connType == crossbot_nav::CONN_LADDER)
+					std::printf("  climb %.0f speed %.0f yaw %.1f fallDamage %.1f flightTime %.2f",
+						(c.pointB - c.pointA).Length(), c.exitSpeed, c.exitAngle, c.fallDamage,
+						c.flightTime);
 
 				if (c.gateAValid)
 					std::printf("\n             gateA (%.1f, %.1f, %.1f)-(%.1f, %.1f, %.1f)",

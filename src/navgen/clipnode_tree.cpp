@@ -8,12 +8,14 @@ namespace
 {
 
 void WalkRecursive(const BspFile &bsp, int nodeIndex, bool includeWater,
-	std::vector<PlaneChainEntry> &chain, const LeafCallback &callback)
+	std::vector<PlaneChainEntry> &chain, const LeafCallback &callback, const ContentsFilter &filter)
 {
 	if (nodeIndex < 0)
 	{
 
-		if (nodeIndex == CONTENTS_EMPTY || (includeWater && nodeIndex == CONTENTS_WATER))
+		bool wanted = filter ? filter(nodeIndex)
+			: (nodeIndex == CONTENTS_EMPTY || (includeWater && nodeIndex == CONTENTS_WATER));
+		if (wanted)
 			callback(nodeIndex, chain);
 		return;
 	}
@@ -21,20 +23,21 @@ void WalkRecursive(const BspFile &bsp, int nodeIndex, bool includeWater,
 	const dclipnode_t &node = bsp.Clipnodes()[static_cast<size_t>(nodeIndex)];
 
 	chain.push_back({node.planenum, true});
-	WalkRecursive(bsp, node.children[0], includeWater, chain, callback);
+	WalkRecursive(bsp, node.children[0], includeWater, chain, callback, filter);
 	chain.pop_back();
 
 	chain.push_back({node.planenum, false});
-	WalkRecursive(bsp, node.children[1], includeWater, chain, callback);
+	WalkRecursive(bsp, node.children[1], includeWater, chain, callback, filter);
 	chain.pop_back();
 }
 
 }
 
-void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const LeafCallback &callback)
+void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const LeafCallback &callback,
+	const ContentsFilter &filter)
 {
 	std::vector<PlaneChainEntry> chain;
-	WalkRecursive(bsp, headnode, includeWater, chain, callback);
+	WalkRecursive(bsp, headnode, includeWater, chain, callback, filter);
 }
 
 namespace

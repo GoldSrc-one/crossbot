@@ -353,25 +353,6 @@ std::vector<LaunchEdge> CollectPerimeterEdges(const Area &area)
 	return edges;
 }
 
-int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas)
-{
-	for (const Area &area : areas)
-	{
-		bool inside = true;
-		for (const Plane &p : area.boundPlanes)
-		{
-			if (point.Dot(p.normal) - p.dist < -1.0)
-			{
-				inside = false;
-				break;
-			}
-		}
-		if (inside)
-			return area.id;
-	}
-	return -1;
-}
-
 long long PairKey(int from, int to)
 {
 	return static_cast<long long>(from) * 1000000LL + static_cast<long long>(to);
@@ -432,6 +413,25 @@ std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Are
 	return edges;
 }
 
+}
+
+int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas)
+{
+	for (const Area &area : areas)
+	{
+		bool inside = true;
+		for (const Plane &p : area.boundPlanes)
+		{
+			if (point.Dot(p.normal) - p.dist < -1.0)
+			{
+				inside = false;
+				break;
+			}
+		}
+		if (inside)
+			return area.id;
+	}
+	return -1;
 }
 
 PM_MoveSimulator::PM_MoveSimulator(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
@@ -534,8 +534,31 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 	sim.Begin(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
 		static_cast<float>(launchPos.z)), yawDegrees, commandedSpeed, jump);
 
-	bool airborne = false;
+	return Fly(sim, result, false, areas, sourceArea, landingArea, navZAdjust);
+}
 
+AirmoveTrajectory PM_MoveSimulator::SimulateAirborne(const Vec3 &launchPos, const Vec3 &velocity,
+	float yawDegrees, float commandedSpeed, const std::vector<Area> &areas, int sourceArea,
+	int &landingArea, double navZAdjust) const
+{
+	AirmoveTrajectory result;
+	result.launchPos = Vec3(launchPos.x, launchPos.y, launchPos.z + navZAdjust);
+	result.exitSpeed = commandedSpeed;
+	result.exitYaw = yawDegrees;
+	landingArea = -1;
+
+	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics);
+	sim.BeginAirborne(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
+		static_cast<float>(launchPos.z)),
+		Vector(static_cast<float>(velocity.x), static_cast<float>(velocity.y),
+			static_cast<float>(velocity.z)), yawDegrees, commandedSpeed);
+
+	return Fly(sim, result, true, areas, sourceArea, landingArea, navZAdjust);
+}
+
+AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajectory &result, bool airborne,
+	const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust) const
+{
 	while (sim.Time() < m_params.maxSimulationTime)
 	{
 		if (!sim.Step())

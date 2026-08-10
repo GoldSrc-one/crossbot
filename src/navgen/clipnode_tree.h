@@ -19,7 +19,10 @@ struct PlaneChainEntry
 
 using LeafCallback = std::function<void(int leafContents, const std::vector<PlaneChainEntry> &chain)>;
 
-void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const LeafCallback &callback);
+using ContentsFilter = std::function<bool(int leafContents)>;
+
+void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const LeafCallback &callback,
+	const ContentsFilter &filter = ContentsFilter());
 
 int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point);
 

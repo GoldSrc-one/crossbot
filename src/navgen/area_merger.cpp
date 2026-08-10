@@ -29,12 +29,16 @@ float ConnectionCostSeconds(const MergedConnection &conn, const std::vector<Area
 			seconds = std::max(seconds, static_cast<float>(area.openSeconds));
 	}
 
-	if (conn.connType == crossbot_nav::CONN_AIRMOVE)
+	if (conn.connType == crossbot_nav::CONN_AIRMOVE || conn.connType == crossbot_nav::CONN_LADDER)
 	{
 		float damage = static_cast<float>(conn.fallDamage);
 		seconds += static_cast<float>(conn.flightTime);
 		seconds += (damage <= 0.0f) ? 0.0f : (damage >= 100.0f ? 1.0e4f : damage * 0.5f);
 	}
+
+	if (conn.connType == crossbot_nav::CONN_LADDER)
+		seconds += static_cast<float>((conn.pointB - conn.pointA).Length() /
+			std::max(conn.exitSpeed, 1.0));
 
 	return seconds;
 }
@@ -487,7 +491,8 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 			c.gateBRight = onFloor(pc.gateB.right, c.areaB);
 		}
 
-		if (c.connType != crossbot_nav::CONN_TELEPORT && (!c.gateAValid || !c.gateBValid))
+		if (c.connType != crossbot_nav::CONN_TELEPORT && c.connType != crossbot_nav::CONN_LADDER &&
+			(!c.gateAValid || !c.gateBValid))
 			++missing;
 	}
 

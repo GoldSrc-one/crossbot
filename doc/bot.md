@@ -54,7 +54,25 @@ off-target), and stall (no progress for kRepathInterval).
 ### RunAirmoveApproach / RunAirmoveDrive
 The steering that takes over once the tracker's `wpIndex` reaches an air-move launch waypoint. It aims
 `kAirmoveApproachLead` past the launch along the launch heading and commits when the bot is within one
-frame of the launch plane.
+frame of the launch plane **and is up to speed**.
+
+The lead is `NavPlan::AirmoveLaunchLead` — `speed * frametime`, one frame of travel, shared with the
+planner so both sides agree on where the bot stops accelerating. It used to carry a flat
+`kAirmoveLaunchSlack` of 4 units on top, which bought nothing and cost every jump 4 units of run-up;
+on `test37_walkent`, whose approach only has 19.5 units of straight, that was most of the margin.
+
+**A launch under `kAirmoveLaunchSpeedTolerance` of its design speed is not taken.** `PmSim`,
+`JumpLandsIn` and the sampler all begin their simulation *at* the design speed, so a launch delivered
+short is a jump the plan never modelled. Nothing checked it, and the gap was systemic rather than
+per-map — `qconsole.log` showed 222 planned against 146 delivered, repeatedly, and the launches that
+matched their design speed were the ones that landed where they were aimed. `test37_walkent` crossed
+the plane at 239 of 270 and fell 274 units into the pit it was jumping over.
+
+When the bot reaches the plane still short, it penalizes the connection, requests a repath and brakes
+(`RunAirmoveDrive` with drive 0 solves to full reverse thrust) instead of jumping. The bot pays one
+approach to learn the edge is undeliverable, and the +5 s penalty routes the next plan around it —
+the same penalize-and-repath loop a bad landing already used, moved earlier so the lesson costs an
+abort rather than a fall.
 
 Two things about the drive are easy to get wrong and both stalled real routes:
 

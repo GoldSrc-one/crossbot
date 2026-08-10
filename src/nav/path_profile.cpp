@@ -22,6 +22,9 @@ constexpr int kEtaMaxSteps = 20000;
 constexpr int kFitPasses = 3;
 constexpr int kTraceShrinkTries = 3;
 constexpr float kTraceShrinkFactor = 0.6f;
+constexpr int kAccelSolveIters = 40;
+constexpr float kEpsSpeed = 0.01f;
+constexpr float kUnreachableDistance = 1e9f;
 
 float Dist2D(const Vector &a, const Vector &b)
 {
@@ -56,6 +59,11 @@ float BrakeBack(float vEnd, float dist, float friction, float stopSpeed)
 	return stopSpeed + friction * (dist - toStop);
 }
 
+float AccelDistanceAt(float speed, float accel, float friction)
+{
+	return -speed / friction - (accel / (friction * friction)) * std::log(accel - friction * speed);
+}
+
 float SegSpeedAt(const ProfileSeg &seg, float local, float friction, float stopSpeed)
 {
 	float remaining = std::max(0.f, seg.sLen - local);
@@ -78,6 +86,76 @@ struct Corner
 	bool shrunk = false;
 };
 
+}
+
+float AccelForward(float v0, float dist, float accel, float friction, float stopSpeed)
+{
+	float v = std::max(v0, 0.f);
+	if (dist <= kEpsLen || accel <= 0.f || friction <= 0.f)
+		return v;
+
+	float remaining = dist;
+
+	if (v < stopSpeed)
+	{
+		float slowGain = accel - friction * stopSpeed;
+		if (slowGain <= 0.f)
+			return v;
+
+		float toStop = (stopSpeed * stopSpeed - v * v) / (2.f * slowGain);
+		if (remaining <= toStop)
+			return std::sqrt(v * v + 2.f * slowGain * remaining);
+
+		remaining -= toStop;
+		v = stopSpeed;
+	}
+
+	float terminal = accel / friction;
+	if (v >= terminal - kEpsSpeed)
+		return v;
+
+	float base = AccelDistanceAt(v, accel, friction);
+	float lo = v;
+	float hi = terminal - kEpsSpeed;
+	for (int i = 0; i < kAccelSolveIters; ++i)
+	{
+		float mid = 0.5f * (lo + hi);
+		if (AccelDistanceAt(mid, accel, friction) - base > remaining)
+			hi = mid;
+		else
+			lo = mid;
+	}
+
+	return lo;
+}
+
+float AccelDistance(float v0, float v1, float accel, float friction, float stopSpeed)
+{
+	float v = std::max(v0, 0.f);
+	if (v1 <= v || accel <= 0.f || friction <= 0.f)
+		return 0.f;
+
+	float terminal = accel / friction;
+	if (v1 >= terminal - kEpsSpeed)
+		return kUnreachableDistance;
+
+	float dist = 0.f;
+
+	if (v < stopSpeed)
+	{
+		float slowGain = accel - friction * stopSpeed;
+		if (slowGain <= 0.f)
+			return kUnreachableDistance;
+
+		float top = std::min(v1, stopSpeed);
+		dist += (top * top - v * v) / (2.f * slowGain);
+		v = top;
+	}
+
+	if (v1 > v)
+		dist += AccelDistanceAt(v1, accel, friction) - AccelDistanceAt(v, accel, friction);
+
+	return dist;
 }
 
 float SpeedForRadius(float radius, float accel, float friction, float stopSpeed)
@@ -125,6 +203,7 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 
 	profile.friction = f;
 	profile.stopSpeed = s0;
+	profile.accel = physics.accelerate * physics.maxSpeed;
 
 	auto NodeMaxSpeed = [&](size_t i)
 	{
@@ -416,6 +495,34 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 		}
 	}
 
+	float fwdAccel = profile.accel;
+	float prevExit = 0.f;
+	for (ProfileSeg &seg : profile.segs)
+	{
+		if (seg.gap)
+		{
+			if (seg.wpIndex >= 1)
+			{
+				const PlanWaypoint &startWp = waypoints[seg.wpIndex - 1];
+				prevExit = (startWp.airmoveLaunch && startWp.launchSpeed > 1.f)
+					? std::min(startWp.launchSpeed, prevExit)
+					: seg.vExit;
+			}
+			else
+			{
+				prevExit = seg.vExit;
+			}
+			seg.vReachEntry = prevExit;
+			seg.vReachExit = prevExit;
+			continue;
+		}
+
+		seg.vReachEntry = std::min(seg.vEntry, prevExit);
+		seg.vReachExit = std::min(seg.vExit,
+			AccelForward(seg.vReachEntry, seg.sLen, fwdAccel, f, s0));
+		prevExit = seg.vReachExit;
+	}
+
 	float v = 0.f;
 	float dt = physics.frameTime > 0.f ? physics.frameTime : 1.f / 60.f;
 	float accel = physics.accelerate * physics.maxSpeed;
@@ -434,19 +541,26 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 			profile.totalTime += dt;
 			++steps;
 		}
-		seg.vReach = v;
 	}
 
 	return profile;
 }
 
-float ProfileReachAtWaypoint(const PlanProfile &profile, size_t wpIndex)
+float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead)
 {
-	float reach = 0.f;
+	const ProfileSeg *approach = nullptr;
 	for (const ProfileSeg &seg : profile.segs)
 		if (seg.wpIndex == wpIndex && !seg.gap)
-			reach = seg.vReach;
-	return reach;
+			approach = &seg;
+
+	if (!approach)
+		return 0.f;
+
+	float usable = std::max(0.f, approach->sLen - std::max(lead, 0.f));
+	float reach = AccelForward(approach->vReachEntry, usable, profile.accel, profile.friction,
+		profile.stopSpeed);
+
+	return std::min(reach, approach->vExit);
 }
 
 ProfileSample SampleProfile(const PlanProfile &profile, float s)

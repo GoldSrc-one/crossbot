@@ -34,6 +34,7 @@ constexpr const char *kAreaBreakable = "#a8705f";
 constexpr const char *kConnWalk = "#e8eef4";
 constexpr const char *kConnAirmove = "#e74c3c";
 constexpr const char *kConnTeleport = "#27ae60";
+constexpr const char *kConnLadder = "#f1c40f";
 constexpr const char *kGate = "#8e6fc4";
 constexpr const char *kGateJump = "#e74c3c";
 constexpr const char *kRoute = "#f39c12";
@@ -77,6 +78,9 @@ ConnStyle StyleForConn(uint8_t connType)
 	{
 	case CONN_AIRMOVE:
 		return {kConnAirmove, "4,2", 1.3};
+
+	case CONN_LADDER:
+		return {kConnLadder, "2,3", 1.6};
 
 	case CONN_TELEPORT:
 		return {kConnTeleport, nullptr, 1.6};

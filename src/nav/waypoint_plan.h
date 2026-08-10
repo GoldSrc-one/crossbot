@@ -14,6 +14,14 @@
 namespace NavPlan
 {
 
+constexpr float kAirmoveLaunchSpeedTolerance = 0.95f;
+
+inline float AirmoveLaunchLead(float speed, float frameTime)
+{
+	float dt = (frameTime > 0.f) ? frameTime : (1.f / 60.f);
+	return (speed > 0.f) ? speed * dt : 0.f;
+}
+
 struct PlanPlane
 {
 	Vector normal;

@@ -15,12 +15,28 @@ Command-line tool with extensive debug flags:
 - `--dump-planes <id>` - one final area's exact plane list (normal+dist) and face windings
 - `--dump-obj <path>` - walkable floor of every area as OBJ mesh (+ MTL): crouch areas colored apart, planned route as ribbon
 - `--dump-svg <path>` - top-down SVG of final area graph
+- `--dump-airmove-prune` - the walk-vs-air comparison behind every kept or dropped air move, and the
+  walk+air-vs-ladder comparison behind every kept or dropped ladder connection
+- `--dump-ladders` - ladder discovery: each `func_ladder`'s hull-3 volume, why each face was kept or
+  rejected, the mount and top positions, and every dismount simulation with its height, direction,
+  landing area, fall damage and loopback verdict
 - `--dump-path` - per-waypoint clearance and per-segment arc/line/gap rows (radius, turn, length,
-  entry/exit speed, cap) for the debug route, plus the profile summary line
+  entry/exit speed, cap, and the `reach` pair — the speed the bot can really carry, see `doc/nav.md`)
+  for the debug route, plus the profile summary line
 - `--trace <path>` - overlays recorded bot trajectory on SVG (one "x y z" per line, empty file = nothing).
   Also reports mean and max lateral deviation of the trace from the planned profile, and the clearance
   budget at the worst point — the headline number for whether the bot actually held its arcs.
 - `--airmove-samples <n>` - launch samples per unit edge length (default 1; 0.5 halves; 0 disables)
+- `--airmove-walk-ratio <n>` - drop an air move a walk covers within n times its cost (default 1.2; 0 keeps all)
+- `--ladder-prune-ratio <n>` - drop a ladder a walk+air-move route covers within n times its cost
+  (default 2.0; 0 keeps all)
+- `--max-speed <n>` - assumed ground speed in units/sec (default 320), used for air-move sampling and
+  for the `--dump-path` debug route. It deliberately does **not** have to match the server: a nav file
+  is server-independent, and the runtime planner clamps every launch to its own `sv_maxspeed` (see
+  "Launch speed is clamped to the server" in `doc/nav.md`). Sampling at 320 and letting a 270 server
+  reject what it cannot reach is the intended arrangement — the same nav then works on any server
+  without a regen. Lower it only to see what a slower server can actually use, or to keep the graph
+  small when you know the target speed.
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
 - `--max-merge-group <n>` - most leaf groups one merge may fuse (default 64). `1` blocks the first
   absorption, so nothing merges at all and each BSP hull-3 leaf becomes its own area — this replaces the
@@ -228,7 +244,7 @@ For each connection:
 3. **Seed jumps** - same edges, add jump impulse, fan yaws ±90°
 4. **Seed reverse jumps (climbs)** - from landing spread of drops, edge along landings, outward toward ledge
 5. **Simulate each sample** - PmSim until land/wedge/timeout; check landing in dest area
-6. **Bin by launch edge** - group samples by `SameLaunchEdge` (outward dot ≥ 0.999, plane offset match 0.1)
+6. **Bin by hull and jump** - four bins: stand/duck hull × drop/jump
 7. **Select best per bin** - prefer: jump > drop; shorter flight time; less fall damage
 8. **Fit gates** - `FitGate` on launch/landing clouds (robust Tukey-weighted PCA segment, local yaw/speed regression at ends)
 9. **Store on connection** - gates, exitSpeed/Yaw, jumpBackDist, fallDamage, flightTime, launchPos/landingPos
@@ -244,29 +260,179 @@ For each connection:
 A drop under `maxJumpHeight` seeds a climb back the other way: `SeedEdgeFromLandings` turns the drop's landing
 points into a synthetic launch edge in the destination area, swept like any other edge.
 
-A normal perimeter edge fans yaw over the full `±yawSpread` (90°) around its outward normal, because nothing is
-known about where the bot wants to go. A reverse seed does know: the climb has to retrace the drop, so it can
-only usefully aim along the drop's own headings reversed. The seed therefore carries a `yawRange` — the circular
-mean of the drop samples' inverse yaws, widened to the spread those samples actually covered — and the sweep
-draws from that arc instead.
+Every edge, seeded or not, fans yaw over the full `±yawSpread` (90°) around its outward normal.
 
-This matters more than it sounds, because `BuildSampledGates` **drops the whole connection, not just its gate**,
-when `FitGate` cannot establish lateral spread. Fanning 180° at a narrow opening lands too few successes to fit
-a gate, so genuinely traversable crossings disappeared: at the default sample density test43_vent lost both vent
-crossings and pruned to 3 of 8 areas. With the seeded arc it is 8 of 8 with nothing unfitted, using slightly
-fewer trajectories — every air-move map gained connections and none lost reachability.
+**A narrower arc for reverse seeds was designed but is not implemented.** The idea was that a reverse seed
+knows where it is going — the climb has to retrace the drop — so it could aim only along the drop's own
+headings reversed, and `LaunchEdge` still carries the `yawRange`/`yawLo`/`yawHi` fields for it. Nothing
+sets or reads them; they are dead. Anyone reviving this should know why it looked worth doing:
+`BuildSampledGates` **drops the whole connection, not just its gate**, when `FitGate` cannot establish
+lateral spread, so fanning wide at a narrow opening can lose a genuinely traversable crossing.
 
 ### Sample Cloud Aggregation
 Samples from every edge the pair was reached from land in one cloud. Which edge a sample left through does not matter: the robust fit keeps whichever cluster is the majority and rejects the rest as outliers, so the gate settles on the face the move is really about.
 
 ### Probe Variables
-- `probeZ = 0.0` - edge filtering and the ground-support test happen here
-- `launchZ = 0.0` - the simulated origin starts here
-- `navZAdjust = 0.0` - added to simulated positions to express them in nav space
-- `emitted` map - pair key -> whether the winning move needs a crouch
+Three sweep modes run over every area, each with its own hull, speed and z offsets:
+- **stand** - stand hull, `probeZ`/`launchZ` = `kStandProbeLift` (18), `navZAdjust` = `-kStandProbeLift`
+  to bring standing-origin positions back into hull-3 nav space
+- **crouchjump** - duck hull at standing speed, `launchZ` = `kStandProbeLift`, jumps only
+- **duck** - duck hull at ducking speed, all offsets 0 because duck space *is* nav space
 
-### Reverse-Jump Yaw Calculation
-The climb has to retrace the drop, so its yaw only ever wants to be one of the drop's headings reversed. Take the mean of those inverse headings as a circular average, then keep the spread the samples actually covered.
+`emitted` maps pair key -> whether the winning move needs a crouch.
+
+## ladder_connections.cpp
+
+### BuildLadderConnections
+Runs after `ProbeAirMoves` and before the prune passes. Emits `CONN_LADDER` connections for every
+`func_ladder`. Nothing is carved and no area is split — `func_ladder` is `SOLID_NOT` and the player is
+*inside* it for the whole climb, so ladders are a pure overlay on the existing graph.
+
+`PM_Ladder` is a **point-content test**, not a trace: the engine asks whether the player origin is inside
+the ladder brush expanded by the current player hull. There is no "which face did I touch", so the whole
+pass works off the hull-3 clipnode volume, never `LUMP_FACES` (which is not even loaded, and is empty for
+`func_ladder` anyway once ZHLT has nullified the trigger texture).
+
+Everything runs in hull 3, like the rest of navgen, so hull-3 leaf space *is* nav space and no z-adjust is
+needed. Ducking enters only when the dismount area is crouch-only: the connection gets
+`CONN_FLAG_NEEDS_CROUCH` and is costed at the ducking climb speed.
+
+Per ladder:
+1. **Extract the volume** - walk `model.headnode[kHullDuck]` for `CONTENTS_SOLID` leaves and build a
+   polytope per leaf. Face normals from `BuildPolytopeFromChain` point *inward*, so the outward normal
+   the player stands against is `-face.plane.normal`.
+2. **Keep climb faces** - `|normal.z| <= kFloorNormalZ`. Near-horizontal caps are skipped, which is what
+   stops the top cap being treated as a mount surface.
+3. **Probe from the face centroid only**, inset 2 units into the volume. A centroid buried in world solid
+   rejects the face. This is deliberately fragile: it reduces a ladder to the one face actually meant to
+   be climbed, which is usually exactly one of four.
+4. **Trace down** along the face-projected down vector (so a slanted ladder follows its own slope) to
+   `2 * kStandProbeLift + PlainJumpHeight(gravity)` = 81 units below the expanded volume bottom. The bot
+   is *standing* when it jumps for the rung, hence 18 + 18 + 45 rather than a bare 45. The hit point is
+   the mount; no floor in reach, or a mount in no area, rejects the face. **This constant decides a test
+   case**: test53_ladder4's dangling ladder has a 76-unit gap, so 81 keeps it and a rounded-down 72 would
+   silently drop it.
+5. **Trace up** from the mount to the expanded top, no overshoot. Whether the climb ended because the
+   ladder ended or because a ceiling blocked it decides if the forward dismount is available.
+
+### Dismounts
+Four ways off, scanned from the top downward in 16-unit steps. Sides and jump-off apply at every height;
+**forward applies only at the top, and only when the ladder ended** — you cannot stop mid-ladder and step
+forward. test29_ladder3 is why the scan exists at all: its ladders hit the ceiling, so the top is where no
+floor is reachable in any direction and the ledge it should serve is passed at mid-height.
+
+| Dismount | Start | Initial velocity | Sim yaw / speed |
+| --- | --- | --- | --- |
+| forward | top position | `(0, 0, +200)` | toward `-N`, `maxSpeed` |
+| left / right | face end along `±perp` | `±perp * 200` | same direction, `maxSpeed` |
+| jump off | column at that height | `N * 270` | toward `N`, speed 0 |
+
+Working the `PM_LadderMove` algebra for a player facing the face, `lateral` is exactly zero and the result
+is **pure +Z at 200** — you cannot move in the `-N` direction while on a ladder, because that input is what
+*becomes* the climb. Forward still reaches a ledge because the bot keeps rising ~25 units after leaving the
+volume and air-accelerates sideways; `kAirAccelWishSpeedCap` buys ~15 units of drift, which is exactly what
+gets it from test12_ladder's column at x≈354 onto the ledge at x≥368. Jump-off uses commanded speed 0 so
+the sim does not air-accelerate the bot back into the ladder.
+
+Each sim runs through `PM_MoveSimulator::SimulateAirborne`, which starts the shared `PmSim` mid-flight with
+a given velocity instead of on the ground. It also starts the flight already flagged airborne, so the first
+ground contact counts as the landing — a sideways step onto a ledge at the same height is a dismount, not a
+slide.
+
+Selection per landing area: **one** winner, ranked by lowest fall damage, then by whether the dismount is
+reversible (below), then by distance from the landing point to that area's centroid. A dismount landing back
+in the ladder's own bottom area is a **loopback** and produces nothing.
+
+### Reversibility, and why it decides the gates
+Gate A is the mount and gate B is the dismount landing. That is right for climbing up — the mount is where
+you start, the landing is where you finish. It is only right for climbing *down* if the bot can step from
+gate B straight back onto the ladder, and for a dismount that flew any distance it cannot: on
+test29_ladder3 the landings sit 43-101 units clear of the ladder column, out over a 250-unit drop.
+
+So a dismount is **reversible** only when it is not a jump-off *and* its landing lies inside the ladder's
+hull-expanded volume, with `kStandProbeLift` of slack in z because a standing player's ladder volume
+reaches 18 units further in each z direction than the hull-3 one. A connection whose winning dismount is
+not reversible gets `CONN_FLAG_ONE_WAY`.
+
+That keeps gate B correct by construction: whenever the connection claims to be two-way, gate B is a point
+the descending bot is already on the ladder at. It is deliberately conservative — you *can* leap at a ladder
+and grab it in GoldSrc, but that is an air move onto a ladder, which this pass does not model and the
+follower cannot execute. Marking those one-way never invents a route, and reachability is unchanged on every
+ladder map. test53_ladder4 shows both outcomes: the two crouch-tunnel ladders stay two-way because their
+forward dismounts land inside the column, while the dangling ladder's side dismount lands 76 units clear of
+it and goes one-way.
+
+### What the connection carries
+No new record fields. `launchPos` is the mount, `landingPos` the dismount, `exitAngle` the yaw the bot holds
+to climb, `exitSpeed` the climb speed, `flightTime`/`fallDamage` come from the winning dismount, and the
+climb length is `|landingPos - launchPos|`. Gates are degenerate points at the mount and the dismount, which
+is why `CONN_LADDER` is exempt from both `BuildConnectionGates` and the missing-gate counter.
+
+### Scope: navgen only
+Ladder connections count for `PruneUnreachableAreas`, so the areas a ladder serves stop being void. They are
+**skipped when building the A\* graph**, in both builders (`main.cpp` and `src/nav/nav_path.cpp`), because
+the bot cannot climb yet. `--dump-path` therefore still reports no route on the ladder maps rather than
+inventing one the follower cannot execute. Removing those two skips is the first line of the planner phase.
+
+## airmove_prune.cpp
+
+### PruneWalkableAirmoves
+Runs between `ProbeAirMoves` and `SnapConnectionsToFloor`. For each `CONN_AIRMOVE` it asks what the same
+two areas cost on foot, and drops the air move when walking is not much worse:
+`walkSeconds < kDefaultAirmoveWalkRatio * airSeconds`, ratio 1.2, tunable with `--airmove-walk-ratio`
+(0 disables the pass). `--dump-airmove-prune` prints the comparison per connection.
+
+Both sides are measured the same way — centroid to centroid at `maxSpeed`, plus `ConnectionCostSeconds`
+— so the air move is paying for its `flightTime` and fall damage against a walk that pays only distance.
+The walk query is a Dijkstra over **walk connections only**, memoised per source area.
+
+Two properties make this safe to run as a single pass. Reachability cannot change, because a connection
+is only dropped when a route between the same endpoints already exists — **in every direction the
+connection itself offered**. And the result does not depend on the order connections are visited, because
+the judging graph never contains the edge type being judged, so dropping one cannot alter any later query
+— no fixed-point iteration needed.
+
+Both halves of that first property need care, and getting either wrong silently orphans areas:
+- The graph is **directed**. A one-way connection contributes one edge, not two. Walk connections are
+  always bidirectional, so this was latent until `PruneRedundantLadders` put air moves in the graph:
+  on test53_ladder4 two one-way drops *out* of a crouch tunnel were being traversed backwards, which
+  made a 64-unit climb look free and deleted both ladders that were the only way *in*. The tunnel and
+  the room behind it — with the map's `info_target` in it — then pruned away as void.
+- A **bidirectional** connection is only dropped when the alternative works both ways, so the query takes
+  the worse of `A->B` and `B->A`.
+
+**A jump the planner prefers is not automatically a jump worth having.** A\* ranks edges on crossing
+distance plus `ConnectionCostSeconds` and has no idea what the approach corner will cost, so it happily
+picks jumps the profile then rates slower than walking: on `test37_walkent` the 5→4 crouch-jump route
+came out at 3.5 s against 3.2 s for walking round the pit, over an identical 888 units. That connection
+is the one this pass drops (walk 0.81 s vs air 1.43 s).
+
+Most of what goes is stairs and slopes, where the sampler finds a jump between nearly every pair of
+treads: `test15_staircase` 33 air moves to 7, `test50_stairs` 20 to 1, `test28_slopecase` 19 to 8,
+`test45_slopes2` 17 to 8. Areas, walk connections and route existence are untouched. The cost is real
+and shows up as slower routes where the discarded jumps were genuine shortcuts that simply did not beat
+walking by the ratio. That trade is what the ratio buys, and it is the knob to turn if those maps matter
+more than the graph size.
+
+One-way drops survive on the no-walk-route branch, which is most of what is left: 21 of `test37_walkent`'s
+30 air moves fall into a pit with no way back out, and no walk route means the air move is load-bearing.
+
+### PruneRedundantLadders
+A second phase over the same machinery, enforcing **walk > jump > ladder**. It judges `CONN_LADDER`
+against a graph of walk connections *plus* the air moves phase 1 kept, and drops the ladder when
+`altSeconds < kDefaultLadderRatio * ladderSeconds` — ratio 2.0, tunable with `--ladder-prune-ratio`
+(0 disables). A ladder gets a looser ratio than an air move because climbing is slow but reliable: it
+only has to be within 2× of the alternative to be worth keeping.
+
+This is why `BuildLadderConnections` runs *after* `ProbeAirMoves` rather than before. Emitting ladders
+first would let them suppress jumps through the sampler's `existingPairs` set, which is the opposite of
+the intended priority.
+
+Both safety properties carry over, but only because the graph is directed and bidirectional connections
+are checked both ways — see the caveats under `PruneWalkableAirmoves`, which this phase is what exposed.
+On `test53_ladder4` it drops 2 of 6: the degenerate 3-unit "climb" and a horizontal jump-off that walking
+already covers. The two long climbs and the two crouch-tunnel ladders are all kept, the latter because
+nothing else reaches the tunnel at all.
 
 ## floor_support.cpp
 

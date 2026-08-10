@@ -68,6 +68,10 @@ public:
 	AirmoveTrajectory Simulate(const Vec3 &launchPos, float yawDegrees, float commandedSpeed, bool jump,
 		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust = 0.0) const;
 
+	AirmoveTrajectory SimulateAirborne(const Vec3 &launchPos, const Vec3 &velocity, float yawDegrees,
+		float commandedSpeed, const std::vector<Area> &areas, int sourceArea, int &landingArea,
+		double navZAdjust = 0.0) const;
+
 	bool IsSupported(const Vec3 &origin) const;
 	bool VoidAhead(const Vec3 &origin, const Vec3 &dir) const;
 	bool BlockedAhead(const Vec3 &origin, const Vec3 &dir) const;
@@ -78,6 +82,8 @@ public:
 	const PmSim::PmPhysics &Physics() const { return m_pmPhysics; }
 
 private:
+	AirmoveTrajectory Fly(PmSim::PmSimulator &sim, AirmoveTrajectory &result, bool airborne,
+		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust) const;
 
 	const BspFile &m_bsp;
 	int m_headnode;
@@ -87,6 +93,8 @@ private:
 	Vec3 m_worldMins;
 	Vec3 m_worldMaxs;
 };
+
+int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas);
 
 void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
 	const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
