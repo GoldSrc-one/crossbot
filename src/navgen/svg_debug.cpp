@@ -42,6 +42,7 @@ constexpr const char *kRoute = "#f39c12";
 constexpr const char *kRouteAirmoveSim = "#2ecc71";
 constexpr const char *kRouteAirmoveStored = "#ff3b30";
 constexpr const char *kRouteAirmoveMissed = "#f5d020";
+constexpr const char *kRouteLadder = "#e91e8c";
 constexpr const char *kRouteStart = "#27ae60";
 constexpr const char *kRouteGoal = "#e74c3c";
 
@@ -305,8 +306,9 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 			if (pathSegmentKinds[i] == PATH_SEG_WALK)
 				continue;
 
-			const char *colour = (pathSegmentKinds[i] == PATH_SEG_AIRMOVE_SIMULATED)
-				? kRouteAirmoveSim : kRouteAirmoveStored;
+			const char *colour = (pathSegmentKinds[i] == PATH_SEG_LADDER) ? kRouteLadder
+				: (pathSegmentKinds[i] == PATH_SEG_AIRMOVE_SIMULATED) ? kRouteAirmoveSim
+				: kRouteAirmoveStored;
 			const Vec3 &a = pathPoints[i];
 			const Vec3 &b = pathPoints[i + 1];
 			std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"%s\" "
@@ -425,12 +427,14 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		SwatchRow(kAreaBreakable, "area (breakable)");
 		LineRow(kConnWalk, nullptr, 1.0, "walk");
 		LineRow(kConnAirmove, "4,2", 1.3, "air move");
+		LineRow(kConnLadder, "2,3", 1.6, "ladder");
 		LineRow(kGate, "3,2", 0.5, "funnel gate");
 		LineRow(kGateJump, "3,2", 0.5, "funnel gate (air move)");
 		LineRow(kRoute, nullptr, 1.8, "planned route");
 		LineRow(kRouteAirmoveSim, nullptr, 1.8, "air move, launch re-simulated");
 		LineRow(kRouteAirmoveStored, nullptr, 1.8, "air move, stored launch");
 		LineRow(kRouteAirmoveMissed, nullptr, 1.8, "air move, re-simulation missed");
+		LineRow(kRouteLadder, nullptr, 1.8, "ladder climb");
 		LineRow(kTrace, nullptr, 1.2, "recorded trace");
 		DotRow(kRouteStart, "route start");
 		DotRow(kRouteGoal, "route goal");

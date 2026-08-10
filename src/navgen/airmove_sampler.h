@@ -50,20 +50,37 @@ struct AirmoveTrajectory
 	bool jumped = false;
 	bool landed = false;
 
+	bool grabbedLadder = false;
+	Vec3 ladderPos;
+
 	bool duckHull = false;
+};
+
+struct LaunchEdge
+{
+	Vec3 a;
+	Vec3 b;
+	Vec3 outward;
+	double length = 0.0;
+
+	bool yawRange = false;
+	float yawLo = 0.0f;
+	float yawHi = 0.0f;
 };
 
 struct HullContext
 {
 	int headnode = -1;
 	const std::vector<BlockingVolume> *blockers = nullptr;
+	const std::vector<BlockingVolume> *ladders = nullptr;
 };
 
 class PM_MoveSimulator
 {
 public:
 	PM_MoveSimulator(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
-		const AirmoveSampleParams &params, const PhysicsParams &physics);
+		const AirmoveSampleParams &params, const PhysicsParams &physics,
+		const std::vector<BlockingVolume> *ladders = nullptr);
 
 	AirmoveTrajectory Simulate(const Vec3 &launchPos, float yawDegrees, float commandedSpeed, bool jump,
 		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust = 0.0) const;
@@ -76,6 +93,7 @@ public:
 	bool VoidAhead(const Vec3 &origin, const Vec3 &dir) const;
 	bool BlockedAhead(const Vec3 &origin, const Vec3 &dir) const;
 	bool GroundAhead(const Vec3 &origin, const Vec3 &dir) const;
+	bool OnLadder(const Vec3 &origin) const;
 	TraceResult Trace(const Vec3 &start, const Vec3 &end) const;
 
 	PmSim::PmTraceFn TraceFn() const;
@@ -88,6 +106,7 @@ private:
 	const BspFile &m_bsp;
 	int m_headnode;
 	const std::vector<BlockingVolume> &m_blockers;
+	const std::vector<BlockingVolume> *m_ladders;
 	AirmoveSampleParams m_params;
 	PmSim::PmPhysics m_pmPhysics;
 	Vec3 m_worldMins;
@@ -95,6 +114,9 @@ private:
 };
 
 int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas);
+
+std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Area &area, double probeZ,
+	const AirmoveSampleParams &params);
 
 void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
 	const std::vector<Area> &areas, std::vector<MergedConnection> &conns,

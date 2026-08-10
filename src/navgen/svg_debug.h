@@ -15,6 +15,7 @@ enum PathSegmentKind : uint8_t
 	PATH_SEG_WALK = 0,
 	PATH_SEG_AIRMOVE_SIMULATED,
 	PATH_SEG_AIRMOVE_STORED,
+	PATH_SEG_LADDER,
 };
 
 struct FailedAirmove

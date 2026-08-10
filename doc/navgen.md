@@ -237,6 +237,20 @@ Both halves come out of the same clip planes, so their floors tile without a gap
 ### PM_MoveSimulator
 Wraps shared PmSim core with navgen's trace function (world + blocking volumes).
 
+`OnLadder` is `PM_Ladder`: a point-content test of the origin against each `func_ladder`'s clipnode tree
+for this hull, AABB-prefiltered. It must be the clipnode test and not the AABB, because a slanted ladder's
+AABB is far larger than the brush — test53_ladder4's model 3 is 160 units wide as a box and a thin slab in
+fact. `Fly` ends the flight with no landing the first airborne frame the origin is on a ladder: a
+`func_ladder` is `SOLID_NOT`, so it stops no trace, but the engine switches the player to `PM_LadderMove`
+the moment they enter one, and with no input they hang there. A trajectory that grazes a ladder therefore
+reports a landing the player never reaches. Ladders mount on walls, so the flights this catches are the
+ones that clip a wall and slide down it.
+
+The check is skipped while the mover is on the ground, so a launch edge that overlaps a ladder's footprint
+still gets sampled; only leaving the ground next to one is refused. `HullContext::ladders` carries the
+volumes per hull. `BuildLadderConnections` deliberately leaves it null on its own simulator — a dismount
+starts inside the ladder it is leaving and would abort on frame one.
+
 ### ProbeAirMoves
 For each connection:
 1. **Collect launch edges** - perimeter of floor faces (outward normal from face center)
@@ -285,8 +299,27 @@ Three sweep modes run over every area, each with its own hull, speed and z offse
 
 ### BuildLadderConnections
 Runs after `ProbeAirMoves` and before the prune passes. Emits `CONN_LADDER` connections for every
-`func_ladder`. Nothing is carved and no area is split — `func_ladder` is `SOLID_NOT` and the player is
-*inside* it for the whole climb, so ladders are a pure overlay on the existing graph.
+`func_ladder`.
+
+### The volumes are carved out of the walkable leaves
+`SubtractLadderVolumes` (blocking_entities.cpp) removes each ladder's hull-3 volume from every leaf it
+overlaps, before areas are built. A nav area is duck-origin space and the expanded volume is exactly the
+set of origins the engine puts on a ladder, so after the carve **no nav area contains a ladder-capture
+point**. That makes routing past a ladder structural: neither the planner nor `bot_avoid` can send the bot
+through a spot where `PM_PlayerMove` would switch it to `MOVETYPE_FLY` and convert its forward input into
+a climb. Only the ladder state machine ever puts the bot inside one.
+
+The carve uses the ladder's **axis-aligned hull bounds, not its clipnode tree**, even though the tree is
+exact. `ClipPolytope` drops a face whose clipped winding falls under 3 vertices, which loses that face's
+plane from the polytope; the next clip rebuilds its cut face from `BaseWindingForPlane(plane, mapRadius)`
+against the remaining planes, so a lost bounding plane lets the piece escape to the map radius.
+Axis-aligned planes rarely trip this. test53_ladder4's slanted ladder did, catastrophically — total leaf
+volume 94,346,287,097 against 25,747,456 uncarved, with areas reaching `maxs 8192`. The box carve is
+conservative for a slanted ladder (it removes walkable floor under the slope) and exact for a vertical one.
+
+Because the mount now lands inside the carved hole, `FindStandArea` steps outward from it in 4-unit steps
+up to 48, tracing down at each step, and returns the first floor point that is in a real area. That point,
+not the mount, becomes `pointA` and both gate-A corners — it is where the bot stands to start the climb.
 
 `PM_Ladder` is a **point-content test**, not a trace: the engine asks whether the player origin is inside
 the ladder brush expanded by the current player hull. There is no "which face did I touch", so the whole
@@ -303,20 +336,29 @@ Per ladder:
    the player stands against is `-face.plane.normal`.
 2. **Keep climb faces** - `|normal.z| <= kFloorNormalZ`. Near-horizontal caps are skipped, which is what
    stops the top cap being treated as a mount surface.
-3. **Probe from the face centroid only**, inset 2 units into the volume. A centroid buried in world solid
-   rejects the face. This is deliberately fragile: it reduces a ladder to the one face actually meant to
-   be climbed, which is usually exactly one of four.
+3. **Search the face for a free probe** (`FindFaceProbe`). It tries the face centroid inset 2 units into
+   the volume first — the historical probe, so a normal ladder behaves exactly as before — then sweeps
+   along `perp` in 8-unit steps out to the winding's extents, trying insets of 2, 1 and 0.5 at each
+   offset, and takes the first point a duck hull fits in. A face with no free point anywhere is rejected,
+   which is still what buries the three faces of a wall-mounted ladder that face into the wall.
+
+   The sweep is not belt-and-braces: a thin ladder plate flush against a wall leaves a capture band only a
+   unit or two deep, and the centroid can miss it in *both* axes at once. test53_ladder4's shaft ladder is
+   a 1-unit plate on the `y = 0` wall of a shaft whose walls sit at `x = 304` and `x = 384`. Its climbable
+   face centroid is `(320, 17, -24)`: `y = 15` after the inset is behind the wall for a duck hull, and
+   `x = 320` is exactly on the hull-clip boundary of the `x = 304` wall. Both fail. `(328, 16.5, -24)` —
+   one perp step over, half a unit in — is free, and is the only reason that ladder produces connections
+   at all. Without it the map lost 7 areas to the void prune and the target became unreachable.
 4. **Trace down** along the face-projected down vector (so a slanted ladder follows its own slope) to
    `2 * kStandProbeLift + PlainJumpHeight(gravity)` = 81 units below the expanded volume bottom. The bot
    is *standing* when it jumps for the rung, hence 18 + 18 + 45 rather than a bare 45. The hit point is
-   the mount; no floor in reach, or a mount in no area, rejects the face. **This constant decides a test
-   case**: test53_ladder4's dangling ladder has a 76-unit gap, so 81 keeps it and a rounded-down 72 would
-   silently drop it.
+   the mount; no floor in reach, or a mount in no area, rejects the face.
 5. **Trace up** from the mount to the expanded top, no overshoot. Whether the climb ended because the
    ladder ended or because a ceiling blocked it decides if the forward dismount is available.
 
 ### Dismounts
-Four ways off, scanned from the top downward in 16-unit steps. Sides and jump-off apply at every height;
+Four ways off, scanned from the top downward in 16-unit steps, with the standing reach height inserted
+into the list in descending order. Sides and jump-off apply at every height;
 **forward applies only at the top, and only when the ladder ended** — you cannot stop mid-ladder and step
 forward. test29_ladder3 is why the scan exists at all: its ladders hit the ceiling, so the top is where no
 floor is reachable in any direction and the ledge it should serve is passed at mid-height.
@@ -339,40 +381,80 @@ a given velocity instead of on the ground. It also starts the flight already fla
 ground contact counts as the landing — a sideways step onto a ledge at the same height is a dismount, not a
 slide.
 
+Sampling is in hull 3 so that a dismount into a crouch-only area is found, but a sample a *standing* player
+cannot occupy is discarded unless the destination area carries `NAV_AREA_CROUCH`. `StandFits` is a point
+test of the sample lifted by `kStandProbeLift` against the hull-1 tree; rejections print
+`[standing hull does not fit]` under `--dump-ladders`. The same test derives the climb's `reach`: step down
+from the true top until a standing hull fits, rather than assuming a fixed offset below it.
+
 Selection per landing area: **one** winner, ranked by lowest fall damage, then by whether the dismount is
 reversible (below), then by distance from the landing point to that area's centroid. A dismount landing back
 in the ladder's own bottom area is a **loopback** and produces nothing.
 
 ### Reversibility, and why it decides the gates
-Gate A is the mount and gate B is the dismount landing. That is right for climbing up — the mount is where
-you start, the landing is where you finish. It is only right for climbing *down* if the bot can step from
-gate B straight back onto the ladder, and for a dismount that flew any distance it cannot: on
-test29_ladder3 the landings sit 43-101 units clear of the ladder column, out over a 250-unit drop.
+Gate A is the mount. Gate B is **where a descending bot gets onto the ladder** — not, in general, where an
+ascending one steps off. Those coincide for a dismount that barely left the column and diverge for one that
+flew, so `landingPos` carries the ascent's exit and gate B carries the descent's entry.
 
-So a dismount is **reversible** only when it is not a jump-off *and* its landing lies inside the ladder's
-hull-expanded volume, with `kStandProbeLift` of slack in z because a standing player's ladder volume
-reaches 18 units further in each z direction than the hull-3 one. A connection whose winning dismount is
-not reversible gets `CONN_FLAG_ONE_WAY`.
+A dismount is **directly reversible** when it is not a jump-off *and* its landing lies inside the ladder's
+hull-expanded volume, with `kStandProbeLift` of slack in z because a standing player's ladder volume reaches
+18 units further in each z direction than the hull-3 one. Gate B is then the landing itself: the bot steps
+back on from where it stepped off.
 
-That keeps gate B correct by construction: whenever the connection claims to be two-way, gate B is a point
-the descending bot is already on the ladder at. It is deliberately conservative — you *can* leap at a ladder
-and grab it in GoldSrc, but that is an air move onto a ladder, which this pass does not model and the
-follower cannot execute. Marking those one-way never invents a route, and reachability is unchanged on every
-ladder map. test53_ladder4 shows both outcomes: the two crouch-tunnel ladders stay two-way because their
-forward dismounts land inside the column, while the dangling ladder's side dismount lands 76 units clear of
-it and goes one-way.
+Otherwise the pass asks a second question — **can the bot walk off an edge of the landing area and fall onto
+the ladder?** `EdgeDropReachesLadder` takes the landing area's drop edges from `FilterLaunchEdges`, samples
+along each every 16 units, and simulates a plain run-off (no jump) at full, half and quarter speed against a
+`PM_MoveSimulator` carrying **only this ladder**. A run that trips `grabbedLadder` makes the connection
+two-way, and gate B becomes the ledge point it launched from. Grabbing cancels fall damage, so the drop is
+free however far it falls — the only thing that has to be true is that the bot ends up inside the volume.
+
+This applies to every dismount kind, not just jump-offs. `PM_Ladder` is a point test, so the yaw the bot
+runs at has no bearing on whether it catches the ladder — it only has to arrive. Each sample therefore tries
+two yaws: toward the nearest point of the ladder's volume in xy, and `climbYaw`. The first is what makes a
+**side** dismount reversible, where the bot has to come at the column from the side and the two yaws are 90°
+apart. test53_ladder4's `6 <-> 4` is that case: the dismount steps off sideways to (428.7, 30, 19.2), and the
+bot gets back by walking to (370, 30.8, 19) and running west at yaw 180 — a head-on run at `climbYaw` would
+have taken it along the face and never into it.
+
+Because the run-off yaw and the climb yaw are then different angles, the descent needs both. The climb yaw
+is `exitAngle`; the run-off yaw goes in `gateAYaw`, which is dead weight on a ladder — it parameterises an
+air move's launch along gate A and nothing reads it for another type. The planner hands them to the mount
+waypoint as `ladderYaw` and `ladderEntryYaw`.
+
+Candidates are ranked by **time to the grab**, not first hit. Without that the scan's edge order decides,
+and it picks whatever it stumbles on: test53_ladder4's `6 <-> 4` first resolved to a 161-unit fall down the
+side of the pit that happens to clip the column near the bottom, instead of the 18-unit step off the lip
+directly above it. Shortest grab is the closest, safest, and least sensitive to the follower drifting.
+
+Both tests are conservative in the same way: the connection only goes two-way when a simulation shows the
+bot ending up on the ladder, so it never invents a route. What stays one-way is a landing the bot can reach
+but cannot fall back to the ladder from, and on the test maps that is always because the drop would have to
+go *upward* — test53_ladder4's `6 -> 9` and `4 -> 7` both dismount onto the pit floor at z −238, below the
+bottom of the ladder they came off. test29_ladder3's `4 -> 2` is the other shape: a ledge that simply does
+not overhang the column. Its other two ladders are the drop case, and that is what lets it descend into the
+pit instead of taking a 256-unit fall for 10.5 damage.
 
 ### What the connection carries
 No new record fields. `launchPos` is the mount, `landingPos` the dismount, `exitAngle` the yaw the bot holds
 to climb, `exitSpeed` the climb speed, `flightTime`/`fallDamage` come from the winning dismount, and the
-climb length is `|landingPos - launchPos|`. Gates are degenerate points at the mount and the dismount, which
-is why `CONN_LADDER` is exempt from both `BuildConnectionGates` and the missing-gate counter.
+climb length is `|landingPos - launchPos|`. Gates are degenerate points: gate A at the mount, gate B at the
+descent entry (above), which is why `CONN_LADDER` is exempt from both `BuildConnectionGates` and the
+missing-gate counter. Gate B is the only place the descent entry lives, so the planner reads its point
+rather than `landingPos` when `fromId` is not `areaA`, and `gateAYaw` is reused for the yaw it runs at.
 
-### Scope: navgen only
-Ladder connections count for `PruneUnreachableAreas`, so the areas a ladder serves stop being void. They are
-**skipped when building the A\* graph**, in both builders (`main.cpp` and `src/nav/nav_path.cpp`), because
-the bot cannot climb yet. `--dump-path` therefore still reports no route on the ladder maps rather than
-inventing one the follower cannot execute. Removing those two skips is the first line of the planner phase.
+### Scope
+Ladder connections count for `PruneUnreachableAreas` and are expanded by A\* like any other connection —
+both graph builders (`main.cpp` and `src/nav/nav_path.cpp`) now feed `CONN_LADDER` straight through. The
+planner turns one into a mount/dismount waypoint pair; see `doc/nav.md` for that half. The **follower**
+is still missing: the bot has no `MOVETYPE_FLY` awareness and its pitch is hard-zeroed, so a plan that
+contains a climb waypoint is not yet executable.
+
+`--dump-path` shows the climb on test12_ladder, test25_ladder2, test29_ladder3 and test53_ladder4.
+
+The sampler refuses a flight that grabs a ladder (see `PM_MoveSimulator`), but the planner's launch
+re-simulation cannot: `JumpLandsIn` runs on `PlanTraceContext`'s trace functions, and the `.nav` carries no
+ladder volumes, so a re-simulated launch from a different point on the gate can still fly through one.
+Closing that needs the volumes in the nav format.
 
 ## airmove_prune.cpp
 

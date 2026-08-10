@@ -26,18 +26,6 @@ using PmSim::kJumpImpulse;
 
 constexpr double kWorldBoundsSlop = 64.0;
 
-struct LaunchEdge
-{
-	Vec3 a;
-	Vec3 b;
-	Vec3 outward;
-	double length = 0.0;
-
-	bool yawRange = false;
-	float yawLo = 0.0f;
-	float yawHi = 0.0f;
-};
-
 struct AirmoveSample
 {
 	Vec3 launchPos;
@@ -394,6 +382,8 @@ struct SweepMode
 	bool jump = true;
 };
 
+}
+
 std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Area &area, double probeZ,
 	const AirmoveSampleParams &params)
 {
@@ -411,8 +401,6 @@ std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Are
 	}
 
 	return edges;
-}
-
 }
 
 int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas)
@@ -435,10 +423,12 @@ int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas)
 }
 
 PM_MoveSimulator::PM_MoveSimulator(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
-	const AirmoveSampleParams &params, const PhysicsParams &physics)
+	const AirmoveSampleParams &params, const PhysicsParams &physics,
+	const std::vector<BlockingVolume> *ladders)
 	: m_bsp(bsp)
 	, m_headnode(headnode)
 	, m_blockers(blockers)
+	, m_ladders(ladders)
 	, m_params(params)
 {
 	m_pmPhysics.maxSpeed = physics.maxSpeed;
@@ -480,6 +470,24 @@ PmSim::PmTraceFn PM_MoveSimulator::TraceFn() const
 		out.startsolid = tr.startsolid;
 		return out;
 	};
+}
+
+bool PM_MoveSimulator::OnLadder(const Vec3 &origin) const
+{
+	if (!m_ladders)
+		return false;
+
+	for (const BlockingVolume &vol : *m_ladders)
+	{
+		if (origin.x < vol.mins.x || origin.x > vol.maxs.x ||
+			origin.y < vol.mins.y || origin.y > vol.maxs.y ||
+			origin.z < vol.mins.z || origin.z > vol.maxs.z)
+			continue;
+		if (ClassifyPoint(m_bsp, vol.headnode, origin - vol.origin) == CONTENTS_SOLID)
+			return true;
+	}
+
+	return false;
 }
 
 bool PM_MoveSimulator::IsSupported(const Vec3 &origin) const
@@ -569,6 +577,13 @@ AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajecto
 		if (!sim.OnGround())
 		{
 			airborne = true;
+			if (OnLadder(Vec3(pos.x, pos.y, pos.z)))
+			{
+				result.grabbedLadder = true;
+				result.ladderPos = Vec3(pos.x, pos.y, pos.z + navZAdjust);
+				result.flightTime = sim.Time();
+				return result;
+			}
 		}
 		else if (airborne)
 		{
@@ -621,9 +636,12 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	PhysicsParams duckPhysics = physics;
 	duckPhysics.maxSpeed = physics.maxSpeed * physics.duckSpeedMultiplier;
 
-	PM_MoveSimulator standSim(bsp, standHull.headnode, *standHull.blockers, params, physics);
-	PM_MoveSimulator crouchJumpSim(bsp, duckHull.headnode, *duckHull.blockers, params, physics);
-	PM_MoveSimulator duckSim(bsp, duckHull.headnode, *duckHull.blockers, params, duckPhysics);
+	PM_MoveSimulator standSim(bsp, standHull.headnode, *standHull.blockers, params, physics,
+		standHull.ladders);
+	PM_MoveSimulator crouchJumpSim(bsp, duckHull.headnode, *duckHull.blockers, params, physics,
+		duckHull.ladders);
+	PM_MoveSimulator duckSim(bsp, duckHull.headnode, *duckHull.blockers, params, duckPhysics,
+		duckHull.ladders);
 
 	SweepMode standSweep;
 	standSweep.sim = &standSim;

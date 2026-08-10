@@ -219,6 +219,16 @@ float GateFraction(const PlanGate &gate, const Vector &p)
 	return (t < 0.f) ? 0.f : (t > 1.f ? 1.f : t);
 }
 
+float YawDelta(float a, float b)
+{
+	float d = b - a;
+	while (d > 180.f)
+		d -= 360.f;
+	while (d < -180.f)
+		d += 360.f;
+	return d;
+}
+
 float LerpYaw(float a, float b, float t)
 {
 	float d = b - a;
@@ -782,6 +792,43 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		PushWaypoint(destWp, false);
 
 		m_anchor = destWp.point;
+		UpdateFrontier();
+		return true;
+	}
+
+	if (conn.connType == crossbot_nav::CONN_LADDER)
+	{
+		bool up = (fromId == conn.areaA);
+		Vector mount = AtPlayerHeight(up ? conn.launchPos : conn.gateB.left, fromId);
+		Vector exit = AtPlayerHeight(up ? conn.landingPos : conn.launchPos, toId);
+
+		bool tailCrouch = FlushFunnelTo(mount);
+
+		PlanWaypoint mountWp;
+		mountWp.point = mount;
+		mountWp.requiresLadder = true;
+		mountWp.ladderUp = up;
+		mountWp.ladderYaw = conn.exitAngle;
+		mountWp.ladderEntryYaw = up ? conn.exitAngle : conn.gateAYaw[0];
+		mountWp.ladderEntrySpeed = up ? 0.f : conn.gateASpeed[0];
+		mountWp.ladderSpeed = conn.exitSpeed;
+		mountWp.ladderDismount = up ? conn.gateB.right : conn.launchPos;
+		mountWp.ladderDismountYaw = up ? conn.gateAYaw[1] : conn.exitAngle + 180.f;
+		mountWp.ladderJumpOff = up && std::fabs(YawDelta(conn.exitAngle, conn.gateAYaw[1])) > 135.f;
+		mountWp.ladderExit = exit;
+		mountWp.requiresCrouch = tailCrouch || fromArea.crouch ||
+			(conn.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH) != 0;
+		mountWp.targetAreaId = static_cast<int>(toId);
+		mountWp.connIndex = static_cast<int>(connIndex);
+		PushWaypoint(mountWp);
+
+		PlanWaypoint exitWp;
+		exitWp.point = exit;
+		exitWp.targetAreaId = static_cast<int>(toId);
+		exitWp.requiresCrouch = toArea.crouch;
+		PushWaypoint(exitWp, false);
+
+		m_anchor = exitWp.point;
 		UpdateFrontier();
 		return true;
 	}

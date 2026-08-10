@@ -31,6 +31,25 @@ struct CBot
 	int airmoveTargetArea = -1;
 	int airmoveConnIndex = -1;
 
+	bool ladderActive = false;
+	bool ladderUp = false;
+	bool ladderJumpOff = false;
+	bool ladderGrabbed = false;
+	bool ladderAtTop = false;
+	bool ladderCrouch = false;
+	float ladderYaw = 0.f;
+	float ladderEntryYaw = 0.f;
+	float ladderEntrySpeed = 0.f;
+	float ladderSpeed = 0.f;
+	float ladderDismountYaw = 0.f;
+	float ladderDismountZ = 0.f;
+	float ladderStartTime = 0.f;
+	float ladderLeftTime = 0.f;
+	float ladderMoveTime = 0.f;
+	int ladderStalls = 0;
+	int ladderTargetArea = -1;
+	int ladderConnIndex = -1;
+
 	BotAvoid::State avoid;
 
 	bool fallTelemetryLogged = false;

@@ -142,6 +142,9 @@ The search only emits an air move whose launch it re-simulated from the funnel's
 watched land inside the destination area. So every maneuver in a returned plan is **simulable** — a
 `PmSim` run from that point at that speed reaches that area.
 
+A ladder gets no such check. Its mount and dismount were both established by navgen against the real
+hulls, so the planner takes the connection at face value and only decides which end it entered from.
+
 It does not follow that the bot can *execute* it. `PmSim` starts at the exact launch point, at the
 exact yaw, already at the launch speed; the follower has to arrive there having tracked an arc chain,
 and arrives with whatever speed and heading it actually has. `NavFollow::Track` derates speed when it
@@ -262,6 +265,15 @@ launch heading, and a landing is entered with whatever velocity the flight left.
 run-up node does get one — its outward tangent is clamped to half the run-up leg, which keeps the last
 stretch into the launch straight while still letting the bot round the turn before it.
 
+`Suppressed` is defined as `IsGap(i) || IsGap(i - 1)`, so the same rule covers teleports and ladder
+mounts. A ladder is a gap for the same reason a flight is: the profile is planar, and a climb is almost
+entirely vertical, so there is no ground path between the mount and the dismount to arc through or to
+walk at running speed. The gap segment's cap is lowered to the connection's `ladderSpeed` (200, or 67
+when the climb ends in a crouch-only area), which keeps the profile from believing the bot exits the
+climb at 320 and mis-fitting the first corner after the dismount. The segment's length is still the 2D
+distance across the dismount hop, so `totalTime` under-reports a climb; the *planner's* cost is the
+honest one, and it comes from `ConnectionCostSeconds`, not from here.
+
 ### Speed profile
 A backward pass propagates each node cap through `BrakeBack`, with the final waypoint pinned to 0 and
 airmove launches capped at `launchSpeed`. Entry speeds are additionally clamped by the cap of the node
@@ -337,7 +349,7 @@ the lookahead distance. Since the arc already encodes the turn, no anticipation 
 **Velocity servo** - `SolveDrive`, below.
 
 **Abort** - `needRepath` once lateral exceeds `rejoinAbort` (96). Previously nothing detected being
-off-path; the corridor pull fought forever until the 10s stall timer fired.
+off-path; the corridor pull fought forever until the stall timer fired.
 
 ### NavFollow::SolveDrive
 Inverts one engine frame to hit a target velocity `V*`. This is the only correct way to ask the engine
@@ -462,6 +474,26 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
 - Adds destination waypoint
 - Anchor moves to landingPos
 
+**Ladder:**
+- Direction is read from the connection, not from a flag: `fromId == conn.areaA` means climbing, so the
+  mount is `launchPos` and the exit is `landingPos`. Otherwise the bot is descending: the exit is
+  `launchPos`, but the mount is **`gateB.left`, not `landingPos`** — where you land coming up is not
+  where you get on going down. navgen puts the descent entry there; see `doc/navgen.md`. When the two
+  differ it is a ledge point the bot runs off to catch the ladder mid-fall, which is why a descending
+  mount can sit at the lip of a drop rather than against the ladder. It runs at `ladderEntryYaw`
+  (from the connection's `gateAYaw`) and holds `ladderYaw` once on the ladder; the two are the same
+  angle except for a side approach, where catching the column means coming at it from ~90° off the
+  face normal.
+  A one-way ladder never reaches the descending case, because `PlanRoute` refuses the reverse edge.
+- Flushes funnel to the mount, at player height for the area being left
+- Adds mount waypoint (requiresLadder=true, ladderUp, ladderYaw, ladderSpeed, ladderExit, targetArea,
+  connIndex)
+- Adds exit waypoint (targetArea), not counted toward path length — the climb is vertical and its cost
+  already arrived through `AddCost`, from `ConnectionCostSeconds`' ladder arm
+- Anchor moves to the exit point
+- No gate is pushed. Ladder gates are degenerate points at the mount and dismount, so there is nothing
+  for the funnel to string-pull through; the mount is simply a hard waypoint, like a teleport trigger.
+
 **Air Move:**
 - Pushes arrival gate (entry side only)
 - If traces available: re-simulates from funnel's preferred launch point
@@ -541,7 +573,7 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
 
 ### PlanWaypoint
 - `point` - position at player height (duck origin + 18 for stand)
-- Flags: requiresElevatorRide, requiresCrouch, requiresDoor, requiresBreak, requiresButtonUse, requiresTriggerTouch, requiresTeleport, teleportDest, airmoveLaunch, requiresJump, launchSpeed, launchYaw, jumpBackDist, launchSimulated, launchSimFailed, launchSimFrom/To/Aim, targetAreaId
+- Flags: requiresElevatorRide, requiresCrouch, requiresDoor, requiresBreak, requiresButtonUse, requiresTriggerTouch, requiresTeleport, teleportDest, requiresLadder, ladderUp, ladderYaw, ladderEntryYaw, ladderSpeed, ladderExit, airmoveLaunch, requiresJump, launchSpeed, launchYaw, jumpBackDist, launchSimulated, launchSimFailed, launchSimFrom/To/Aim, targetAreaId
 - `requiresBreak` is recorded and plumbed but the bot does not act on it yet — it never shoots the breakable
 
 ### Constants

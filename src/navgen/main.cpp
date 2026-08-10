@@ -414,9 +414,6 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		pc.launchPos = pointA;
 		pc.landingPos = pointB;
 
-		if (c.connType == crossbot_nav::CONN_LADDER)
-			continue;
-
 		areaConnIndices[static_cast<size_t>(c.areaA)].push_back(static_cast<uint32_t>(i));
 		areaConnIndices[static_cast<size_t>(c.areaB)].push_back(static_cast<uint32_t>(i));
 	}
@@ -502,6 +499,8 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		if (seg.gap && startWp.airmoveLaunch)
 			kind = startWp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
 				: navgen::PATH_SEG_AIRMOVE_STORED;
+		else if (seg.gap && startWp.requiresLadder)
+			kind = navgen::PATH_SEG_LADDER;
 
 		PushPoint(seg.a, kind, seg.vEntry);
 
@@ -559,7 +558,7 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 
 		for (size_t i = 0; i + 1 < plan.size(); ++i)
 		{
-			if (plan[i].airmoveLaunch || plan[i].requiresTeleport)
+			if (plan[i].airmoveLaunch || plan[i].requiresTeleport || plan[i].requiresLadder)
 				continue;
 			const Vector &a = plan[i].point;
 			const Vector &b = plan[i + 1].point;
@@ -607,10 +606,14 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 				kind = "trigger";
 			else if (wp.requiresTeleport)
 				kind = "teleport";
+			else if (wp.requiresLadder)
+				kind = wp.ladderUp ? "climb" : "descend";
 			else if (wp.airmoveLaunch)
 				kind = wp.requiresJump ? "jump" : "dropoff";
 			else if (i > 0 && plan[i - 1].airmoveLaunch)
 				kind = "landing";
+			else if (i > 0 && plan[i - 1].requiresLadder)
+				kind = "dismount";
 			else if (wp.requiresDoor)
 				kind = "door";
 
@@ -620,6 +623,13 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 			if (wp.airmoveLaunch)
 				std::printf(" launch %.0f yaw %.1f jumpBack %.1f", wp.launchSpeed, wp.launchYaw,
 					wp.jumpBackDist);
+			if (wp.requiresLadder)
+			{
+				std::printf(" climb %.0f yaw %.1f to z %.1f", wp.ladderSpeed, wp.ladderYaw,
+					wp.ladderExit.z);
+				if (std::fabs(wp.ladderEntryYaw - wp.ladderYaw) > 0.5f)
+					std::printf(" enter yaw %.1f", wp.ladderEntryYaw);
+			}
 			std::printf(" clearance %.1f", wp.clearance);
 			std::printf("\n");
 		}
@@ -890,6 +900,10 @@ int main(int argc, char **argv)
 			navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullDuck);
 		std::vector<navgen::BlockingVolume> standBlockers =
 			navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullHuman);
+		std::vector<navgen::BlockingVolume> duckLadders =
+			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullDuck);
+		std::vector<navgen::BlockingVolume> standLadders =
+			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullHuman);
 
 		navgen::PassableSet duckPassables = navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck);
 		navgen::PassableSet standPassables = navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullHuman);
@@ -909,7 +923,9 @@ int main(int argc, char **argv)
 		size_t splitLeaves = 0;
 		for (navgen::ExtractedLeaf &leaf : leaves)
 		{
-			if (!navgen::OverlapsAnyBlockingVolume(leaf, blockers))
+			bool hitBlocker = navgen::OverlapsAnyBlockingVolume(leaf, blockers);
+			bool hitLadder = navgen::OverlapsAnyBlockingVolume(leaf, duckLadders);
+			if (!hitBlocker && !hitLadder)
 			{
 				leaf.id = static_cast<int>(navigableLeaves.size());
 				navigableLeaves.push_back(std::move(leaf));
@@ -917,7 +933,20 @@ int main(int argc, char **argv)
 			}
 
 			++affectedLeaves;
-			std::vector<navgen::Polytope> pieces = navgen::SubtractBlockingVolumes(bsp, leaf.polytope, blockers, kMapRadius);
+			std::vector<navgen::Polytope> pieces = hitBlocker
+				? navgen::SubtractBlockingVolumes(bsp, leaf.polytope, blockers, kMapRadius)
+				: std::vector<navgen::Polytope>{leaf.polytope};
+
+			if (hitLadder)
+			{
+				std::vector<navgen::Polytope> unladdered;
+				for (const navgen::Polytope &piece : pieces)
+					for (navgen::Polytope &carved :
+						navgen::SubtractLadderVolumes(piece, duckLadders, kMapRadius))
+						unladdered.push_back(std::move(carved));
+				pieces = std::move(unladdered);
+			}
+
 			if (pieces.empty())
 				++fullyRemovedLeaves;
 			else if (pieces.size() > 1)
@@ -974,6 +1003,10 @@ int main(int argc, char **argv)
 
 			leaves = std::move(next);
 		}
+
+		if (!duckLadders.empty())
+			std::printf("%s: %zu func_ladder volumes carved out of the walkable leaves\n",
+				bspPath.c_str(), duckLadders.size());
 
 		if (!duckPassables.passable.empty() || !duckPassables.impassable.empty())
 		{
@@ -1066,18 +1099,18 @@ int main(int argc, char **argv)
 		physics.maxSpeed = maxSpeed;
 		navgen::AirmoveSampleParams airmoveParams;
 		airmoveParams.samplesPerUnit = airmoveSamplesPerUnit;
-		navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers};
+
+		navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers, &duckLadders};
+		navgen::HullContext standHull{worldModel.headnode[navgen::kHullHuman], &standBlockers,
+			&standLadders};
 		if (airmoveSamplesPerUnit <= 0.0f)
 			std::printf("air move sampling skipped (--airmove-samples 0)\n");
 		else
-		{
-			navgen::HullContext standHull{worldModel.headnode[navgen::kHullHuman], &standBlockers};
 			navgen::ProbeAirMoves(bsp, duckHull, standHull, merged.areas, merged.conns, physics,
 				airmoveParams);
-		}
 
-		navgen::LadderStats ladders = navgen::BuildLadderConnections(bsp, entities, duckHull, merged.areas,
-			merged.conns, physics, dumpLadders);
+		navgen::LadderStats ladders = navgen::BuildLadderConnections(bsp, entities, duckHull, standHull,
+			merged.areas, merged.conns, physics, dumpLadders);
 		if (ladders.entities > 0)
 			std::printf("%s: %zu func_ladder entities, %zu climbable faces, %zu mounted, "
 				"%zu ladder connections\n",

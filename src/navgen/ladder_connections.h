@@ -24,7 +24,7 @@ constexpr double kLadderJumpOffSpeed = 270.0;
 constexpr double kLadderDismountStep = 16.0;
 
 LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity> &entities,
-	const HullContext &duckHull, const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
-	const PhysicsParams &physics, bool dump);
+	const HullContext &duckHull, const HullContext &standHull, const std::vector<Area> &areas,
+	std::vector<MergedConnection> &conns, const PhysicsParams &physics, bool dump);
 
 }

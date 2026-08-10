@@ -208,7 +208,7 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 	auto NodeMaxSpeed = [&](size_t i)
 	{
 		float v = physics.maxSpeed;
-		if (waypoints[i].requiresCrouch && !waypoints[i].airmoveLaunch)
+		if (waypoints[i].requiresCrouch && !waypoints[i].airmoveLaunch && !waypoints[i].requiresLadder)
 			v *= PmSim::kDuckingMultiplier;
 		return v;
 	};
@@ -218,11 +218,17 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 		return physics.accelerate * NodeMaxSpeed(i);
 	};
 
+	auto IsGap = [&](size_t i)
+	{
+		return waypoints[i].airmoveLaunch || waypoints[i].requiresTeleport ||
+			waypoints[i].requiresLadder;
+	};
+
 	auto Suppressed = [&](size_t i)
 	{
-		if (waypoints[i].airmoveLaunch || waypoints[i].requiresTeleport)
+		if (IsGap(i))
 			return true;
-		if (i > 0 && (waypoints[i - 1].airmoveLaunch || waypoints[i - 1].requiresTeleport))
+		if (i > 0 && IsGap(i - 1))
 			return true;
 		return false;
 	};
@@ -230,11 +236,6 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 	auto PrecedesLaunch = [&](size_t i)
 	{
 		return i + 1 < n && waypoints[i + 1].airmoveLaunch;
-	};
-
-	auto IsGap = [&](size_t i)
-	{
-		return waypoints[i].airmoveLaunch || waypoints[i].requiresTeleport;
 	};
 
 	std::vector<Corner> corners(n);
@@ -426,6 +427,8 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 		line.wpIndex = i;
 		line.clearance = std::min(waypoints[i - 1].clearance, waypoints[i].clearance);
 		line.vCap = std::min(NodeMaxSpeed(i - 1), NodeMaxSpeed(i));
+		if (waypoints[i - 1].requiresLadder && waypoints[i - 1].ladderSpeed > 1.f)
+			line.vCap = std::min(line.vCap, waypoints[i - 1].ladderSpeed);
 		if (line.sLen > kEpsLen)
 			PushSeg(line);
 

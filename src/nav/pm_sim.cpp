@@ -233,12 +233,11 @@ int PmSimulator::FlyMove(float *origin, float *velocity, float dt) const
 			if (k == numplanes)
 			{
 				VectorCopy(new_velocity, velocity);
-				VectorCopy(new_velocity, original_velocity);
 				break;
 			}
 		}
 
-		if (i != numplanes)
+		if (i == numplanes)
 		{
 			if (numplanes == 2)
 			{

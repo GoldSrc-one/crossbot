@@ -238,6 +238,45 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 	return result;
 }
 
+std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
+	int hullIndex)
+{
+	Vec3 hullMins(kHumanHullMinX, kHumanHullMinY, kHumanHullMinZ);
+	Vec3 hullMaxs(kHumanHullMaxX, kHumanHullMaxY, kHumanHullMaxZ);
+	if (hullIndex == kHullDuck)
+	{
+		hullMins = Vec3(kDuckClipHullMinX, kDuckClipHullMinY, kDuckClipHullMinZ);
+		hullMaxs = Vec3(kDuckClipHullMaxX, kDuckClipHullMaxY, kDuckClipHullMaxZ);
+	}
+
+	std::vector<BlockingVolume> result;
+
+	for (const Entity &ent : entities)
+	{
+		if (ent.Get("classname") != "func_ladder")
+			continue;
+
+		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
+		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
+			continue;
+
+		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
+		if (model.headnode[hullIndex] < 0)
+			continue;
+
+		BlockingVolume vol;
+		vol.headnode = model.headnode[hullIndex];
+		vol.origin = ParseEntityOrigin(ent.Get("origin"));
+		vol.mins = Vec3(model.mins[0] + hullMins.x, model.mins[1] + hullMins.y,
+			model.mins[2] + hullMins.z) + vol.origin;
+		vol.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
+			model.maxs[2] + hullMaxs.z) + vol.origin;
+		result.push_back(vol);
+	}
+
+	return result;
+}
+
 PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity> &entities, int hullIndex)
 {
 	Vec3 hullMins(kHumanHullMinX, kHumanHullMinY, kHumanHullMinZ);
@@ -368,6 +407,47 @@ void SplitByPassableVolume(const BspFile &bsp, const Polytope &poly, const Block
 	for (const Polytope &piece : CarvePolytopeAgainstTree(bsp, blocker.headnode, local, CONTENTS_EMPTY,
 			mapRadius, kMinPieceVolume, epsilon))
 		inside.push_back(TranslatePolytope(piece, blocker.origin));
+}
+
+std::vector<Polytope> SubtractLadderVolumes(const Polytope &leafPolytope,
+	const std::vector<BlockingVolume> &ladders, double mapRadius, double epsilon)
+{
+	std::vector<Polytope> pieces{leafPolytope};
+
+	for (const BlockingVolume &ladder : ladders)
+	{
+		const Plane slabs[6] = {
+			{Vec3(1.0, 0.0, 0.0), ladder.mins.x}, {Vec3(-1.0, 0.0, 0.0), -ladder.maxs.x},
+			{Vec3(0.0, 1.0, 0.0), ladder.mins.y}, {Vec3(0.0, -1.0, 0.0), -ladder.maxs.y},
+			{Vec3(0.0, 0.0, 1.0), ladder.mins.z}, {Vec3(0.0, 0.0, -1.0), -ladder.maxs.z}};
+
+		std::vector<Polytope> next;
+		for (const Polytope &piece : pieces)
+		{
+			Vec3 mins, maxs;
+			PolytopeBounds(piece, mins, maxs);
+			if (!BoundsOverlap(mins, maxs, ladder.mins, ladder.maxs, -kOverlapEpsilon))
+			{
+				next.push_back(piece);
+				continue;
+			}
+
+			Polytope remain = piece;
+			for (const Plane &slab : slabs)
+			{
+				Polytope outside = ClipPolytope(remain, slab, false, mapRadius, epsilon);
+				if (outside.Volume() > kMinPieceVolume)
+					next.push_back(std::move(outside));
+
+				remain = ClipPolytope(remain, slab, true, mapRadius, epsilon);
+				if (remain.Empty())
+					break;
+			}
+		}
+		pieces = std::move(next);
+	}
+
+	return pieces;
 }
 
 std::vector<Polytope> SubtractBlockingVolumes(const BspFile &bsp, const Polytope &leafPolytope,

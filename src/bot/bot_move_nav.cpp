@@ -28,6 +28,19 @@ namespace
 	constexpr float kAirmoveMinAirTime = 0.1f;
 	constexpr float kAirmoveMaxAirTime = 6.f;
 
+	constexpr float kLadderCommitRadius = 48.f;
+	constexpr float kLadderMountRadius = 32.f;
+	constexpr float kLadderMountLead = 32.f;
+	constexpr float kLadderEntryTimeout = 3.f;
+	constexpr float kLadderMaxTime = 25.f;
+	constexpr float kLadderDownPitch = 89.f;
+	constexpr float kLadderAimTolerance = 6.f;
+	constexpr float kLadderDismountSlack = 2.f;
+	constexpr float kLadderMinAirTime = 0.1f;
+	constexpr float kLadderStallSpeed = 8.f;
+	constexpr float kLadderStallTime = 0.5f;
+	constexpr int kLadderStallEscapes = 2;
+
 	Vector YawDir(float yawDeg)
 	{
 		float r = yawDeg * (kPiF / 180.f);
@@ -119,7 +132,7 @@ namespace
 	}
 
 	constexpr float kTeleportJumpThreshold = 150.f;
-	constexpr float kRepathInterval = 10.f;
+	constexpr float kRepathInterval = 2.f;
 	constexpr float kEtaSafetyMargin = 1.6f;
 	constexpr float kProgressEpsilon = 8.f;
 	constexpr float kMoveButtonDeadzone = 0.01f;
@@ -129,6 +142,11 @@ namespace
 		bot.moveForward = 0.f;
 		bot.moveSide = 0.f;
 		g_engfuncs.pfnRunPlayerMove(bot.pEdict, angles, 0.f, 0.f, 0.f, 0, 0, Bot_FrameMsec());
+	}
+
+	bool OnLadder(edict_t *pEdict)
+	{
+		return pEdict->v.movetype == MOVETYPE_FLY;
 	}
 
 	void RunAirmoveDrive(CBot &bot, const Vector &moveDir, float drive, float aimYaw, bool crouch, bool jump)
@@ -167,7 +185,7 @@ namespace
 		if (smove > 1.f) buttons |= IN_MOVERIGHT;
 		else if (smove < -1.f) buttons |= IN_MOVELEFT;
 		if (crouch) buttons |= IN_DUCK;
-		if (jump) buttons |= IN_JUMP;
+		if (jump && !OnLadder(pEdict)) buttons |= IN_JUMP;
 
 		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
 	}
@@ -257,6 +275,8 @@ namespace
 		float airTime = gpGlobals->time - bot.airmoveStartTime;
 		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
 
+		bot.lastProgressTime = gpGlobals->time;
+
 		if ((onGround && airTime >= kAirmoveMinAirTime) || airTime >= kAirmoveMaxAirTime)
 		{
 			bot.airmoveActive = false;
@@ -297,6 +317,275 @@ namespace
 		return true;
 	}
 
+	float BotNavZ(edict_t *pEdict)
+	{
+		return pEdict->v.origin.z -
+			(((pEdict->v.flags & FL_DUCKING) != 0) ? 0.f : NavPlan::kPlanStandHeight);
+	}
+
+	void RunLadderDrive(CBot &bot, float drive, float aimYaw, float aimPitch, bool crouch, bool jump)
+	{
+		edict_t *pEdict = bot.pEdict;
+
+		bot.desiredAngles = Vector(aimPitch, aimYaw, 0.f);
+		Vector angles = Bot_UpdateFacing(bot);
+
+		Vector wishDir = YawDir(aimYaw);
+		if (!OnLadder(pEdict) && (pEdict->v.flags & FL_ONGROUND) != 0)
+		{
+			NavFollow::Drive solved =
+				NavFollow::SolveDrive(wishDir * drive, pEdict->v.velocity, BotPhysics(pEdict));
+			if (solved.wishSpeed > 0.f)
+			{
+				wishDir = solved.wishDir;
+				drive = solved.wishSpeed;
+			}
+		}
+
+		if ((pEdict->v.flags & FL_DUCKING) != 0)
+			drive /= PmSim::kDuckingMultiplier;
+		float maxSpeed = BotMaxSpeed(pEdict);
+		if (drive > maxSpeed)
+			drive = maxSpeed;
+
+		float fmove = 0.f, smove = 0.f;
+		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, wishDir, drive, fmove, smove);
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+
+		unsigned short buttons = 0;
+		if (fmove > 1.f) buttons |= IN_FORWARD;
+		else if (fmove < -1.f) buttons |= IN_BACK;
+		if (smove > 1.f) buttons |= IN_MOVERIGHT;
+		else if (smove < -1.f) buttons |= IN_MOVELEFT;
+		if (crouch) buttons |= IN_DUCK;
+		if (jump) buttons |= IN_JUMP;
+
+		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
+	}
+
+	bool FinishLadder(CBot &bot, const Nav::NavMesh &mesh, const char *why)
+	{
+		edict_t *pEdict = bot.pEdict;
+		bot.ladderActive = false;
+
+		const Nav::Area *landedArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
+		int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
+		bool failed = (bot.ladderTargetArea >= 0 && landedId != bot.ladderTargetArea);
+
+		if (bot.ladderConnIndex >= 0)
+		{
+			uint32_t connIndex = static_cast<uint32_t>(bot.ladderConnIndex);
+			if (failed)
+				Nav::PenalizeConnection(connIndex);
+			else
+				Nav::RewardConnection(connIndex);
+		}
+
+		char msg[288];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s ladder %s %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d\n",
+			bot.name, bot.ladderUp ? "climb" : "descent", why, gpGlobals->time - bot.ladderStartTime,
+			pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, landedId, bot.ladderTargetArea,
+			bot.ladderConnIndex);
+		SERVER_PRINT(msg);
+
+		if (failed)
+			bot.nextRepathTime = gpGlobals->time;
+
+		return false;
+	}
+
+	bool RunLadderMove(CBot &bot, const Nav::NavMesh &mesh)
+	{
+		edict_t *pEdict = bot.pEdict;
+		bool onLadder = OnLadder(pEdict);
+		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
+		float elapsed = gpGlobals->time - bot.ladderStartTime;
+		float navZ = BotNavZ(pEdict);
+		float climbDrive = (bot.ladderSpeed > 1.f) ? bot.ladderSpeed : kFullDrive;
+
+		bot.lastProgressTime = gpGlobals->time;
+
+		if (elapsed >= kLadderMaxTime)
+			return FinishLadder(bot, mesh, "timed out on");
+
+		float drive = climbDrive;
+		float aimYaw = bot.ladderYaw;
+		float aimPitch = 0.f;
+		float escapeYaw = bot.ladderYaw + 180.f;
+		bool jump = false;
+
+		if (!bot.ladderGrabbed)
+		{
+			if (!onLadder)
+			{
+				if (elapsed >= kLadderEntryTimeout)
+					return FinishLadder(bot, mesh, "never caught");
+
+				drive = (bot.ladderEntrySpeed > 1.f) ? bot.ladderEntrySpeed : kFullDrive;
+				aimYaw = bot.ladderEntryYaw;
+				aimPitch = bot.ladderUp ? 0.f : kLadderDownPitch;
+				RunLadderDrive(bot, drive, aimYaw, aimPitch, bot.ladderCrouch, false);
+				return true;
+			}
+
+			bot.ladderGrabbed = true;
+			bot.ladderMoveTime = gpGlobals->time;
+
+			char msg[192];
+			snprintf(msg, sizeof(msg), "CrossBot: %s caught the ladder at (%.1f,%.1f,%.1f) after %.2fs\n",
+				bot.name, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, elapsed);
+			SERVER_PRINT(msg);
+		}
+
+		if (!bot.ladderUp)
+		{
+			if (navZ <= bot.ladderDismountZ + kLadderDismountSlack)
+				return FinishLadder(bot, mesh, "reached the bottom of");
+			if (!onLadder && onGround)
+				return FinishLadder(bot, mesh, "fell off");
+
+			aimYaw = bot.ladderDismountYaw;
+			aimPitch = kLadderDownPitch;
+			escapeYaw = aimYaw;
+
+			if (onLadder &&
+				fabsf(Bot_NormalizeAngle(aimYaw - pEdict->v.v_angle.y)) > kLadderAimTolerance)
+				drive = 0.f;
+		}
+		else if (!onLadder)
+		{
+			if (bot.ladderLeftTime <= 0.f)
+				bot.ladderLeftTime = gpGlobals->time;
+
+			if (onGround && gpGlobals->time - bot.ladderLeftTime >= kLadderMinAirTime)
+				return FinishLadder(bot, mesh, "dismounted off");
+
+			drive = bot.ladderJumpOff ? 0.f : BotMaxSpeed(pEdict);
+			aimYaw = bot.ladderDismountYaw;
+			escapeYaw = aimYaw;
+		}
+		else if (bot.ladderAtTop || navZ >= bot.ladderDismountZ - kLadderDismountSlack)
+		{
+			bot.ladderAtTop = true;
+
+			aimYaw = bot.ladderDismountYaw;
+			escapeYaw = aimYaw;
+			jump = bot.ladderJumpOff;
+
+			float aimError = fabsf(Bot_NormalizeAngle(aimYaw - pEdict->v.v_angle.y));
+			if (jump)
+				drive = 0.f;
+			else if (aimError > kLadderAimTolerance)
+				drive = 0.f;
+		}
+		else if (fabsf(Bot_NormalizeAngle(aimYaw - pEdict->v.v_angle.y)) > kLadderAimTolerance)
+		{
+			drive = 0.f;
+		}
+
+		float speed = pEdict->v.velocity.Length();
+		if (drive <= 1.f || speed >= kLadderStallSpeed)
+		{
+			bot.ladderMoveTime = gpGlobals->time;
+		}
+		else if (gpGlobals->time - bot.ladderMoveTime >= kLadderStallTime)
+		{
+			if (bot.ladderStalls >= kLadderStallEscapes)
+			{
+				pEdict->v.velocity = YawDir(escapeYaw) * climbDrive;
+				return FinishLadder(bot, mesh, "stalled on");
+			}
+
+			++bot.ladderStalls;
+			bot.ladderMoveTime = gpGlobals->time;
+			jump = true;
+
+			char msg[192];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s wedged on the ladder at (%.1f,%.1f,%.1f), pushing off\n", bot.name,
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z);
+			SERVER_PRINT(msg);
+		}
+
+		RunLadderDrive(bot, drive, aimYaw, aimPitch, bot.ladderCrouch, jump);
+		return true;
+	}
+
+	bool RunLadderApproach(CBot &bot, const Nav::Waypoint &wp)
+	{
+		edict_t *pEdict = bot.pEdict;
+		const Vector &origin = pEdict->v.origin;
+		const Vector &vel = pEdict->v.velocity;
+
+		float navZ = BotNavZ(pEdict);
+		if (wp.ladderUp ? (navZ >= wp.ladderDismount.z - kLadderDismountSlack)
+			: (navZ <= wp.ladderDismount.z + kLadderDismountSlack))
+			return false;
+
+		Vector entryDir = YawDir(wp.ladderEntryYaw);
+		Vector toMount(wp.point.x - origin.x, wp.point.y - origin.y, 0.f);
+		float remaining = toMount.x * entryDir.x + toMount.y * entryDir.y;
+		float dist = sqrtf(toMount.x * toMount.x + toMount.y * toMount.y);
+		float speed = sqrtf(vel.x * vel.x + vel.y * vel.y);
+
+		bool onLadder = OnLadder(pEdict);
+		bool committed = wp.ladderUp
+			? (onLadder && dist <= kLadderMountRadius)
+			: (onLadder || (dist <= kLadderCommitRadius &&
+				remaining <= NavPlan::AirmoveLaunchLead(speed, gpGlobals->frametime)));
+
+		if (committed)
+		{
+			bot.ladderActive = true;
+			bot.ladderGrabbed = false;
+			bot.ladderAtTop = false;
+			bot.ladderUp = wp.ladderUp;
+			bot.ladderJumpOff = wp.ladderJumpOff;
+			bot.ladderCrouch = wp.requiresCrouch;
+			bot.ladderYaw = wp.ladderYaw;
+			bot.ladderEntryYaw = wp.ladderEntryYaw;
+			bot.ladderEntrySpeed = wp.ladderEntrySpeed;
+			bot.ladderSpeed = wp.ladderSpeed;
+			bot.ladderDismountYaw = wp.ladderDismountYaw;
+			bot.ladderDismountZ = wp.ladderDismount.z;
+			bot.ladderStartTime = gpGlobals->time;
+			bot.ladderLeftTime = 0.f;
+			bot.ladderMoveTime = gpGlobals->time;
+			bot.ladderStalls = 0;
+			bot.ladderTargetArea = wp.targetAreaId;
+			bot.ladderConnIndex = wp.connIndex;
+			++bot.waypointIndex;
+
+			char msg[320];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s ladder %s at (%.1f,%.1f,%.1f) entry yaw %.0f speed %.0f | climb yaw %.0f "
+				"speed %.0f | off z %.1f yaw %.0f jump %d | targArea %d conn %d\n",
+				bot.name, wp.ladderUp ? "climb" : "descent", origin.x, origin.y, origin.z,
+				wp.ladderEntryYaw, wp.ladderEntrySpeed, wp.ladderYaw, wp.ladderSpeed,
+				wp.ladderDismount.z, wp.ladderDismountYaw, wp.ladderJumpOff ? 1 : 0, wp.targetAreaId,
+				wp.connIndex);
+			SERVER_PRINT(msg);
+
+			RunLadderMove(bot, *Nav::Get());
+			return true;
+		}
+
+		Vector aim = wp.ladderUp ? (wp.point + YawDir(wp.ladderYaw) * kLadderMountLead)
+			: (wp.point + entryDir * kAirmoveApproachLead);
+		Vector moveDir = Norm2D(aim - origin);
+		float aimYaw = (moveDir.x != 0.f || moveDir.y != 0.f)
+			? atan2f(moveDir.y, moveDir.x) * (180.f / kPiF) : wp.ladderEntryYaw;
+
+		bool reachUp = wp.ladderUp && !onLadder && dist <= kLadderMountRadius &&
+			(pEdict->v.flags & FL_ONGROUND) != 0;
+
+		RunLadderDrive(bot, kFullDrive, aimYaw, wp.ladderUp ? 0.f : kLadderDownPitch, wp.requiresCrouch,
+			reachUp);
+		return true;
+	}
+
 	void ResetPath(CBot &bot)
 	{
 		bot.waypoints.clear();
@@ -306,6 +595,9 @@ namespace
 		bot.airmoveActive = false;
 		bot.airmoveTargetArea = -1;
 		bot.airmoveConnIndex = -1;
+		bot.ladderActive = false;
+		bot.ladderTargetArea = -1;
+		bot.ladderConnIndex = -1;
 		bot.avoid = BotAvoid::State();
 		bot.plannedAreaPath.clear();
 		bot.plannedConnPath.clear();
@@ -509,6 +801,15 @@ namespace
 						i, wp.point.x, wp.point.y, wp.point.z, wp.requiresJump, wp.requiresCrouch,
 						wp.launchYaw, wp.launchSpeed, wp.launchSimulated, wp.targetAreaId);
 				}
+				else if (wp.requiresLadder)
+				{
+					snprintf(wpMsg, sizeof(wpMsg),
+						"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) LADDER up=%d crouch=%d entry yaw=%.0f "
+						"speed=%.0f climb yaw=%.0f speed=%.0f off z=%.1f yaw=%.0f jump=%d targArea=%d\n",
+						i, wp.point.x, wp.point.y, wp.point.z, wp.ladderUp, wp.requiresCrouch,
+						wp.ladderEntryYaw, wp.ladderEntrySpeed, wp.ladderYaw, wp.ladderSpeed,
+						wp.ladderDismount.z, wp.ladderDismountYaw, wp.ladderJumpOff, wp.targetAreaId);
+				}
 				else
 				{
 					snprintf(wpMsg, sizeof(wpMsg),
@@ -528,6 +829,33 @@ namespace
 				path.areaPath.size(), bot.followProfile.totalTime, penalizedOnRoute);
 			SERVER_PRINT(wpMsg);
 		}
+		return true;
+	}
+
+	bool RepathDue(const CBot &bot)
+	{
+		return bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
+	}
+
+	bool TryRepath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict, const char *why)
+	{
+		if (!bot.waypoints.empty())
+		{
+			char msg[160];
+			snprintf(msg, sizeof(msg), "CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
+				bot.name, why, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
+				bot.waypointIndex, bot.waypoints.size());
+			SERVER_PRINT(msg);
+		}
+		if (!Repath(bot, mesh, pEdict))
+		{
+			WriteTraceLog(bot);
+			bot.hasGoal = false;
+			return false;
+		}
+		bot.nextRepathTime = 0.f;
+		bot.lastProgressTime = gpGlobals->time;
+		bot.lastProgressS = 0.f;
 		return true;
 	}
 }
@@ -565,28 +893,13 @@ void Bot_MoveNav(CBot &bot)
 		bot.lastProgressTime = gpGlobals->time;
 	}
 
-	bool forcedRepath = bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
+	bool forcedRepath = RepathDue(bot);
 	bool stalled = !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
 	if (bot.waypoints.empty() || forcedRepath || stalled)
 	{
-		if (!bot.waypoints.empty())
-		{
-			char msg[160];
-			snprintf(msg, sizeof(msg), "CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
-				bot.name, forcedRepath ? "forced" : "stalled", pEdict->v.origin.x, pEdict->v.origin.y,
-				pEdict->v.origin.z, bot.waypointIndex, bot.waypoints.size());
-			SERVER_PRINT(msg);
-		}
-		if (!Repath(bot, *mesh, pEdict))
-		{
-			WriteTraceLog(bot);
-			bot.hasGoal = false;
+		if (!TryRepath(bot, *mesh, pEdict, forcedRepath ? "forced" : "stalled"))
 			return;
-		}
-		bot.nextRepathTime = 0.f;
-		bot.lastProgressTime = gpGlobals->time;
-		bot.lastProgressS = 0.f;
 	}
 
 	if (curArea && (bot.visitedAreaPath.empty() || bot.visitedAreaPath.back() != curArea->id))
@@ -603,6 +916,17 @@ void Bot_MoveNav(CBot &bot)
 		if (RunAirmoveFlight(bot, *mesh))
 			return;
 		bot.trackState.started = false;
+		if (RepathDue(bot) && !TryRepath(bot, *mesh, pEdict, "airmove landed off-plan"))
+			return;
+	}
+
+	if (bot.ladderActive)
+	{
+		if (RunLadderMove(bot, *mesh))
+			return;
+		bot.trackState.started = false;
+		if (RepathDue(bot) && !TryRepath(bot, *mesh, pEdict, "ladder finished off-plan"))
+			return;
 	}
 
 	PmSim::PmPhysics physics = BotPhysics(pEdict);
@@ -643,6 +967,21 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
+	bool ladderEject = false;
+	if (OnLadder(pEdict))
+	{
+		ladderEject = true;
+		size_t limit = std::min(bot.waypointIndex + 3, bot.waypoints.size());
+		for (size_t i = bot.waypointIndex; i < limit; ++i)
+		{
+			if (!bot.waypoints[i].requiresLadder)
+				continue;
+			bot.waypointIndex = i;
+			ladderEject = false;
+			break;
+		}
+	}
+
 	Nav::Waypoint *wp = &bot.waypoints[bot.waypointIndex];
 
 	{
@@ -668,6 +1007,9 @@ void Bot_MoveNav(CBot &bot)
 		RunAirmoveApproach(bot, *wp);
 		return;
 	}
+
+	if (wp->requiresLadder && RunLadderApproach(bot, *wp))
+		return;
 
 	Vector moveDir(follow.wishDir.x, follow.wishDir.y, 0.f);
 
@@ -736,7 +1078,7 @@ void Bot_MoveNav(CBot &bot)
 
 	if (crouch)
 		buttons |= IN_DUCK;
-	if (avoid.jump)
+	if (ladderEject || (avoid.jump && !OnLadder(pEdict)))
 		buttons |= IN_JUMP;
 
 	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());

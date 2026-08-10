@@ -480,6 +480,9 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 		c.gateAClamped = pc.gateA.clamped;
 		c.gateBClamped = pc.gateB.clamped;
 
+		if (c.connType == crossbot_nav::CONN_LADDER)
+			continue;
+
 		if (c.gateAValid)
 		{
 			c.gateALeft = onFloor(pc.gateA.left, c.areaA);

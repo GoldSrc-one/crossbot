@@ -171,7 +171,7 @@ namespace
 	{
 		return wp.requiresCrouch || wp.requiresDoor || wp.requiresBreak || wp.requiresButtonUse
 			|| wp.requiresTriggerTouch || wp.requiresTeleport || wp.requiresElevatorRide
-			|| wp.airmoveLaunch || wp.requiresJump;
+			|| wp.airmoveLaunch || wp.requiresJump || wp.requiresLadder;
 	}
 
 	struct SearchCtx

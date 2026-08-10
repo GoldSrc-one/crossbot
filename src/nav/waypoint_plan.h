@@ -91,6 +91,17 @@ struct PlanWaypoint
 	bool requiresTeleport = false;
 	Vector teleportDest;
 
+	bool requiresLadder = false;
+	bool ladderUp = false;
+	bool ladderJumpOff = false;
+	float ladderYaw = 0.f;
+	float ladderEntryYaw = 0.f;
+	float ladderEntrySpeed = 0.f;
+	float ladderSpeed = 0.f;
+	Vector ladderDismount;
+	float ladderDismountYaw = 0.f;
+	Vector ladderExit;
+
 	bool airmoveLaunch = false;
 	bool requiresJump = false;
 	float launchSpeed = 0.f;

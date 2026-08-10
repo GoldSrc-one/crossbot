@@ -34,6 +34,13 @@ replan after a failure means the penalty did its job and the new route avoids th
 Main navigation-driven movement function. Repath triggers are: empty path, forced (air move landed
 off-target), and stall (no progress for kRepathInterval).
 
+An air move or ladder that finishes in the wrong area replans in the *same* frame, not the next one.
+The forced-repath latch is read at the top of the frame, above the air-move and ladder blocks, so a
+landing that arms it would otherwise spend a frame driving on a plan the bot has provably left — and
+`trackState.started` is cleared on that same frame, which makes the reprojection global and can snap
+`progressS` anywhere on the stale profile. Both blocks therefore re-check the latch through
+`TryRepath` once their runner returns.
+
 - Uses NavFollow::Track against the `PlanProfile` built at repath time (see doc/nav.md). Progress is
   arclength along the arc chain, so there is no per-waypoint arrival radius or advance loop, and
   waypoint 0 is no longer a special case — the chain starts at the bot's own position.
@@ -42,7 +49,11 @@ off-target), and stall (no progress for kRepathInterval).
   constant `kFullDrive = 1000`, which meant the bot had no speed control at all: it entered every
   corner at full speed and walked past the goal until an arrival radius caught it.
 - Stall detection is rebased on `trackState.progressS` advancing, not on the waypoint index changing —
-  a bot correctly braking to a stop at a hard node would otherwise read as stalled.
+  a bot correctly braking to a stop at a hard node would otherwise read as stalled. At 2 s the timer is
+  short enough that a maneuver which suspends `Track` has to hold the clock open itself: `RunLadderMove`
+  and `RunAirmoveFlight` both stamp `lastProgressTime` every frame, because no arclength accrues while
+  they are driving. Without that a long fall (up to `kAirmoveMaxAirTime`, 6 s) trips the stall timer
+  mid-air and repaths from an airborne origin.
 - `BotPhysics` reads sv_gravity, sv_airaccelerate, sv_accelerate, sv_friction, sv_stopspeed and
   sv_edgefriction, so plan-time physics match a non-default server. Only the first three were read
   before, which silently diverged the profile from the engine.
@@ -118,6 +129,40 @@ the launch heading, so a bot that has already closed most of that distance gets 
 build from anywhere — but the bot arrives at the run-up node with no speed, which is the worst state
 to start a launch that has to build speed at a ledge. Two waypoints at the same 2D point at the head
 of the list in `crossbot_nav_status` are the tell.
+
+### Ladders
+
+`RunLadderApproach` walks the bot to the mount and latches `CBot::ladderActive`; `RunLadderMove` then
+owns every frame until it finishes, exactly as the air move does. Four rules make the difference between
+a climb and the jump-on-jump-off loop test53_ladder4 used to run.
+
+**Never hold `IN_JUMP` while `MOVETYPE_FLY`.** `PM_LadderMove` reads the jump button before anything
+else and answers with `movetype = MOVETYPE_WALK; velocity = normal * 270` — one frame of jump ejects the
+bot off the ladder at 270 u/s. The reach-up hop that grabs a dangling rung is therefore gated on
+`!onLadder`, not just `FL_ONGROUND`: at the foot of a ladder that reaches the floor the bot is on the
+ladder *and* on the ground at once, so the ungated version hopped on, ejected, walked back and repeated
+forever. `avoid.jump` is suppressed the same way, and `RunAirmoveDrive` drops the button outright when
+the mover is on a ladder, so a flight that ends on one cannot bounce off it.
+
+**Aim before driving.** `PM_LadderMove` builds its wish from the *buttons*, so `IN_MOVERIGHT` is a full
+`±MAX_CLIMB_SPEED` sideways input no matter how small the `smove` that set it. A bot still turning toward
+its target yaw is therefore commanding a large wrong-axis vector, and the ladder converts wrong-axis
+input into the wrong motion: perp becomes pure horizontal at 200, into-the-face becomes +200 climb.
+A descent that committed while still facing its run-up yaw climbed straight out of the top of the ladder
+and walked off the ledge — `caught the ladder` then `fell off` 0.4 s later, 61 units sideways, twice per
+run. Every on-ladder phase now zeroes `drive` while the yaw error exceeds `kLadderAimTolerance`; with no
+buttons `PM_LadderMove` clears the velocity, so the bot simply hangs there and turns.
+
+**Latch the dismount phase.** The height test that switches from climb yaw to dismount yaw sits at a
+single z, so a bot hovering on it alternated targets every frame and the aim gate held `drive` at 0 for
+both — a 12.7 s climb that should take 2 s. `ladderAtTop` is set once and never cleared before the next
+commit.
+
+**A climb approach aims past the mount.** `pointA` is deliberately outside the carved volume, so
+steering *to* it stops the bot short of the capture region — for a ladder whose volume starts two units
+beyond the stand point that is a permanent stall, jumping in place at full drive. The approach aims
+`kLadderMountLead` further along `ladderYaw`, i.e. into the ladder, and lets the capture happen on the
+way through.
 
 ## bot_avoid.cpp
 
@@ -337,7 +382,7 @@ Above `kAvoidMoverSpeed` a failed search sets `AVOID_FOLLOW` instead of `AVOID_B
 `bot_move_nav.cpp` skips **both** the connection penalty and the forced repath, so the bot keeps
 driving at its current waypoint and walks after the door. Three things bound that: the door reaches
 its stop and `avelocity` goes to zero, at which point the next search penalises normally;
-`kAvoidSearchCooldown` re-takes the verdict at most once a second; and the 10 s `kRepathInterval`
+`kAvoidSearchCooldown` re-takes the verdict at most once a second; and the 2 s `kRepathInterval`
 stall detector is the outer net if the classification is ever wrong. A stationary obstacle scores
 exactly zero and keeps the old behaviour, which is what the `closing` field in the decision line is
 for.
