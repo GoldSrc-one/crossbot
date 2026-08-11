@@ -138,6 +138,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 
 	PlanWalker walker = std::move(state[goalArea].walker);
 	walker.Finish(goalPoint, static_cast<int>(goalArea));
+	walker.Retract();
 	walker.Respeed();
 
 	result.found = true;

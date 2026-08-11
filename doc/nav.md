@@ -500,8 +500,10 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
   - Computes funnel crossing on launch gate (exit side)
   - Interpolates yaw/speed from gateAYaw/gateASpeed
   - Re-simulates with PmSim; if lands in dest area, uses simulated params
-  - On a miss, `Cross` returns false and the whole edge is refused — there is no fallback to the baked
-    params, because a launch that does not land where the plan says is worse than no edge at all
+  - On a miss, one retry at a rescaled speed — see "Rescaling a missed launch"
+  - If the retry misses too, `Cross` returns false and the whole edge is refused — there is no fallback
+    to the baked params, because a launch that does not land where the plan says is worse than no edge
+    at all
 - Pops arrival gate
 - Flushes funnel to launch point
 - Adds launch waypoint (airmoveLaunch=true, requiresJump, launchSpeed/Yaw, jumpBackDist, requiresCrouch, targetArea)
@@ -613,6 +615,10 @@ branch the search abandoned takes its counters with it.
   re-simulated at the speed it could and still landed.
 - `airmovesRespeedKept` - launches where that slower re-simulation also missed, so the design speed was
   kept. See "Re-speeding a launch": this no longer truncates.
+- `airmovesRetracted` - earlier launches whose speed was cut so their landing stops sitting on top of
+  the next launch's run-up node. See "Landing on the next run-up".
+- `airmovesRetractKept` - pairs where that pull was rejected — the two headings too far apart, or the
+  slower jump no longer landing in its own area — so the earlier design speed was kept.
 - `corners`, `gatesClamped` - funnel diagnostics.
 - `runupTraces` - vestigial, never populated. `--dump-svg` still accepts them and draws nothing.
 
@@ -674,7 +680,35 @@ wall whenever the launch sat less than the offset from the far side: on `test37_
 at y=43.6 in an area starting at y=16 got a run-up node at y=14.9, 1.1 units inside solid. The funnel
 then pulled the approach against geometry that is not walkable and the arc fitter had nothing to work
 with. The offset is length, not direction: it does not stop the node landing behind the bot when the
-route arrives perpendicular to the launch heading, which is what produces the hairpin above.
+route arrives perpendicular to the launch heading, which is what produces the hairpin above. When the
+route arrives by *air move* the node can land behind the bot outright — see "Landing on the next
+run-up".
+
+**The clamp runs backwards along the route, not inside one area.** `PlanWalker::RunupDistance` steps
+area by area: clamp inside the current one, and when that falls short of the offset, re-clamp with no
+inset to reach the seam and continue in the area the route came from. An area's predecessor is read
+straight off `m_pendingGates` — each walk connection pushes a gate pair carrying `insideArea`, and
+`m_pendingGates` only ever holds plain-walk gates because every barrier flushes the funnel — so no
+adjacency structure has to be plumbed into the walker. The chain stops at a real wall, at a seam the
+next area's column does not actually contain, or at a crouch area, where running at
+`kDuckingMultiplier` would make the extra distance worth less than the ducking costs.
+
+Confining it to one area silently capped the launch speed on thin ledges. `test54_window`'s area 3 is
+a 16-unit-deep lip between the window and the pit; the 3→17 jump wants 26.7 units of run-up and got
+3.2, so the bot reached 159 of a 267 design speed and aborted the jump every time. Extending back
+through the window into area 2 gives the full offset and it now launches at 267 exactly.
+
+Two invariants make the extension safe. The straight run-up→launch leg is not string-pulled, but every
+step of the walk-back is clamped inside a convex area and each seam point is checked against the next
+area's column, so the leg lies inside the union by construction. And the gates the run-up point now
+sits *behind* are dropped before `FlushFunnelTo` — otherwise the pull would be forced out through a
+gate the target is on the near side of, and come back. Those gates only constrained the leg the funnel
+no longer draws.
+
+The cost is that a run-up node absorbing a former gate corner also loses that corner's `clearance`,
+falling back to the default 16 where the gate may have reported 32. That is the conservative
+direction — a narrower corridor shrinks arcs rather than cutting them — and it is why `test5_jump`
+trades two corners for one and reports one more `slowed`.
 
 It is load-bearing for a second reason that has nothing to do with alignment. `Bot_MoveNav` hands
 control to `RunAirmoveApproach` when the tracker's `wpIndex` reaches the launch waypoint, and
@@ -705,10 +739,47 @@ arms: `test40_walljump` planned 315, drove at 270, and aborted every attempt.
 re-simulation also misses it keeps the design speed by design, so the unreachable 315 survived to the
 follower as `airmovesRespeedKept`.
 
+### Rescaling a missed launch
+`Cross` interpolates yaw and speed from the gate ends at the fraction the funnel crosses, and that pair
+was never flown by any sample — the gate endpoints sit at mean ± 1σ along the fitted segment and the
+yaw/speed there come from a one-sided local regression, so at `t` 0 or 1 the planner is extrapolating.
+An overshoot or undershoot of a few tens of units is routine, and refusing the edge on it loses genuine
+connectivity.
+
+So a miss gets exactly one retry. Horizontal range on a jump is close to linear in launch speed —
+air time barely depends on it — so the correction is one division: multiply `candSpeed` by
+`|entryPoint - exitPoint| / |end - exitPoint|`, both measured in XY, and re-simulate at that. The aim
+point is the funnel's own crossing of the arrival gate, so the retry lands where the string pull wanted
+to enter, not at the area centroid.
+
+Nothing iterates. A second miss refuses the edge exactly as before, and the retry is skipped when either
+distance is under `kPlanAirmoveRangeEps` or the correction moves the speed by less than
+`kPlanAirmoveRespeedEps`. The rescaled speed is clamped to `physics.maxSpeed`, which is what bounds the
+degenerate case: a first sim that wedges immediately travels ~0 units and the ratio blows up, so it
+retries at full speed and almost always misses again — one wasted simulation, never an unbounded one.
+
+**Correcting downward composes with `Respeed`; correcting upward does not.** A retry that raises the
+speed can assert a launch the run-up cannot deliver, and `Respeed` will then knock it back down and keep
+the design speed if the slower jump misses. In practice the corrections that matter are reductions,
+because the extrapolated gate speed is biased toward the cloud's interior mean and overshoots.
+
+`test54_window` is the map this exists for. Its spawn room is a closed box whose only exit is a window
+24 units up the wall, so navgen finds no launch edge there at all (`FilterLaunchEdges` needs void ahead
+at running height) and every jump out of it is reverse-seeded from the landing spread of the jumps back
+in — a 2D blob squashed into a segment, the worst case for the end regression. Both edges out of the
+room missed and the map had no route. The retry corrects `1->2` from 185 to 117 and it lands.
+
+Across the test maps it removes rejections without moving a single waypoint: `test5_jump` 2 rejections
+to 0, `test24_precise2` 1 to 0, `test38_islands` 1 to 0, all with byte-identical routes.
+
 ### Re-speeding a launch
 The stored `exitSpeed` is what the air-move sampler launched at, not what the route can deliver. A
 corner 30 units before the launch caps the bot well under it, and nothing used to notice: the plan
 asserted the design speed and the jump was validated at a speed the bot would never reach.
+
+`PlanWalker::Retract` runs first (see "Landing on the next run-up") and may lower an earlier launch;
+the comparison below is against `PendingLaunch::designSpeed`, which `Retract` rewrites, so the two
+passes compose instead of fighting.
 
 `PlanWalker::Respeed` therefore builds a probe `PlanProfile` over the finished waypoint list.
 `ProfileLaunchReach` reads the reachable-speed pass on the segment ending at each launch — the arc fit,
@@ -728,9 +799,11 @@ fell short over the whole segment.
 `airmovesRespeedKept` counts it. Truncating here was the last place a complete plan could still be cut
 short, and with the retry loop gone there is nothing left to recover it — a jump the bot may come up
 short on beats a plan that stops dead in the middle of the map, and the follower already has
-`launchSimFailed` to reason about. In practice this branch has never fired: `airmovesRespeeded` and
-`airmovesRespeedKept` are both 0 on all 52 test maps and on crossfire, because the profile has so far
-always delivered the design speed.
+`launchSimFailed` to reason about. It is back to never firing on the test maps, but it did fire while
+the run-up was confined to one area: `test6_crouchjump` kept a 290 design speed the profile could not
+reach. Extending the run-up backwards along the route fixed the cause rather than the symptom — the
+same launch now re-speeds cleanly to 253 — so a kept design speed remains the signal that a launch is
+asserting a speed the approach cannot deliver.
 
 This is also why the search does not carry an incremental reach-speed estimate. Folding one into
 `PlanWalker` would let launches be simulated at the right speed the first time, but it would change
@@ -747,6 +820,68 @@ Two corners of the profile are what make the number meaningful, and both had to 
   means duck *in flight*; the approach is a full-speed run. Capping it at 107 made every crouch jump
   arrive at a third of its launch speed — `test6_crouchjump` and `test40_walljump` both failed
   re-speeding outright until this was fixed.
+
+### Landing on the next run-up
+When the barrier before an air move is *another* air move, the run-up node could be placed behind the
+point where the bot lands. `RunupDistance` walks back through area geometry, and a previous landing is
+not in `m_pendingGates` to stop it — that list holds plain-walk gates only, because every barrier
+flushes the funnel. On `test54_window` at `--plan-speed 270` the node sat 14 units *behind* the
+landing:
+
+```
+wp[ 3] landing  (582.0, 759.4, -1475.4) area 2
+wp[ 4] corner   (585.6, 773.4, -1476.0) area 2     <- run-up node, behind the landing
+wp[ 5] jump     (585.2, 746.9, -1476.0) area 17 JUMP launch 265
+```
+
+The plan credited 26.5 units of approach. The bot lands at wp[3] already moving at the previous launch
+speed *toward* wp[5], so it cannot use them: it delivered 200 of 265, aborted, repathed and fell in
+the pit.
+
+**`Respeed` cannot see this.** `IsGap` covers launch, teleport and ladder waypoints but not landings,
+so the node is not `Suppressed` — the ~170° reversal is arc-fitted, collapses to a pivot cap around
+53, and `ProfileLaunchReach` then integrates forward over the whole 26.5 units and saturates at
+`vExit`. The profile reads 265 of 265 and reports `0 re-speeded`, because it credits the reversal leg
+as travel.
+
+Two things fix it, and the first is what makes the second measurable.
+
+**The offset is clamped at the anchor, but only across an air move.** `m_anchor` is where the bot
+enters the current walk stretch, and after an air move that is the landing, so the run-up cannot be
+placed before it. The clamp is a straight-line projection onto the launch heading, which is only valid
+when the bot arrives *on* that heading — hence `m_anchorFromAirmove`. Applying it at every anchor
+breaks curved approaches: on `test6_crouchjump` the route runs south from the spawn and then launches
+north-east, so the projection of the start point is −194 and a legitimate run-up disappears.
+
+**`PlanWalker::Retract` then buys the distance back.** For each adjacent launch pair shaped
+`[launch][landing][run-up][launch]`, if the later launch's `needRunup` exceeds the `haveRunup` the
+clamp left it, the *earlier* launch speed is cut by the same one-shot ratio the `Cross` rescale uses,
+so its landing moves back along its own flight line. Both quantities are recorded on `PendingLaunch`
+at `Cross` time, so the detection needs no profile: `needRunup` is `AccelDistance(0, launchSpeed)`
+plus one lead, which is entry-speed independent and therefore has no feedback loop.
+
+That last point is why the first attempt under-delivered. Sizing the pull from
+`AccelDistance(reached, design)` looks right but is not: pulling the earlier launch back also lowers
+the speed the bot carries across the gap into the approach, so more runway arrives with a slower
+entry and the one-shot lands short.
+
+**The run-up node moves with the landing.** `ProfileLaunchReach` measures only the final segment —
+run-up node to launch — so room opened up *before* the node is invisible to it. `Retract` re-places
+the node at `needRunup` back along the launch heading, re-floored in its own area and rejected if it
+leaves that area's column. Landing and node move back by the same distance along the launch heading,
+so their relative position is preserved and no new corner appears.
+
+Guards, each keeping the design speed and counting `airmovesRetractKept`: a degenerate flight length,
+an alignment below `kPlanAirmoveRetractAlign` (0.5) between the earlier flight and the later launch
+heading — beyond 60° the pull is mostly lateral and the required distance blows up — and a
+`JumpLandsIn` that no longer lands in the earlier destination area. Nothing is ever truncated.
+
+`Retract` runs between `Finish` and `Respeed`, and writes `PendingLaunch::designSpeed` as well as the
+waypoint. Without that write `Respeed` compares its reach against the *original* design speed and
+raises the launch straight back up; with it, `Respeed` stays downward-only relative to the retracted
+value and mops up whatever the pull could not reach. On `test54_window` the 1→2 launch retracts
+149 → 128, the node moves level with the landing, and the 3→17 launch re-speeds 265 → 237 and lands —
+`1 re-speed kept design` becomes `0`, and the bot delivers 96% of design instead of 75%.
 
 - `BuildAreaGates(PlanArea&)` - fills edgeGates from boundPlanes
 - `BuildConnectionGates(areas, conns)` - builds shared face gates

@@ -779,12 +779,15 @@ namespace
 			char wpMsg[512];
 			snprintf(wpMsg, sizeof(wpMsg),
 				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
-				"airmoves=%zu simulated/%zu respeeded/%zu kept/%zu rejected | search %zu areas/%zu sims "
+				"airmoves=%zu simulated/%zu rescaled/%zu runup-ext/%zu respeeded/%zu kept/%zu retracted/%zu retract-kept/%zu rejected | search %zu areas/%zu sims "
 				"in %.1fms | profile segs=%zu len=%.0f "
 				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu | penalized=%zu\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
-				planStats.airmovesSimulated, planStats.airmovesRespeeded, planStats.airmovesRespeedKept,
+				planStats.airmovesSimulated, planStats.airmovesRescaled,
+				planStats.airmovesRunupExtended, planStats.airmovesRespeeded,
+				planStats.airmovesRespeedKept, planStats.airmovesRetracted,
+				planStats.airmovesRetractKept,
 				path.airmovesRejected, path.expansions, path.airmovesTried, planMs,
 				bot.followProfile.segs.size(), bot.followProfile.totalLength,
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,

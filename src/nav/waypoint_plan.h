@@ -136,8 +136,12 @@ struct PlanStats
 {
 	size_t airmovesSimulated = 0;
 	size_t airmovesUnplannable = 0;
+	size_t airmovesRescaled = 0;
+	size_t airmovesRunupExtended = 0;
 	size_t airmovesRespeeded = 0;
 	size_t airmovesRespeedKept = 0;
+	size_t airmovesRetracted = 0;
+	size_t airmovesRetractKept = 0;
 	size_t corners = 0;
 		std::vector<std::vector<Vector>> runupTraces;
 		size_t gatesClamped = 0;
@@ -172,6 +176,8 @@ struct PendingLaunch
 	Vector launchFloor;
 	float yaw = 0.f;
 	float designSpeed = 0.f;
+	float needRunup = 0.f;
+	float haveRunup = 0.f;
 };
 
 class PlanWalker
@@ -183,6 +189,7 @@ public:
 	void Reset(const Vector &startPoint);
 	bool Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t fromId, uint32_t toId);
 	void Finish(const Vector &goalPoint, int lastAreaId);
+	void Retract();
 	void Respeed();
 
 	void AddCost(float seconds) { m_extraTime += seconds; }
@@ -206,6 +213,9 @@ private:
 	bool JumpLandsIn(const Vector &launchFloor, float yaw, float speed, bool jump, uint32_t fromAreaId,
 		uint32_t destAreaId, bool needsCrouch, Vector &endOut, const char **whyOut) const;
 
+	float RunupDistance(const Vector &launchPoint, const Vector &back, float want, uint32_t fromId,
+		uint32_t &runupAreaOut, size_t &gatesKeptOut) const;
+
 	const std::vector<PlanArea> *m_areas = nullptr;
 	const PlanTraceContext *m_traces = nullptr;
 	PlanStats m_stats;
@@ -215,6 +225,7 @@ private:
 	std::vector<PendingLaunch> m_launches;
 
 	Vector m_anchor;
+	bool m_anchorFromAirmove = false;
 	Vector m_frontier;
 	float m_committedLength = 0.f;
 	float m_pendingLength = 0.f;

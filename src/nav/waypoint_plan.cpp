@@ -33,6 +33,14 @@ constexpr float kPlanAirmoveRunupTime = 0.1f;
 constexpr float kPlanAirmoveRunupMin = 8.f;
 constexpr float kPlanAirmoveRunupEps = 1.f;
 constexpr float kPlanAirmoveRespeedEps = 1.f;
+constexpr float kPlanAirmoveRangeEps = 1.f;
+constexpr float kPlanAirmoveRetractAlign = 0.5f;
+
+float HorizontalDistance(const Vector &a, const Vector &b)
+{
+	float dx = b.x - a.x, dy = b.y - a.y;
+	return std::sqrt(dx * dx + dy * dy);
+}
 
 float ClampTravelInsideArea(const PlanArea &area, const Vector &from, const Vector &dir, float want,
 	float inset)
@@ -560,6 +568,7 @@ void PlanWalker::Reset(const Vector &startPoint)
 	m_launches.clear();
 
 	m_anchor = startPoint;
+	m_anchorFromAirmove = false;
 	m_frontier = startPoint;
 	m_committedLength = 0.f;
 	m_pendingLength = 0.f;
@@ -770,6 +779,60 @@ bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, 
 	return false;
 }
 
+float PlanWalker::RunupDistance(const Vector &launchPoint, const Vector &back, float want,
+	uint32_t fromId, uint32_t &runupAreaOut, size_t &gatesKeptOut) const
+{
+	runupAreaOut = fromId;
+	gatesKeptOut = m_pendingGates.size();
+
+	uint32_t area = fromId;
+	Vector pos = launchPoint;
+	float total = 0.f;
+	float remaining = want;
+	size_t bound = m_pendingGates.size();
+
+	while (true)
+	{
+		float step = ClampTravelInsideArea((*m_areas)[area], pos, back, remaining, kLaunchInset);
+		if (step >= remaining)
+		{
+			total += remaining;
+			break;
+		}
+
+		size_t gate = bound;
+		while (gate > 0 && m_pendingGates[gate - 1].insideArea == area)
+			--gate;
+
+		if (gate == 0)
+		{
+			total += step;
+			break;
+		}
+
+		uint32_t prev = m_pendingGates[gate - 1].insideArea;
+		float toSeam = ClampTravelInsideArea((*m_areas)[area], pos, back, remaining, 0.f);
+		Vector seamPos = pos + back * toSeam;
+
+		if (prev >= m_areas->size() || (*m_areas)[prev].crouch ||
+			!InAreaColumn(seamPos, (*m_areas)[prev], -kLaunchInset))
+		{
+			total += step;
+			break;
+		}
+
+		total += toSeam;
+		remaining -= toSeam;
+		pos = seamPos;
+		area = prev;
+		bound = gate - 1;
+		runupAreaOut = prev;
+		gatesKeptOut = gate - 1;
+	}
+
+	return total;
+}
+
 bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t fromId, uint32_t toId)
 {
 	const PlanArea &fromArea = (*m_areas)[fromId];
@@ -792,6 +855,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		PushWaypoint(destWp, false);
 
 		m_anchor = destWp.point;
+		m_anchorFromAirmove = false;
 		UpdateFrontier();
 		return true;
 	}
@@ -829,6 +893,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		PushWaypoint(exitWp, false);
 
 		m_anchor = exitWp.point;
+		m_anchorFromAirmove = false;
 		UpdateFrontier();
 		return true;
 	}
@@ -885,6 +950,43 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 			simAim = entryPoint;
 			usedSim = JumpLandsIn(exitPoint, candYaw, candSpeed, jump, fromId, toId, needsCrouch,
 				end, &why);
+
+			if (!usedSim)
+			{
+				Vector candDir(std::cos(candYaw * kDegToRad), std::sin(candYaw * kDegToRad), 0.f);
+				const Vector &toCentroid = (*m_areas)[toId].centroid;
+				float want = (toCentroid.x - exitPoint.x) * candDir.x +
+					(toCentroid.y - exitPoint.y) * candDir.y;
+				float got = HorizontalDistance(exitPoint, end);
+				float rescaled = (want > kPlanAirmoveRangeEps && got > kPlanAirmoveRangeEps)
+					? std::min(candSpeed * (want / got), m_traces->physics.maxSpeed)
+					: 0.f;
+
+				if (rescaled > kPlanAirmoveRangeEps &&
+					std::fabs(rescaled - candSpeed) > kPlanAirmoveRespeedEps)
+				{
+					Vector rescaledEnd;
+					const char *rescaledWhy = "";
+					usedSim = JumpLandsIn(exitPoint, candYaw, rescaled, jump, fromId, toId,
+						needsCrouch, rescaledEnd, &rescaledWhy);
+
+					if (m_traces->dumpAirmoves)
+					{
+						std::printf("    airmove %u->%u rescale %.0f -> %.0f (want %.0f got %.0f): "
+							"%s -> end (%.1f,%.1f,%.1f)\n",
+							fromId, toId, candSpeed, rescaled, want, got, rescaledWhy,
+							rescaledEnd.x, rescaledEnd.y, rescaledEnd.z);
+					}
+
+					if (usedSim)
+					{
+						candSpeed = rescaled;
+						end = rescaledEnd;
+						++m_stats.airmovesRescaled;
+					}
+				}
+			}
+
 			simTo = end;
 
 			if (usedSim)
@@ -922,18 +1024,38 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 
 		float runupBack = std::max(launchSpeed * kPlanAirmoveRunupTime, kPlanAirmoveRunupMin);
 		runupBack = std::max(runupBack, needed);
-		runupBack = ClampTravelInsideArea(fromArea, launchPoint, launchDir * -1.f, runupBack,
-			kLaunchInset);
+
+		if (m_anchorFromAirmove)
+		{
+			float anchorBack = (launchPoint.x - m_anchor.x) * launchDir.x +
+				(launchPoint.y - m_anchor.y) * launchDir.y;
+			runupBack = std::min(runupBack, std::max(0.f, anchorBack));
+		}
+
+		uint32_t runupArea = fromId;
+		size_t gatesKept = m_pendingGates.size();
+		runupBack = RunupDistance(launchPoint, launchDir * -1.f, runupBack, fromId, runupArea,
+			gatesKept);
 
 		bool hasRunup = runupBack > kPlanAirmoveRunupEps;
 		Vector runupPoint = launchPoint - launchDir * runupBack;
+
+		if (hasRunup && runupArea != fromId)
+		{
+			const PlanArea &backArea = (*m_areas)[runupArea];
+			runupPoint.z = AreaFloorZ(backArea, runupPoint.x, runupPoint.y);
+			runupPoint = AtPlayerHeight(runupPoint, runupArea);
+			m_pendingGates.resize(gatesKept);
+			++m_stats.airmovesRunupExtended;
+		}
+
 		bool runupCrouch = FlushFunnelTo(hasRunup ? runupPoint : launchPoint);
 
 		if (hasRunup)
 		{
 			PlanWaypoint runupWp;
 			runupWp.point = runupPoint;
-			runupWp.targetAreaId = static_cast<int>(fromId);
+			runupWp.targetAreaId = static_cast<int>(runupArea);
 			runupWp.requiresCrouch = runupCrouch || fromArea.crouch;
 			PushWaypoint(runupWp);
 		}
@@ -964,6 +1086,8 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		pl.launchFloor = launch;
 		pl.yaw = yaw;
 		pl.designSpeed = launchSpeed;
+		pl.needRunup = needed;
+		pl.haveRunup = runupBack;
 		m_launches.push_back(pl);
 
 		PushWaypoint(launchWp);
@@ -975,6 +1099,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		PushWaypoint(landWp, false);
 
 		m_anchor = landWp.point;
+		m_anchorFromAirmove = true;
 		UpdateFrontier();
 		return true;
 	}
@@ -1012,6 +1137,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		buttonWp.requiresCrouch = FlushFunnelTo(buttonWp.point) || fromArea.crouch;
 		PushWaypoint(buttonWp);
 		m_anchor = buttonWp.point;
+		m_anchorFromAirmove = false;
 	}
 	else if (toArea.doorActivation == crossbot_nav::DOOR_ACTIVATION_TRIGGER)
 	{
@@ -1022,12 +1148,14 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		triggerWp.requiresCrouch = FlushFunnelTo(triggerWp.point) || fromArea.crouch;
 		PushWaypoint(triggerWp);
 		m_anchor = triggerWp.point;
+		m_anchorFromAirmove = false;
 	}
 
 	if (FlushFunnelTo(wp.point))
 		wp.requiresCrouch = true;
 	PushWaypoint(wp);
 	m_anchor = wp.point;
+	m_anchorFromAirmove = false;
 
 	UpdateFrontier();
 	return true;
@@ -1046,6 +1174,93 @@ void PlanWalker::Finish(const Vector &goalPoint, int lastAreaId)
 			goalWp.requiresCrouch = true;
 	}
 	PushWaypoint(goalWp);
+}
+
+void PlanWalker::Retract()
+{
+	if (!m_traces || m_launches.size() < 2)
+		return;
+
+	for (size_t k = 1; k < m_launches.size(); ++k)
+	{
+		PendingLaunch &prev = m_launches[k - 1];
+		const PendingLaunch &later = m_launches[k];
+
+		if (later.index != prev.index + 3)
+			continue;
+
+		float extra = later.needRunup - later.haveRunup;
+		if (extra <= kPlanAirmoveRunupEps)
+			continue;
+
+		const Vector &launchPoint = m_result[prev.index].point;
+		const Vector &landPoint = m_result[prev.index + 1].point;
+
+		float got = HorizontalDistance(launchPoint, landPoint);
+		if (got <= kPlanAirmoveRangeEps)
+		{
+			++m_stats.airmovesRetractKept;
+			continue;
+		}
+
+		Vector laterDir(std::cos(later.yaw * kDegToRad), std::sin(later.yaw * kDegToRad), 0.f);
+		float align = ((landPoint.x - launchPoint.x) * laterDir.x +
+			(landPoint.y - launchPoint.y) * laterDir.y) / got;
+
+		if (align < kPlanAirmoveRetractAlign)
+		{
+			++m_stats.airmovesRetractKept;
+			continue;
+		}
+
+		float want = got - extra / align;
+		float pulled = prev.designSpeed * (want / got);
+
+		if (want <= kPlanAirmoveRangeEps || prev.designSpeed - pulled < kPlanAirmoveRespeedEps)
+		{
+			++m_stats.airmovesRetractKept;
+			continue;
+		}
+
+		Vector end;
+		const char *why = "";
+		bool ok = JumpLandsIn(prev.launchFloor, prev.yaw, pulled, prev.jump, prev.fromId, prev.toId,
+			prev.needsCrouch, end, &why);
+
+		if (m_traces->dumpAirmoves)
+		{
+			std::printf("    airmove %u->%u retract %.0f -> %.0f (need %.1f have %.1f "
+				"align %.2f): %s -> end (%.1f,%.1f,%.1f)\n",
+				prev.fromId, prev.toId, prev.designSpeed, pulled, later.needRunup,
+				later.haveRunup, align, why, end.x, end.y, end.z);
+		}
+
+		if (!ok)
+		{
+			++m_stats.airmovesRetractKept;
+			continue;
+		}
+
+		m_result[prev.index].launchSpeed = pulled;
+		m_result[prev.index].launchSimTo = end;
+		m_result[prev.index + 1].point = AtPlayerHeight(end, prev.toId);
+		prev.designSpeed = pulled;
+		++m_stats.airmovesRetracted;
+
+		PlanWaypoint &runupWp = m_result[later.index - 1];
+		if (runupWp.targetAreaId < 0 || static_cast<size_t>(runupWp.targetAreaId) >= m_areas->size())
+			continue;
+
+		uint32_t runupArea = static_cast<uint32_t>(runupWp.targetAreaId);
+		const PlanArea &backArea = (*m_areas)[runupArea];
+		Vector moved = m_result[later.index].point - laterDir * later.needRunup;
+
+		if (!InAreaColumn(moved, backArea, -kLaunchInset))
+			continue;
+
+		moved.z = AreaFloorZ(backArea, moved.x, moved.y);
+		runupWp.point = AtPlayerHeight(moved, runupArea);
+	}
 }
 
 void PlanWalker::Respeed()

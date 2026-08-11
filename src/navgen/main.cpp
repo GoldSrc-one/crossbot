@@ -59,9 +59,11 @@ void PrintUsage(const char *argv0)
 		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
 		"                    edge gets 128 samples; 0.5 halves it; 0 disables air-move sampling)\n"
-		"  --max-speed <n>   ground speed the bot is assumed to reach, in units/sec (default %.0f). Must\n"
-		"                    match the server's sv_maxspeed or air moves are sampled at speeds the bot\n"
-		"                    can never deliver\n"
+		"  --max-speed <n>   ground speed air moves are sampled at, in units/sec (default %.0f): the\n"
+		"                    speed range the baked gates cover\n"
+		"  --plan-speed <n>  ground speed the debug plan is planned at (default: --max-speed). Set it to\n"
+		"                    the server's sv_maxspeed to reproduce what the runtime planner does with a\n"
+		"                    mesh sampled at a higher --max-speed\n"
 		"  --airmove-walk-ratio <n> drop an air move when a walk-only route between the same two areas\n"
 		"                    costs less than n times the air move (default %.1f; 0 keeps every air move)\n"
 		"  --dump-airmove-prune print the walk-vs-air comparison for every sampled air move, and the\n"
@@ -575,11 +577,13 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	}
 
 	std::printf("debug path: area %u -> %u via %zu connections, %zu waypoints "
-		"(%zu air moves re-simulated, %zu re-speeded, %zu re-speed kept design, "
+		"(%zu air moves re-simulated, %zu rescaled, %zu run-ups extended, %zu re-speeded, "
+		"%zu re-speed kept design, %zu retracted, %zu retract kept design, "
 		"%zu rejected in search; %zu corners, "
 		"%zu gates short of full clearance, %zu segments leaving the mesh)\n",
 		startArea, goalArea, result.connPath.size(), plan.size(), planStats.airmovesSimulated,
-		planStats.airmovesRespeeded, planStats.airmovesRespeedKept,
+		planStats.airmovesRescaled, planStats.airmovesRunupExtended, planStats.airmovesRespeeded,
+		planStats.airmovesRespeedKept, planStats.airmovesRetracted, planStats.airmovesRetractKept,
 		result.airmovesRejected, planStats.corners, planStats.gatesClamped, offMesh);
 
 	std::printf("debug search: %zu areas expanded, %zu air move simulations\n", result.expansions,
@@ -681,6 +685,7 @@ int main(int argc, char **argv)
 	bool dumpAirmovePrune = false;
 	bool dumpLadders = false;
 	float maxSpeed = navgen::PhysicsParams().maxSpeed;
+	float planSpeed = 0.f;
 	int dumpPlanesAreaId = -1;
 	std::string objPath;
 	std::string svgPath;
@@ -781,6 +786,24 @@ int main(int argc, char **argv)
 				return 1;
 			}
 			maxSpeed = static_cast<float>(parsed);
+		}
+		else if (arg == "--plan-speed")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed <= 0.0)
+			{
+				std::fprintf(stderr, "--plan-speed: expected a positive number, got \"%s\"\n", value);
+				return 1;
+			}
+			planSpeed = static_cast<float>(parsed);
 		}
 		else if (arg == "--dump-airmove-prune")
 		{
@@ -1330,6 +1353,8 @@ int main(int argc, char **argv)
 			traces.duckTrace = duckSim.TraceFn();
 			traces.standTrace = standSim.TraceFn();
 			traces.physics = standSim.Physics();
+			if (planSpeed > 0.f)
+				traces.physics.maxSpeed = planSpeed;
 			traces.dumpAirmoves = dumpAirmove;
 
 			pathPoints = BuildDebugPath(entities, merged, &traces, &pathSegmentKinds, &failedAirmoves,

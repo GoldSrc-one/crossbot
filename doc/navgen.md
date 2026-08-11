@@ -10,8 +10,10 @@ Command-line tool with extensive debug flags:
 - `--dump-steps` - every walk connection the step filter trimmed or dropped: area pair, shallowest
   crossing, both floor heights, surviving walkable runs, each floor face's normal z and 2D offset
 - `--dump-support` - every leaf fragment dropped as unsupported: floor centroid, floor normal, volume
-- `--dump-airmove` - air-move launch derivation: why no funnel launch was found, and every
-  re-simulation miss with its launch, yaw, speed and where it landed
+- `--dump-airmove` - air-move launch derivation: why no funnel launch was found, every re-simulation
+  miss with its launch, yaw, speed and where it landed, every rescaled retry with the speed it
+  corrected to and the wanted/travelled distances behind it, and every `retract` attempt with the
+  run-up it needed against the run-up it had (see `doc/nav.md`)
 - `--dump-planes <id>` - one final area's exact plane list (normal+dist) and face windings
 - `--dump-obj <path>` - walkable floor of every area as OBJ mesh (+ MTL): crouch areas colored apart, planned route as ribbon
 - `--dump-svg <path>` - top-down SVG of final area graph
@@ -35,8 +37,15 @@ Command-line tool with extensive debug flags:
   is server-independent, and the runtime planner clamps every launch to its own `sv_maxspeed` (see
   "Launch speed is clamped to the server" in `doc/nav.md`). Sampling at 320 and letting a 270 server
   reject what it cannot reach is the intended arrangement — the same nav then works on any server
-  without a regen. Lower it only to see what a slower server can actually use, or to keep the graph
-  small when you know the target speed.
+  without a regen. Lower it only to keep the graph small when you know the target speed — to see what
+  a slower server actually plans, use `--plan-speed` instead.
+- `--plan-speed <n>` - ground speed the `--dump-path` debug route is planned at (default: whatever
+  `--max-speed` is). This is the flag that reproduces a server offline: the mesh stays sampled at
+  `--max-speed`, and only `PlanTraceContext::physics.maxSpeed` is overridden, which is the single
+  input to `PlanRoute`, `JumpLandsIn` and `BuildPathProfile`. So `--plan-speed 270` against a nav
+  baked at 320 gives the same waypoints, launch speeds and counters the runtime produces on a
+  `sv_maxspeed 270` server, without starting HLDS. The baked `.nav` is byte-identical with and
+  without it.
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
 - `--max-merge-group <n>` - most leaf groups one merge may fuse (default 64). `1` blocks the first
   absorption, so nothing merges at all and each BSP hull-3 leaf becomes its own area — this replaces the
@@ -53,8 +62,9 @@ Command-line tool with extensive debug flags:
   and the search continues. The summary line counts those as `rejected in search`, and a second
   `debug search:` line reports how many areas were expanded and how many air-move simulations that
   cost. A connection that keeps being rejected is an air move `ProbeAirMoves` should not have exported;
-  `--dump-airmove` prints each miss with its launch, yaw, speed and where it actually landed, and its
-  count matches `rejected in search`
+  `--dump-airmove` prints each miss with its launch, yaw, speed and where it actually landed. The
+  `sim miss` lines match `rejected in search`; a `rescale` line without one following it is an edge the
+  retry rescued
 - Re-simulates air moves from funnel's preferred launch point if traces available
 - Validates route stays over areas (skips air-move segments)
 - Builds the `PlanProfile` and tessellates it, so the exported route is the arc chain the bot will
