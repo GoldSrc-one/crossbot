@@ -529,6 +529,20 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 	}
 }
 
+const PlanDetour *FindDetour(const PlanArea &area, uint32_t fromId)
+{
+	for (const PlanDetour &d : area.detours)
+		if (d.fromAreaId == fromId)
+			return &d;
+	return nullptr;
+}
+
+Vector GateMidpoint(const PlanGate &gate)
+{
+	return Vector((gate.left.x + gate.right.x) * 0.5f, (gate.left.y + gate.right.y) * 0.5f,
+		(gate.left.z + gate.right.z) * 0.5f);
+}
+
 Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnection &conn)
 {
 	if (conn.connType != crossbot_nav::CONN_WALK)
@@ -838,6 +852,12 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 	const PlanArea &fromArea = (*m_areas)[fromId];
 	const PlanArea &toArea = (*m_areas)[toId];
 
+	if (toArea.activation != crossbot_nav::ACT_NONE && conn.connType != crossbot_nav::CONN_WALK)
+	{
+		++m_stats.gatedRejected;
+		return false;
+	}
+
 	if (conn.connType == crossbot_nav::CONN_TELEPORT)
 	{
 		bool tailCrouch = FlushFunnelTo(conn.launchPos);
@@ -1112,12 +1132,10 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		return true;
 	}
 
+	m_extraTime += toArea.doorWaitTime;
+
 	const PlanGate *doorGate = GateFor(conn, toId);
-	Vector doorPoint = doorGate
-		? Vector((doorGate->left.x + doorGate->right.x) * 0.5f,
-			(doorGate->left.y + doorGate->right.y) * 0.5f,
-			(doorGate->left.z + doorGate->right.z) * 0.5f)
-		: toArea.centroid;
+	Vector doorPoint = doorGate ? GateMidpoint(*doorGate) : toArea.centroid;
 
 	PlanWaypoint wp;
 	wp.point = AtPlayerHeight(doorPoint, toId);
@@ -1127,27 +1145,42 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 	wp.targetAreaId = static_cast<int>(toId);
 	wp.requiresCrouch = fromArea.crouch || toArea.crouch;
 
-	if (toArea.doorActivation == crossbot_nav::DOOR_ACTIVATION_BUTTON)
+	if (toArea.activation != crossbot_nav::ACT_NONE)
 	{
-		PlanWaypoint buttonWp;
-		buttonWp.point = toArea.doorActivatorPos;
-		buttonWp.requiresButtonUse = true;
-		buttonWp.buttonWaitTime = toArea.doorWaitTime;
-		buttonWp.targetAreaId = static_cast<int>(fromId);
-		buttonWp.requiresCrouch = FlushFunnelTo(buttonWp.point) || fromArea.crouch;
-		PushWaypoint(buttonWp);
-		m_anchor = buttonWp.point;
-		m_anchorFromAirmove = false;
-	}
-	else if (toArea.doorActivation == crossbot_nav::DOOR_ACTIVATION_TRIGGER)
-	{
-		PlanWaypoint triggerWp;
-		triggerWp.point = toArea.doorActivatorPos;
-		triggerWp.requiresTriggerTouch = true;
-		triggerWp.targetAreaId = static_cast<int>(fromId);
-		triggerWp.requiresCrouch = FlushFunnelTo(triggerWp.point) || fromArea.crouch;
-		PushWaypoint(triggerWp);
-		m_anchor = triggerWp.point;
+		const PlanDetour *detour = FindDetour(toArea, fromId);
+		if (!detour || detour->blocked || detour->points.empty())
+			return false;
+
+		bool tailCrouch = FlushFunnelTo(detour->points.front().point);
+
+		for (size_t i = 0; i < detour->points.size(); ++i)
+		{
+			const PlanDetourPoint &dp = detour->points[i];
+
+			PlanWaypoint stepWp;
+			stepWp.point = dp.point;
+			stepWp.targetAreaId = dp.areaId;
+			stepWp.clearance = dp.clearance;
+			stepWp.requiresCrouch = dp.crouch || (i == 0 && tailCrouch) || fromArea.crouch;
+
+			if (i == detour->actIndex)
+			{
+				stepWp.activatorCenter = detour->actCenter;
+				if (detour->actKind == crossbot_nav::ACT_TRIGGER)
+				{
+					stepWp.requiresTriggerTouch = true;
+				}
+				else
+				{
+					stepWp.requiresButtonUse = true;
+					stepWp.buttonWaitTime = detour->waitSeconds;
+				}
+			}
+
+			PushWaypoint(stepWp);
+		}
+
+		m_anchor = detour->points.back().point;
 		m_anchorFromAirmove = false;
 	}
 

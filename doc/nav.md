@@ -41,7 +41,9 @@ are the extension points when those grow failure detection.
 
 ### Area struct
 - `planes` - inward-facing bound planes (for prism areas, includes footprint vertical planes + z-slab)
-- `doorActivation`, `doorActivatorPos`, `doorWaitTime` - door interaction data
+
+Activation data lives only on `planAreas`, loaded straight from the area records. `Nav::Area` used to mirror
+`doorActivation`/`doorActivatorPos`/`doorWaitTime`, which nothing outside the loader ever read.
 
 ### Connection struct
 - `gateA`, `gateB` - funnel gates on each side, baked by navgen with player radius already applied (inset at both ends and pushed that far into the owning area). Zero-length gate means opening was too narrow to inset; midpoint is the only way through. `gateValid` says which sides carry one; teleport carries neither.
@@ -430,6 +432,20 @@ the waypoint they emit. So the string pull never crosses one of them, which is w
 resolve each air move exactly once, at the moment it traverses it, and never has to revisit an earlier
 landing.
 
+**Activation detours.** Entering an area with `activation != ACT_NONE` looks up the precomputed detour for the
+neighbour being entered from (`FindDetour`); a missing or blocked entry makes `Cross` return `false` and A*
+routes around, so a route can no longer pass through a door whose activator is unreachable from that side. The
+stored polyline begins and ends on the *same* gate midpoint the door waypoint is derived from — both sides call
+`GateMidpoint`, and if they ever drift the unvalidated straight segment between them comes back. `FlushFunnelTo`
+targets the polyline's first point, which is a point on the entering area's boundary; that is the ordinary case
+(`UpdateFrontier` already aims at the last pending gate's midpoint), unlike the old code which aimed at a point
+inside the button's solid brush. Only the polyline's interior is funnel-validated — the pull from `m_anchor` to
+its first point is a straight 2D pull like every other, and can clip a wall in a prism area.
+
+A gated area entered by a non-walk connection is refused. Previously the teleport, ladder and air-move branches
+of `Cross` all returned before the door check, so an air move landing inside a door area emitted no activation
+waypoint at all.
+
 **Crouch belongs to the segment, not the corner.** `requiresCrouch` on a waypoint means "be ducked while
 travelling to it", so it has to be set on the waypoint that *ends* every pulled segment passing through a
 crouch area. It used to be read off the gate a corner sat on, which silently lost it whenever the funnel
@@ -565,8 +581,11 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
 ### PlanArea
 - `boundPlanes` - inward-facing planes (for prism: footprint walls + z-slab)
 - `edgeGates` - one per bound plane, inset/pushed gates
-- `door`, `breakable`, `doorActivation`, `doorActivatorPos`, `doorWaitTime` - a door area makes the plan stop at
-  it; BUTTON/TRIGGER activation first emits a waypoint at the activator
+- `door`, `breakable`, `activation`, `doorWaitTime` - a door area makes the plan stop at it
+- `detours` - one `PlanDetour` per walk neighbour of a gated area, precomputed by navgen. Each is a closed
+  polyline of `PlanDetourPoint` starting and ending on that neighbour's gate midpoint, with `actIndex` marking
+  the activation waypoint, plus `blocked` when no activator is reachable from that side. `FindDetour` scans
+  linearly — a gated area has two to four entries
 
 ### PlanConnection
 - `planeA`, `planeB` - bound plane indices for connection (baking only)
@@ -575,8 +594,30 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
 
 ### PlanWaypoint
 - `point` - position at player height (duck origin + 18 for stand)
-- Flags: requiresElevatorRide, requiresCrouch, requiresDoor, requiresBreak, requiresButtonUse, requiresTriggerTouch, requiresTeleport, teleportDest, requiresLadder, ladderUp, ladderYaw, ladderEntryYaw, ladderSpeed, ladderExit, airmoveLaunch, requiresJump, launchSpeed, launchYaw, jumpBackDist, launchSimulated, launchSimFailed, launchSimFrom/To/Aim, targetAreaId
+- Flags: requiresElevatorRide, requiresCrouch, requiresDoor, requiresBreak, requiresButtonUse, requiresTriggerTouch, activatorCenter, requiresTeleport, teleportDest, requiresLadder, ladderUp, ladderYaw, ladderEntryYaw, ladderSpeed, ladderExit, airmoveLaunch, requiresJump, launchSpeed, launchYaw, jumpBackDist, launchSimulated, launchSimFailed, launchSimFrom/To/Aim, targetAreaId
+- `activatorCenter` is the activator brush model centre, copied from the detour. The bot aims at it to press:
+  GoldSrc `PlayerUse` picks the entity whose centre gives the largest forward dot above `VIEW_FIELD_NARROW`,
+  so the runtime cannot press without knowing where the brush is
 - `requiresBreak` is recorded and plumbed but the bot does not act on it yet — it never shoots the breakable
+
+### Activation at runtime
+`src/bot/bot_move_nav.cpp` services activation waypoints; see `doc/navgen.md` for how the detour is built.
+
+- **Barrier.** `NavFollow::Config` carries `sLimit` and `sFloor`, both arc lengths from
+  `NavPlan::ProfileWaypointS`. They exist because a detour doubles back on itself: the outbound and return
+  legs are collinear in XY, so `ProjectOntoProfile` cannot tell them apart by distance and resolves the tie
+  in favour of the lower `s`. Without `sLimit` the bot's `s` jumps to the return leg and it never stands on
+  the activator (worse on first acquisition, which searches the whole profile); without `sFloor` it can never
+  leave the outbound leg afterwards and stalls in place. `sLimit` is the next unserviced activation, `sFloor`
+  the last serviced one, both computed in one pass over the waypoints each frame
+- **Press.** `RunActivation` takes over the frame inside `kActivationEngageRadius`, aims at `activatorCenter`
+  in pitch and yaw, and emits a single `IN_USE` rising edge once the aim converges and the bot is within
+  `kActivationUseRange` of the centre in 3D. One edge, not a held button — repeated presses would toggle a
+  toggle-style button back off. It then holds for the door's `buttonWaitTime` before releasing the barrier
+- **Triggers** need no press, only arrival, so they are serviced by proximity before `Track` runs
+- **Memo.** Serviced activators are remembered by centre for `kActivationMemory` seconds. This is what stops a
+  mid-detour repath from pressing twice (waypoint indices change, world state does not), and what makes a
+  failed press retry on its own once the memo lapses
 
 ### Constants
 - `kPlanClearance = 16` - player hull radius; gates inset by this at ends and pushed this far off connection plane
@@ -890,11 +931,18 @@ value and mops up whatever the pull could not reach. On `test54_window` the 1→
 
 ## nav_format.h
 
-### Nav File Format (version 11)
+### Nav File Format (version 12)
 - Magic: "CBNV"
-- Header: magic, version, mapName[64], bspChecksum, flags, counts
-- AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, doorActivation, doorActivatorPos[3], doorWaitTime
+- Header: magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex, areaPlanes,
+  detours, detourPoints)
+- AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount
 - ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3]
+- ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
+- DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
+
+Section order on disk is header, areas, conns, areaConnIndex, areaPlanes, detours, detourPoints. The detour
+offsets are `uint32_t`; `connOffset`/`planeOffset` remain `uint16_t` into the global arrays and throw past
+65535. Each record has explicit padding and a `static_assert` on its size, because they are written raw.
 
 `nav_loader.cpp` rejects a version mismatch outright, so bumping forces regeneration rather than silently
 loading a stale mesh. Area planes are the exported `boundPlanes`, which for a prism area is its footprint hull

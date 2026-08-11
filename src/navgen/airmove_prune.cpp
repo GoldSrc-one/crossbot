@@ -28,7 +28,7 @@ double TravelSeconds(const std::vector<Area> &areas, const MergedConnection &con
 	Vec3 b = areas[static_cast<size_t>(conn.areaB)].polytope.Centroid();
 	double travel = (b - a).Length() / std::max(maxSpeed, 1.0);
 
-	return travel + static_cast<double>(ConnectionCostSeconds(conn, areas));
+	return travel + static_cast<double>(ConnectionCostSeconds(conn));
 }
 
 std::vector<double> WalkDijkstra(const std::vector<std::vector<WalkEdge>> &graph, size_t from)

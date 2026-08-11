@@ -15,6 +15,8 @@ struct Config
 	float rejoinAbort = 96.f;
 	float derateFloor = 0.25f;
 	float goalRadius = 12.f;
+	float sLimit = -1.f;
+	float sFloor = -1.f;
 };
 
 struct TrackState

@@ -137,6 +137,9 @@ namespace
 			const Nav::Waypoint &wp = bot.waypoints[i];
 			if (wp.requiresElevatorRide)
 				return true;
+			if (wp.requiresButtonUse &&
+				AabbOverlap(wp.activatorCenter, wp.activatorCenter, hit->v.absmin, hit->v.absmax))
+				return true;
 			if (!wp.requiresDoor && !wp.requiresBreak)
 				continue;
 			if (wp.targetAreaId < 0)

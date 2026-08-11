@@ -7,6 +7,10 @@ Command-line tool with extensive debug flags:
 - `--dump-leaves` - per-leaf (pre-merge) id/faces/volume/centroid stats
 - `--dump-areas` - per-area (post-merge) id/faces/volume/centroid/member-leaf stats
 - `--dump-conns` - every final connection: type, flags, endpoints, air-move parameters
+- `--dump-activators` - activator discovery and the precomputed door detours: each gated entity's activator
+  brushes with their use/touch volumes, every candidate service point with the area it stands in and why it
+  was kept or rejected, and per `(door area ← entering neighbour)` the chosen service point, the detour
+  polyline with the activation point marked, and its length — or why that entry is blocked
 - `--dump-steps` - every walk connection the step filter trimmed or dropped: area pair, shallowest
   crossing, both floor heights, surviving walkable runs, each floor face's normal z and 2D offset
 - `--dump-support` - every leaf fragment dropped as unsupported: floor centroid, floor normal, volume
@@ -229,11 +233,12 @@ travel time, so it is real time and **not** a distance multiplier — it used to
 multiplier would silently break door and air-move routing.
 
 - plain walk — 0
-- walk touching a door or breakable area — that area's `openSeconds`
 - air move — `flightTime` plus a fall-damage penalty, keeping the "lethal ⇒ effectively infinite" sentinel
 
-Button and trigger doors get no extra penalty on top: the detour to the activator already costs its own travel
-time, which is the whole point of expressing cost as time.
+Door and breakable waits are **not** here. They used to be, added to every connection *touching* a gated area,
+which charged a through-route twice and skewed `airmove_prune`'s Dijkstra near doors. `PlanWalker::Cross` now
+adds `openSeconds` to `m_extraTime` once, on entry only. The activator detour costs its own travel time through
+`m_committedLength`, which is the whole point of expressing cost as time.
 
 ### Door/Breakable Isolation
 A merge never crosses `ExtractedLeaf::passableIndex`. A door or breakable has to stay its own area so it keeps
@@ -665,13 +670,17 @@ Carving them was the old behaviour and it disconnected the graph: every door map
 Same volume extraction, plus the classification that decides how the bot gets through. Returns a `PassableSet`:
 entities it can classify go in `passable`, ones it cannot go in `impassable` and join the carve list.
 
-- **No `targetname`, not trigger-only** → `DOOR_ACTIVATION_TOUCH`, walk straight through. Trigger-only is
+- **No `targetname`, not trigger-only** → `ACT_NONE`, walk straight through. Trigger-only is
   `SF_BREAK_TRIGGER_ONLY` (1) for breakables, `SF_DOOR_USE_ONLY` (256) for doors.
-- **Unnamed use-only door** → `BUTTON` with the door as its own activator (walk up, press use).
-- **Named** → resolve through `func_button` (chasing `trigger_relay` and `multi_manager`) else
-  `trigger_multiple`, giving `BUTTON` / `TRIGGER` and `doorActivatorPos` at the activator's model centre.
-- **Named, activator unresolvable** → impassable, carved like a wall so whatever is behind it prunes out. That
-  is deliberate: pruning then reports honestly that there is no way through.
+- **Unnamed use-only door** → `ACT_BUTTON` with the door as its own activator (walk up, press use).
+- **Named** → `CollectActivatorsFor` gathers **every** `func_button` / `func_rot_button` and **every**
+  `trigger_multiple` / `trigger_once` whose target reaches the entity, directly or through one
+  `trigger_relay` / `multi_manager` hop. Each becomes an `ActivatorVolume` holding the **raw** model AABB
+  (unexpanded — button range and trigger touch need different expansions) plus its model centre. The area's
+  `activation` is `ACT_BUTTON` if any activator is a button, else `ACT_TRIGGER`.
+- **Named, no activator at all** → impassable, carved like a wall so whatever is behind it prunes out. That
+  is deliberate: pruning then reports honestly that there is no way through. A door whose activators exist but
+  are unreachable is *not* carved — it keeps its area and gets blocked detour entries instead.
 - **`SF_DOOR_START_OPEN` / `SF_DOOR_PASSABLE`** never occupy their brush space, so neither carved nor split.
 
 Opening time, from the real SDK (`external/hlsdk-full`; the vendored `external/hlsdk` is headers-only):
@@ -709,13 +718,79 @@ Both halves come out of the same clip planes, so their floors tile without a gap
 connects the door piece to its neighbours with no extra linking. This is the same property prism merging relies
 on, and it is why splitting needs no new linking code at all.
 
+## activation_detours.cpp
+
+### Why precompute
+An activator is rarely in the door's own area, and the route to it is a property of *(door, which side you came
+from)* — static map geometry, so it belongs in navgen. Planning it at search time would mean a sub-A* per A*
+expansion (the walker is copied per node), and putting activation in the search state means revisit waves.
+
+The stage runs after `PruneUnreachableAreas` (which renumbers every area id, so `fromAreaId` would otherwise be
+garbage) and after `BakeConnectionGates` (the polyline anchors on a baked gate midpoint).
+
+### FindServicePoints
+Where the bot has to stand to work an activator. Gated areas are never service areas — you cannot stand inside a
+closed door to press the button that opens it.
+
+- **Trigger** — touch is an AABB overlap of the player hull with the trigger's `absmin/absmax`, so the set of
+  player *origins* that touch it is `[act.mins − hullMaxs, act.maxs − hullMins]`. Each floor winding is clipped
+  against that box's four vertical planes; a survivor over `kMinServiceArea` yields its centroid, lifted to
+  player-origin height, with the origin z checked against the box's z span.
+- **Button** — GoldSrc `+USE` is `SV_FindEntityInSphere(pev->origin, 64)` against the brush model **centre**,
+  then a facing dot test. It does **no trace at all**: pressing a button through a thin wall works in vanilla
+  HL. So the test is 3D distance from the player origin to `act.center` ≤ `kUseRange` (56, leaving margin), and
+  there is deliberately no line-of-sight check — an earlier one rejected the *common* case, since a
+  flush-mounted button has its centre inside world solid. Because the range is 3D from `floorZ + 18`, a button
+  high on a wall is out of reach from directly beneath it.
+
+A button sample is also rejected when the player hull at that origin would overlap the activator brush itself
+(`HullClearsBox`, the same origin-space box the trigger case uses). `func_button` is not in
+`IsBlockingClassname`, so `StandablePoint` alone happily returns a point inside the button — and since samples
+are ranked by *closest to the centre*, that unreachable point always won. The bot then jammed against the brush
+short of the waypoint, `progressS` never advanced, and it stall-repathed forever.
+
+Containment uses `boundPlanes`, never the polytope — areas can be non-convex prisms.
+
+### BuildActivationDetours
+Per gated area D and per **directed walk** connection `X → D`, `PlanRoute` runs from the X-side gate midpoint to
+each candidate service point and back again (planned separately — gate string-pulling is not symmetric). The
+cheapest pair becomes one closed polyline that starts and ends at that gate midpoint, with `actIndex` marking
+the activation waypoint.
+
+Non-walk entries into a gated area are rejected outright. They were silently broken before: the teleport, ladder
+and air-move branches of `Cross` all return *before* the door check, so a jump landing inside a door area emitted
+no activation waypoint at all.
+
+**Bootstrapping** needs no flag. The planner rule is a lookup — "no detour for this neighbour ⇒ refuse the edge"
+— so during the pass every gated area has an empty `detours` and seals itself automatically. Results go to a
+side buffer and are written back only after the last `PlanRoute` returns, so nothing depends on door iteration
+order. This is also the conservative no-recursion rule: a button behind another button-door reads as blocked,
+and `--dump-activators` says so rather than hiding it.
+
+The precompute graph is walk-only, which also means the stored polyline can carry no air-move/ladder/teleport
+flags and `traces` can be `nullptr`.
+
+**Known limitation:** the detour starts at the door's own gate, so a bot walks up to the door, turns round to
+the activator, and comes back. Plausible, not optimal — diverging at the ideal point would need activation in
+the search state.
+
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v10):
-- Header: magic "CBNV", version 10, mapName[64], bspChecksum, counts
-- Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, and the door fields
-  (`doorActivation`, `doorActivatorPos[3]`, `doorWaitTime` = the area's `openSeconds`)
+Serializes MergeResult to crossbot_nav format (v13):
+- Header: magic "CBNV", version 13, mapName[64], bspChecksum, counts (including `detourCount` and
+  `detourPointCount`)
+- Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, `activation`,
+  `openSeconds`, and `detourOffset`/`detourCount`
+- Activation detour records: fromAreaId, pointOffset/Count, actIndex, waitSeconds, detourSeconds,
+  `actCenter[3]`, actKind, flags (`DETOUR_FLAG_BLOCKED`). Detour points: pos[3], areaId, clearance, flags
+  (`DETOUR_PT_CROUCH`)
+- `actCenter` is the activator brush model centre. It is the only thing the runtime cannot recompute: pressing
+  needs the engine's own aim target, and the service point is where the bot *stands*, not what it looks at
+- The detour offsets are `uint32_t`, unlike `connOffset`/`planeOffset` which are `uint16_t` into the global
+  arrays and throw past 65535 via `ToU16Count`
+- Every record is `fwrite`n raw, so each has explicit padding and a `static_assert` on its size — a new field
+  that shifts the layout fails the build instead of silently corrupting nav files
 - Area planes come from `boundPlanes`, not `polytope.faces` — see "Area geometry vs exported region"
 - Connection records: areaA/B, connType/Flags, gateValid, costSeconds, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallDamage, flightTime, launchPos/landingPos[3]
 - Area-connection index (uint32 per connection per area)

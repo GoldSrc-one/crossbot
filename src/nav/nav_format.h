@@ -7,7 +7,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 11;
+constexpr uint32_t kNavVersion = 13;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
 
@@ -38,11 +38,24 @@ enum ConnFlags : uint8_t
 	CONN_FLAG_JUMP         = 1u << 2,
 };
 
-enum DoorActivation : uint8_t
+enum ActivationKind : uint8_t
 {
-	DOOR_ACTIVATION_TOUCH   = 0,
-	DOOR_ACTIVATION_BUTTON  = 1,
-	DOOR_ACTIVATION_TRIGGER = 2,
+	ACT_NONE    = 0,
+	ACT_BUTTON  = 1,
+	ACT_TRIGGER = 2,
+	ACT_ATTACK  = 3,
+};
+
+enum DetourFlags : uint8_t
+{
+	DETOUR_FLAG_NONE    = 0,
+	DETOUR_FLAG_BLOCKED = 1u << 0,
+};
+
+enum DetourPointFlags : uint8_t
+{
+	DETOUR_PT_NONE   = 0,
+	DETOUR_PT_CROUCH = 1u << 0,
 };
 
 struct NavHeader
@@ -56,6 +69,8 @@ struct NavHeader
 	uint32_t connCount;
 	uint32_t areaConnIndexCount;
 	uint32_t areaPlaneCount;
+	uint32_t detourCount;
+	uint32_t detourPointCount;
 };
 
 struct NavAreaRecord
@@ -70,10 +85,39 @@ struct NavAreaRecord
 	uint16_t planeOffset;
 	uint16_t planeCount;
 
-	uint8_t doorActivation;
-	float doorActivatorPos[3];
-	float doorWaitTime;
+	uint8_t activation;
+	uint8_t pad0[3];
+	float openSeconds;
+	uint32_t detourOffset;
+	uint32_t detourCount;
 };
+
+struct NavActivationDetourRecord
+{
+	uint32_t fromAreaId;
+	uint32_t pointOffset;
+	uint32_t pointCount;
+	uint32_t actIndex;
+	float waitSeconds;
+	float detourSeconds;
+	float actCenter[3];
+	uint8_t actKind;
+	uint8_t flags;
+	uint8_t pad[2];
+};
+
+struct NavDetourPointRecord
+{
+	float pos[3];
+	uint32_t areaId;
+	float clearance;
+	uint8_t flags;
+	uint8_t pad[3];
+};
+
+static_assert(sizeof(NavAreaRecord) == 68, "NavAreaRecord layout changed without a version bump");
+static_assert(sizeof(NavActivationDetourRecord) == 40, "NavActivationDetourRecord layout changed");
+static_assert(sizeof(NavDetourPointRecord) == 24, "NavDetourPointRecord layout changed");
 
 struct NavAreaPlane
 {

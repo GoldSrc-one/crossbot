@@ -10,6 +10,26 @@
 namespace navgen
 {
 
+struct DetourPoint
+{
+	Vec3 pos;
+	int areaId = -1;
+	double clearance = 16.0;
+	bool crouch = false;
+};
+
+struct ActivationDetour
+{
+	int fromAreaId = -1;
+	std::vector<DetourPoint> points;
+	size_t actIndex = 0;
+	uint8_t actKind = crossbot_nav::ACT_BUTTON;
+	Vec3 actCenter;
+	double waitSeconds = 0.0;
+	double detourSeconds = 0.0;
+	bool blocked = false;
+};
+
 struct Area
 {
 	int id = 0;
@@ -19,9 +39,10 @@ struct Area
 	uint32_t areaFlags = crossbot_nav::NAV_AREA_NONE;
 	bool prism = false;
 
-	uint8_t doorActivation = crossbot_nav::DOOR_ACTIVATION_TOUCH;
-	Vec3 doorActivatorPos;
+	uint8_t activation = crossbot_nav::ACT_NONE;
 	double openSeconds = 0.0;
+	int passableIndex = -1;
+	std::vector<ActivationDetour> detours;
 };
 
 struct MergedConnection
@@ -60,7 +81,7 @@ struct MergeResult
 	std::vector<MergedConnection> conns;
 };
 
-float ConnectionCostSeconds(const MergedConnection &conn, const std::vector<Area> &areas);
+float ConnectionCostSeconds(const MergedConnection &conn);
 
 size_t ResolveConnectionPlanes(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 

@@ -82,6 +82,8 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	std::vector<NavAreaRecord> areaRecords(areas.size());
 	std::vector<uint32_t> areaConnIndex;
 	std::vector<NavAreaPlane> areaPlanes;
+	std::vector<NavActivationDetourRecord> detourRecords;
+	std::vector<NavDetourPointRecord> detourPoints;
 
 	for (size_t i = 0; i < areas.size(); ++i)
 	{
@@ -89,11 +91,44 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.id = static_cast<uint32_t>(areas[i].id);
 		ComputeBounds(areas[i].polytope, rec.mins, rec.maxs, rec.centroid);
 		rec.areaFlags = areas[i].areaFlags;
-		rec.doorActivation = areas[i].doorActivation;
-		rec.doorActivatorPos[0] = static_cast<float>(areas[i].doorActivatorPos.x);
-		rec.doorActivatorPos[1] = static_cast<float>(areas[i].doorActivatorPos.y);
-		rec.doorActivatorPos[2] = static_cast<float>(areas[i].doorActivatorPos.z);
-		rec.doorWaitTime = static_cast<float>(areas[i].openSeconds);
+		rec.activation = areas[i].activation;
+		rec.pad0[0] = rec.pad0[1] = rec.pad0[2] = 0;
+		rec.openSeconds = static_cast<float>(areas[i].openSeconds);
+
+		rec.detourOffset = static_cast<uint32_t>(detourRecords.size());
+		rec.detourCount = static_cast<uint32_t>(areas[i].detours.size());
+
+		for (const ActivationDetour &d : areas[i].detours)
+		{
+			NavActivationDetourRecord drec;
+			drec.fromAreaId = static_cast<uint32_t>(d.fromAreaId);
+			drec.pointOffset = static_cast<uint32_t>(detourPoints.size());
+			drec.pointCount = static_cast<uint32_t>(d.points.size());
+			drec.actIndex = static_cast<uint32_t>(d.actIndex);
+			drec.waitSeconds = static_cast<float>(d.waitSeconds);
+			drec.detourSeconds = static_cast<float>(d.detourSeconds);
+			drec.actCenter[0] = static_cast<float>(d.actCenter.x);
+			drec.actCenter[1] = static_cast<float>(d.actCenter.y);
+			drec.actCenter[2] = static_cast<float>(d.actCenter.z);
+			drec.actKind = d.actKind;
+			drec.flags = d.blocked ? crossbot_nav::DETOUR_FLAG_BLOCKED : crossbot_nav::DETOUR_FLAG_NONE;
+			drec.pad[0] = drec.pad[1] = 0;
+			detourRecords.push_back(drec);
+
+			for (const DetourPoint &p : d.points)
+			{
+				NavDetourPointRecord prec;
+				prec.pos[0] = static_cast<float>(p.pos.x);
+				prec.pos[1] = static_cast<float>(p.pos.y);
+				prec.pos[2] = static_cast<float>(p.pos.z);
+				prec.areaId = static_cast<uint32_t>(p.areaId);
+				prec.clearance = static_cast<float>(p.clearance);
+				prec.flags = p.crouch ? crossbot_nav::DETOUR_PT_CROUCH : crossbot_nav::DETOUR_PT_NONE;
+				prec.pad[0] = prec.pad[1] = prec.pad[2] = 0;
+				detourPoints.push_back(prec);
+			}
+		}
+
 		rec.connOffset = ToU16Count(areaConnIndex.size(), "area-conn-index offset");
 		rec.connCount = ToU16Count(perArea[i].size(), "conns-per-area");
 
@@ -145,7 +180,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 			rec.gateASpeed[k] = static_cast<float>(c.gateASpeed[k]);
 		}
 
-		rec.costSeconds = ConnectionCostSeconds(c, areas);
+		rec.costSeconds = ConnectionCostSeconds(c);
 
 		rec.exitSpeed = static_cast<float>(c.exitSpeed);
 		rec.exitAngle = static_cast<float>(c.exitAngle);
@@ -171,12 +206,17 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	header.connCount = static_cast<uint32_t>(connRecords.size());
 	header.areaConnIndexCount = static_cast<uint32_t>(areaConnIndex.size());
 	header.areaPlaneCount = static_cast<uint32_t>(areaPlanes.size());
+	header.detourCount = static_cast<uint32_t>(detourRecords.size());
+	header.detourPointCount = static_cast<uint32_t>(detourPoints.size());
 
 	WriteRaw(f, &header, sizeof(header), "header");
 	WriteRaw(f, areaRecords.data(), areaRecords.size() * sizeof(NavAreaRecord), "area records");
 	WriteRaw(f, connRecords.data(), connRecords.size() * sizeof(NavConnectionRecord), "connection records");
 	WriteRaw(f, areaConnIndex.data(), areaConnIndex.size() * sizeof(uint32_t), "area-conn index");
 	WriteRaw(f, areaPlanes.data(), areaPlanes.size() * sizeof(NavAreaPlane), "area planes");
+	WriteRaw(f, detourRecords.data(), detourRecords.size() * sizeof(NavActivationDetourRecord),
+		"activation detours");
+	WriteRaw(f, detourPoints.data(), detourPoints.size() * sizeof(NavDetourPointRecord), "detour points");
 
 	std::fclose(f);
 }

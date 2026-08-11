@@ -75,6 +75,8 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 
 float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead);
 
+float ProfileWaypointS(const PlanProfile &profile, size_t wpIndex);
+
 ProfileSample SampleProfile(const PlanProfile &profile, float s);
 
 float ProjectOntoProfile(const PlanProfile &profile, const Vector &pos, float sMin, float sMax,

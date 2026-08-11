@@ -15,19 +15,9 @@
 namespace navgen
 {
 
-float ConnectionCostSeconds(const MergedConnection &conn, const std::vector<Area> &areas)
+float ConnectionCostSeconds(const MergedConnection &conn)
 {
 	float seconds = 0.0f;
-
-	for (int areaId : {conn.areaA, conn.areaB})
-	{
-		if (areaId < 0 || static_cast<size_t>(areaId) >= areas.size())
-			continue;
-
-		const Area &area = areas[static_cast<size_t>(areaId)];
-		if (area.areaFlags & (crossbot_nav::NAV_AREA_DOOR | crossbot_nav::NAV_AREA_BREAKABLE))
-			seconds = std::max(seconds, static_cast<float>(area.openSeconds));
-	}
 
 	if (conn.connType == crossbot_nav::CONN_AIRMOVE || conn.connType == crossbot_nav::CONN_LADDER)
 	{
@@ -717,10 +707,15 @@ void ApplyPassable(Area &area, const std::vector<PassableVolume> &passables, int
 		return;
 
 	const PassableVolume &p = passables[static_cast<size_t>(passableIndex)];
+
+	if (area.passableIndex >= 0 && area.passableIndex != passableIndex)
+		std::fprintf(stderr, "warning: area %d merges leaves from passable %d and %d\n",
+			area.id, area.passableIndex, passableIndex);
+
 	area.areaFlags |= p.areaFlag;
-	area.doorActivation = p.activation;
-	area.doorActivatorPos = p.activatorPos;
+	area.activation = p.activation;
 	area.openSeconds = p.openSeconds;
+	area.passableIndex = passableIndex;
 }
 
 }

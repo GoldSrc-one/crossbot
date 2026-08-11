@@ -131,6 +131,18 @@ namespace
 		return traces;
 	}
 
+	constexpr float kActivationEngageRadius = 40.f;
+	constexpr float kActivationStandRadius = 8.f;
+	constexpr float kActivationUseRange = 56.f;
+	constexpr float kActivationAimTolerance = 8.f;
+	constexpr float kActivationMinHold = 0.5f;
+	constexpr float kActivationMaxHold = 3.f;
+	constexpr float kActivationTimeout = 6.f;
+	constexpr float kActivationMemory = 15.f;
+	constexpr float kActivationSameRadius = 8.f;
+	constexpr float kTriggerTouchRadius = 20.f;
+	constexpr float kTriggerTouchHeight = 40.f;
+
 	constexpr float kTeleportJumpThreshold = 150.f;
 	constexpr float kRepathInterval = 2.f;
 	constexpr float kEtaSafetyMargin = 1.6f;
@@ -586,6 +598,185 @@ namespace
 		return true;
 	}
 
+	bool RecentlyActivated(const CBot &bot, const Nav::Waypoint &wp)
+	{
+		const Vector &key = wp.activatorCenter;
+		for (const BotActivation &a : bot.activationMemo)
+		{
+			if ((a.center - key).Length() > kActivationSameRadius)
+				continue;
+			if (gpGlobals->time - a.time <= kActivationMemory)
+				return true;
+		}
+		return false;
+	}
+
+	void NoteActivated(CBot &bot, const Nav::Waypoint &wp)
+	{
+		const Vector &key = wp.activatorCenter;
+		for (BotActivation &a : bot.activationMemo)
+		{
+			if ((a.center - key).Length() > kActivationSameRadius)
+				continue;
+			a.time = gpGlobals->time;
+			return;
+		}
+
+		BotActivation added;
+		added.center = key;
+		added.time = gpGlobals->time;
+		bot.activationMemo.push_back(added);
+	}
+
+	size_t NextActivation(const CBot &bot)
+	{
+		for (size_t i = 0; i < bot.waypoints.size(); ++i)
+		{
+			const Nav::Waypoint &wp = bot.waypoints[i];
+			if (!wp.requiresButtonUse && !wp.requiresTriggerTouch)
+				continue;
+			if (RecentlyActivated(bot, wp))
+				continue;
+			return i;
+		}
+		return bot.waypoints.size();
+	}
+
+	bool TriggerTouched(const CBot &bot, const Nav::Waypoint &wp)
+	{
+		if (!wp.requiresTriggerTouch)
+			return false;
+
+		const Vector &origin = bot.pEdict->v.origin;
+		float dx = wp.point.x - origin.x, dy = wp.point.y - origin.y;
+		if (dx * dx + dy * dy > kTriggerTouchRadius * kTriggerTouchRadius)
+			return false;
+
+		return fabsf(wp.point.z - origin.z) <= kTriggerTouchHeight;
+	}
+
+	void FinishActivation(CBot &bot, const Nav::Waypoint &wp, const char *why)
+	{
+		bot.activationActive = false;
+		bot.activationPressed = false;
+		NoteActivated(bot, wp);
+
+		char msg[224];
+		snprintf(msg, sizeof(msg), "CrossBot: %s %s the activator at (%.1f,%.1f,%.1f)\n", bot.name, why,
+			wp.activatorCenter.x, wp.activatorCenter.y, wp.activatorCenter.z);
+		SERVER_PRINT(msg);
+	}
+
+	bool RunActivation(CBot &bot, size_t index)
+	{
+		edict_t *pEdict = bot.pEdict;
+		const Nav::Waypoint &wp = bot.waypoints[index];
+		if (!wp.requiresButtonUse)
+			return false;
+
+		const Vector &origin = pEdict->v.origin;
+		Vector to(wp.point.x - origin.x, wp.point.y - origin.y, 0.f);
+		float dist = sqrtf(to.x * to.x + to.y * to.y);
+
+		if (!bot.activationActive)
+		{
+			if (dist > kActivationEngageRadius)
+				return false;
+
+			bot.activationActive = true;
+			bot.activationPressed = false;
+			bot.activationStartTime = gpGlobals->time;
+			bot.activationHoldUntil = 0.f;
+
+			char msg[288];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s reached the service point (%.1f,%.1f,%.1f) for the activator at "
+				"(%.1f,%.1f,%.1f), wp %zu/%zu, wait %.1fs\n", bot.name, wp.point.x, wp.point.y,
+				wp.point.z, wp.activatorCenter.x, wp.activatorCenter.y, wp.activatorCenter.z, index,
+				bot.waypoints.size(), wp.buttonWaitTime);
+			SERVER_PRINT(msg);
+		}
+
+		bot.lastProgressTime = gpGlobals->time;
+
+		Vector eye = origin + pEdict->v.view_ofs;
+		Vector los = wp.activatorCenter - eye;
+		float flat = sqrtf(los.x * los.x + los.y * los.y);
+		if (flat > 0.0001f || fabsf(los.z) > 0.0001f)
+			bot.desiredAngles = Vector(-atan2f(los.z, flat) * (180.f / kPiF),
+				atan2f(los.y, los.x) * (180.f / kPiF), 0.f);
+
+		Vector angles = Bot_UpdateFacing(bot);
+
+		float useDist = (wp.activatorCenter - origin).Length();
+		bool inRange = useDist <= kActivationUseRange;
+		bool aimed =
+			fabsf(Bot_NormalizeAngle(bot.desiredAngles.y - angles.y)) <= kActivationAimTolerance &&
+			fabsf(Bot_NormalizeAngle(bot.desiredAngles.x - angles.x)) <= kActivationAimTolerance;
+
+		unsigned short buttons = 0;
+		if (!bot.activationPressed && aimed && inRange)
+		{
+			buttons |= IN_USE;
+			bot.activationPressed = true;
+			bot.activationHoldUntil = gpGlobals->time +
+				std::max(kActivationMinHold, std::min(wp.buttonWaitTime, kActivationMaxHold));
+
+			char msg[224];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s pressed USE at (%.1f,%.1f,%.1f), %.1f from the activator, holding %.1fs\n",
+				bot.name, origin.x, origin.y, origin.z, useDist,
+				bot.activationHoldUntil - gpGlobals->time);
+			SERVER_PRINT(msg);
+		}
+
+		if (bot.activationPressed && gpGlobals->time >= bot.activationHoldUntil)
+		{
+			FinishActivation(bot, wp, "finished with");
+			return false;
+		}
+
+		if (gpGlobals->time - bot.activationStartTime > kActivationTimeout)
+		{
+			FinishActivation(bot, wp, inRange ? "could not aim at" : "could not reach");
+			bot.nextRepathTime = gpGlobals->time;
+			return false;
+		}
+
+		float drive = 0.f;
+		Vector moveDir(0.f, 0.f, 0.f);
+		if (dist > 1.f && (dist > kActivationStandRadius || !inRange))
+		{
+			moveDir = Norm2D(to);
+			drive = BotMaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
+
+			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
+				BotPhysics(pEdict));
+			if (solved.wishSpeed > 0.f)
+			{
+				moveDir = solved.wishDir;
+				drive = solved.wishSpeed;
+			}
+		}
+
+		if ((pEdict->v.flags & FL_DUCKING) != 0)
+			drive /= PmSim::kDuckingMultiplier;
+
+		float fmove = 0.f, smove = 0.f;
+		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+
+		if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
+		else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
+		if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
+		else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
+		if (wp.requiresCrouch) buttons |= IN_DUCK;
+
+		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, Bot_FrameMsec());
+		return true;
+	}
+
 	void ResetPath(CBot &bot)
 	{
 		bot.waypoints.clear();
@@ -598,6 +789,8 @@ namespace
 		bot.ladderActive = false;
 		bot.ladderTargetArea = -1;
 		bot.ladderConnIndex = -1;
+		bot.activationActive = false;
+		bot.activationPressed = false;
 		bot.avoid = BotAvoid::State();
 		bot.plannedAreaPath.clear();
 		bot.plannedConnPath.clear();
@@ -754,6 +947,8 @@ namespace
 		bot.waypoints = std::move(path.waypoints);
 		bot.waypointIndex = 0;
 		bot.airmoveActive = false;
+		bot.activationActive = false;
+		bot.activationPressed = false;
 		bot.plannedAreaPath = path.areaPath;
 		bot.plannedConnPath = path.connPath;
 		bot.avoid.detourEnd = 0;
@@ -934,8 +1129,35 @@ void Bot_MoveNav(CBot &bot)
 
 	PmSim::PmPhysics physics = BotPhysics(pEdict);
 
+	size_t activationWp = NextActivation(bot);
+	while (activationWp < bot.waypoints.size() && TriggerTouched(bot, bot.waypoints[activationWp]))
+	{
+		FinishActivation(bot, bot.waypoints[activationWp], "touched");
+		activationWp = NextActivation(bot);
+	}
+
+	if (activationWp >= bot.waypoints.size())
+		bot.activationActive = false;
+
+	NavFollow::Config followCfg;
+	for (size_t i = 0; i < bot.waypoints.size(); ++i)
+	{
+		const Nav::Waypoint &step = bot.waypoints[i];
+		if (!step.requiresButtonUse && !step.requiresTriggerTouch)
+			continue;
+
+		if (i < activationWp)
+		{
+			followCfg.sFloor = NavPlan::ProfileWaypointS(bot.followProfile, i);
+			continue;
+		}
+
+		followCfg.sLimit = NavPlan::ProfileWaypointS(bot.followProfile, i);
+		break;
+	}
+
 	NavFollow::Decision follow = NavFollow::Track(bot.followProfile, pEdict->v.origin,
-		pEdict->v.velocity, physics, bot.trackState);
+		pEdict->v.velocity, physics, bot.trackState, followCfg);
 
 	if (follow.wpIndex < bot.waypoints.size())
 		bot.waypointIndex = follow.wpIndex;
@@ -1012,6 +1234,9 @@ void Bot_MoveNav(CBot &bot)
 	}
 
 	if (wp->requiresLadder && RunLadderApproach(bot, *wp))
+		return;
+
+	if (activationWp < bot.waypoints.size() && RunActivation(bot, activationWp))
 		return;
 
 	Vector moveDir(follow.wishDir.x, follow.wishDir.y, 0.f);

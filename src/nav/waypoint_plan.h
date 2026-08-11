@@ -35,20 +35,42 @@ struct PlanGate
 	bool clamped = false;
 };
 
+struct PlanDetourPoint
+{
+	Vector point;
+	int areaId = -1;
+	float clearance = 16.f;
+	bool crouch = false;
+};
+
+struct PlanDetour
+{
+	uint32_t fromAreaId = 0;
+	std::vector<PlanDetourPoint> points;
+	size_t actIndex = 0;
+	uint8_t actKind = crossbot_nav::ACT_NONE;
+	Vector actCenter;
+	float waitSeconds = 0.f;
+	float detourSeconds = 0.f;
+	bool blocked = false;
+};
+
 struct PlanArea
 {
 	Vector centroid;
 	bool crouch = false;
 	bool door = false;
 	bool breakable = false;
-	uint8_t doorActivation = crossbot_nav::DOOR_ACTIVATION_TOUCH;
-	Vector doorActivatorPos;
+	uint8_t activation = crossbot_nav::ACT_NONE;
 	float doorWaitTime = 0.f;
+	std::vector<PlanDetour> detours;
 
 	std::vector<PlanPlane> boundPlanes;
 
 	std::vector<PlanGate> edgeGates;
 };
+
+const PlanDetour *FindDetour(const PlanArea &area, uint32_t fromId);
 
 struct PlanConnection
 {
@@ -84,6 +106,7 @@ struct PlanWaypoint
 	bool requiresButtonUse = false;
 	float buttonWaitTime = 0.f;
 	bool requiresTriggerTouch = false;
+	Vector activatorCenter;
 	int targetAreaId = -1;
 	int connIndex = -1;
 	float clearance = 16.f;
@@ -143,6 +166,7 @@ struct PlanStats
 	size_t airmovesRetracted = 0;
 	size_t airmovesRetractKept = 0;
 	size_t corners = 0;
+	size_t gatedRejected = 0;
 		std::vector<std::vector<Vector>> runupTraces;
 		size_t gatesClamped = 0;
 	};
@@ -155,6 +179,8 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 	const PlanFloorFn &floorAt = PlanFloorFn(), float maxStep = 0.f);
 
 Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnection &conn);
+
+Vector GateMidpoint(const PlanGate &gate);
 
 struct PendingGate
 {

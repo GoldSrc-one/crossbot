@@ -26,9 +26,6 @@ struct Area
 
 	std::vector<AreaPlane> planes;
 
-	uint8_t doorActivation = crossbot_nav::DOOR_ACTIVATION_TOUCH;
-	Vector doorActivatorPos;
-	float doorWaitTime = 0.f;
 };
 
 struct Connection

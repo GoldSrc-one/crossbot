@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "activation_detours.h"
 #include "area_merger.h"
 #include "airmove_prune.h"
 #include "airmove_sampler.h"
@@ -23,6 +24,7 @@
 #include "ladder_connections.h"
 #include "leaf_extractor.h"
 #include "nav_file.h"
+#include "plan_model.h"
 #include "plan_search.h"
 #include "reachability.h"
 #include "stand_classifier.h"
@@ -41,6 +43,11 @@ void PrintUsage(const char *argv0)
 		"usage: %s <map.bsp> [options]\n"
 		"  --dump-leaves     print per-leaf (pre-merge) id/faces/volume/centroid stats\n"
 		"  --dump-areas      print per-area (post-merge) id/faces/volume/centroid/member-leaf stats\n"
+		"  --dump-activators print activator discovery and the precomputed door detours: each gated\n"
+		"                    entity's activator brushes and their use/touch volumes, every candidate\n"
+		"                    service point with the area it stands in and why it was kept or rejected,\n"
+		"                    and for each (door area, entering neighbour) the chosen service point and\n"
+		"                    detour polyline, or why the entry is blocked\n"
 		"  --dump-conns      print every final connection: type, flags, endpoints, air-move parameters\n"
 		"  --dump-steps      print every walk connection the step filter trimmed or dropped: area pair,\n"
 		"                    shallowest crossing, both floor heights, surviving walkable runs, and each\n"
@@ -353,75 +360,11 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 		return Vector(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z));
 	};
 
-	std::vector<NavPlan::PlanArea> planAreas(merged.areas.size());
-	for (size_t i = 0; i < merged.areas.size(); ++i)
-	{
-		Vector centroid = ToVector(merged.areas[i].polytope.Centroid());
-		planAreas[i].centroid = centroid;
-		planAreas[i].crouch = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
-		planAreas[i].door = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
-		planAreas[i].breakable = (merged.areas[i].areaFlags & crossbot_nav::NAV_AREA_BREAKABLE) != 0;
-		planAreas[i].doorActivation = merged.areas[i].doorActivation;
-		planAreas[i].doorActivatorPos = ToVector(merged.areas[i].doorActivatorPos);
-		planAreas[i].doorWaitTime = static_cast<float>(merged.areas[i].openSeconds);
-
-		planAreas[i].boundPlanes.reserve(merged.areas[i].boundPlanes.size());
-		for (const navgen::Plane &p : merged.areas[i].boundPlanes)
-		{
-			NavPlan::PlanPlane pp;
-			pp.normal = Vector(static_cast<float>(p.normal.x), static_cast<float>(p.normal.y),
-				static_cast<float>(p.normal.z));
-			pp.dist = static_cast<float>(p.dist);
-			planAreas[i].boundPlanes.push_back(pp);
-		}
-	}
-
-	std::vector<NavAStar::Connection> graphConns(merged.conns.size());
-	std::vector<NavPlan::PlanConnection> planConns(merged.conns.size());
-	std::vector<std::vector<uint32_t>> areaConnIndices(merged.areas.size());
-	for (size_t i = 0; i < merged.conns.size(); ++i)
-	{
-		const navgen::MergedConnection &c = merged.conns[i];
-		Vector pointA = ToVector(c.pointA);
-		Vector pointB = ToVector(c.pointB);
-
-		NavAStar::Connection &gc = graphConns[i];
-		gc.areaA = static_cast<uint32_t>(c.areaA);
-		gc.areaB = static_cast<uint32_t>(c.areaB);
-		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
-		gc.costSeconds = navgen::ConnectionCostSeconds(c, merged.areas);
-
-		NavPlan::PlanConnection &pc = planConns[i];
-		pc.areaA = gc.areaA;
-		pc.areaB = gc.areaB;
-		pc.connType = c.connType;
-		pc.gateA.valid = c.gateAValid;
-		pc.gateA.clamped = c.gateAClamped;
-		pc.gateA.left = ToVector(c.gateALeft);
-		pc.gateA.right = ToVector(c.gateARight);
-		pc.gateB.valid = c.gateBValid;
-		pc.gateB.clamped = c.gateBClamped;
-		pc.gateB.left = ToVector(c.gateBLeft);
-		pc.gateB.right = ToVector(c.gateBRight);
-		for (int k = 0; k < 2; ++k)
-		{
-			pc.gateAYaw[k] = static_cast<float>(c.gateAYaw[k]);
-			pc.gateASpeed[k] = static_cast<float>(c.gateASpeed[k]);
-		}
-		pc.connFlags = c.connFlags;
-		pc.exitSpeed = static_cast<float>(c.exitSpeed);
-		pc.exitAngle = static_cast<float>(c.exitAngle);
-		pc.jumpBackDist = static_cast<float>(c.jumpBackDist);
-		pc.flightTime = static_cast<float>(c.flightTime);
-		pc.launchPos = pointA;
-		pc.landingPos = pointB;
-
-		areaConnIndices[static_cast<size_t>(c.areaA)].push_back(static_cast<uint32_t>(i));
-		areaConnIndices[static_cast<size_t>(c.areaB)].push_back(static_cast<uint32_t>(i));
-	}
-
-	for (size_t i = 0; i < planConns.size(); ++i)
-		graphConns[i].crossing = NavPlan::ConnectionCrossing(planAreas, planConns[i]);
+	navgen::PlanModel model = navgen::BuildPlanModel(merged);
+	std::vector<NavPlan::PlanArea> &planAreas = model.areas;
+	std::vector<NavPlan::PlanConnection> &planConns = model.conns;
+	std::vector<NavAStar::Connection> &graphConns = model.graphConns;
+	std::vector<std::vector<uint32_t>> &areaConnIndices = model.areaConnIndices;
 
 	uint32_t startArea = static_cast<uint32_t>(spawnAreas.front());
 	Vector startPoint = ToVector(spawnPoints.front());
@@ -671,6 +614,7 @@ int main(int argc, char **argv)
 	std::string bspPath;
 	bool dumpLeaves = false;
 	bool dumpAreas = false;
+	bool dumpActivators = false;
 	bool dumpConns = false;
 	bool dumpSteps = false;
 	bool dumpSupport = false;
@@ -698,6 +642,10 @@ int main(int argc, char **argv)
 		if (arg == "--dump-leaves")
 		{
 			dumpLeaves = true;
+		}
+		else if (arg == "--dump-activators")
+		{
+			dumpActivators = true;
 		}
 		else if (arg == "--dump-areas")
 		{
@@ -1202,6 +1150,15 @@ int main(int argc, char **argv)
 				bspPath.c_str(), gatelessConns, walkless, airless, ladderless);
 		}
 
+		navgen::DetourStats detourStats = navgen::BuildActivationDetours(bsp,
+			worldModel.headnode[navgen::kHullHuman], standBlockers, entities,
+			duckPassables.passable, merged.areas, merged.conns, dumpActivators);
+		if (detourStats.gatedAreas > 0)
+			std::printf("%s: %zu activation-gated areas, %zu activators, %zu service points "
+				"(%zu areas with no service point)\n",
+				bspPath.c_str(), detourStats.gatedAreas, detourStats.activators,
+				detourStats.servicePoints, detourStats.areasWithoutService);
+
 		int walkConns = 0, airMoveConns = 0, ladderConns = 0;
 		for (const navgen::MergedConnection &c : merged.conns)
 		{
@@ -1273,9 +1230,9 @@ int main(int argc, char **argv)
 					areaKind += " prism";
 				if (area.areaFlags & (crossbot_nav::NAV_AREA_DOOR | crossbot_nav::NAV_AREA_BREAKABLE))
 				{
-					static const char *kActivation[] = {"touch", "button", "trigger"};
+					static const char *kActivation[] = {"touch", "button", "trigger", "attack"};
 					char buf[128];
-					if (area.doorActivation == crossbot_nav::DOOR_ACTIVATION_TOUCH)
+					if (area.activation == crossbot_nav::ACT_NONE)
 					{
 						std::snprintf(buf, sizeof(buf), " %s(touch %.2fs)",
 							(area.areaFlags & crossbot_nav::NAV_AREA_DOOR) ? "door" : "breakable",
@@ -1283,10 +1240,13 @@ int main(int argc, char **argv)
 					}
 					else
 					{
-						std::snprintf(buf, sizeof(buf), " %s(%s at (%.1f, %.1f, %.1f) %.2fs)",
+						size_t blocked = 0;
+						for (const navgen::ActivationDetour &d : area.detours)
+							blocked += d.blocked ? 1 : 0;
+						std::snprintf(buf, sizeof(buf), " %s(%s, %zu entries: %zu ok / %zu blocked, %.2fs)",
 							(area.areaFlags & crossbot_nav::NAV_AREA_DOOR) ? "door" : "breakable",
-							kActivation[area.doorActivation < 3 ? area.doorActivation : 0],
-							area.doorActivatorPos.x, area.doorActivatorPos.y, area.doorActivatorPos.z,
+							kActivation[area.activation < 4 ? area.activation : 0],
+							area.detours.size(), area.detours.size() - blocked, blocked,
 							area.openSeconds);
 					}
 					areaKind += buf;

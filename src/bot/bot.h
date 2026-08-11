@@ -8,6 +8,12 @@
 #include "../nav/path_follower.h"
 #include "bot_avoid.h"
 
+struct BotActivation
+{
+	Vector center;
+	float time = 0.f;
+};
+
 struct CBot
 {
 	bool inUse = false;
@@ -49,6 +55,12 @@ struct CBot
 	int ladderStalls = 0;
 	int ladderTargetArea = -1;
 	int ladderConnIndex = -1;
+
+	bool activationActive = false;
+	bool activationPressed = false;
+	float activationStartTime = 0.f;
+	float activationHoldUntil = 0.f;
+	std::vector<BotActivation> activationMemo;
 
 	BotAvoid::State avoid;
 

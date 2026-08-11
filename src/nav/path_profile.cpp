@@ -224,11 +224,17 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 			waypoints[i].requiresLadder;
 	};
 
+	auto IsStop = [&](size_t i)
+	{
+		return waypoints[i].requiresButtonUse || waypoints[i].requiresTriggerTouch ||
+			waypoints[i].requiresDoor || waypoints[i].requiresBreak;
+	};
+
 	auto Suppressed = [&](size_t i)
 	{
-		if (IsGap(i))
+		if (IsGap(i) || IsStop(i))
 			return true;
-		if (i > 0 && IsGap(i - 1))
+		if (i > 0 && (IsGap(i - 1) || IsStop(i - 1)))
 			return true;
 		return false;
 	};
@@ -564,6 +570,19 @@ float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead)
 		profile.stopSpeed);
 
 	return std::min(reach, approach->vExit);
+}
+
+float ProfileWaypointS(const PlanProfile &profile, size_t wpIndex)
+{
+	for (const ProfileSeg &seg : profile.segs)
+	{
+		if (seg.wpIndex < wpIndex)
+			continue;
+		if (seg.wpIndex == wpIndex && !seg.isArc)
+			return seg.sStart + seg.sLen;
+		return seg.sStart;
+	}
+	return profile.totalLength;
 }
 
 ProfileSample SampleProfile(const PlanProfile &profile, float s)

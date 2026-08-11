@@ -62,11 +62,15 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	std::vector<NavConnectionRecord> connRecords;
 	std::vector<uint32_t> areaConnIndex;
 	std::vector<NavAreaPlane> areaPlanes;
+	std::vector<NavActivationDetourRecord> detourRecords;
+	std::vector<NavDetourPointRecord> detourPoints;
 
 	bool ok = ReadArray(f, header.areaCount, areaRecords) &&
 		ReadArray(f, header.connCount, connRecords) &&
 		ReadArray(f, header.areaConnIndexCount, areaConnIndex) &&
-		ReadArray(f, header.areaPlaneCount, areaPlanes);
+		ReadArray(f, header.areaPlaneCount, areaPlanes) &&
+		ReadArray(f, header.detourCount, detourRecords) &&
+		ReadArray(f, header.detourPointCount, detourPoints);
 	std::fclose(f);
 
 	if (!ok)
@@ -108,9 +112,6 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		area.maxs = Vector(rec.maxs[0], rec.maxs[1], rec.maxs[2]);
 		area.centroid = Vector(rec.centroid[0], rec.centroid[1], rec.centroid[2]);
 		area.areaFlags = rec.areaFlags;
-		area.doorActivation = rec.doorActivation;
-		area.doorActivatorPos = Vector(rec.doorActivatorPos[0], rec.doorActivatorPos[1], rec.doorActivatorPos[2]);
-		area.doorWaitTime = rec.doorWaitTime;
 		area.connIndices.reserve(rec.connCount);
 		for (uint32_t k = 0; k < rec.connCount; ++k)
 			area.connIndices.push_back(areaConnIndex[rec.connOffset + k]);
@@ -162,14 +163,42 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	for (size_t i = 0; i < mesh->areas.size(); ++i)
 	{
 		const Area &a = mesh->areas[i];
+		const NavAreaRecord &rec = areaRecords[i];
 		NavPlan::PlanArea &pa = mesh->planAreas[i];
 		pa.centroid = a.centroid;
 		pa.crouch = (a.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		pa.door = (a.areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
 		pa.breakable = (a.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE) != 0;
-		pa.doorActivation = a.doorActivation;
-		pa.doorActivatorPos = a.doorActivatorPos;
-		pa.doorWaitTime = a.doorWaitTime;
+		pa.activation = rec.activation;
+		pa.doorWaitTime = rec.openSeconds;
+
+		pa.detours.reserve(rec.detourCount);
+		for (uint32_t k = 0; k < rec.detourCount; ++k)
+		{
+			const NavActivationDetourRecord &drec = detourRecords[rec.detourOffset + k];
+			NavPlan::PlanDetour pd;
+			pd.fromAreaId = drec.fromAreaId;
+			pd.actIndex = drec.actIndex;
+			pd.actKind = drec.actKind;
+			pd.actCenter = Vector(drec.actCenter[0], drec.actCenter[1], drec.actCenter[2]);
+			pd.waitSeconds = drec.waitSeconds;
+			pd.detourSeconds = drec.detourSeconds;
+			pd.blocked = (drec.flags & crossbot_nav::DETOUR_FLAG_BLOCKED) != 0;
+
+			pd.points.reserve(drec.pointCount);
+			for (uint32_t p = 0; p < drec.pointCount; ++p)
+			{
+				const NavDetourPointRecord &prec = detourPoints[drec.pointOffset + p];
+				NavPlan::PlanDetourPoint pp;
+				pp.point = Vector(prec.pos[0], prec.pos[1], prec.pos[2]);
+				pp.areaId = static_cast<int>(prec.areaId);
+				pp.clearance = prec.clearance;
+				pp.crouch = (prec.flags & crossbot_nav::DETOUR_PT_CROUCH) != 0;
+				pd.points.push_back(pp);
+			}
+
+			pa.detours.push_back(pd);
+		}
 
 		pa.boundPlanes.reserve(a.planes.size());
 		for (const AreaPlane &src : a.planes)

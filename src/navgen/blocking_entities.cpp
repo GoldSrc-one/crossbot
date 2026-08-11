@@ -127,49 +127,72 @@ Vec3 ModelWorldCenter(const dmodel_t &model, const Vec3 &origin)
 		origin.z + (model.mins[2] + model.maxs[2]) * 0.5);
 }
 
-const Entity *ResolveButtonFor(const std::vector<Entity> &entities, const std::string &targetname)
+uint8_t ActivatorKindFor(const std::string &classname)
 {
-	for (const Entity &ent : entities)
-	{
-		if (ent.Get("classname") != "func_button")
-			continue;
-
-		std::string target = ent.Get("target");
-		if (target.empty())
-			continue;
-
-		if (target == targetname)
-			return &ent;
-
-		for (const Entity &mid : entities)
-		{
-			std::string midClass = mid.Get("classname");
-			if (midClass == "trigger_relay")
-			{
-				if (mid.Get("targetname") == target && mid.Get("target") == targetname)
-					return &ent;
-			}
-			else if (midClass == "multi_manager")
-			{
-				if (mid.Get("targetname") == target && mid.Find(targetname) != nullptr)
-					return &ent;
-			}
-		}
-	}
-	return nullptr;
+	if (classname == "func_button" || classname == "func_rot_button")
+		return crossbot_nav::ACT_BUTTON;
+	if (classname == "trigger_multiple" || classname == "trigger_once")
+		return crossbot_nav::ACT_TRIGGER;
+	return crossbot_nav::ACT_NONE;
 }
 
-const Entity *ResolveTriggerFor(const std::vector<Entity> &entities, const std::string &targetname)
+bool TargetReaches(const std::vector<Entity> &entities, const std::string &target,
+	const std::string &targetname)
 {
-	for (const Entity &ent : entities)
+	if (target.empty())
+		return false;
+	if (target == targetname)
+		return true;
+
+	for (const Entity &mid : entities)
 	{
-		std::string classname = ent.Get("classname");
-		if (classname != "trigger_multiple" && classname != "trigger_once")
+		std::string midClass = mid.Get("classname");
+		if (mid.Get("targetname") != target)
 			continue;
-		if (ent.Get("target") == targetname)
-			return &ent;
+
+		if (midClass == "trigger_relay")
+		{
+			if (mid.Get("target") == targetname)
+				return true;
+		}
+		else if (midClass == "multi_manager")
+		{
+			if (mid.Find(targetname) != nullptr)
+				return true;
+		}
 	}
-	return nullptr;
+	return false;
+}
+
+void CollectActivatorsFor(const BspFile &bsp, const std::vector<Entity> &entities,
+	const std::string &targetname, std::vector<ActivatorVolume> &out)
+{
+	for (size_t i = 0; i < entities.size(); ++i)
+	{
+		const Entity &ent = entities[i];
+
+		uint8_t kind = ActivatorKindFor(ent.Get("classname"));
+		if (kind == crossbot_nav::ACT_NONE)
+			continue;
+
+		if (!TargetReaches(entities, ent.Get("target"), targetname))
+			continue;
+
+		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
+		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
+			continue;
+
+		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
+		Vec3 origin = ParseEntityOrigin(ent.Get("origin"));
+
+		ActivatorVolume act;
+		act.kind = kind;
+		act.mins = Vec3(model.mins[0], model.mins[1], model.mins[2]) + origin;
+		act.maxs = Vec3(model.maxs[0], model.maxs[1], model.maxs[2]) + origin;
+		act.center = ModelWorldCenter(model, origin);
+		act.entityIndex = static_cast<int>(i);
+		out.push_back(act);
+	}
 }
 
 double DoorOpenSeconds(const Entity &ent, const dmodel_t &model)
@@ -289,8 +312,10 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 
 	PassableSet result;
 
-	for (const Entity &ent : entities)
+	for (size_t entIndex = 0; entIndex < entities.size(); ++entIndex)
 	{
+		const Entity &ent = entities[entIndex];
+
 		std::string classname = ent.Get("classname");
 		if (!IsPassableClassname(classname))
 			continue;
@@ -319,6 +344,7 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 
 		PassableVolume pass;
 		pass.volume = vol;
+		pass.entityIndex = static_cast<int>(entIndex);
 		pass.areaFlag = isDoor ? crossbot_nav::NAV_AREA_DOOR : crossbot_nav::NAV_AREA_BREAKABLE;
 		pass.openSeconds = isDoor ? DoorOpenSeconds(ent, model)
 			: std::max(ParseDouble(ent.Get("health"), kDefaultBreakableHealth), kDefaultBreakableHealth) *
@@ -330,40 +356,44 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 
 		if (targetname.empty() && !triggerOnly)
 		{
-			pass.activation = crossbot_nav::DOOR_ACTIVATION_TOUCH;
+			pass.activation = crossbot_nav::ACT_NONE;
 			result.passable.push_back(pass);
 			continue;
 		}
 
 		if (targetname.empty() && isDoor)
 		{
-			pass.activation = crossbot_nav::DOOR_ACTIVATION_BUTTON;
-			pass.activatorPos = ModelWorldCenter(model, vol.origin);
+			ActivatorVolume self;
+			self.kind = crossbot_nav::ACT_BUTTON;
+			self.mins = Vec3(model.mins[0], model.mins[1], model.mins[2]) + vol.origin;
+			self.maxs = Vec3(model.maxs[0], model.maxs[1], model.maxs[2]) + vol.origin;
+			self.center = ModelWorldCenter(model, vol.origin);
+			self.entityIndex = static_cast<int>(entIndex);
+
+			pass.activation = crossbot_nav::ACT_BUTTON;
+			pass.activators.push_back(self);
 			result.passable.push_back(pass);
 			continue;
 		}
 
-		const Entity *activator = nullptr;
-		if (!targetname.empty())
-		{
-			activator = ResolveButtonFor(entities, targetname);
-			pass.activation = crossbot_nav::DOOR_ACTIVATION_BUTTON;
-			if (!activator)
-			{
-				activator = ResolveTriggerFor(entities, targetname);
-				pass.activation = crossbot_nav::DOOR_ACTIVATION_TRIGGER;
-			}
-		}
+		CollectActivatorsFor(bsp, entities, targetname, pass.activators);
 
-		int activatorModel = activator ? ParseBrushModelIndex(activator->Get("model")) : -1;
-		if (activatorModel < 0 || static_cast<size_t>(activatorModel) >= bsp.Models().size())
+		if (pass.activators.empty())
 		{
 			result.impassable.push_back(vol);
 			continue;
 		}
 
-		pass.activatorPos = ModelWorldCenter(bsp.Models()[static_cast<size_t>(activatorModel)],
-			ParseEntityOrigin(activator->Get("origin")));
+		pass.activation = pass.activators.front().kind;
+		for (const ActivatorVolume &act : pass.activators)
+		{
+			if (act.kind == crossbot_nav::ACT_BUTTON)
+			{
+				pass.activation = crossbot_nav::ACT_BUTTON;
+				break;
+			}
+		}
+
 		result.passable.push_back(pass);
 	}
 

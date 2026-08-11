@@ -70,17 +70,21 @@ Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vec
 	float dt = physics.frameTime > 0.f ? physics.frameTime : 1.f / 60.f;
 	float speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
 
+	bool barred = cfg.sLimit >= 0.f && cfg.sLimit < profile.totalLength;
+	float limit = barred ? cfg.sLimit : profile.totalLength;
+	float floorS = std::max(cfg.sFloor, 0.f);
+
 	float lateral = 0.f;
 	float s;
 	if (!state.started)
 	{
-		s = NavPlan::ProjectOntoProfile(profile, pos, 0.f, profile.totalLength, &lateral);
+		s = NavPlan::ProjectOntoProfile(profile, pos, floorS, limit, &lateral);
 		state.started = true;
 	}
 	else
 	{
-		float sMin = state.progressS - cfg.projectBack;
-		float sMax = state.progressS + speed * dt * 4.f + cfg.projectAhead;
+		float sMin = std::max(state.progressS - cfg.projectBack, floorS);
+		float sMax = std::min(state.progressS + speed * dt * 4.f + cfg.projectAhead, limit);
 		s = NavPlan::ProjectOntoProfile(profile, pos, sMin, sMax, &lateral);
 	}
 
@@ -93,13 +97,13 @@ Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vec
 	d.onGap = here.gap;
 
 	const NavPlan::ProfileSeg &lastSeg = profile.segs.back();
-	if (HorizDist(pos, lastSeg.b) < cfg.goalRadius)
+	if (!barred && HorizDist(pos, lastSeg.b) < cfg.goalRadius)
 	{
 		d.done = true;
 		return d;
 	}
 
-	NavPlan::ProfileSample lead = NavPlan::SampleProfile(profile, s + speed * dt);
+	NavPlan::ProfileSample lead = NavPlan::SampleProfile(profile, std::min(s + speed * dt, limit));
 	d.aimPoint = lead.point;
 
 	Vector aimDir = lead.tangent;

@@ -18,13 +18,23 @@ struct BlockingVolume
 	Vec3 maxs;
 };
 
+struct ActivatorVolume
+{
+	uint8_t kind = crossbot_nav::ACT_BUTTON;
+	Vec3 mins;
+	Vec3 maxs;
+	Vec3 center;
+	int entityIndex = -1;
+};
+
 struct PassableVolume
 {
 	BlockingVolume volume;
 	uint32_t areaFlag = crossbot_nav::NAV_AREA_NONE;
-	uint8_t activation = crossbot_nav::DOOR_ACTIVATION_TOUCH;
-	Vec3 activatorPos;
+	uint8_t activation = crossbot_nav::ACT_NONE;
+	std::vector<ActivatorVolume> activators;
 	double openSeconds = 0.0;
+	int entityIndex = -1;
 };
 
 struct PassableSet
