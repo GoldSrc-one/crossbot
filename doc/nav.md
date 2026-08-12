@@ -283,6 +283,13 @@ the segment starts from. `vEntry`/`vExit` are ceilings, not predictions: a segme
 report 320 while the bot is still accelerating from the arc exit speed. A forward pass integrates the
 real speed against those ceilings to produce `totalTime`, which replaces the old fabricated ETA.
 
+An elevator ride contributes nothing to that integration and has to be added on top. Its two waypoints are
+the mover's column centre at two heights, so `Dist2D` is zero, the segment is never pushed, and the whole
+ride — travel *and* the departure stop's auto-return dwell — is invisible to every pass above. A trailing
+loop adds `elevatorWaitTime + elevatorTravelTime` per ride waypoint. Door and button dwells have the same
+gap and are still left to `kEtaSafetyMargin`; a ride cannot be, because on `test55_plat` it is twice the
+walking time.
+
 A second forward pass records the prediction the ceilings deliberately omit. Walking front to back, it
 carries the reachable speed through `AccelForward` — the exact solution of `dv/ds = (a - f·max(v,s0))/v`,
 bisected on the closed form, the mirror of `BrakeBack` — and stores it per segment as
@@ -352,6 +359,14 @@ the lookahead distance. Since the arc already encodes the turn, no anticipation 
 
 **Abort** - `needRepath` once lateral exceeds `rejoinAbort` (96). Previously nothing detected being
 off-path; the corridor pull fought forever until the stall timer fired.
+
+**`done` means arrived, and only that.** The cross-track correction can cancel the tangent exactly — a
+bot barred at a node by `sLimit` and standing beyond it along the tangent sees the chain point directly
+behind, and the two unit vectors sum to zero. That used to fall through to `d.done`, which
+`Bot_MoveNav` announces as reaching the goal and acts on by dropping it, wherever the bot happened to
+be. `test18_elevator` hit it while barred at a lift, printing `reached goal` 312 units away and mid
+shaft. A degenerate blend now keeps the raw tangent, and the surviving zero-direction case — which
+needs an empty tangent, not a cancelled one — asks for a repath instead of claiming success.
 
 ### NavFollow::SolveDrive
 Inverts one engine frame to hit a target velocity `V*`. This is the only correct way to ask the engine
@@ -484,6 +499,20 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
 
 **Connection types:**
 
+**Elevator:**
+- Checked before the activation guard, because a stop area is gated *and* legitimately enterable — the guard
+  otherwise rejects every non-walk edge into a gated area.
+- When the destination stop is gated, `PushActivationDetour` emits the summon detour first (walk to the call
+  button, press, come back). Returns **false** when that detour is missing or blocked — which is how "you
+  cannot call this lift from up here" is expressed.
+- Adds `m_extraTime += rideWaitSeconds`, then a counted boarding waypoint carrying
+  `requiresElevatorRide` / `elevatorTravelTime` / `elevatorWaitTime`, then a free arrival waypoint so the
+  shaft's height never enters the funnel. Anchor moves to the arrival point. The wait is copied onto the
+  waypoint as well as charged to the search, because the runner's ride deadline has to allow for a
+  platform that does not set off until its dwell elapses — see `doc/bot.md`.
+- Walking *onto* a gated stop takes the ordinary door path instead: `needsStop` includes a gated elevator area,
+  so the same detour runs and `doorWaitTime` (= the summon time) is charged.
+
 **Teleport:**
 - Flushes funnel to launchPos
 - Adds trigger waypoint (requiresTeleport=true, teleportDest=landingPos)
@@ -594,7 +623,7 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
 
 ### PlanWaypoint
 - `point` - position at player height (duck origin + 18 for stand)
-- Flags: requiresElevatorRide, requiresCrouch, requiresDoor, requiresBreak, requiresButtonUse, requiresTriggerTouch, activatorCenter, requiresTeleport, teleportDest, requiresLadder, ladderUp, ladderYaw, ladderEntryYaw, ladderSpeed, ladderExit, airmoveLaunch, requiresJump, launchSpeed, launchYaw, jumpBackDist, launchSimulated, launchSimFailed, launchSimFrom/To/Aim, targetAreaId
+- Flags: requiresElevatorRide, elevatorTravelTime, elevatorWaitTime, requiresCrouch, requiresDoor, requiresBreak, requiresButtonUse, requiresTriggerTouch, activatorCenter, requiresTeleport, teleportDest, requiresLadder, ladderUp, ladderYaw, ladderEntryYaw, ladderSpeed, ladderExit, airmoveLaunch, requiresJump, launchSpeed, launchYaw, jumpBackDist, launchSimulated, launchSimFailed, launchSimFrom/To/Aim, targetAreaId
 - `activatorCenter` is the activator brush model centre, copied from the detour. The bot aims at it to press:
   GoldSrc `PlayerUse` picks the entity whose centre gives the largest forward dot above `VIEW_FIELD_NARROW`,
   so the runtime cannot press without knowing where the brush is
@@ -608,8 +637,10 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
   legs are collinear in XY, so `ProjectOntoProfile` cannot tell them apart by distance and resolves the tie
   in favour of the lower `s`. Without `sLimit` the bot's `s` jumps to the return leg and it never stands on
   the activator (worse on first acquisition, which searches the whole profile); without `sFloor` it can never
-  leave the outbound leg afterwards and stalls in place. `sLimit` is the next unserviced activation, `sFloor`
-  the last serviced one, both computed in one pass over the waypoints each frame
+  leave the outbound leg afterwards and stalls in place. `sLimit` is the next unserviced activation *or
+  pending elevator ride*, `sFloor` the last serviced one, both computed in one pass over the waypoints each
+  frame. A ride is the same tie in its extreme form — its two waypoints share an XY exactly, so the
+  segment between them has zero length and does not exist in the profile at all; see `doc/bot.md`
 - **Press.** `RunActivation` takes over the frame inside `kActivationEngageRadius`, aims at `activatorCenter`
   in pitch and yaw, and emits a single `IN_USE` rising edge once the aim converges and the bot is within
   `kActivationUseRange` of the centre in 3D. One edge, not a held button — repeated presses would toggle a
@@ -936,7 +967,7 @@ value and mops up whatever the pull could not reach. On `test54_window` the 1→
 - Header: magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex, areaPlanes,
   detours, detourPoints)
 - AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount
-- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3]
+- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds
 - ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
 - DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
 
@@ -949,10 +980,12 @@ loading a stale mesh. Area planes are the exported `boundPlanes`, which for a pr
 plus a z-slab rather than its true faces.
 
 ### Enums
-- AreaFlags: CROUCH(1), LADDER_TOP(2), WATER(4), DOOR(128), BREAKABLE(256)
-- ConnType: WALK(0), TELEPORT(1), AIRMOVE(2), LADDER(3) - a ladder reuses the air-move fields rather than
-  adding its own: launchPos is the mount, landingPos the dismount, exitAngle the climbing yaw, exitSpeed
-  the climb speed, and flightTime/fallDamage belong to the dismount hop
+- AreaFlags: CROUCH(1), LADDER_TOP(2), WATER(4), DOOR(128), BREAKABLE(256), ELEVATOR(512)
+- ConnType: WALK(0), TELEPORT(1), AIRMOVE(2), LADDER(3), ELEVATOR(4) - a ladder reuses the air-move fields
+  rather than adding its own: launchPos is the mount, landingPos the dismount, exitAngle the climbing yaw,
+  exitSpeed the climb speed, and flightTime/fallDamage belong to the dismount hop. An elevator ride uses
+  launchPos as the boarding point and landingPos as the arrival point, and carries its own rideSeconds /
+  rideWaitSeconds; rideSecondsMax equals rideSeconds today and is the hook for a swept-interval sampler
 - ConnFlags: ONE_WAY(1), NEEDS_CROUCH(2), JUMP(4) - jump means left ground under impulse, not derivable from jumpBackDist
 - DoorActivation: TOUCH(0), BUTTON(1), TRIGGER(2)
 - GateValidFlags: VALID_A(1), VALID_B(2), CLAMPED_A(4), CLAMPED_B(8)

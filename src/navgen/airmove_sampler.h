@@ -75,6 +75,22 @@ struct HullContext
 	const std::vector<BlockingVolume> *ladders = nullptr;
 };
 
+struct AirmoveWorldStop
+{
+	int moverId = -1;
+	bool isDefault = false;
+	BlockingVolume duckVolume;
+	BlockingVolume standVolume;
+};
+
+struct AirmoveWorlds
+{
+	std::vector<BlockingVolume> baseDuck;
+	std::vector<BlockingVolume> baseStand;
+	std::vector<AirmoveWorldStop> stops;
+	std::vector<int> defaultStopOf;
+};
+
 class PM_MoveSimulator
 {
 public:
@@ -119,8 +135,9 @@ std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Are
 	const AirmoveSampleParams &params);
 
 void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
-	const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
-	const PhysicsParams &physics, const AirmoveSampleParams &params = AirmoveSampleParams());
+	const AirmoveWorlds &worlds, const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
+	const PhysicsParams &physics, const AirmoveSampleParams &params = AirmoveSampleParams(),
+	bool dumpElevators = false);
 
 }
 

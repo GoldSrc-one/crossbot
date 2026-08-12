@@ -15,6 +15,7 @@ struct ExtractedLeaf
 	Polytope polytope;
 
 	int passableIndex = -1;
+	int elevatorStopId = -1;
 };
 
 Polytope BuildPolytopeFromChain(const BspFile &bsp, const std::vector<PlaneChainEntry> &chain, double mapRadius);

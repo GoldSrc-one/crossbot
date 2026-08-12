@@ -26,6 +26,12 @@ Command-line tool with extensive debug flags:
 - `--dump-ladders` - ladder discovery: each `func_ladder`'s hull-3 volume, why each face was kept or
   rejected, the mount and top positions, and every dismount simulation with its height, direction,
   landing area, fall damage and loopback verdict
+- `--dump-elevators` - elevator classification: every `func_door`/`func_plat`, its movedir and footprint,
+  whether it was reclassified as a rideable platform or left to the door path and why, and for each accepted
+  one its stop positions with ride and dwell times, activation, shaft column, the boxes carved out of the
+  walkable leaves, the tagged stop leaves and the ride connections built. Also, per non-default stop area,
+  the air-move sweep run with the mover placed there: perimeter edges, how many of them are supported with
+  the mover parked versus placed, and the launch edges and samples that came out
 - `--dump-path` - per-waypoint clearance and per-segment arc/line/gap rows (radius, turn, length,
   entry/exit speed, cap, and the `reach` pair — the speed the bot can really carry, see `doc/nav.md`)
   for the debug route, plus the profile summary line
@@ -317,7 +323,7 @@ Runs after `ProbeAirMoves` and before the prune passes. Emits `CONN_LADDER` conn
 `func_ladder`.
 
 ### The volumes are carved out of the walkable leaves
-`SubtractLadderVolumes` (blocking_entities.cpp) removes each ladder's hull-3 volume from every leaf it
+`SubtractBoxVolumes` (blocking_entities.cpp) removes each ladder's hull-3 volume from every leaf it
 overlaps, before areas are built. A nav area is duck-origin space and the expanded volume is exactly the
 set of origins the engine puts on a ladder, so after the carve **no nav area contains a ladder-capture
 point**. That makes routing past a ladder structural: neither the planner nor `bot_avoid` can send the bot
@@ -718,6 +724,185 @@ Both halves come out of the same clip planes, so their floors tile without a gap
 connects the door piece to its neighbours with no extra linking. This is the same property prism merging relies
 on, and it is why splitting needs no new linking code at all.
 
+## elevators.cpp
+
+### What an elevator is, and why it is not a door
+A vertical `func_door` is the classic HLDM lift: you stand on top and it carries you. Modelling it as a door —
+something you wait for and walk *through* — produces a wrong route rather than a missing one. On
+`test18_elevator` it used to yield a 16-unit slab tagged `door(button, 2.38s)` under the parked platform, and
+the pit column's floor became the parked platform top instead of the real pit floor.
+
+### Classification
+Two tests, both required; failing either leaves the entity on the normal door path.
+
+1. classname `func_door` (not `func_door_rotating`) or `func_plat`, and `|movedir.z| > kFloorNormalZ` with the
+   other two components under `kElevatorAxisEpsilon`. Pure translation only — `TraceHullWithEntities` translates
+   a blocker by its `origin` and cannot rotate a clipnode tree, so a rotating mover is not expressible.
+2. footprint at least `kElevatorMinFootprint` (48) in **both** horizontal axes.
+
+The movedir test alone separates nothing: every `func_door` in `test9_door`, `test10_doorbutton`,
+`test11_doorbutton2` and `test20_doortrigger` also has `angles "-90 0 0"` and moves straight up. The four test
+doors are 16 × 64 and are rejected on footprint. A 48-unit floor in both axes is not a doorway.
+
+### Stops
+`func_door` — travel from `DoorTravelDistance`, ride time `travel / DoorSpeed`. `SF_DOOR_START_OPEN` makes the
+moved position the spawn position (hlsdk `doors.cpp` swaps `m_vecPosition2` with `m_vecPosition1`). Dwell at the
+moved stop is `wait`; `wait < 0` or `SF_DOOR_NO_AUTO_RETURN` means it never leaves on its own.
+
+`func_plat` — the brush as compiled *is* the top position (hlsdk `plats.cpp`: "plats are always drawn in the
+extended position"). Bottom is `origin.z - height`, or `origin.z - size.z + 8` when `height` is 0. Speed
+defaults to 150. A **named** plat spawns at the top and is brought down by its button; an **unnamed** one spawns
+at the bottom with its own auto-spawned touch trigger. Dwell at the top is 3 s unless `SF_PLAT_TOGGLE`.
+
+Dwell is keyed to the mover's **position**, not to which stop is the default. `CFuncPlat::HitTop` waits at the
+top whether or not the top is where it spawned, so a named plat (default = top) and an unnamed one
+(default = bottom) both dwell at travel 0. Keying it to default-ness gets the unnamed case backwards and
+silently drops the ride-down edge. A door is the other way round — it dwells at its *opened* position — which is
+its non-spawn stop either way, including under `SF_DOOR_START_OPEN` where hlsdk swaps the two positions.
+
+### A stop you cannot summon can be left but not entered
+An unnamed `func_plat` has no activator in the entity lump — its trigger is auto-spawned at runtime — so its
+raised stop is `ACT_NONE` and nothing gates walking onto it. That would let a bot walk out over a shaft with the
+platform parked at the bottom. A `CONN_WALK` is one bidirectional record, so dropping it would take the way
+*off* the platform with it, which is the seam that matters once you have ridden up. `BuildElevatorConnections`
+therefore orients it instead: `CONN_FLAG_ONE_WAY` with the stop as `areaA`, so the seam can only be walked
+outwards. `reachability.cpp` and `nav_path.cpp` both honour the flag, so a stop nobody can summon still does not
+become reachable through that seam. Separate from this are the walk edges dropped *between* two stops of one
+mover, which the step filter usually kills first but which are removed structurally.
+
+### Geometry: a stop area is the space the mover floors
+All in nav (duck-clip origin) space. Everything needed is per stop and already built by `ExtractElevators`:
+
+- `duckVolume` — the mover's model at that stop's offset, expanded by the hull, traced through the model's own
+  clipnodes. `MoverVolume` builds it; its AABB is the model bounds `±16` in XY, `±18` in Z.
+- `topZ` — `origin.z + model.maxs.z + travel + kDuckClipHullMaxZ`, the top of that body. `slabTopZ` is the next
+  stop's `topZ`, or `mapRadius` for the highest, which is what keeps two stops of one mover from overlapping —
+  on `test18_elevator` they meet exactly at nav 16.
+
+`SplitLeavesByElevatorStops` runs **before** `SplitLeavesByFloorSupport` and is the only place a mover touches
+the leaves. Per leaf, per stop, `ClaimStopFloor` takes the space between `topZ` and `slabTopZ` whose floor is
+the mover and not the world:
+
+- the candidate is the leaf clipped to `duckVolume`'s AABB in XY and `[topZ, slabTopZ]` in Z;
+- `ComputeSupportedFloor` on its floor face, once against the world plus every non-elevator blocker and once
+  against `{duckVolume}` alone (with `CONTENTS_EMPTY` as the headnode, so the world contributes nothing), says
+  which of the two holds each part of it up;
+- where those disagree, `VerticalPlaneThroughEdge` and `ClipPolytope` cut the candidate along the boundary;
+- mover-floored pieces are claimed and tagged `elevatorStopId`. Anything the world already floors stays behind,
+  and if nothing at all is claimed the leaf is left whole rather than fragmented.
+
+Only then is the **default** stop's body subtracted from what remains, and only from pieces that strictly
+overlap it — `OverlapsBlockingVolume` counts a shared face, and carving against a tree a piece merely touches
+splits it along that tree's planes, which would strand the halves. Claiming before subtracting is what lets a
+lift parked at its *top* stop still produce a lower stop area; the general blocker carve in `main.cpp` runs on
+`airmoveWorlds.baseDuck`, which is every blocker except the elevator volumes, precisely so this stage can own
+the order.
+
+The second half of the rule is what a flush landing needs. `test55_plat`'s raised stop is level with the ledge
+beside it, and the mover's own footprint reaches 16 units into that ledge; the world floors that strip, so it
+stays ordinary ground and walking onto the ledge does not require summoning the plat. The first half is what
+makes the strip on the *other* side — 256 units of pit under it — part of the stop, gated with it, instead of a
+free-standing ledge in mid-air.
+
+Injecting as **leaves** rather than as finished areas is what makes the rest free: floor support, stand
+clearance, `MergeAreas`, `BuildBoundPlanes`, `ValidateAreaFootprints`, `BuildWalkConnections`,
+`FilterWalkConnectionsByStep`, `ProbeAirMoves`, `PruneUnreachableAreas`, `BakeConnectionGates` and
+`BuildActivationDetours` all run unmodified. In particular `BuildWalkConnections` re-derives every seam with
+`CollectFloorSeams` on the final area polytopes, so a stop area gets its walk connections with no linking code —
+on `test18_elevator` the raised stop's floor (nav 16) and the corridor slivers' floors (nav 18) share the planes
+`x = 144` and `x = 368`, and the 2-unit step survives the step filter. On `test55_plat` the same machinery finds
+the 8-unit step from the pit floor at nav `-238` onto the parked plat at nav `-230`, which is how a bot boards.
+
+### Blocker lists
+- `blockers` / `standBlockers` get the **default stop only**, so traces see the map as it spawns. This is what
+  makes a drop into the shaft land on the parked platform. The leaf carve uses `airmoveWorlds.baseDuck`
+  instead — the same list *without* the mover — because `SplitLeavesByElevatorStops` subtracts the parked body
+  itself, after claiming.
+- `supportBlockers` gets **every stop**, or each stop's floor face would probe into air and
+  `SplitLeavesByFloorSupport` would drop it.
+- `ProbeAirMoves` gets neither. It takes an `AirmoveWorlds` — the base lists with **no** mover volumes at all,
+  plus every stop's volume indexed by `Area::elevatorStopId` — and composes its own world as
+  `base + one volume per mover`, which is why `BuildAirmoveWorlds` is called before the default stops are
+  appended to `blockers`.
+
+### Where the mover stands during sampling
+The sampler cannot use one static world. A stop's floor is the boundary between its own volume and the area
+below it, so making a raised stop standable necessarily seals the stop beneath it — on `test18_elevator` the
+raised platform blocks nav `−260…16` and area 6 is `−222…16`, entirely inside it. Making every stop solid at
+once would leave area 6 with no free space at all, delete the drop into the pit, and strand the route at the
+call button. That is not an artifact: when the lift is up you genuinely cannot drop into the pit. A thin slab
+at `topZ` fails the same way, and a swept volume is worse, being the union over a continuum.
+
+So the world is a property of the **sweep**, not of the sampler. `PM_MoveSimulator` holds its blocker list by
+reference, and `sweepArea` is the single lambda both the main loop and the reverse-seed loop go through, so
+selecting a configuration there costs nothing:
+
+- Sweeping an area tagged with a **non-default** stop selects that stop for its mover, recomposes the world,
+  sweeps, and restores. Selecting replaces the mover's volume rather than adding one, so the composed world
+  never has a platform in two places.
+- Every other area sweeps in the default configuration, exactly as before. On a map with no elevators the
+  composed world is the base list unchanged, and the whole sweep is byte-identical to the pre-`AirmoveWorlds`
+  output across every map under `maps/`.
+
+With the platform placed, `FilterLaunchEdges`, `IsSupported` and `Simulate` need no special cases — relaxing
+`IsSupported` would not have worked anyway, since `Simulate` runs in the same world and the sampled player
+would fall through the floor it launched from. `--dump-elevators` reports the flip per stop area, e.g.
+`support 0 parked -> 4 placed`. `test18_elevator` stops there — its raised top is flush with both corridors, so
+`GroundAhead` filters every perimeter edge — but `test55_plat` goes the whole way: its raised stop reaches
+`x=112`, where 256 units of pit lie beyond, giving `2 launch edges, 508 samples` and a real `airmove 4 -> 7`
+off the platform into the pit. That is the end-to-end case, and it only exists because the stop claims the
+space the mover floors rather than a shrunken box.
+
+Nothing is needed at runtime: `PlanWalker::JumpLandsIn` re-simulates every air move against the live engine
+trace, so an edge that only exists with the lift raised simply fails to relax while it is parked.
+
+### Gating and the ride edge
+The default stop is real ground: `ACT_NONE`. Every other stop carries `NAV_AREA_ELEVATOR`, the mover's
+activation, and `openSeconds` = the ride time — the cost of *summoning* the platform. Walking onto a non-default
+stop therefore goes through the same `ActivationDetour` machinery a door uses, keyed the same way
+(`FindDetour(toArea, fromId)`). On `test18_elevator` that is exactly right: entering the raised stop from either
+corridor needs a route to the call button, the button is only reachable from the parked platform, the detour
+comes back `blocked`, and `PlanWalker::Cross` refuses. You cannot summon that lift from the top.
+
+`BuildElevatorConnections` runs after `FilterWalkConnectionsByStep` and before `ProbeAirMoves`, so the stop pair
+is already in the sampler's `existingPairs` and no duplicate 238-unit lethal drop is sampled. It also removes any
+`CONN_WALK` the seam collector built between two stops of one mover.
+
+`CONN_ELEVATOR` carries `rideSeconds`, `rideSecondsMax` (equal to `rideSeconds` today; the hook for a future
+swept-interval sampler) and `rideWaitSeconds`. Cost is `rideSeconds + rideWaitSeconds` — time, no distance. The
+ride *toward* the non-default stop is gated by that area's activation and waits 0; the ride *back* is ungated and
+waits the departure stop's dwell. A stop that never leaves on its own emits no return edge, which makes the lift
+one-way in the mesh rather than silently wrong.
+
+In `PlanWalker::Cross` the branch follows the teleport template: optional activation detour, a counted waypoint
+carrying `requiresElevatorRide` / `elevatorTravelTime`, then `PushWaypoint(arrive, countLength=false)` so the
+238 units never enter the funnel, then re-anchor.
+
+### Known limitations
+- **No air moves *onto* a non-default stop.** Launching off one works (see "Where the mover stands during
+  sampling"), because the launch area is the stop itself and the sweep places the mover. Landing on one does
+  not: the launch area is an ordinary corridor swept in the default configuration, so a jump toward the shaft
+  simulates a fall straight past the raised stop down to the parked platform and `landingArea` resolves to the
+  default stop. Correct for the world it simulated, but nothing can be found that lands on a raised stop. The
+  fix is to sweep areas near a mover once per configuration, recording only pairs that touch that mover's
+  stops so the default world stays authoritative elsewhere; `PlanWalker::Cross` already rejects a non-walk,
+  non-ride entry into a gated stop, so such an edge would also need `BuildActivationDetours` extended past its
+  walk-and-ride entry check.
+- **A large ceiling-retracting door misclassifies.** With the footprint test as the sole discriminator, a
+  vertical door 48+ units in both horizontal axes that slides up into a recess becomes an elevator: its sweep is
+  carved and the upper stop area is unreachable inside the recess. A wasted area and a lost doorway, not a crash.
+- **`test18_elevator` depends on its 2-unit flushness.** The raised top lands at nav 16 against corridor floors
+  at nav 18, which is why the exits are walk seams. Change the `lip` and the map becomes an air-move case.
+- **Auto-return dwell is not enforced.** `rideWaitSeconds` records that the platform leaves after `wait`
+  seconds, but nothing prevents planning a top-side walk-off slower than the dwell. That is a runtime concern.
+- **An unnamed `func_plat` cannot be summoned from outside.** `CollectActivatorsFor` only runs when `targetname`
+  is non-empty ([elevators.cpp:183](../src/navgen/elevators.cpp:183)), so a plat summoned by its own implicit
+  `CPlatTrigger` reports `activation none, 0 activator(s)` and every seam into its raised stop is exit-only.
+  `test55_plat` does not need entering — pit → board → ride → alight — but a plat parked at its *top* stop is
+  unreachable from below, which is what `topplat` (that map with a `targetname` patched in) shows: both stop
+  areas and a ride-down edge exist, and nothing can call it. Modelling `CPlatTrigger` as an `ACT_TOUCH`
+  activator over the mover's own column would close it.
+
 ## activation_detours.cpp
 
 ### Why precompute
@@ -777,8 +962,8 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v13):
-- Header: magic "CBNV", version 13, mapName[64], bspChecksum, counts (including `detourCount` and
+Serializes MergeResult to crossbot_nav format (v14):
+- Header: magic "CBNV", version 14, mapName[64], bspChecksum, counts (including `detourCount` and
   `detourPointCount`)
 - Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, `activation`,
   `openSeconds`, and `detourOffset`/`detourCount`

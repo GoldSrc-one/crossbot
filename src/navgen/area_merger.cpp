@@ -30,6 +30,9 @@ float ConnectionCostSeconds(const MergedConnection &conn)
 		seconds += static_cast<float>((conn.pointB - conn.pointA).Length() /
 			std::max(conn.exitSpeed, 1.0));
 
+	if (conn.connType == crossbot_nav::CONN_ELEVATOR)
+		seconds += static_cast<float>(conn.rideSeconds + conn.rideWaitSeconds);
+
 	return seconds;
 }
 
@@ -485,7 +488,7 @@ size_t BakeConnectionGates(const std::vector<Area> &areas, std::vector<MergedCon
 		}
 
 		if (c.connType != crossbot_nav::CONN_TELEPORT && c.connType != crossbot_nav::CONN_LADDER &&
-			(!c.gateAValid || !c.gateBValid))
+			c.connType != crossbot_nav::CONN_ELEVATOR && (!c.gateAValid || !c.gateBValid))
 			++missing;
 	}
 
@@ -701,6 +704,12 @@ int LeafPassable(const std::vector<ExtractedLeaf> &leaves, int leafId)
 	return (static_cast<size_t>(leafId) < leaves.size()) ? leaves[static_cast<size_t>(leafId)].passableIndex : -1;
 }
 
+int LeafElevatorStop(const std::vector<ExtractedLeaf> &leaves, int leafId)
+{
+	return (static_cast<size_t>(leafId) < leaves.size())
+		? leaves[static_cast<size_t>(leafId)].elevatorStopId : -1;
+}
+
 void ApplyPassable(Area &area, const std::vector<PassableVolume> &passables, int passableIndex)
 {
 	if (passableIndex < 0 || static_cast<size_t>(passableIndex) >= passables.size())
@@ -716,6 +725,8 @@ void ApplyPassable(Area &area, const std::vector<PassableVolume> &passables, int
 	area.activation = p.activation;
 	area.openSeconds = p.openSeconds;
 	area.passableIndex = passableIndex;
+	area.activationEntity = p.entityIndex;
+	area.activators = p.activators;
 }
 
 }
@@ -1185,6 +1196,9 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		if (LeafPassable(leaves, seam.a) != LeafPassable(leaves, seam.b))
 			continue;
 
+		if (LeafElevatorStop(leaves, seam.a) != LeafElevatorStop(leaves, seam.b))
+			continue;
+
 		if (!SeamIsWalkable(leaves[static_cast<size_t>(seam.a)].polytope,
 				leaves[static_cast<size_t>(seam.b)].polytope, seam.pointA, seam.pointB, kStepHeight))
 			continue;
@@ -1372,6 +1386,12 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 			if (LeafIsCrouch(isCrouchLeaf, leafId))
 				area.areaFlags |= crossbot_nav::NAV_AREA_CROUCH;
 			ApplyPassable(area, passables, LeafPassable(leaves, leafId));
+			int stopId = LeafElevatorStop(leaves, leafId);
+			if (stopId >= 0)
+			{
+				area.elevatorStopId = stopId;
+				area.areaFlags |= crossbot_nav::NAV_AREA_ELEVATOR;
+			}
 			std::vector<const Face *> faces;
 			facesExcluding(leafId, removedFaces, faces);
 			for (const Face *f : faces)

@@ -382,6 +382,23 @@ struct SweepMode
 	bool jump = true;
 };
 
+size_t CountSupportedEdges(const PM_MoveSimulator &sim, const std::vector<LaunchEdge> &edges,
+	double probeZ, const AirmoveSampleParams &params)
+{
+	size_t supported = 0;
+
+	for (const LaunchEdge &edge : edges)
+	{
+		Vec3 launchPos = (edge.a + edge.b) * 0.5 - edge.outward * params.inset;
+		launchPos.z += params.lift;
+
+		if (sim.IsSupported(Vec3(launchPos.x, launchPos.y, launchPos.z + probeZ)))
+			++supported;
+	}
+
+	return supported;
+}
+
 }
 
 std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Area &area, double probeZ,
@@ -623,8 +640,8 @@ AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajecto
 }
 
 void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
-	const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
-	const PhysicsParams &physics, const AirmoveSampleParams &params)
+	const AirmoveWorlds &worlds, const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
+	const PhysicsParams &physics, const AirmoveSampleParams &params, bool dumpElevators)
 {
 	std::unordered_set<long long> existingPairs;
 	for (const MergedConnection &c : conns)
@@ -636,11 +653,31 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	PhysicsParams duckPhysics = physics;
 	duckPhysics.maxSpeed = physics.maxSpeed * physics.duckSpeedMultiplier;
 
-	PM_MoveSimulator standSim(bsp, standHull.headnode, *standHull.blockers, params, physics,
+	std::vector<int> selected = worlds.defaultStopOf;
+	std::vector<BlockingVolume> duckWorld;
+	std::vector<BlockingVolume> standWorld;
+
+	auto composeWorld = [&]()
+	{
+		duckWorld = worlds.baseDuck;
+		standWorld = worlds.baseStand;
+		for (int stopIndex : selected)
+		{
+			if (stopIndex < 0 || static_cast<size_t>(stopIndex) >= worlds.stops.size())
+				continue;
+			const AirmoveWorldStop &stop = worlds.stops[static_cast<size_t>(stopIndex)];
+			duckWorld.push_back(stop.duckVolume);
+			standWorld.push_back(stop.standVolume);
+		}
+	};
+
+	composeWorld();
+
+	PM_MoveSimulator standSim(bsp, standHull.headnode, standWorld, params, physics,
 		standHull.ladders);
-	PM_MoveSimulator crouchJumpSim(bsp, duckHull.headnode, *duckHull.blockers, params, physics,
+	PM_MoveSimulator crouchJumpSim(bsp, duckHull.headnode, duckWorld, params, physics,
 		duckHull.ladders);
-	PM_MoveSimulator duckSim(bsp, duckHull.headnode, *duckHull.blockers, params, duckPhysics,
+	PM_MoveSimulator duckSim(bsp, duckHull.headnode, duckWorld, params, duckPhysics,
 		duckHull.ladders);
 
 	SweepMode standSweep;
@@ -672,6 +709,8 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	size_t simulated = 0;
 	std::unordered_set<int> sourceAreas;
 	size_t unfitted = 0;
+	size_t areaLaunchEdges = 0;
+	size_t areaRecorded = 0;
 
 	auto runSweep = [&](const SweepMode &mode, const Area &area, const std::vector<LaunchEdge> &edges,
 		bool requireLaunchInside)
@@ -741,12 +780,13 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 					entry.samples.push_back(sample);
 
 					sourceAreas.insert(area.id);
+					++areaRecorded;
 				}
 			}
 		}
 	};
 
-	auto sweepArea = [&](const Area &area, const std::vector<LaunchEdge> *seed)
+	auto sweepAreaInWorld = [&](const Area &area, const std::vector<LaunchEdge> *seed)
 	{
 		auto run = [&](const SweepMode &base, const PM_MoveSimulator &sim)
 		{
@@ -758,6 +798,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			if (!seed)
 				perimeter = FilterLaunchEdges(sim, area, mode.probeZ, params);
 
+			areaLaunchEdges += seed ? seed->size() : perimeter.size();
 			runSweep(mode, area, seed ? *seed : perimeter, seed != nullptr);
 		};
 
@@ -770,6 +811,56 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 
 		run(standSweep, standSim);
 		run(crouchJumpSweep, crouchJumpSim);
+	};
+
+	auto sweepArea = [&](const Area &area, const std::vector<LaunchEdge> *seed)
+	{
+		int stopIndex = area.elevatorStopId;
+		if (stopIndex < 0 || static_cast<size_t>(stopIndex) >= worlds.stops.size())
+		{
+			sweepAreaInWorld(area, seed);
+			return;
+		}
+
+		const AirmoveWorldStop &stop = worlds.stops[static_cast<size_t>(stopIndex)];
+		if (stop.isDefault || stop.moverId < 0 ||
+			static_cast<size_t>(stop.moverId) >= selected.size())
+		{
+			sweepAreaInWorld(area, seed);
+			return;
+		}
+
+		bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		const PM_MoveSimulator &probeSim = crouch ? duckSim : standSim;
+		double probeZ = crouch ? 0.0 : kStandProbeLift;
+
+		std::vector<LaunchEdge> perimeter;
+		size_t supportedParked = 0;
+		if (dumpElevators)
+		{
+			perimeter = CollectPerimeterEdges(area);
+			supportedParked = CountSupportedEdges(probeSim, perimeter, probeZ, params);
+		}
+
+		int previous = selected[static_cast<size_t>(stop.moverId)];
+		selected[static_cast<size_t>(stop.moverId)] = stopIndex;
+		composeWorld();
+
+		areaLaunchEdges = 0;
+		areaRecorded = 0;
+		sweepAreaInWorld(area, seed);
+
+		if (dumpElevators)
+		{
+			std::printf("  airmove area %d (mover %d stop %d placed): %zu perimeter edges, "
+				"support %zu parked -> %zu placed, %zu launch edges, %zu samples\n",
+				area.id, stop.moverId, stopIndex, perimeter.size(), supportedParked,
+				CountSupportedEdges(probeSim, perimeter, probeZ, params), areaLaunchEdges,
+				areaRecorded);
+		}
+
+		selected[static_cast<size_t>(stop.moverId)] = previous;
+		composeWorld();
 	};
 
 	for (const Area &area : areas)

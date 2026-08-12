@@ -44,6 +44,70 @@ bool IsPassableClassname(const std::string &classname)
 	return IsDoorClassname(classname) || classname == "func_breakable";
 }
 
+void PolytopeBounds(const Polytope &poly, Vec3 &mins, Vec3 &maxs)
+{
+	mins = Vec3(1e30, 1e30, 1e30);
+	maxs = Vec3(-1e30, -1e30, -1e30);
+	for (const Face &f : poly.faces)
+	{
+		for (const Vec3 &v : f.winding)
+		{
+			mins.x = std::min(mins.x, v.x);
+			mins.y = std::min(mins.y, v.y);
+			mins.z = std::min(mins.z, v.z);
+			maxs.x = std::max(maxs.x, v.x);
+			maxs.y = std::max(maxs.y, v.y);
+			maxs.z = std::max(maxs.z, v.z);
+		}
+	}
+}
+
+bool BoundsOverlap(const Vec3 &aMins, const Vec3 &aMaxs, const Vec3 &bMins, const Vec3 &bMaxs, double epsilon)
+{
+	return aMins.x <= bMaxs.x + epsilon && aMaxs.x >= bMins.x - epsilon &&
+		aMins.y <= bMaxs.y + epsilon && aMaxs.y >= bMins.y - epsilon &&
+		aMins.z <= bMaxs.z + epsilon && aMaxs.z >= bMins.z - epsilon;
+}
+
+uint8_t ActivatorKindFor(const std::string &classname)
+{
+	if (classname == "func_button" || classname == "func_rot_button")
+		return crossbot_nav::ACT_BUTTON;
+	if (classname == "trigger_multiple" || classname == "trigger_once")
+		return crossbot_nav::ACT_TRIGGER;
+	return crossbot_nav::ACT_NONE;
+}
+
+bool TargetReaches(const std::vector<Entity> &entities, const std::string &target,
+	const std::string &targetname)
+{
+	if (target.empty())
+		return false;
+	if (target == targetname)
+		return true;
+
+	for (const Entity &mid : entities)
+	{
+		std::string midClass = mid.Get("classname");
+		if (mid.Get("targetname") != target)
+			continue;
+
+		if (midClass == "trigger_relay")
+		{
+			if (mid.Get("target") == targetname)
+				return true;
+		}
+		else if (midClass == "multi_manager")
+		{
+			if (mid.Find(targetname) != nullptr)
+				return true;
+		}
+	}
+	return false;
+}
+
+}
+
 double ParseDouble(const std::string &s, double def)
 {
 	if (s.empty())
@@ -95,31 +159,6 @@ Vec3 ParseEntityOrigin(const std::string &origin)
 	return Vec3(x, y, z);
 }
 
-void PolytopeBounds(const Polytope &poly, Vec3 &mins, Vec3 &maxs)
-{
-	mins = Vec3(1e30, 1e30, 1e30);
-	maxs = Vec3(-1e30, -1e30, -1e30);
-	for (const Face &f : poly.faces)
-	{
-		for (const Vec3 &v : f.winding)
-		{
-			mins.x = std::min(mins.x, v.x);
-			mins.y = std::min(mins.y, v.y);
-			mins.z = std::min(mins.z, v.z);
-			maxs.x = std::max(maxs.x, v.x);
-			maxs.y = std::max(maxs.y, v.y);
-			maxs.z = std::max(maxs.z, v.z);
-		}
-	}
-}
-
-bool BoundsOverlap(const Vec3 &aMins, const Vec3 &aMaxs, const Vec3 &bMins, const Vec3 &bMaxs, double epsilon)
-{
-	return aMins.x <= bMaxs.x + epsilon && aMaxs.x >= bMins.x - epsilon &&
-		aMins.y <= bMaxs.y + epsilon && aMaxs.y >= bMins.y - epsilon &&
-		aMins.z <= bMaxs.z + epsilon && aMaxs.z >= bMins.z - epsilon;
-}
-
 Vec3 ModelWorldCenter(const dmodel_t &model, const Vec3 &origin)
 {
 	return Vec3(origin.x + (model.mins[0] + model.maxs[0]) * 0.5,
@@ -127,41 +166,21 @@ Vec3 ModelWorldCenter(const dmodel_t &model, const Vec3 &origin)
 		origin.z + (model.mins[2] + model.maxs[2]) * 0.5);
 }
 
-uint8_t ActivatorKindFor(const std::string &classname)
+double DoorSpeed(const Entity &ent)
 {
-	if (classname == "func_button" || classname == "func_rot_button")
-		return crossbot_nav::ACT_BUTTON;
-	if (classname == "trigger_multiple" || classname == "trigger_once")
-		return crossbot_nav::ACT_TRIGGER;
-	return crossbot_nav::ACT_NONE;
+	double speed = ParseDouble(ent.Get("speed"), 0.0);
+	return speed <= 0.0 ? kDefaultDoorSpeed : speed;
 }
 
-bool TargetReaches(const std::vector<Entity> &entities, const std::string &target,
-	const std::string &targetname)
+double DoorTravelDistance(const Entity &ent, const dmodel_t &model)
 {
-	if (target.empty())
-		return false;
-	if (target == targetname)
-		return true;
+	Vec3 movedir = MoveDirFromAngles(ParseEntityOrigin(ent.Get("angles")));
+	Vec3 size(model.maxs[0] - model.mins[0], model.maxs[1] - model.mins[1], model.maxs[2] - model.mins[2]);
 
-	for (const Entity &mid : entities)
-	{
-		std::string midClass = mid.Get("classname");
-		if (mid.Get("targetname") != target)
-			continue;
+	double travel = std::fabs(movedir.x * (size.x - 2.0)) + std::fabs(movedir.y * (size.y - 2.0)) +
+		std::fabs(movedir.z * (size.z - 2.0)) - ParseDouble(ent.Get("lip"), 0.0);
 
-		if (midClass == "trigger_relay")
-		{
-			if (mid.Get("target") == targetname)
-				return true;
-		}
-		else if (midClass == "multi_manager")
-		{
-			if (mid.Find(targetname) != nullptr)
-				return true;
-		}
-	}
-	return false;
+	return travel < 0.0 ? 0.0 : travel;
 }
 
 void CollectActivatorsFor(const BspFile &bsp, const std::vector<Entity> &entities,
@@ -195,11 +214,12 @@ void CollectActivatorsFor(const BspFile &bsp, const std::vector<Entity> &entitie
 	}
 }
 
+namespace
+{
+
 double DoorOpenSeconds(const Entity &ent, const dmodel_t &model)
 {
-	double speed = ParseDouble(ent.Get("speed"), 0.0);
-	if (speed <= 0.0)
-		speed = kDefaultDoorSpeed;
+	double speed = DoorSpeed(ent);
 
 	if (ent.Get("classname") == "func_door_rotating")
 	{
@@ -209,15 +229,7 @@ double DoorOpenSeconds(const Entity &ent, const dmodel_t &model)
 		return distance / speed;
 	}
 
-	Vec3 movedir = MoveDirFromAngles(ParseEntityOrigin(ent.Get("angles")));
-	Vec3 size(model.maxs[0] - model.mins[0], model.maxs[1] - model.mins[1], model.maxs[2] - model.mins[2]);
-
-	double travel = std::fabs(movedir.x * (size.x - 2.0)) + std::fabs(movedir.y * (size.y - 2.0)) +
-		std::fabs(movedir.z * (size.z - 2.0)) - ParseDouble(ent.Get("lip"), 0.0);
-	if (travel < 0.0)
-		travel = 0.0;
-
-	return travel / speed;
+	return DoorTravelDistance(ent, model) / speed;
 }
 
 }
@@ -300,7 +312,8 @@ std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::
 	return result;
 }
 
-PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity> &entities, int hullIndex)
+PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity> &entities, int hullIndex,
+	const std::vector<int> &skipEntities)
 {
 	Vec3 hullMins(kHumanHullMinX, kHumanHullMinY, kHumanHullMinZ);
 	Vec3 hullMaxs(kHumanHullMaxX, kHumanHullMaxY, kHumanHullMaxZ);
@@ -318,6 +331,10 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 
 		std::string classname = ent.Get("classname");
 		if (!IsPassableClassname(classname))
+			continue;
+
+		if (std::find(skipEntities.begin(), skipEntities.end(), static_cast<int>(entIndex)) !=
+			skipEntities.end())
 			continue;
 
 		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
@@ -439,24 +456,24 @@ void SplitByPassableVolume(const BspFile &bsp, const Polytope &poly, const Block
 		inside.push_back(TranslatePolytope(piece, blocker.origin));
 }
 
-std::vector<Polytope> SubtractLadderVolumes(const Polytope &leafPolytope,
-	const std::vector<BlockingVolume> &ladders, double mapRadius, double epsilon)
+std::vector<Polytope> SubtractBoxVolumes(const Polytope &leafPolytope,
+	const std::vector<BlockingVolume> &boxes, double mapRadius, double epsilon)
 {
 	std::vector<Polytope> pieces{leafPolytope};
 
-	for (const BlockingVolume &ladder : ladders)
+	for (const BlockingVolume &box : boxes)
 	{
 		const Plane slabs[6] = {
-			{Vec3(1.0, 0.0, 0.0), ladder.mins.x}, {Vec3(-1.0, 0.0, 0.0), -ladder.maxs.x},
-			{Vec3(0.0, 1.0, 0.0), ladder.mins.y}, {Vec3(0.0, -1.0, 0.0), -ladder.maxs.y},
-			{Vec3(0.0, 0.0, 1.0), ladder.mins.z}, {Vec3(0.0, 0.0, -1.0), -ladder.maxs.z}};
+			{Vec3(1.0, 0.0, 0.0), box.mins.x}, {Vec3(-1.0, 0.0, 0.0), -box.maxs.x},
+			{Vec3(0.0, 1.0, 0.0), box.mins.y}, {Vec3(0.0, -1.0, 0.0), -box.maxs.y},
+			{Vec3(0.0, 0.0, 1.0), box.mins.z}, {Vec3(0.0, 0.0, -1.0), -box.maxs.z}};
 
 		std::vector<Polytope> next;
 		for (const Polytope &piece : pieces)
 		{
 			Vec3 mins, maxs;
 			PolytopeBounds(piece, mins, maxs);
-			if (!BoundsOverlap(mins, maxs, ladder.mins, ladder.maxs, -kOverlapEpsilon))
+			if (!BoundsOverlap(mins, maxs, box.mins, box.maxs, -kOverlapEpsilon))
 			{
 				next.push_back(piece);
 				continue;

@@ -422,32 +422,28 @@ DetourStats BuildActivationDetours(const BspFile &bsp, int standHeadnode,
 		Area &area = areas[a];
 		if (area.activation == crossbot_nav::ACT_NONE)
 			continue;
-		if (area.passableIndex < 0 || static_cast<size_t>(area.passableIndex) >= passables.size())
-			continue;
 
 		++stats.gatedAreas;
-
-		const PassableVolume &pass = passables[static_cast<size_t>(area.passableIndex)];
 
 		if (dump)
 		{
 			std::string classname;
 			std::string targetname;
-			if (pass.entityIndex >= 0 && static_cast<size_t>(pass.entityIndex) < entities.size())
+			if (area.activationEntity >= 0 && static_cast<size_t>(area.activationEntity) < entities.size())
 			{
-				classname = entities[static_cast<size_t>(pass.entityIndex)].Get("classname");
-				targetname = entities[static_cast<size_t>(pass.entityIndex)].Get("targetname");
+				classname = entities[static_cast<size_t>(area.activationEntity)].Get("classname");
+				targetname = entities[static_cast<size_t>(area.activationEntity)].Get("targetname");
 			}
 			std::printf("activators: area %d %s \"%s\" (%.2fs open, %zu activators)\n",
 				static_cast<int>(a), classname.c_str(), targetname.c_str(), area.openSeconds,
-				pass.activators.size());
+				area.activators.size());
 		}
 
 		std::vector<ServicePoint> service;
 
-		for (size_t k = 0; k < pass.activators.size(); ++k)
+		for (size_t k = 0; k < area.activators.size(); ++k)
 		{
-			const ActivatorVolume &act = pass.activators[k];
+			const ActivatorVolume &act = area.activators[k];
 			++stats.activators;
 
 			if (dump)
@@ -488,7 +484,8 @@ DetourStats BuildActivationDetours(const BspFile &bsp, int standHeadnode,
 			else
 				continue;
 
-			if (conn.connType != crossbot_nav::CONN_WALK)
+			bool ride = conn.connType == crossbot_nav::CONN_ELEVATOR;
+			if (conn.connType != crossbot_nav::CONN_WALK && !ride)
 			{
 				++stats.nonWalkEntries;
 				if (dump)
@@ -507,7 +504,9 @@ DetourStats BuildActivationDetours(const BspFile &bsp, int standHeadnode,
 			detour.waitSeconds = area.openSeconds;
 
 			Vec3 gatePoint;
-			if (!EntryGatePoint(areas, conn, fromId, gatePoint))
+			if (ride)
+				gatePoint = conn.pointA;
+			else if (!EntryGatePoint(areas, conn, fromId, gatePoint))
 			{
 				detour.blocked = true;
 				++stats.blockedNoGate;

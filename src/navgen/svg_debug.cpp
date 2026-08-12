@@ -31,10 +31,12 @@ constexpr const char *kAreaWalkable = "#8d9298";
 constexpr const char *kAreaCrouch = "#93b3cf";
 constexpr const char *kAreaDoor = "#b99a5b";
 constexpr const char *kAreaBreakable = "#a8705f";
+constexpr const char *kAreaElevator = "#6fa8a0";
 constexpr const char *kConnWalk = "#e8eef4";
 constexpr const char *kConnAirmove = "#e74c3c";
 constexpr const char *kConnTeleport = "#27ae60";
 constexpr const char *kConnLadder = "#f1c40f";
+constexpr const char *kConnElevator = "#4aa3df";
 constexpr const char *kGate = "#8e6fc4";
 constexpr const char *kGateJump = "#e74c3c";
 constexpr const char *kRoute = "#f39c12";
@@ -85,6 +87,9 @@ ConnStyle StyleForConn(uint8_t connType)
 
 	case CONN_TELEPORT:
 		return {kConnTeleport, nullptr, 1.6};
+
+	case CONN_ELEVATOR:
+		return {kConnElevator, "6,3", 1.8};
 	case CONN_WALK:
 	default:
 		return {kConnWalk, nullptr, 1.0};
@@ -97,6 +102,8 @@ const char *FillForArea(const Area &area)
 		return kAreaDoor;
 	if (area.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE)
 		return kAreaBreakable;
+	if (area.areaFlags & crossbot_nav::NAV_AREA_ELEVATOR)
+		return kAreaElevator;
 	if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
 		return kAreaCrouch;
 	return kAreaWalkable;
@@ -425,9 +432,11 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		SwatchRow(kAreaCrouch, "area (crouch)");
 		SwatchRow(kAreaDoor, "area (door)");
 		SwatchRow(kAreaBreakable, "area (breakable)");
+		SwatchRow(kAreaElevator, "area (elevator stop)");
 		LineRow(kConnWalk, nullptr, 1.0, "walk");
 		LineRow(kConnAirmove, "4,2", 1.3, "air move");
 		LineRow(kConnLadder, "2,3", 1.6, "ladder");
+		LineRow(kConnElevator, "6,3", 1.8, "elevator ride");
 		LineRow(kGate, "3,2", 0.5, "funnel gate");
 		LineRow(kGateJump, "3,2", 0.5, "funnel gate (air move)");
 		LineRow(kRoute, nullptr, 1.8, "planned route");

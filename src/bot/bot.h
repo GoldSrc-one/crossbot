@@ -56,6 +56,19 @@ struct CBot
 	int ladderTargetArea = -1;
 	int ladderConnIndex = -1;
 
+	bool rideActive = false;
+	bool rideCrouch = false;
+	bool rideUp = false;
+	float rideStartTime = 0.f;
+	float rideDeadline = 0.f;
+	float rideArriveZ = 0.f;
+	float rideExitYaw = 0.f;
+	Vector ridePoint;
+	int rideTargetArea = -1;
+	int rideConnIndex = -1;
+	size_t rideWpIndex = 0;
+	size_t rideFloorWp = 0;
+
 	bool activationActive = false;
 	bool activationPressed = false;
 	float activationStartTime = 0.f;

@@ -56,24 +56,6 @@ struct Dismount
 	bool viaDrop = false;
 };
 
-int ParseBrushModelIndex(const std::string &model)
-{
-	if (model.size() < 2 || model[0] != '*')
-		return -1;
-	char *end = nullptr;
-	long idx = std::strtol(model.c_str() + 1, &end, 10);
-	if (end == model.c_str() + 1 || *end != '\0' || idx <= 0)
-		return -1;
-	return static_cast<int>(idx);
-}
-
-Vec3 ParseEntityOrigin(const std::string &origin)
-{
-	double x = 0.0, y = 0.0, z = 0.0;
-	std::sscanf(origin.c_str(), "%lf %lf %lf", &x, &y, &z);
-	return Vec3(x, y, z);
-}
-
 bool InSolid(const BspFile &bsp, const HullContext &hull, const Vec3 &p)
 {
 	if (ClassifyPoint(bsp, hull.headnode, p) == CONTENTS_SOLID)

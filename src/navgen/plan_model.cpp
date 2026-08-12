@@ -27,6 +27,7 @@ PlanModel BuildPlanModel(const MergeResult &merged, bool walkOnly)
 		pa.crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		pa.door = (area.areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
 		pa.breakable = (area.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE) != 0;
+		pa.elevator = (area.areaFlags & crossbot_nav::NAV_AREA_ELEVATOR) != 0;
 		pa.activation = area.activation;
 		pa.doorWaitTime = static_cast<float>(area.openSeconds);
 
@@ -105,6 +106,9 @@ PlanModel BuildPlanModel(const MergeResult &merged, bool walkOnly)
 		pc.flightTime = static_cast<float>(c.flightTime);
 		pc.launchPos = pointA;
 		pc.landingPos = pointB;
+		pc.rideSeconds = static_cast<float>(c.rideSeconds);
+		pc.rideSecondsMax = static_cast<float>(c.rideSecondsMax);
+		pc.rideWaitSeconds = static_cast<float>(c.rideWaitSeconds);
 
 		if (walkOnly && c.connType != crossbot_nav::CONN_WALK)
 			continue;

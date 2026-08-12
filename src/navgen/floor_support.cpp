@@ -421,17 +421,6 @@ bool SameDirectedPlane(const Plane &a, const Plane &b)
 		std::fabs(a.dist - b.dist) < kPlaneDistEpsilon;
 }
 
-bool PolytopeInsidePlane(const Polytope &poly, const Plane &plane)
-{
-	for (const Face &f : poly.faces)
-		for (const Vec3 &v : f.winding)
-		{
-			if (v.Dot(plane.normal) - plane.dist < -kPlaneDistEpsilon)
-				return false;
-		}
-	return true;
-}
-
 Polytope PolytopeFromPlanes(const std::vector<Plane> &planes, double mapRadius)
 {
 	Polytope poly;
@@ -602,6 +591,8 @@ size_t AbsorbFloorlessPieces(std::vector<ExtractedLeaf> &pieces, std::vector<Flo
 			{
 				if (pieces[hi].passableIndex != floorless[fi].leaf.passableIndex)
 					continue;
+				if (pieces[hi].elevatorStopId != floorless[fi].leaf.elevatorStopId)
+					continue;
 				if (!BoundsTouch(hostBounds[hi], floorless[fi].bounds))
 					continue;
 
@@ -636,6 +627,7 @@ size_t AbsorbFloorlessPieces(std::vector<ExtractedLeaf> &pieces, std::vector<Flo
 					piece.bounds = PolytopeBounds(rest);
 					piece.hadFloor = floorless[fi].hadFloor;
 					piece.leaf.passableIndex = floorless[fi].leaf.passableIndex;
+					piece.leaf.elevatorStopId = floorless[fi].leaf.elevatorStopId;
 					piece.leaf.polytope = std::move(rest);
 					spawned.push_back(std::move(piece));
 				}
@@ -831,6 +823,7 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 			ExtractedLeaf piece;
 			piece.polytope = std::move(frag);
 			piece.passableIndex = leaf.passableIndex;
+			piece.elevatorStopId = leaf.elevatorStopId;
 
 			if (fragFloor && totalSupported > kMinSupportedArea)
 			{

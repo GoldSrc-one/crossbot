@@ -114,13 +114,20 @@ Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vec
 	float off = std::sqrt(toChain.x * toChain.x + toChain.y * toChain.y);
 	if (off > 0.0001f && cfg.rejoinDist > 0.0001f)
 	{
+		// The rejoin pull can cancel the tangent exactly -- a bot barred at a node and standing beyond it
+		// along the tangent sees the chain point directly behind. Falling through to `done` there reports
+		// an arrival wherever the bot happens to be, so keep the raw tangent and let the lateral test
+		// decide whether this is worth a repath.
 		float gain = std::min(1.f, off / cfg.rejoinDist) / off;
-		aimDir = Norm2D(aimDir + Vector(toChain.x * gain, toChain.y * gain, 0.f));
+		Vector blended = Norm2D(aimDir + Vector(toChain.x * gain, toChain.y * gain, 0.f));
+		if (blended.x != 0.f || blended.y != 0.f)
+			aimDir = blended;
 	}
 
 	if (aimDir.x == 0.f && aimDir.y == 0.f)
 	{
-		d.done = true;
+		d.needRepath = true;
+		d.wishDir = Vector(0.f, 0.f, 0.f);
 		return d;
 	}
 

@@ -7,7 +7,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 13;
+constexpr uint32_t kNavVersion = 14;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
 
@@ -20,6 +20,7 @@ enum AreaFlags : uint32_t
 
 	NAV_AREA_DOOR             = 1u << 7,
 	NAV_AREA_BREAKABLE        = 1u << 8,
+	NAV_AREA_ELEVATOR         = 1u << 9,
 };
 
 enum ConnType : uint8_t
@@ -28,6 +29,7 @@ enum ConnType : uint8_t
 	CONN_TELEPORT = 1,
 	CONN_AIRMOVE  = 2,
 	CONN_LADDER   = 3,
+	CONN_ELEVATOR = 4,
 };
 
 enum ConnFlags : uint8_t
@@ -147,7 +149,13 @@ struct NavConnectionRecord
 	float flightTime;
 	float launchPos[3];
 	float landingPos[3];
+
+	float rideSeconds;
+	float rideSecondsMax;
+	float rideWaitSeconds;
 };
+
+static_assert(sizeof(NavConnectionRecord) == 136, "NavConnectionRecord layout changed without a version bump");
 
 enum GateValidFlags : uint8_t
 {

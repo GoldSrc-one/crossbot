@@ -95,12 +95,13 @@ std::vector<ExtractedLeaf> SplitLeavesByStandClearance(const BspFile &bsp, int s
 	isCrouchLeafOut.clear();
 	size_t split = 0;
 
-	auto emit = [&](Polytope poly, bool crouch, int passableIndex)
+	auto emit = [&](Polytope poly, bool crouch, const ExtractedLeaf &from)
 	{
 		ExtractedLeaf piece;
 		piece.id = static_cast<int>(out.size());
 		piece.polytope = std::move(poly);
-		piece.passableIndex = passableIndex;
+		piece.passableIndex = from.passableIndex;
+		piece.elevatorStopId = from.elevatorStopId;
 		out.push_back(std::move(piece));
 		isCrouchLeafOut.push_back(crouch);
 	};
@@ -110,7 +111,7 @@ std::vector<ExtractedLeaf> SplitLeavesByStandClearance(const BspFile &bsp, int s
 		std::vector<const Face *> floors = CollectFloorFaces(leaf.polytope);
 		if (floors.empty())
 		{
-			emit(leaf.polytope, false, leaf.passableIndex);
+			emit(leaf.polytope, false, leaf);
 			continue;
 		}
 
@@ -135,13 +136,13 @@ std::vector<ExtractedLeaf> SplitLeavesByStandClearance(const BspFile &bsp, int s
 
 		if (standableArea <= kMinStandableArea)
 		{
-			emit(leaf.polytope, true, leaf.passableIndex);
+			emit(leaf.polytope, true, leaf);
 			continue;
 		}
 
 		if (standableArea >= floorArea * (1.0 - kCoverageTolerance))
 		{
-			emit(leaf.polytope, false, leaf.passableIndex);
+			emit(leaf.polytope, false, leaf);
 			continue;
 		}
 
@@ -190,7 +191,7 @@ std::vector<ExtractedLeaf> SplitLeavesByStandClearance(const BspFile &bsp, int s
 		for (Polytope &frag : fragments)
 		{
 			bool crouch = ClassifyPolytope(bsp, standHeadnode, standBlockers, frag);
-			emit(std::move(frag), crouch, leaf.passableIndex);
+			emit(std::move(frag), crouch, leaf);
 		}
 	}
 

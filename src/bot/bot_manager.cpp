@@ -260,6 +260,12 @@ void PrintNavStatus()
 			detourLeft);
 		std::string msg = line;
 
+		if (bot.rideActive)
+		{
+			snprintf(line, sizeof(line), " riding=%.1fs", gpGlobals->time - bot.rideStartTime);
+			msg += line;
+		}
+
 		if (bot.hasGoal && bot.estimatedArrivalTime > 0.f)
 		{
 			float elapsed = gpGlobals->time - bot.pathStartTime;

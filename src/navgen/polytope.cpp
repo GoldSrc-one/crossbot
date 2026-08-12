@@ -338,6 +338,36 @@ Vec3 Polytope::Centroid() const
 	return sum * (1.0 / count);
 }
 
+bool PolytopeInsidePlane(const Polytope &poly, const Plane &plane, double epsilon)
+{
+	for (const Face &f : poly.faces)
+		for (const Vec3 &v : f.winding)
+			if (v.Dot(plane.normal) - plane.dist < -epsilon)
+				return false;
+	return true;
+}
+
+Polytope ClipPolytopeToBox(const Polytope &poly, const Vec3 &mins, const Vec3 &maxs, double mapRadius,
+	double epsilon)
+{
+	const Plane planes[6] = {
+		{Vec3(1.0, 0.0, 0.0), mins.x}, {Vec3(-1.0, 0.0, 0.0), -maxs.x},
+		{Vec3(0.0, 1.0, 0.0), mins.y}, {Vec3(0.0, -1.0, 0.0), -maxs.y},
+		{Vec3(0.0, 0.0, 1.0), mins.z}, {Vec3(0.0, 0.0, -1.0), -maxs.z}};
+
+	Polytope result = poly;
+	for (const Plane &plane : planes)
+	{
+		if (result.Empty())
+			break;
+		if (PolytopeInsidePlane(result, plane, epsilon))
+			continue;
+		result = ClipPolytope(result, plane, true, mapRadius, epsilon);
+	}
+
+	return result;
+}
+
 Polytope ClipPolytope(const Polytope &poly, const Plane &plane, bool keepFront, double mapRadius, double epsilon)
 {
 	Polytope result;

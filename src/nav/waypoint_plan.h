@@ -61,6 +61,7 @@ struct PlanArea
 	bool crouch = false;
 	bool door = false;
 	bool breakable = false;
+	bool elevator = false;
 	uint8_t activation = crossbot_nav::ACT_NONE;
 	float doorWaitTime = 0.f;
 	std::vector<PlanDetour> detours;
@@ -87,6 +88,10 @@ struct PlanConnection
 	float flightTime = 0.f;
 	Vector launchPos, landingPos;
 
+	float rideSeconds = 0.f;
+	float rideSecondsMax = 0.f;
+	float rideWaitSeconds = 0.f;
+
 	PlanGate gateA, gateB;
 
 	float gateAYaw[2] = {0.f, 0.f};
@@ -99,6 +104,7 @@ struct PlanWaypoint
 
 	bool requiresElevatorRide = false;
 	float elevatorTravelTime = 0.f;
+	float elevatorWaitTime = 0.f;
 	bool requiresCrouch = false;
 	bool requiresDoor = false;
 	bool requiresBreak = false;
@@ -233,6 +239,7 @@ private:
 	void PushGate(const PlanConnection &conn, uint32_t fromId, uint32_t toId);
 	std::vector<NavFunnel::PulledPoint> PeekFunnel(const Vector &target) const;
 	bool FlushFunnelTo(const Vector &target);
+	bool PushActivationDetour(const PlanArea &fromArea, const PlanArea &toArea, uint32_t fromId);
 	void PushWaypoint(const PlanWaypoint &wp, bool countLength = true);
 	void UpdateFrontier();
 

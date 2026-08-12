@@ -73,6 +73,11 @@ double WalkableFootprintGapArea(const Polytope &poly);
 Polytope ClipPolytope(const Polytope &poly, const Plane &plane, bool keepFront, double mapRadius,
 	double epsilon = 0.01);
 
+bool PolytopeInsidePlane(const Polytope &poly, const Plane &plane, double epsilon = 0.01);
+
+Polytope ClipPolytopeToBox(const Polytope &poly, const Vec3 &mins, const Vec3 &maxs, double mapRadius,
+	double epsilon = 0.01);
+
 Polytope TranslatePolytope(const Polytope &poly, const Vec3 &offset);
 
 }

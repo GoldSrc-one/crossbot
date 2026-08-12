@@ -143,6 +143,9 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.flightTime = rec.flightTime;
 		conn.launchPos = Vector(rec.launchPos[0], rec.launchPos[1], rec.launchPos[2]);
 		conn.landingPos = Vector(rec.landingPos[0], rec.landingPos[1], rec.landingPos[2]);
+		conn.rideSeconds = rec.rideSeconds;
+		conn.rideSecondsMax = rec.rideSecondsMax;
+		conn.rideWaitSeconds = rec.rideWaitSeconds;
 
 		conn.gateA.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_A) != 0;
 		conn.gateB.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_B) != 0;
@@ -169,6 +172,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		pa.crouch = (a.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		pa.door = (a.areaFlags & crossbot_nav::NAV_AREA_DOOR) != 0;
 		pa.breakable = (a.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE) != 0;
+		pa.elevator = (a.areaFlags & crossbot_nav::NAV_AREA_ELEVATOR) != 0;
 		pa.activation = rec.activation;
 		pa.doorWaitTime = rec.openSeconds;
 
@@ -225,6 +229,9 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		pc.flightTime = c.flightTime;
 		pc.launchPos = c.launchPos;
 		pc.landingPos = c.landingPos;
+		pc.rideSeconds = c.rideSeconds;
+		pc.rideSecondsMax = c.rideSecondsMax;
+		pc.rideWaitSeconds = c.rideWaitSeconds;
 		pc.gateA = c.gateA;
 		pc.gateB = c.gateB;
 		for (int k = 0; k < 2; ++k)

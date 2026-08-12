@@ -164,6 +164,89 @@ beyond the stand point that is a permanent stall, jumping in place at full drive
 `kLadderMountLead` further along `ladderYaw`, i.e. into the ladder, and lets the capture happen on the
 way through.
 
+### Elevators
+
+`RunElevatorApproach` / `RunElevatorRide` / `FinishElevatorRide` are the ladder trio again, but the hard
+part is not the driving — it is that **the ride is invisible to the profile**. The planner's boarding and
+arrival waypoints are the mover's column centre at two heights (`elevators.cpp` builds both from
+`centerX`/`centerY`), so they differ only in Z. `BuildPathProfile` measures `Dist2D`, gets zero, and never
+pushes the segment; `ProjectOntoProfile` skips zero-length segments outright. The `gap` flag `IsGap` sets
+for a ride lands on a segment that does not exist.
+
+Three consequences, all of which had to be answered separately:
+
+**The tracker walks through the ride.** With `projectAhead` of 64 units and both ends at the same XY, the
+bot aims at the far-side corridor while standing at the near-side stop. `NavFollow::Config::sLimit` already
+exists for the doubled-back activation detour, which is the same failure in weaker form, so a *pending*
+ride sets the barrier too. Pending means the flag is still set: `FinishElevatorRide` clears
+`requiresElevatorRide` on the bot's own copy of the waypoint rather than remembering an index, because
+`SpliceDetour` rebuilds `bot.waypoints` with a shifted base and an index would not survive it. No memo is
+needed the way activations need one — a repath from the far stop plans a route with no ride in it at all.
+
+**Reprojection cannot be global.** The ladder can clear `trackState.started` when it finishes because its
+two ends differ in XY. A ride's do not, so a global reprojection is free to resolve the tie in favour of
+the *lower* `s` and put the bot back on the approach. `FinishElevatorRide` sets `trackState.progressS` to
+the arrival waypoint's `ProfileWaypointS` by hand and leaves `started` true; the incremental window then
+reaches at most `projectBack` behind, where the profile is 32 units away and cannot win the tie.
+
+**`totalTime` under-reports by the whole ride.** The ETA integrates over segments, and there is no segment,
+so `BuildPathProfile` adds `elevatorWaitTime + elevatorTravelTime` after the loop. Without it
+`test55_plat`'s ETA is 3.8 s against a 4.96 s ride and `test_nav_goal.ps1` — which times out at twice the
+bot's own ETA — cannot pass the map however well the bot behaves.
+
+**The ride waypoint may own no profile segment at all**, so the approach cannot be dispatched off
+`bot.waypointIndex` the way the air move and the ladder are. On `test18_elevator` the funnel corner
+before the board point is the shaft centre at floor height, the board point is the same XY at the stop's
+top surface, and *that* pair is zero-length too — the segment reaching the shaft carries the corner's
+index and index 10 never appears in the profile. The runner is therefore driven by the barrier index the
+`followCfg` loop already computed, exactly as `RunActivation` is driven by `activationWp`. Dispatching on
+`waypointIndex` looked right on `test55_plat`, where the approach happens to be the ride's own segment,
+and silently never boarded on test18.
+
+Beyond that the runner is deliberately dull. It latches on `FL_ONGROUND` within `kElevatorBoardRadius`,
+holds station with a `kElevatorHoldRadius` deadzone, never jumps, and aims at the waypoint *after* the
+arrival one so the bot is already turned to walk off — `func_plat`'s `PLAT_DELAY` gives it three seconds.
+`RunElevatorDrive` skips `SolveDrive` when drive is zero: the servo answers a residual velocity with a
+full-rate reverse command, which is right on open ground and wrong on a platform edge, so friction does
+the stopping instead. `lastProgressTime` is stamped every frame for the same reason the ladder stamps it,
+and the 150-unit teleport reset at the top of `Bot_MoveNav` is skipped while riding, since a server hitch
+would otherwise repath from mid-shaft where `FindAreaForPoint` finds nothing and the bot drops its goal.
+
+The arrival test is `BotNavZ` against the arrival waypoint's own floor Z, directional with
+`kElevatorArriveSlack`. The slack means the bot can step off up to 8 units short, and that is safe for a
+reason worth stating: navgen only builds a walk seam off a stop when the step is under 18 units, so
+anything within the slack is steppable by construction. On `test55_plat` the ride ends at nav 10 against
+a stop at nav 18 and the bot walks out over the remainder.
+
+The engage radius is pure XY distance to the board point, so a route that merely *passes* within 48 units
+of a shaft it has not reached yet would hand the frame over early. Ordering is what protects this today:
+the barrier sits at whichever comes first, so while a call button is unserviced `rideWp` is unset and the
+runner is never called. On `test18_elevator` that matters concretely — the air move lands 40 units from
+the board point, inside the radius, with the button still to press. If a map ever defeats that, the ride
+times out, penalizes the connection and repaths; tying engagement to `progressS` reaching `sLimit` is the
+tighter fix if one is needed.
+
+`rideDeadline` is `wait + travel * kElevatorTimeMargin + kElevatorTimeGrace`; the
+wait term matters because a ride *back* to the default stop does not begin until the platform's auto-return
+dwell elapses. Timing out finishes the ride like any other failure — penalize the connection, repath — and
+that is also what recovers a bot that walked to a boarding point whose platform someone else had ridden
+away.
+
+`bot_avoid.cpp` needed nothing: `RouteExemptsHit` already exempts every `SOLID_BSP` hit while a ride
+waypoint is in the lookahead window, so the bot does not fight the platform on the way in, and the runner
+returns before `BotAvoid::Update` while riding.
+
+**What the two test maps actually cover.** `test55_plat` is the only one that exercises a sustained ride:
+the bot boards the parked plat in the pit, `CPlatTrigger` fires under it, and it rides 248 units to the
+ledge — the log reads `boarded ... (up)` then `ride reached the stop of after 4.18s ... area 4 (wanted 4)`
+against a 4.96 s plan. Note it boards at nav −199, not the parked −230, because stepping onto the plat
+starts it moving well before the bot reaches the column centre; the runner does not care, since it watches
+the arrival height rather than counting from the board point. `test18_elevator` covers summon-then-board —
+drop into the shaft, walk to the call button, press, board — but **not** the ride loop: the door travels
+for 2.38 s while `RunActivation` holds its 2.4 s button wait, so the bot is already at the top when it
+boards and the ride finishes in 0.00 s. That is correct behaviour, not a skipped test, but a map with a
+call button *off* the platform is what would exercise waiting for a lift to arrive.
+
 ## bot_avoid.cpp
 
 Reactive obstacle handling, layered between the follower's steering decision and the engine call. The

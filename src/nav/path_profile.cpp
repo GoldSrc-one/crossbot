@@ -221,7 +221,7 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 	auto IsGap = [&](size_t i)
 	{
 		return waypoints[i].airmoveLaunch || waypoints[i].requiresTeleport ||
-			waypoints[i].requiresLadder;
+			waypoints[i].requiresLadder || waypoints[i].requiresElevatorRide;
 	};
 
 	auto IsStop = [&](size_t i)
@@ -551,6 +551,12 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 			++steps;
 		}
 	}
+
+	// A ride's two waypoints share an XY, so its segment has zero length and the integration above cannot
+	// see it at all. Add the time here or the ETA reads as a walk to the shaft and back out again.
+	for (const PlanWaypoint &wp : waypoints)
+		if (wp.requiresElevatorRide)
+			profile.totalTime += wp.elevatorWaitTime + wp.elevatorTravelTime;
 
 	return profile;
 }
