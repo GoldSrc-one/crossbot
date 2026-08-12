@@ -73,7 +73,14 @@ Runs navgen on every `.bsp` in `maps/`, writes `.svg` and `.nav` files to `nav_d
 ```
 
 The script's own output is the pass/fail verdict only. Everything the plugin printed goes to
-`hlds\qconsole.log`.
+`nav_debug\logs\<map>_server.log` for that run (and, shared across runs, `hlds\qconsole.log`).
+
+### Sweep every map
+```powershell
+.\scripts\test_nav_goal_all.ps1
+```
+Per-map transcripts in `nav_debug\logs\`. Raising `-MaxParallel` past the default 6 loads the box enough
+to change bot behaviour — see `doc/testing.md` before trading that for wall clock.
 
 ### Sweep the mesh, then the routes
 ```powershell

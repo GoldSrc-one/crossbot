@@ -3,19 +3,24 @@
     Runs test_nav_goal.ps1 for all .bsp maps in the maps/ directory in parallel.
 
 .DESCRIPTION
-    Finds all .bsp files in maps/, launches each test_nav_goal.ps1 in a parallel
-    PowerShell job (Start-Job) with unique ports and map-specific outputs.
-    Waits for all jobs to complete and reports PASS/FAIL summary.
-    Also updates nav_debug/index.html with colored PASS/FAIL cards.
+    Finds all .bsp files in maps/ and runs each one as its own PowerShell child
+    process on a unique port, at most -MaxParallel at a time. Each child's full
+    transcript is captured to nav_debug/logs/<map>.log and its verdict is taken
+    from its real process exit code. Reports a PASS/FAIL summary and rebuilds
+    nav_debug/index.html once, serially, at the end.
 
 .PARAMETER MaxParallel
-    Maximum number of concurrent HLDS instances (default: 12, limited by ports 29015-29100)
+    Maximum number of concurrent HLDS instances (default: 6, hard-limited by the
+    86 ports 29015-29100). Higher is faster but not free: at 12 the box is loaded
+    enough that bots themselves behave differently -- maps that pass alone and at
+    6 have been seen to fall off geometry and fail -- so the verdict gets less
+    trustworthy, which is the opposite of what this suite is for.
 
 .PARAMETER Timeout
-    Absolute safety timeout per test in seconds (default: 60)
+    Absolute safety timeout per test in seconds (default: 60). This is the real bound.
 
 .PARAMETER TimeoutMultiplier
-    Multiplier on bot's reported ETA (default: 2.0)
+    Multiplier on bot's reported ETA (default: 6.0)
 
 .PARAMETER NavGenPath
     Path to navgen.exe (default: build\tools\navgen\navgen.exe)
@@ -29,6 +34,9 @@
 .PARAMETER MapsDir
     Directory containing .bsp test maps (default: maps\)
 
+.PARAMETER Filter
+    Only run maps whose filename matches this wildcard (default: *)
+
 .EXAMPLE
     .\scripts\test_nav_goal_all.ps1 -MaxParallel 4
 
@@ -37,13 +45,14 @@
 #>
 
 param(
-    [int]$MaxParallel = 12,
+    [int]$MaxParallel = 6,
     [int]$Timeout = 60,
-    [double]$TimeoutMultiplier = 2.0,
+    [double]$TimeoutMultiplier = 6.0,
     [string]$NavGenPath = "build\tools\navgen\navgen.exe",
     [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
     [string]$OutputDir = "nav_debug",
-    [string]$MapsDir = "maps"
+    [string]$MapsDir = "maps",
+    [string]$Filter = "*"
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,12 +60,22 @@ $scriptDir = $PSScriptRoot
 $repoRoot = Split-Path $scriptDir -Parent
 $testScript = Join-Path $scriptDir "test_nav_goal.ps1"
 
-# Find all .bsp files
-$mapFiles = Get-ChildItem -Path (Join-Path $repoRoot $MapsDir) -Filter "*.bsp" | Sort-Object Name
-if (-not $mapFiles) {
-    Write-Error "No .bsp files found in $MapsDir"
+. "$scriptDir\nav_index.ps1"
+
+$mapFiles = @(Get-ChildItem -Path (Join-Path $repoRoot $MapsDir) -Filter "*.bsp" |
+    Where-Object { $_.Name -like $Filter } | Sort-Object Name)
+if ($mapFiles.Count -eq 0) {
+    Write-Error "No .bsp files matching '$Filter' found in $MapsDir"
     exit 1
 }
+
+$portBase = 29015
+$maxPorts = 86  # 29015-29100
+if ($mapFiles.Count -gt $maxPorts) {
+    Write-Error "$($mapFiles.Count) maps exceeds the $maxPorts unique ports available from $portBase"
+    exit 1
+}
+if ($MaxParallel -lt 1) { $MaxParallel = 1 }
 
 Write-Host "=== crossbot parallel nav goal test runner ==="
 Write-Host "Found $($mapFiles.Count) maps:"
@@ -65,101 +84,167 @@ Write-Host "Max parallel: $MaxParallel"
 Write-Host "Timeout: ${Timeout}s (${TimeoutMultiplier}x ETA)"
 Write-Host ""
 
-# Prepare output directory
-$outputDirFull = if (Test-Path $OutputDir) { $OutputDir }
-elseif (Test-Path (Join-Path $repoRoot $OutputDir)) { Join-Path $repoRoot $OutputDir }
+$outputDirFull = if (Test-Path $OutputDir) { (Resolve-Path $OutputDir).Path }
+elseif (Test-Path (Join-Path $repoRoot $OutputDir)) { (Resolve-Path (Join-Path $repoRoot $OutputDir)).Path }
 else { Join-Path $repoRoot $OutputDir }
 if (-not (Test-Path $outputDirFull)) { New-Item -ItemType Directory -Path $outputDirFull | Out-Null }
+$logDir = Join-Path $outputDirFull "logs"
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-# Launch jobs in parallel batches
-$jobs = @()
-$portBase = 29015
-$maxPorts = 86  # 29015-29100
-$mapIndex = 0
+# Run each map in its own PowerShell process rather than a background job. A real
+# child process means the verdict is its exit code, its Write-Host transcript is
+# capturable, and native stderr goes to a file instead of becoming an ErrorRecord
+# that $ErrorActionPreference = 'Stop' would turn into a spurious failure.
+$psExe = [System.Diagnostics.Process]::GetCurrentProcess().Path
 
-$mapFiles | ForEach-Object {
-    $mapFile = $_
-    $mapName = $mapFile.BaseName
-    $port = $portBase + ($mapIndex % $maxPorts)
-    $mapIndex++
-    
-    $job = Start-Job -ScriptBlock {
-        param($MapPath, $Port, $Timeout, $TimeoutMultiplier, $NavGenPath, $HLDSDir, $OutputDir, $TestScript, $MapName)
-        
-        try {
-            & $TestScript -Map $MapPath -Port $Port -Timeout $Timeout -TimeoutMultiplier $TimeoutMultiplier -NavGenPath $NavGenPath -HLDSDir $HLDSDir -OutputDir $OutputDir
-            return @{ Map = $MapName; Port = $Port; ExitCode = $LASTEXITCODE; Result = "PASS" }
-        } catch {
-            return @{ Map = $MapName; Port = $Port; ExitCode = 1; Result = "FAIL"; Error = $_.ToString() }
+# Killing a child does not run its cleanup, so remember which ports we own and
+# sweep for survivors at the end. Never a blanket kill: the user may be running
+# their own server, and the default 27015 is outside this range.
+$ourPorts = [System.Collections.Generic.List[int]]::new()
+
+function Stop-ServerOnPort {
+    param([int[]]$Ports)
+    if ($Ports.Count -eq 0) { return @() }
+    $killed = @()
+    $procs = @(Get-CimInstance Win32_Process -Filter "Name='hlds.exe'" -ErrorAction SilentlyContinue)
+    foreach ($p in $procs) {
+        foreach ($port in $Ports) {
+            if ($p.CommandLine -and $p.CommandLine -match "\+port\s+$port(\s|$)") {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                $killed += "$($p.ProcessId) (port $port)"
+                break
+            }
         }
-    } -ArgumentList @(
-        $mapFile.FullName,
-        $port,
-        $Timeout,
-        $TimeoutMultiplier,
-        $NavGenPath,
-        $HLDSDir,
-        $OutputDir,
-        $testScript,
-        $mapName
+    }
+    return $killed
+}
+
+$tracked = [System.Collections.Generic.List[object]]::new()
+
+for ($i = 0; $i -lt $mapFiles.Count; $i++) {
+    $mapFile = $mapFiles[$i]
+    $mapName = $mapFile.BaseName
+    $port = $portBase + $i
+    $ourPorts.Add($port)
+
+    $log = Join-Path $logDir "$mapName.log"
+    $errLog = Join-Path $logDir "$mapName.err.log"
+    $resultFile = Join-Path $outputDirFull "$mapName.result"
+    Remove-Item $resultFile, $log, $errLog -ErrorAction SilentlyContinue
+
+    $childArgs = @(
+        "-NoProfile", "-NonInteractive", "-File", $testScript,
+        "-Map", $mapFile.FullName,
+        "-Port", "$port",
+        "-Timeout", "$Timeout",
+        "-TimeoutMultiplier", "$TimeoutMultiplier",
+        "-NavGenPath", $NavGenPath,
+        "-HLDSDir", $HLDSDir,
+        "-OutputDir", $outputDirFull,
+        "-ServerLog", (Join-Path $logDir "${mapName}_server.log"),
+        "-NoIndexUpdate"
     )
-    
-    $jobs += [pscustomobject]@{
-        Job = $job
-        Map = $mapName
-        Port = $port
-        StartTime = Get-Date
-    }
-    
-    Write-Host "Started job for $mapName on port $port (Job ID: $($job.Id))"
-    
-    # Throttle: wait if we hit max parallel
-    while (($jobs | Where-Object { $_.Job.State -eq 'Running' }).Count -ge $MaxParallel) {
-        Start-Sleep -Seconds 2
+
+    $proc = Start-Process -FilePath $psExe -ArgumentList $childArgs `
+        -WorkingDirectory $repoRoot -NoNewWindow -PassThru `
+        -RedirectStandardOutput $log -RedirectStandardError $errLog
+
+    $tracked.Add([pscustomobject]@{
+        Proc       = $proc
+        Map        = $mapName
+        Port       = $port
+        Log        = $log
+        ErrLog     = $errLog
+        ResultFile = $resultFile
+        StartTime  = Get-Date
+        Deadline   = (Get-Date).AddSeconds($Timeout + 90)
+        Killed     = $false
+    })
+
+    Write-Host "Started $mapName on port $port (PID $($proc.Id))"
+
+    while (@($tracked | Where-Object { -not $_.Proc.HasExited }).Count -ge $MaxParallel) {
+        foreach ($t in $tracked) {
+            if (-not $t.Proc.HasExited -and (Get-Date) -gt $t.Deadline) {
+                Write-Host "  deadline exceeded for $($t.Map), killing"
+                Stop-Process -Id $t.Proc.Id -Force -ErrorAction SilentlyContinue
+                Stop-ServerOnPort -Ports @($t.Port) | Out-Null
+                $t.Killed = $true
+            }
+        }
+        Start-Sleep -Milliseconds 500
     }
 }
 
 Write-Host ""
-Write-Host "=== Waiting for all jobs to complete ==="
-Write-Host ""
+Write-Host "=== Waiting for remaining runs to finish ==="
 
-# Wait for all jobs and collect results
-$results = @()
-
-foreach ($jobInfo in $jobs) {
-    $job = $jobInfo.Job
-    $map = $jobInfo.Map
-    $port = $jobInfo.Port
-    
-    Write-Host "Waiting for $map (port $port)..."
-    $job | Wait-Job | Out-Null
-    $result = $job | Receive-Job
-    $job | Remove-Job
-    
-    $elapsed = (Get-Date) - $jobInfo.StartTime
-    $status = if ($result.Result -eq "PASS") { "PASS" } else { "FAIL" }
-    Write-Host ("{0}: {1} ({2:N1}s)" -f $map, $status, $elapsed.TotalSeconds)
-    
-    if ($result.Result -eq "FAIL" -and $result.Error) {
-        Write-Host "  Error: $($result.Error)" -ForegroundColor Red
+while (@($tracked | Where-Object { -not $_.Proc.HasExited }).Count -gt 0) {
+    foreach ($t in $tracked) {
+        if (-not $t.Proc.HasExited -and (Get-Date) -gt $t.Deadline) {
+            Write-Host "  deadline exceeded for $($t.Map), killing"
+            Stop-Process -Id $t.Proc.Id -Force -ErrorAction SilentlyContinue
+            Stop-ServerOnPort -Ports @($t.Port) | Out-Null
+            $t.Killed = $true
+        }
     }
-    
-    $results += $result
+    Start-Sleep -Milliseconds 500
 }
 
-# Summary
+$results = [System.Collections.Generic.List[object]]::new()
+
+foreach ($t in $tracked) {
+    $t.Proc.Refresh()
+    $exitCode = $t.Proc.ExitCode
+    $elapsed = try { ($t.Proc.ExitTime - $t.StartTime).TotalSeconds } catch { ((Get-Date) - $t.StartTime).TotalSeconds }
+
+    $reason = ""
+    if (Test-Path $t.ResultFile) {
+        $parts = (Get-Content $t.ResultFile -Raw).TrimEnd() -split "`t", 2
+        if ($parts.Count -ge 2) { $reason = $parts[1] }
+    }
+    if (-not $reason -and (Test-Path $t.Log)) {
+        $line = Select-String -Path $t.Log -Pattern '=== RESULT: ' | Select-Object -Last 1
+        if ($line) { $reason = ($line.Line -replace '^.*=== RESULT: ', '') -replace ' ===$', '' }
+    }
+    if ($t.Killed) { $reason = "killed at deadline ($([int]($Timeout + 90))s)" }
+    if (-not $reason) { $reason = "no verdict recorded (exit $exitCode), see $($t.Log)" }
+
+    $results.Add([pscustomobject]@{
+        Map      = $t.Map
+        Result   = if ($exitCode -eq 0 -and -not $t.Killed) { "PASS" } else { "FAIL" }
+        ExitCode = $exitCode
+        Elapsed  = $elapsed
+        Reason   = $reason
+        Log      = $t.Log
+    })
+}
+
+$orphans = Stop-ServerOnPort -Ports $ourPorts
+if ($orphans.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Cleaned up $($orphans.Count) orphaned server(s): $($orphans -join ', ')"
+}
+
+Write-Host ""
+Write-Host "=== Rebuilding index.html ==="
+foreach ($r in ($results | Sort-Object Map)) {
+    Update-IndexHtml -MapName $r.Map -Result $r.Result -OutputDir $outputDirFull
+}
+
 Write-Host ""
 Write-Host "=== SUMMARY ==="
-$passCount = ($results | Where-Object { $_.Result -eq "PASS" }).Count
-$failCount = ($results | Where-Object { $_.Result -eq "FAIL" }).Count
+$passCount = @($results | Where-Object { $_.Result -eq "PASS" }).Count
+$failCount = @($results | Where-Object { $_.Result -eq "FAIL" }).Count
 
-$results | Sort-Object Map | ForEach-Object {
-    $status = if ($_.Result -eq "PASS") { "PASS" } else { "FAIL" }
-    Write-Host ("{0,-20} {1}" -f $_.Map, $status)
+foreach ($r in ($results | Sort-Object Map)) {
+    $color = if ($r.Result -eq "PASS") { "Green" } else { "Red" }
+    Write-Host ("{0,-24} {1,-4} {2,6:N1}s  {3}" -f $r.Map, $r.Result, $r.Elapsed, $r.Reason) -ForegroundColor $color
 }
 
 Write-Host ""
 Write-Host "Total: $($results.Count)  Passed: $passCount  Failed: $failCount"
+Write-Host "Per-map transcripts: $logDir"
 
 if ($failCount -gt 0) {
     exit 1

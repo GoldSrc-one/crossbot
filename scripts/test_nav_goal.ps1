@@ -22,10 +22,14 @@
     Path to the .bsp file (relative to repo root or absolute)
 
 .PARAMETER Timeout
-    Absolute safety timeout in seconds (default: 60)
+    Absolute safety timeout in seconds (default: 60). Measured on the wall clock.
 
 .PARAMETER TimeoutMultiplier
-    Multiplier on bot's reported ETA (default: 2.0)
+    Multiplier on bot's reported ETA (default: 6.0). This is a fail-fast heuristic,
+    not the real bound -- -Timeout is. Ladder maps take 2.6-3.1x their ETA even
+    run alone, because the planner's estimate does not model falling off and
+    reclimbing, and more than that under parallel load. A genuinely broken map
+    never arrives at all, so it still fails fast on the absolute cap.
 
 .PARAMETER Port
     HLDS port (default: auto-assign from 29015-29100)
@@ -38,6 +42,15 @@
 
 .PARAMETER OutputDir
     Directory for SVG/NAV output (default: nav_debug)
+
+.PARAMETER ServerLog
+    Where to capture this instance's server output (default:
+    <OutputDir>\logs\<map>_server.log). Per-instance, unlike qconsole.log.
+
+.PARAMETER NoIndexUpdate
+    Skip the nav_debug/index.html rewrite. Parallel runners set this and rebuild
+    the index once, serially, at the end -- concurrent read-modify-write on a
+    single html file loses results.
 
 .EXAMPLE
     .\scripts\test_nav_goal.ps1 -Map maps\test1_simple.bsp
@@ -52,7 +65,7 @@ param(
 
     [int]$Timeout = 60,
 
-    [double]$TimeoutMultiplier = 2.0,
+    [double]$TimeoutMultiplier = 6.0,
 
     [int]$Port = 0,  # 0 = auto-assign from 29015-29100
 
@@ -62,6 +75,10 @@ param(
 
     [string]$OutputDir = "nav_debug",
 
+    [string]$ServerLog = "",
+
+    [switch]$NoIndexUpdate,
+
     # How close the bot must end up for hasGoal=0 to count as arrival rather than giving up.
     # Legitimate arrivals land 24-50 units out (the follower stops at finalRadius, and the goal is
     # clamped into its area, so it never coincides with the raw entity origin).
@@ -70,43 +87,26 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
-
-function Update-IndexHtml {
-    param(
-        [string]$MapName,
-        [string]$Result,
-        [string]$OutputDir
-    )
-
-    $indexHtml = Join-Path $OutputDir "index.html"
-    if (-not (Test-Path $indexHtml)) {
-        Write-Host "Index.html not found at $indexHtml, skipping update"
-        return
-    }
-
-    $html = Get-Content $indexHtml -Raw
-    $color = if ($Result -eq "PASS") { "#1a5c1a" } else { "#5c1a1a" }
-    $borderColor = if ($Result -eq "PASS") { "#2e8b2e" } else { "#8b2e2e" }
-    $label = if ($Result -eq "PASS") { "✓ PASS" } else { "✗ FAIL" }
-
-    # Match existing card format (single-line): <div class="card"><h2><a href="mapname.svg" target="_blank">mapname</a></h2>...
-    $pattern = '<div class="card"><h2><a href="' + [regex]::Escape($MapName) + '\.svg" target="_blank">' + [regex]::Escape($MapName) + '</a></h2>'
-
-    $newCard = '<div class="card" style="background: {0}; border-color: {1};"><h2><a href="{2}.svg" target="_blank">{2} <span style="float:right; color:{3};">{4}</span></a></h2><a href="{2}.svg" target="_blank"><img src="{2}.svg"></a></div>' -f $color, $borderColor, $MapName, $borderColor, $label
-
-    if ($html -match $pattern) {
-        # Replace existing card - use single-line regex mode for cross-line matching
-        $regex = [regex]::new($pattern + '.*?</div>', 'Singleline')
-        $html = $regex.Replace($html, $newCard)
-    } else {
-        # Add new card after the grid opening
-        $html = $html -replace '(<div class="grid">)', "`$1`n$newCard"
-    }
-
-    $html | Set-Content -Path $indexHtml -Encoding UTF8
-    Write-Host "Updated index.html: $MapName -> $label"
-}
 $repoRoot = Split-Path $scriptDir -Parent
+
+. "$scriptDir\nav_index.ps1"
+
+# Native tools report warnings on stderr. Under $ErrorActionPreference = 'Stop'
+# a redirected stderr line becomes a terminating error, which failed maps for
+# reasons that had nothing to do with the bot. Warnings must never fail a run.
+function Invoke-Native {
+    param([string]$Exe, [string[]]$Arguments)
+    $ErrorActionPreference = 'Continue'
+    $output = & $Exe @Arguments 2>&1 | Out-String
+    return [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
+}
+
+function Invoke-Rcon {
+    param([string]$Cmd)
+    $out = try { & "$scriptDir\rcon.ps1" -Port $Port -Command $Cmd } catch { "" }
+    if ($null -eq $out) { return "" }
+    return ($out | Out-String)
+}
 
 # Resolve paths
 $mapPath = if (Test-Path $Map) { $Map }
@@ -140,6 +140,13 @@ $traceLogPath = Join-Path $HLDSDir $traceCvarPath
 $svgOut = Join-Path $outputDir "$mapName.svg"
 $navOut = Join-Path $outputDir "$mapName.nav"
 $traceOut = Join-Path $outputDir "nav_trace_$mapName.txt"
+$resultOut = Join-Path $outputDir "$mapName.result"
+
+if (-not $ServerLog) {
+    $ServerLog = Join-Path $outputDir "logs\${mapName}_server.log"
+}
+$serverLogDir = Split-Path $ServerLog -Parent
+if ($serverLogDir -and -not (Test-Path $serverLogDir)) { New-Item -ItemType Directory -Path $serverLogDir -Force | Out-Null }
 
 Write-Host "=== crossbot automatic nav goal test: $mapName ==="
 Write-Host "Map:      $mapPath"
@@ -149,6 +156,10 @@ Write-Host "Port:     $Port"
 Write-Host "Trace:    $traceCvarPath"
 Write-Host "navgen:   $navGenExe"
 Write-Host "HLDS:     $hldsExe"
+Write-Host "SrvLog:   $ServerLog"
+
+$result = "FAIL"
+$reason = "did not run"
 
 # --- Copy map to HLDS maps directory if needed ---
 $hldsMapPath = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
@@ -163,15 +174,14 @@ if (-not (Test-Path $botNavDir)) { New-Item -ItemType Directory -Path $botNavDir
 $botNavPath = Join-Path $botNavDir "$mapName.nav"
 
 Write-Host "Running navgen to generate fresh nav file..."
-$navgenResult = & $navGenExe $mapPath -o $botNavPath 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: navgen failed: $navgenResult"
+$navgenRun = Invoke-Native -Exe $navGenExe -Arguments @($mapPath, "-o", $botNavPath)
+if ($navgenRun.ExitCode -ne 0) {
+    Write-Host "WARNING: navgen failed (exit $($navgenRun.ExitCode)): $($navgenRun.Output)"
 } else {
     Write-Host "navgen succeeded, nav file: $botNavPath"
 }
 
 # --- 1. Start HLDS ---
-$qconsoleLog = Join-Path $HLDSDir "qconsole.log"
 Remove-Item $traceLogPath -ErrorAction SilentlyContinue
 
 # Boot commands: set trace path, add bot, list spawns/targets
@@ -183,61 +193,81 @@ $bootCommands = @(
 )
 
 Write-Host "Starting HLDS on port $Port..."
-$startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands $bootCommands -ConfigName $configName
+$startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands $bootCommands `
+    -ConfigName $configName -HLDSDir $HLDSDir -LogFile $ServerLog
 
 if ($startResult -match "^EXITED") {
     Write-Host "FAIL: server failed to start ($startResult)"
+    Write-Host "=== RESULT: FAIL -- server failed to start ($startResult) ==="
+    "FAIL`tserver failed to start ($startResult)" | Set-Content -Path $resultOut
     exit 1
 }
 $serverPid = [int]($startResult -replace "PID=", "")
 Write-Host "Server started, PID=$serverPid"
 
-# Give boot cfg time to run (40 waits + commands)
-Start-Sleep -Seconds 10
+function Parse-SpawnsAndTargetsFromRcon {
+    $spawnOut = Invoke-Rcon "crossbot_list_spawns"
+    $targetOut = Invoke-Rcon "crossbot_list_targets"
+
+    $spawnMatches = [regex]::Matches([string]$spawnOut, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+    $targetMatches = [regex]::Matches([string]$targetOut, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+
+    $spawns = @()
+    foreach ($m in $spawnMatches) {
+        $spawns += [pscustomobject]@{
+            Classname = $m.Groups[1].Value
+            X = [double]$m.Groups[2].Value
+            Y = [double]$m.Groups[3].Value
+            Z = [double]$m.Groups[4].Value
+        }
+    }
+    $spawns = @($spawns | Sort-Object X,Y,Z -Unique)
+
+    $targets = @()
+    foreach ($m in $targetMatches) {
+        $targets += [pscustomobject]@{
+            Name = $m.Groups[1].Value
+            X = [double]$m.Groups[2].Value
+            Y = [double]$m.Groups[3].Value
+            Z = [double]$m.Groups[4].Value
+        }
+    }
+
+    return @{ Spawns = $spawns; Targets = @($targets) }
+}
 
 try {
-    # --- 2. Get spawn points and targets via RCON (not qconsole.log) ---
-    Write-Host "Querying spawn points and targets via RCON..."
-
-    function Parse-SpawnsAndTargetsFromRcon($port) {
-            $spawnOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_spawns"
-            $targetOut = & "$scriptDir\rcon.ps1" -Port $port -Command "crossbot_list_targets"
-
-            Write-Host "Raw spawn output: '$spawnOut'"
-            Write-Host "Raw target output: '$targetOut'"
-
-            $spawnMatches = [regex]::Matches($spawnOut, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-            $targetMatches = [regex]::Matches($targetOut, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-
-            $spawns = @()
-            foreach ($m in $spawnMatches) {
-                $spawns += [pscustomobject]@{
-                    Classname = $m.Groups[1].Value
-                    X = [double]$m.Groups[2].Value
-                    Y = [double]$m.Groups[3].Value
-                    Z = [double]$m.Groups[4].Value
-                }
-            }
-            $spawns = $spawns | Sort-Object X,Y,Z -Unique
-
-            $targets = @()
-            foreach ($m in $targetMatches) {
-                $targets += [pscustomobject]@{
-                    Name = $m.Groups[1].Value
-                    X = [double]$m.Groups[2].Value
-                    Y = [double]$m.Groups[3].Value
-                    Z = [double]$m.Groups[4].Value
-                }
-            }
-
-            return @{ Spawns = $spawns; Targets = $targets }
-        }
-
-        $parsed = Parse-SpawnsAndTargetsFromRcon $Port
+    # --- 2. Wait for the boot cfg to have run, then read spawns/targets over RCON ---
+    # The cfg is 40 engine "wait"s then the commands; poll for its observable effect
+    # rather than sleeping a fixed amount, which under parallel load was both too
+    # long on small maps and too short on big ones (0 spawns parsed -> bogus FAIL).
+    # An RCON reply can arrive split across UDP packets, and a loaded box can drop
+    # or delay one. A short read looks exactly like a map with fewer spawns or no
+    # info_target at all, which silently picks a different goal. So require the
+    # same counts twice in a row before trusting them.
+    Write-Host "Waiting for boot commands and querying spawns/targets via RCON..."
+    $bootSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $spawns = @()
+    $targets = @()
+    $botReady = $false
+    $prevKey = ""
+    while ($bootSw.Elapsed.TotalSeconds -lt 30) {
+        $parsed = Parse-SpawnsAndTargetsFromRcon
         $spawns = $parsed.Spawns
         $targets = $parsed.Targets
+        $status = Invoke-Rcon "crossbot_nav_status"
+        $botReady = ($status -match "origin=")
+        $key = "$($spawns.Count)/$($targets.Count)"
+        if ($spawns.Count -ge 1 -and $botReady -and $key -eq $prevKey) { break }
+        $prevKey = $key
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Host ("Boot ready after {0:N1}s: {1} spawn(s), {2} target(s), bot={3}" -f `
+        $bootSw.Elapsed.TotalSeconds, $spawns.Count, $targets.Count, $botReady)
 
-        Write-Host "Found $($spawns.Count) spawn point(s), $($targets.Count) target(s)"
+    if (-not $botReady) {
+        Write-Host "WARNING: bot never reported an origin; continuing anyway"
+    }
 
     # --- 3. Select goal ---
     $goal = $null
@@ -265,127 +295,110 @@ try {
         Write-Host ("  Spawn A ({0:F1},{1:F1},{2:F1}) -> Goal B ({3:F1},{4:F1},{5:F1})" -f $bestA.X,$bestA.Y,$bestA.Z,$goal.X,$goal.Y,$goal.Z)
     }
     else {
-        Write-Host "FAIL: Need at least 1 info_target or 2 spawn points to define a goal"
+        $reason = "need at least 1 info_target or 2 spawn points to define a goal (found $($spawns.Count) spawns, $($targets.Count) targets)"
+        Write-Host "FAIL: $reason"
+        Write-Host "=== RESULT: FAIL -- $reason ==="
+        "FAIL`t$reason" | Set-Content -Path $resultOut
         exit 1
     }
 
     # --- 4. Teleport bot to start (use first spawn point) and set goal ---
-        $startSpawn = $spawns[0]
-        Write-Host "Teleporting bot to first spawn: ($($startSpawn.X), $($startSpawn.Y), $($startSpawn.Z))"
-        & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_teleport $($startSpawn.X) $($startSpawn.Y) $($startSpawn.Z)"
-        Start-Sleep -Milliseconds 500
+    $startSpawn = $spawns[0]
+    Write-Host "Teleporting bot to first spawn: ($($startSpawn.X), $($startSpawn.Y), $($startSpawn.Z))"
+    Invoke-Rcon "crossbot_teleport $($startSpawn.X) $($startSpawn.Y) $($startSpawn.Z)" | Out-Null
+    Start-Sleep -Milliseconds 500
 
-        # Verify teleport worked
-        $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
-        Write-Host "After teleport status: $status"
+    $status = Invoke-Rcon "crossbot_nav_status"
+    Write-Host "After teleport status: $status"
 
     Write-Host ("Setting nav goal to ({0:F1},{1:F1},{2:F1})..." -f $goal.X, $goal.Y, $goal.Z)
-    & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_goal $($goal.X) $($goal.Y) $($goal.Z)" | Out-Null
+    Invoke-Rcon "crossbot_nav_goal $($goal.X) $($goal.Y) $($goal.Z)" | Out-Null
 
-        # Wait for Repath to run and waypoints to be generated (poll until we have waypoints)
-        Write-Host "Waiting for path planning..."
-        $waypointsReady = $false
-        for ($i = 0; $i -lt 20; $i++) {  # up to 2 seconds
-            Start-Sleep -Milliseconds 100
-            $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
-            if ($status -match "waypoint=\d+/(\d+)") {
-                $wpCount = [int]$matches[1]
-                if ($wpCount -gt 0) {
-                    $waypointsReady = $true
-                    break
-                }
-            }
-        }
+    # Wait for Repath to run and waypoints to be generated
+    Write-Host "Waiting for path planning..."
+    $planSw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($planSw.Elapsed.TotalSeconds -lt 5) {
+        Start-Sleep -Milliseconds 100
+        $status = Invoke-Rcon "crossbot_nav_status"
+        if ($status -match "waypoint=\d+/(\d+)" -and [int]$matches[1] -gt 0) { break }
+    }
 
-        # Dump waypoints for debugging
-        $wpDump = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_waypoints"
-        Write-Host "Waypoints dump:"
-        Write-Host $wpDump
+    $wpDump = Invoke-Rcon "crossbot_waypoints"
+    Write-Host "Waypoints dump:"
+    Write-Host $wpDump
 
-        # --- 5. Poll until arrival or timeout ---
-    # Use hasGoal=0 from crossbot_nav_status as primary signal (more reliable than qconsole.log for short goals)
-        # Also collect bot positions during polling to build trajectory trace if test fails/times out
-        $expectedEta = $null
-        $elapsed = 0
-        $pollInterval = 2  # shorter interval to catch quick completions
-        $result = "FAIL"
-        $reason = "unknown"
-        $pollTracePoints = @()  # collect positions during polling for fallback trace
+    # --- 5. Poll until arrival or timeout ---
+    # hasGoal=0 from crossbot_nav_status is the primary signal (more reliable than
+    # qconsole.log for short goals). Positions collected here double as a fallback
+    # trajectory if the plugin's own trace log comes back empty.
+    # Everything below is timed on the wall clock: each RCON round trip costs real
+    # time, so counting poll iterations understated elapsed time by ~2.5x and made
+    # both -Timeout and -TimeoutMultiplier mean far more than they said.
+    $expectedEta = $null
+    $pollInterval = 2
+    $reason = "unknown"
+    $pollTracePoints = @()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # Absolute deadline
-        $absoluteDeadline = (Get-Date).AddSeconds($Timeout)
+    Write-Host "Polling for goal arrival (interval=${pollInterval}s)..."
 
-        Write-Host "Polling for goal arrival (interval=${pollInterval}s)..."
+    while ($sw.Elapsed.TotalSeconds -lt $Timeout) {
+        Start-Sleep -Seconds $pollInterval
+        $elapsed = $sw.Elapsed.TotalSeconds
 
-        while ($elapsed -lt $Timeout) {
-            Start-Sleep -Seconds $pollInterval
-            $elapsed += $pollInterval
+        $status = Invoke-Rcon "crossbot_nav_status"
+        $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
 
-            # Poll live status for hasGoal, ETA, and progress
-            $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
-                        Write-Host "Full status: $status"
-                        $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
+        if ($statusLine) {
+            Write-Host "Full status: $statusLine"
+            $etaMatch = [regex]::Match($statusLine, "eta=([\d.]+)s")
+            $originMatch = [regex]::Match($statusLine, "origin=\(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+            $hasGoalMatch = [regex]::Match($statusLine, "hasGoal=(\d)")
 
-            if ($statusLine) {
-                            # Print full status line if it contains waypoints
-                            if ($statusLine -match "waypoints=") {
-                                Write-Host "Full status: $statusLine"
-                            }
-                            $etaMatch = [regex]::Match($statusLine, "eta=([\d.]+)s")
-                            $originMatch = [regex]::Match($statusLine, "origin=\(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-                            $hasGoalMatch = [regex]::Match($statusLine, "hasGoal=(\d)")
-
-                if ($etaMatch.Success -and -not $expectedEta) {
-                    $expectedEta = [double]$etaMatch.Groups[1].Value
-                    $etaDeadline = $expectedEta * $TimeoutMultiplier
-                    Write-Host ("Bot reports ETA={0:N1}s -> timeout at {1:N1}s (or absolute {2}s)" -f $expectedEta, $etaDeadline, $Timeout)
-                }
-
-                if ($originMatch.Success) {
-                    $ox = [double]$originMatch.Groups[1].Value
-                    $oy = [double]$originMatch.Groups[2].Value
-                    $oz = [double]$originMatch.Groups[3].Value
-                    $dx = $ox - $goal.X; $dy = $oy - $goal.Y; $dz = $oz - $goal.Z
-                    $dist = [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
-                    $hasGoal = if ($hasGoalMatch.Success) { [int]$hasGoalMatch.Groups[1].Value } else { 0 }
-                    Write-Host ("t={0,4}s origin=({1:F0},{2:F0},{3:F0}) dist={4:F0} hasGoal={5}" -f $elapsed, $ox, $oy, $oz, $dist, $hasGoal)
-
-                    # Record position for fallback trace
-                    $pollTracePoints += [pscustomobject]@{ X = $ox; Y = $oy; Z = $oz }
-                }
-
-                # hasGoal=0 means the bot stopped pursuing the goal -- which happens both when it
-                # arrives and when Repath fails and it gives up. Only the first is a pass, so
-                # confirm it actually ended up near the goal.
-                if ($hasGoalMatch.Success -and [int]$hasGoalMatch.Groups[1].Value -eq 0) {
-                    if ($originMatch.Success -and $dist -gt $GoalRadius) {
-                        $result = "FAIL"
-                        $reason = ("bot abandoned the goal at ({0:F0},{1:F0},{2:F0}), {3:F0} units away (limit {4}), t={5}s" -f $ox, $oy, $oz, $dist, $GoalRadius, $elapsed)
-                    } else {
-                        $result = "PASS"
-                        $reason = ("goal reached, {0:F0} units away, t={1}s" -f $dist, $elapsed)
-                    }
-                    break
-                }
+            if ($etaMatch.Success -and -not $expectedEta) {
+                $expectedEta = [double]$etaMatch.Groups[1].Value
+                $etaDeadline = $expectedEta * $TimeoutMultiplier
+                Write-Host ("Bot reports ETA={0:N1}s -> timeout at {1:N1}s (or absolute {2}s)" -f $expectedEta, $etaDeadline, $Timeout)
             }
 
-            # Check timeout conditions
-            if ($expectedEta -and $elapsed -gt ($expectedEta * $TimeoutMultiplier)) {
-                $reason = ("exceeded {0:N1}s ({1}x the {2:N1}s ETA) without arriving" -f ($expectedEta * $TimeoutMultiplier), $TimeoutMultiplier, $expectedEta)
-            break
-        }
+            if ($originMatch.Success) {
+                $ox = [double]$originMatch.Groups[1].Value
+                $oy = [double]$originMatch.Groups[2].Value
+                $oz = [double]$originMatch.Groups[3].Value
+                $dx = $ox - $goal.X; $dy = $oy - $goal.Y; $dz = $oz - $goal.Z
+                $dist = [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
+                $hasGoal = if ($hasGoalMatch.Success) { [int]$hasGoalMatch.Groups[1].Value } else { 0 }
+                Write-Host ("t={0,5:N1}s origin=({1:F0},{2:F0},{3:F0}) dist={4:F0} hasGoal={5}" -f $elapsed, $ox, $oy, $oz, $dist, $hasGoal)
 
-            if ((Get-Date) -ge $absoluteDeadline) {
-                $reason = "hit absolute ${Timeout}s safety cap"
+                $pollTracePoints += [pscustomobject]@{ X = $ox; Y = $oy; Z = $oz }
+            }
+
+            # hasGoal=0 means the bot stopped pursuing the goal -- which happens both when it
+            # arrives and when Repath fails and it gives up. Only the first is a pass, so
+            # confirm it actually ended up near the goal.
+            if ($hasGoalMatch.Success -and [int]$hasGoalMatch.Groups[1].Value -eq 0) {
+                if ($originMatch.Success -and $dist -gt $GoalRadius) {
+                    $result = "FAIL"
+                    $reason = ("bot abandoned the goal at ({0:F0},{1:F0},{2:F0}), {3:F0} units away (limit {4}), t={5:N1}s" -f $ox, $oy, $oz, $dist, $GoalRadius, $elapsed)
+                } else {
+                    $result = "PASS"
+                    $reason = ("goal reached, {0:F0} units away, t={1:N1}s" -f $dist, $elapsed)
+                }
                 break
             }
         }
 
-        if ($result -ne "PASS" -and $elapsed -ge $Timeout) {
-            $reason = "hit absolute ${Timeout}s safety cap without arriving"
+        if ($expectedEta -and $sw.Elapsed.TotalSeconds -gt ($expectedEta * $TimeoutMultiplier)) {
+            $reason = ("exceeded {0:N1}s ({1}x the {2:N1}s ETA) without arriving" -f ($expectedEta * $TimeoutMultiplier), $TimeoutMultiplier, $expectedEta)
+            break
         }
+    }
 
-        Write-Host "=== RESULT: $result -- $reason ==="
+    if ($result -ne "PASS" -and $sw.Elapsed.TotalSeconds -ge $Timeout) {
+        $reason = "hit absolute ${Timeout}s safety cap without arriving"
+    }
+
+    Write-Host "=== RESULT: $result -- $reason ==="
 
     # --- 6. Collect trace log ---
     Write-Host "Collecting trace log from $traceLogPath..."
@@ -414,11 +427,11 @@ try {
         Write-Warning "Trace log not found at $traceLogPath (bot may not have reached goal or trace writing failed)"
     }
 
-        # Fallback: use positions collected during polling if trace log is empty
-        if ($tracePoints.Count -eq 0 -and $pollTracePoints.Count -gt 0) {
-            Write-Host "Using $($pollTracePoints.Count) fallback trace points from polling"
-            $tracePoints = $pollTracePoints
-        }
+    # Fallback: use positions collected during polling if trace log is empty
+    if ($tracePoints.Count -eq 0 -and $pollTracePoints.Count -gt 0) {
+        Write-Host "Using $($pollTracePoints.Count) fallback trace points from polling"
+        $tracePoints = $pollTracePoints
+    }
 
     # --- 7. Generate SVG with trace overlay ---
     Write-Host "Generating debug SVG..."
@@ -431,8 +444,8 @@ try {
 
     $navgenArgs = @($mapPath, "--dump-svg", $svgOut, "--trace", $traceOut, "-o", $navOut)
     Write-Host "Running: navgen.exe $($navgenArgs -join ' ')"
-    $navgenResult = & $navGenExe @navgenArgs
-    Write-Host $navgenResult
+    $svgRun = Invoke-Native -Exe $navGenExe -Arguments $navgenArgs
+    Write-Host $svgRun.Output
 
     if (-not (Test-Path $svgOut)) {
         Write-Warning "SVG generation may have failed: $svgOut not found"
@@ -441,17 +454,20 @@ try {
     }
     if (Test-Path $navOut) { Write-Host "NAV written: $navOut" }
 
-        # Update index.html with test result
+    "$result`t$reason" | Set-Content -Path $resultOut
+
+    if (-not $NoIndexUpdate) {
         Update-IndexHtml -MapName $mapName -Result $result -OutputDir $outputDir
-
     }
-        finally {
-                    # --- Cleanup ---
-                    Write-Host "Stopping HLDS (PID=$serverPid)..."
-                    & "$scriptDir\test_server_stop.ps1" -Id $serverPid | Out-Null
-                    # Also kill any child processes just in case
-                    Get-CimInstance Win32_Process -Filter "ParentProcessId=$serverPid" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-                }
+}
+finally {
+    # --- Cleanup ---
+    Write-Host "Stopping HLDS (PID=$serverPid)..."
+    & "$scriptDir\test_server_stop.ps1" -Id $serverPid | Out-Null
+    # Also kill any child processes just in case
+    Get-CimInstance Win32_Process -Filter "ParentProcessId=$serverPid" -ErrorAction SilentlyContinue |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
 
-                if ($result -ne "PASS") { exit 1 }
-                exit 0
+if ($result -ne "PASS") { exit 1 }
+exit 0

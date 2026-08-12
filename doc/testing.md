@@ -20,22 +20,50 @@ What it does per run:
 - Updates `nav_debug/index.html` with the pass/fail mark.
 
 Options: `-Timeout` (absolute cap, default 60s), `-TimeoutMultiplier` (on the bot's reported ETA,
-default 2.0 — the run fails at min(ETA × multiplier, Timeout)), `-Port`, `-NavGenPath`, `-HLDSDir`,
-`-OutputDir`.
+default 6.0 — the run fails at min(ETA × multiplier, Timeout)), `-Port`, `-NavGenPath`, `-HLDSDir`,
+`-OutputDir`, `-ServerLog`, `-NoIndexUpdate`.
 
-**Parallel-safe.** Every instance takes a unique port (29015-29100) and map-specific trace file, config
-and outputs; `crossbot_trace_path` isolates the trace log per instance. It still starts a real HLDS per
-map, so a full-suite run is heavy and will collide with anyone using the server by hand.
+It also writes `nav_debug/<map>.result` — a single `PASS|FAIL<tab>reason` line. That is the verdict in
+machine-readable form; the runner reads it instead of scraping the transcript.
 
-**The verdict goes to the console, not the pipeline.** It is printed with `Write-Host`, so
-`... | Select-String '=== RESULT'` captures nothing. Redirect the whole run to a file and parse that;
-the exit code is easy to lose through a pipeline too.
+**Timing is wall clock.** The loop used to count poll iterations, which ignored the seconds each RCON
+round trip costs and made both `-Timeout` and `-TimeoutMultiplier` mean roughly 2.5× what they said.
+They are now honest, which is why the multiplier default had to go up: **the planner's ETA does not
+model ladders.** Ladder maps take 2.6-3.1× their reported ETA running completely alone, and more under
+parallel load. The multiplier is a fail-fast heuristic; `-Timeout` is the real bound. A genuinely stuck
+bot never arrives at all, so tightening the multiplier buys nothing and costs false failures.
 
-**The script's output does not contain the plugin's.** The transcript is the script talking over RCON;
-every `SERVER_PRINT` — `Repath`, `Replan`, the air-move launch and landing lines — goes to
-`hlds/qconsole.log` instead. A run that passes tells you nothing about *why*; the log is where the
-route, the failures and the penalties are. It is shared across parallel runs and appended to, so read
-it by tail, not from the top.
+**Parallel-safe.** Every instance takes a unique port (29015-29100) and map-specific trace file, config,
+server log and outputs; `crossbot_trace_path` isolates the trace log per instance. The one thing that is
+*not* isolated is `nav_debug/index.html`, so parallel callers must pass `-NoIndexUpdate` and rebuild it
+once at the end — concurrent read-modify-write on it loses results.
+
+**The server is invisible, not absent.** `test_server_start.ps1` launches `hlds.exe` with
+`-NoNewWindow` and its stdout/stderr redirected. The binary is console-subsystem, so it is created with
+no console at all rather than being shown and hidden after the fact: nothing flashes, nothing steals
+focus, and there is no window to click into and freeze the server in QuickEdit select mode. Readiness is
+the engine printing `player server started` into that log, not a window handle appearing.
+
+**The plugin's output is now per-instance.** Every `SERVER_PRINT` — `Repath`, `Replan`, the air-move
+launch and landing lines — goes to `<OutputDir>/logs/<map>_server.log` for that run alone. A run that
+passes tells you nothing about *why*; that log is where the route, the failures and the penalties are.
+`hlds/qconsole.log` still receives everything too (via `-condebug`), but it is shared across concurrent
+instances and appended to, so prefer the per-map log and read qconsole by tail if you use it at all.
+
+## scripts/test_nav_goal_all.ps1
+
+The same test over every `maps/*.bsp`, at most `-MaxParallel` at a time. Each map runs as its own
+PowerShell child process, so its verdict is a real process exit code and its whole transcript lands in
+`nav_debug/logs/<map>.log`. Summary prints map, PASS/FAIL, elapsed and reason; exit 1 if anything failed.
+
+**`-MaxParallel` is a correctness knob, not just a speed one.** Default 6 (~210s for 45 maps). At 12 the
+run takes ~140s, but the box is loaded enough that the *bots* behave differently — maps that pass alone
+and at 6 have been observed falling off geometry and failing. A faster sweep you cannot trust is worth
+nothing here. The hard ceiling is 86, from the port range.
+
+Killing a child does not run its cleanup, so the runner tracks the ports it owns and sweeps for
+surviving `hlds.exe` at the end, matching on `+port` in the command line. It never mass-kills
+`hlds.exe`: a server you started by hand on the default 27015 is outside its range and is left alone.
 
 ## Sweeping a change
 
