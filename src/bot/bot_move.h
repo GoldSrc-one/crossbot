@@ -11,3 +11,6 @@ void Bot_DecomposeMove(float viewYawDeg, const Vector &worldDir, float driveLeng
 
 byte Bot_FrameMsec();
 
+void Bot_RunPlayerMove(edict_t *pEdict, const Vector &angles, float fmove, float smove,
+	unsigned short buttons);
+

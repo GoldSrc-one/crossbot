@@ -15,7 +15,11 @@ param(
     [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
     # Per-instance capture of everything the server prints. qconsole.log is
     # shared by every concurrent instance; this file is not.
-    [string]$LogFile = ""
+    [string]$LogFile = "",
+    # Extra engine launch arguments, inserted before +map so any cvar they set
+    # is already in effect when the level loads. Use for +sys_ticrate and
+    # friends when stress-testing the bot at an unusual server framerate.
+    [string[]]$ExtraArgs = @()
 )
 
 $exe = Join-Path $HLDSDir "hlds.exe"
@@ -41,8 +45,10 @@ Set-Content -Path $inFile -Value "" -NoNewline
 $launchArgs = @(
     "-console", "-condebug", "-insecure", "-game", "valve",
     "+sv_lan", "1", "+deathmatch", "1", "+developer", "2", "+maxplayers", "16",
-    "+rcon_password", "crossbot_test", "+port", "$Port", "+map", $Map
+    "+rcon_password", "crossbot_test", "+port", "$Port"
 )
+if ($ExtraArgs.Count -gt 0) { $launchArgs += $ExtraArgs }
+$launchArgs += @("+map", $Map)
 
 if ($Commands.Count -gt 0) {
     $cfgPath = Join-Path $HLDSDir "valve\$ConfigName"

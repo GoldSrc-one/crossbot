@@ -79,6 +79,12 @@ param(
 
     [switch]$NoIndexUpdate,
 
+    # Extra engine launch arguments, forwarded to test_server_start.ps1 and applied
+    # before the map loads. -ServerArgs "+sys_ticrate","10" runs the whole test at a
+    # 10 Hz server framerate, which is the cheapest way to check that the follower
+    # is frame-rate independent rather than accidentally tuned to 100 Hz frames.
+    [string[]]$ServerArgs = @(),
+
     # How close the bot must end up for hasGoal=0 to count as arrival rather than giving up.
     # Legitimate arrivals land 24-50 units out (the follower stops at finalRadius, and the goal is
     # clamped into its area, so it never coincides with the raw entity origin).
@@ -157,6 +163,7 @@ Write-Host "Trace:    $traceCvarPath"
 Write-Host "navgen:   $navGenExe"
 Write-Host "HLDS:     $hldsExe"
 Write-Host "SrvLog:   $ServerLog"
+if ($ServerArgs.Count -gt 0) { Write-Host "SrvArgs:  $($ServerArgs -join ' ')" }
 
 $result = "FAIL"
 $reason = "did not run"
@@ -194,7 +201,7 @@ $bootCommands = @(
 
 Write-Host "Starting HLDS on port $Port..."
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands $bootCommands `
-    -ConfigName $configName -HLDSDir $HLDSDir -LogFile $ServerLog
+    -ConfigName $configName -HLDSDir $HLDSDir -LogFile $ServerLog -ExtraArgs $ServerArgs
 
 if ($startResult -match "^EXITED") {
     Write-Host "FAIL: server failed to start ($startResult)"

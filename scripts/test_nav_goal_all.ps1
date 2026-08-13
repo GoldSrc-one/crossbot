@@ -52,7 +52,11 @@ param(
     [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
     [string]$OutputDir = "nav_debug",
     [string]$MapsDir = "maps",
-    [string]$Filter = "*"
+    [string]$Filter = "*",
+    # Forwarded to each child's -ServerArgs. -ServerArgs "+sys_ticrate","10" runs the whole
+    # suite at a 10 Hz server framerate, which catches follower logic that only works because
+    # a 100 Hz frame is too short for the engine to re-simulate anything mid-command.
+    [string[]]$ServerArgs = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -144,6 +148,11 @@ for ($i = 0; $i -lt $mapFiles.Count; $i++) {
         "-ServerLog", (Join-Path $logDir "${mapName}_server.log"),
         "-NoIndexUpdate"
     )
+
+    if ($ServerArgs.Count -gt 0) {
+        $childArgs += "-ServerArgs"
+        $childArgs += ($ServerArgs -join ',')
+    }
 
     $proc = Start-Process -FilePath $psExe -ArgumentList $childArgs `
         -WorkingDirectory $repoRoot -NoNewWindow -PassThru `

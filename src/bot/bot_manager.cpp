@@ -266,6 +266,14 @@ void PrintNavStatus()
 			msg += line;
 		}
 
+		if (bot.ladderActive)
+		{
+			snprintf(line, sizeof(line), " ladder=%.1fs up=%d grabbed=%d top=%d stalls=%d offz=%.0f",
+				gpGlobals->time - bot.ladderStartTime, bot.ladderUp ? 1 : 0, bot.ladderGrabbed ? 1 : 0,
+				bot.ladderAtTop ? 1 : 0, bot.ladderStalls, bot.ladderDismountZ);
+			msg += line;
+		}
+
 		if (bot.hasGoal && bot.estimatedArrivalTime > 0.f)
 		{
 			float elapsed = gpGlobals->time - bot.pathStartTime;

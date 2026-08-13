@@ -9,6 +9,19 @@ PM_WalkMove and PM_AirMove both flatten forward/right and renormalize before use
 Wraps an angle into (-180, 180]. Lives here rather than in bot_move_nav.cpp so both movement
 translation units share one copy.
 
+### Bot_RunPlayerMove
+Every actuation in the follower goes through this rather than calling `pfnRunPlayerMove` directly,
+because a usercmd is not the atomic unit it looks like: the engine halves any command longer than 50 ms
+and runs `PM_PlayerMove` once per half, re-reading the same buttons each time. For all but one button
+that is harmless — the halves simply integrate the same intent twice. `IN_JUMP` is the exception.
+`PM_LadderMove` reads it with no `oldbuttons` gate (`pm_shared.c:2105`) and answers by setting
+`velocity = plane.normal * 270`, so a jump that *begins* out of a ladder's reach is ejected by the
+sub-step that finally brings the bot into contact. Below the threshold the bot never noticed, because a
+10 ms frame is far too short to cross the gap; at `sys_ticrate 10` it made the standing climb in
+test53_ladder4 impossible, and the bot pogoed at the foot of the ladder until the run timed out. So a
+command carrying `IN_JUMP` is issued as at most 50 ms, and the remainder of the frame is issued
+separately with the button cleared — one frame of held jump at any server framerate.
+
 ## bot_move_nav.cpp
 
 ### Constants
@@ -133,8 +146,35 @@ of the list in `crossbot_nav_status` are the tell.
 ### Ladders
 
 `RunLadderApproach` walks the bot to the mount and latches `CBot::ladderActive`; `RunLadderMove` then
-owns every frame until it finishes, exactly as the air move does. Four rules make the difference between
+owns every frame until it finishes, exactly as the air move does. Eight rules make the difference between
 a climb and the jump-on-jump-off loop test53_ladder4 used to run.
+
+**Drive from the plane the engine picked, not the face navgen planned.** `PM_LadderMove` chooses its
+plane with `PM_TraceModel(origin -> ladder centre)` in the *point* hull, so the face is decided by where
+the bot actually stands. When that disagrees with the planned face, `dot(velocity, N)` is ~0, `lateral`
+collapses to the raw view vector, and the bot flies horizontally off the ladder at 200 u/s.
+`ProbeLadderPlane` repeats the engine's own trace every frame and every aim is derived from its result;
+`LadderPlane::why` records which of `no-entity` / `startsolid` / `allsolid` / `no-hit` / `degenerate`
+rejected a probe. With a valid plane every motion is reachable with `IN_FORWARD` alone plus view angles —
+climb faces `-N` at pitch 0, descent faces `-N` at pitch +89, sideways faces `±perp`. A degenerate plane
+is not a failure to route around: velocity is then exactly `vpn * 200`, so the fallback simply aims pitch
+∓89 and rides that.
+
+**A ladder mount bars the profile, like a ride does.** Mount to exit is near-zero in XY, so
+`NavFollow::Track` sails straight through it and `waypointIndex` reaches the exit while the bot is still
+short of the volume. `RunLadderApproach` is then never called for the mount, and the moment the bot
+drifts onto the ladder anyway the `ladderEject` rule sees no ladder waypoint in range and jumps it back
+off at 270 u/s — forever. The mount therefore sets `NavFollow::Config::sLimit` while
+`i >= bot.waypointIndex`, released by the `++bot.waypointIndex` that commits the climb.
+
+**Never duck on a ladder while `FL_ONGROUND`.** `PM_CategorizePosition` treats the player as airborne
+only above `velocity[2] > 180` (`pm_shared.c:1542`); below that it traces two units down and, if it finds
+floor, snaps the origin back to it. A ducked climb is `MAX_CLIMB_SPEED * 0.333 = 67`, under the
+threshold, so at the foot of a ladder the bot is re-glued to the floor every frame: correct plane,
+correct aim, `vel=(0,0,67)`, and an origin that never leaves z 18-20. Only the two `[crouch]` ladders in
+test53_ladder4 stalled, and only at their mounts. `RunLadderDrive` drops `IN_DUCK` while on a ladder and
+on the ground; the bot detaches in one frame at 200 and re-ducks in the air, where the two-unit trace no
+longer reaches. `PM_UnDuck` refuses to unduck into a ceiling, so a genuinely low mount degrades safely.
 
 **Never hold `IN_JUMP` while `MOVETYPE_FLY`.** `PM_LadderMove` reads the jump button before anything
 else and answers with `movetype = MOVETYPE_WALK; velocity = normal * 270` — one frame of jump ejects the
@@ -143,6 +183,14 @@ bot off the ladder at 270 u/s. The reach-up hop that grabs a dangling rung is th
 ladder *and* on the ground at once, so the ungated version hopped on, ejected, walked back and repeated
 forever. `avoid.jump` is suppressed the same way, and `RunAirmoveDrive` drops the button outright when
 the mover is on a ladder, so a flight that ends on one cannot bounce off it.
+
+**A ladder need not reach the floor, and reaching one costs exactly one frame of jump.** test53_ladder4's
+`*2` brush stops 62 units above the floor of its shaft: hull 1 expands it to `z >= -212` and a standing
+bot's origin is at -220, so no amount of walking touches it. `LadderOutOfReach` detects that, waits
+`kLadderReachDwell`, and hops. What made the hop framerate-dependent was the engine re-simulating the
+held button mid-flight — see `Bot_RunPlayerMove`, which is why the hop is now a 50 ms command and the
+rest of the frame is jump-free. The contact sub-step then finds `IN_JUMP` clear, and the bot grabs at the
+top of its arc instead of being thrown back down the shaft.
 
 **Aim before driving.** `PM_LadderMove` builds its wish from the *buttons*, so `IN_MOVERIGHT` is a full
 `±MAX_CLIMB_SPEED` sideways input no matter how small the `smove` that set it. A bot still turning toward
@@ -163,6 +211,43 @@ steering *to* it stops the bot short of the capture region — for a ladder whos
 beyond the stand point that is a permanent stall, jumping in place at full drive. The approach aims
 `kLadderMountLead` further along `ladderYaw`, i.e. into the ladder, and lets the capture happen on the
 way through.
+
+**Stalls are measured in distance, not speed.** A bot wedged against the brush can hold a healthy
+`vel=(0,0,67)` forever while its origin does not move, so the detector compares against
+`ladderStallOrigin` and gives up after `kLadderStallDist`. Two escapes are allowed, each a push-off;
+the third gives up on the connection and repaths.
+
+### Ladder debugging
+
+`bot_move_nav.cpp` carries a per-frame ladder trace behind `#ifdef CROSSBOT_LADDER_DEBUG`, off by
+default. Turn it on with
+
+```
+build.bat -DCROSSBOT_LADDER_DEBUG=ON
+```
+
+(the value is cached in `build/CMakeCache.txt`, so plain `build.bat` keeps whatever was last set). It
+prints to the server console, which the test harness already captures at
+`nav_debug/logs/<map>_server.log`, and it is emitted only while the bot is in the ladder pipeline. The
+macro compiles its arguments away when the flag is off.
+
+Lines read `CrossBot: LDBG <bot> t=<time> <phase> key=val ...`, one per frame per phase:
+
+| phase | what it shows |
+| --- | --- |
+| `approach` | the whole pre-commit state: mount, dist, remaining, launch lead, computed aim, `blocked`/`reachUp` |
+| `past` | the approach handed back to the walker because the bot is already beyond the dismount height |
+| `entry` | pre-catch, with all three "never caught" predicates evaluated separately |
+| `state` | plane validity and reason, normal, chosen step, dismount dots, stall age and displacement |
+| `aim` | target vs current angles, the error, and whether `drive` was gated by turning or commanded off |
+| `drive` | `fmove`/`smove` and the decoded button names actually sent to `pfnRunPlayerMove` |
+| `after` | position and velocity immediately after that call, so one frame's cause and effect sit together |
+| `exit` | off-ladder, seeking the exit point |
+| `eject` | the walker's `OnLadder` branch: which of the next three waypoints are ladder waypoints, and whether `ladderEject` fired |
+| `walk` | the walker's own actuation whenever a ladder is involved — the only other place `IN_JUMP` can reach the bot |
+
+`drive`/`after` and `eject`/`walk` between them cover every button the bot can be sent, which is what
+makes "who pressed jump" answerable rather than a matter of reading gates.
 
 ### Elevators
 

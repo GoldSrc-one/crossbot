@@ -49,6 +49,10 @@ struct CBot
 	float ladderSpeed = 0.f;
 	float ladderDismountYaw = 0.f;
 	float ladderDismountZ = 0.f;
+	Vector ladderMountPoint;
+	Vector ladderExitPoint;
+	Vector ladderStallOrigin;
+	float ladderReachTime = 0.f;
 	float ladderStartTime = 0.f;
 	float ladderLeftTime = 0.f;
 	float ladderMoveTime = 0.f;

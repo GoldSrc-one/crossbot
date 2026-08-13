@@ -75,6 +75,12 @@ if(WIN32)
     target_compile_definitions(crossbot_mm PRIVATE _WINDOWS WIN32)
 endif()
 
+option(CROSSBOT_LADDER_DEBUG "Per-frame ladder state trace on the server console" OFF)
+if(CROSSBOT_LADDER_DEBUG)
+    target_compile_definitions(crossbot_mm PRIVATE CROSSBOT_LADDER_DEBUG)
+    message(STATUS "crossbot: ladder state trace ENABLED")
+endif()
+
 file(GLOB NAVGEN_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/navgen/*.cpp
 )

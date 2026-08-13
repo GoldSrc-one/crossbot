@@ -61,6 +61,16 @@ run takes ~140s, but the box is loaded enough that the *bots* behave differently
 and at 6 have been observed falling off geometry and failing. A faster sweep you cannot trust is worth
 nothing here. The hard ceiling is 86, from the port range.
 
+**`-ServerArgs` lowers the server framerate, which is a different test from parallel load.**
+`-ServerArgs "+sys_ticrate","10"` (forwarded to each child, and available on `test_nav_goal.ps1` alone)
+runs the whole suite at 10 Hz instead of the default ~100. `-MaxParallel` starves the box and makes the
+bot arrive at the right place late; a low ticrate changes the *shape* of a frame, and catches follower
+logic that only works because a 10 ms command is too short for the engine to do anything surprising
+inside it. `pfnRunPlayerMove` is where that bites — the engine halves any command over 50 ms and
+re-simulates it, which is how a held `IN_JUMP` came to eject the bot off a ladder it had just touched
+(see `Bot_RunPlayerMove` in `doc/bot.md`). At 100 Hz that bug was invisible; at 10 Hz it failed 5 runs
+out of 5. Verify the rate actually took with `rcon stats`, whose FPS column should read ~10.9.
+
 Killing a child does not run its cleanup, so the runner tracks the ports it owns and sweeps for
 surviving `hlds.exe` at the end, matching on `+port` in the command line. It never mass-kills
 `hlds.exe`: a server you started by hand on the default 27015 is outside its range and is left alone.
