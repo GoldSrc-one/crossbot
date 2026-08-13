@@ -767,7 +767,7 @@ platform parked at the bottom. A `CONN_WALK` is one bidirectional record, so dro
 *off* the platform with it, which is the seam that matters once you have ridden up. `BuildElevatorConnections`
 therefore orients it instead: `CONN_FLAG_ONE_WAY` with the stop as `areaA`, so the seam can only be walked
 outwards. `reachability.cpp` and `nav_path.cpp` both honour the flag, so a stop nobody can summon still does not
-become reachable through that seam. Separate from this are the walk edges dropped *between* two stops of one
+become reachable through that seam. Nothing summons this stop, so the seam can only be walked outwards -- stepping in from the far side is stepping into the shaft. Dropping the record would take the way off with it. Separate from this are the walk edges dropped *between* two stops of one
 mover, which the step filter usually kills first but which are removed structurally.
 
 ### Geometry: a stop area is the space the mover floors
@@ -786,17 +786,22 @@ the mover and not the world:
 - the candidate is the leaf clipped to `duckVolume`'s AABB in XY and `[topZ, slabTopZ]` in Z;
 - `ComputeSupportedFloor` on its floor face, once against the world plus every non-elevator blocker and once
   against `{duckVolume}` alone (with `CONTENTS_EMPTY` as the headnode, so the world contributes nothing), says
-  which of the two holds each part of it up;
+  which of the two holds each part of it up. True when the only thing holding this piece up is the mover parked at this stop. CONTENTS_EMPTY as the headnode makes the world contribute nothing, which is how the mover is asked in isolation.
 - where those disagree, `VerticalPlaneThroughEdge` and `ClipPolytope` cut the candidate along the boundary;
 - mover-floored pieces are claimed and tagged `elevatorStopId`. Anything the world already floors stays behind,
-  and if nothing at all is claimed the leaf is left whole rather than fragmented.
+  and if nothing at all is claimed the leaf is left whole rather than fragmented. Takes from `piece` the space between this stop's top surface and the next stop's, wherever the mover is what you would be standing on. Anything the world already floors at that height stays behind in `keep`, which is what lets a stop flush with a landing keep the landing as ordinary ground.
 
 Only then is the **default** stop's body subtracted from what remains, and only from pieces that strictly
-overlap it — `OverlapsBlockingVolume` counts a shared face, and carving against a tree a piece merely touches
-splits it along that tree's planes, which would strand the halves. Claiming before subtracting is what lets a
+overlap it — `OverlapsBlockingVolume()` counts a shared face as an overlap, and carving against a tree the piece only
+touches still splits it along that tree's planes. The claim leaves pieces flush against the mover, so the
+parked-body subtraction needs a strict test or it fragments them. Claiming before subtracting is what lets a
 lift parked at its *top* stop still produce a lower stop area; the general blocker carve in `main.cpp` runs on
 `airmoveWorlds.baseDuck`, which is every blocker except the elevator volumes, precisely so this stage can own
 the order.
+
+The movers carve their own leaves in SplitLeavesByElevatorStops, which has to claim the stop
+floors before the parked body is subtracted -- otherwise a lift parked at its top stop swallows
+the region its lower stop needs. baseDuck is `blockers` without any elevator volume.
 
 The second half of the rule is what a flush landing needs. `test55_plat`'s raised stop is level with the ledge
 beside it, and the mover's own footprint reaches 16 units into that ledge; the world floors that strip, so it

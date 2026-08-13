@@ -242,9 +242,6 @@ void PrintMover(const ElevatorMover &mover, uint8_t reject, const Vec3 &size)
 		mover.activators.size());
 }
 
-// OverlapsBlockingVolume() counts a shared face as an overlap, and carving against a tree the piece only
-// touches still splits it along that tree's planes. The claim leaves pieces flush against the mover, so the
-// parked-body subtraction needs a strict test or it fragments them.
 bool OverlapsVolumeStrict(const Polytope &poly, const BlockingVolume &vol)
 {
 	Vec3 mins, maxs;
@@ -264,8 +261,6 @@ double SupportedFloorArea(const BspFile &bsp, int headnode, const std::vector<Bl
 	return total;
 }
 
-// True when the only thing holding this piece up is the mover parked at this stop. CONTENTS_EMPTY as the
-// headnode makes the world contribute nothing, which is how the mover is asked in isolation.
 bool MoverIsTheFloor(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &worldSupport,
 	const std::vector<BlockingVolume> &moverOnly, const Polytope &piece)
 {
@@ -322,9 +317,6 @@ void SplitByPlanes(const Polytope &poly, const std::vector<Plane> &planes, size_
 	SplitByPlanes(ClipPolytope(poly, plane, false, mapRadius), planes, index + 1, mapRadius, out);
 }
 
-// Takes from `piece` the space between this stop's top surface and the next stop's, wherever the mover is
-// what you would be standing on. Anything the world already floors at that height stays behind in `keep`,
-// which is what lets a stop flush with a landing keep the landing as ordinary ground.
 void ClaimStopFloor(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &worldSupport,
 	const ElevatorStop &stop, const Polytope &piece, double mapRadius, std::vector<Polytope> &claimed,
 	std::vector<Polytope> &keep)
@@ -684,8 +676,6 @@ size_t BuildElevatorConnections(const ElevatorSet &elevators, const std::vector<
 				}
 			}
 
-			// Nothing summons this stop, so the seam can only be walked outwards -- stepping in from the
-			// far side is stepping into the shaft. Dropping the record would take the way off with it.
 			bool outA = ungatedStopArea(c.areaA);
 			bool outB = ungatedStopArea(c.areaB);
 			if (outA != outB)

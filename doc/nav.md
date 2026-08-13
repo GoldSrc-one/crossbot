@@ -290,6 +290,9 @@ loop adds `elevatorWaitTime + elevatorTravelTime` per ride waypoint. Door and bu
 gap and are still left to `kEtaSafetyMargin`; a ride cannot be, because on `test55_plat` it is twice the
 walking time.
 
+A ride's two waypoints share an XY, so its segment has zero length and the integration above cannot
+see it at all. Add the time here or the ETA reads as a walk to the shaft and back out again.
+
 A second forward pass records the prediction the ceilings deliberately omit. Walking front to back, it
 carries the reachable speed through `AccelForward` — the exact solution of `dv/ds = (a - f·max(v,s0))/v`,
 bisected on the closed form, the mirror of `BrakeBack` — and stores it per segment as
@@ -367,6 +370,11 @@ behind, and the two unit vectors sum to zero. That used to fall through to `d.do
 be. `test18_elevator` hit it while barred at a lift, printing `reached goal` 312 units away and mid
 shaft. A degenerate blend now keeps the raw tangent, and the surviving zero-direction case — which
 needs an empty tangent, not a cancelled one — asks for a repath instead of claiming success.
+
+The rejoin pull can cancel the tangent exactly -- a bot barred at a node and standing beyond it
+along the tangent sees the chain point directly behind. Falling through to `done` there reports
+an arrival wherever the bot happens to be, so keep the raw tangent and let the lateral test
+decide whether this is worth a repath.
 
 ### NavFollow::SolveDrive
 Inverts one engine frame to hit a target velocity `V*`. This is the only correct way to ask the engine

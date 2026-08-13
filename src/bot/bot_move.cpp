@@ -8,11 +8,6 @@ namespace
 {
 	constexpr float kMaxTurnRatePerSec = 300.f;
 
-	// The engine halves any usercmd longer than this and runs PM_PlayerMove once per half, so a
-	// button held in a long command is re-read after the bot has already moved. IN_JUMP is the one
-	// button where that matters: PM_LadderMove reads it with no oldbuttons gate and answers by
-	// shoving the player 270 units off the ladder plane, so a jump that merely *starts* out of a
-	// ladder's reach ejects the bot the moment a later sub-step brings it into contact.
 	constexpr byte kMaxJumpCommandMsec = 50;
 }
 
@@ -34,8 +29,6 @@ byte Bot_FrameMsec()
 	return static_cast<byte>(msec);
 }
 
-// Every actuation goes through here so a jump costs the same one frame of held button at any server
-// framerate. Below the split threshold this is exactly the single call it replaces.
 void Bot_RunPlayerMove(edict_t *pEdict, const Vector &angles, float fmove, float smove,
 	unsigned short buttons)
 {

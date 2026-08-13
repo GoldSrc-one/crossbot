@@ -1000,8 +1000,6 @@ namespace
 		return true;
 	}
 
-	// A waypoint's point is at player height in its own area, so the floor under it is the point less the
-	// stand lift unless the plan wants the bot ducked -- the convention BotNavZ reads off the live stance.
 	float WaypointNavZ(const Nav::Waypoint &wp)
 	{
 		return wp.point.z - (wp.requiresCrouch ? 0.f : NavPlan::kPlanStandHeight);
@@ -1019,9 +1017,6 @@ namespace
 		return bot.pEdict->v.v_angle.y;
 	}
 
-	// Zero drive means stand exactly still. SolveDrive answers a residual velocity with a full-rate reverse
-	// command, which is the right servo answer on open ground and the wrong one on a platform edge, so the
-	// solve is skipped and friction does the stopping.
 	void RunElevatorDrive(CBot &bot, const Vector &moveDir, float drive, float aimYaw, bool crouch)
 	{
 		edict_t *pEdict = bot.pEdict;
@@ -1072,57 +1067,49 @@ namespace
 		bool failed = (bot.rideTargetArea >= 0 && landedId != bot.rideTargetArea);
 
 		if (bot.rideConnIndex >= 0)
-		{
-			uint32_t connIndex = static_cast<uint32_t>(bot.rideConnIndex);
-			if (failed)
-				Nav::PenalizeConnection(connIndex);
-			else
-				Nav::RewardConnection(connIndex);
-		}
+				{
+					uint32_t connIndex = static_cast<uint32_t>(bot.rideConnIndex);
+					if (failed)
+						Nav::PenalizeConnection(connIndex);
+					else
+						Nav::RewardConnection(connIndex);
+				}
 
-		char msg[288];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s elevator %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d\n",
-			bot.name, why, gpGlobals->time - bot.rideStartTime, pEdict->v.origin.x, pEdict->v.origin.y,
-			pEdict->v.origin.z, landedId, bot.rideTargetArea, bot.rideConnIndex);
-		SERVER_PRINT(msg);
+				char msg[288];
+				snprintf(msg, sizeof(msg),
+					"CrossBot: %s elevator %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d\n",
+					bot.name, why, gpGlobals->time - bot.rideStartTime, pEdict->v.origin.x, pEdict->v.origin.y,
+					pEdict->v.origin.z, landedId, bot.rideTargetArea, bot.rideConnIndex);
+				SERVER_PRINT(msg);
 
-		// The ride is spent. Clearing the flag is what lifts the sLimit barrier, and it travels with the
-		// waypoint through SpliceDetour, which an index watermark would not.
-		if (bot.rideWpIndex < bot.waypoints.size())
-			bot.waypoints[bot.rideWpIndex].requiresElevatorRide = false;
+				if (bot.rideWpIndex < bot.waypoints.size())
+					bot.waypoints[bot.rideWpIndex].requiresElevatorRide = false;
 
-		size_t arriveWp = bot.rideWpIndex + 1;
-		if (arriveWp < bot.waypoints.size())
-		{
-			bot.waypointIndex = arriveWp;
+				size_t arriveWp = bot.rideWpIndex + 1;
+				if (arriveWp < bot.waypoints.size())
+				{
+					bot.waypointIndex = arriveWp;
 
-			// Boarding and arrival share an XY, so a global reprojection is free to snap back below the
-			// ride. Place progress on the far side by hand instead of clearing trackState.started, and
-			// floor it there: the two segments meet at one point, and walking away from a lift you entered
-			// and left on the same side is equidistant from both, which the earlier segment wins.
-			bot.rideFloorWp = arriveWp;
-			bot.trackState.progressS = NavPlan::ProfileWaypointS(bot.followProfile, arriveWp);
-			bot.lastProgressS = bot.trackState.progressS;
-		}
+					bot.rideFloorWp = arriveWp;
+					bot.trackState.progressS = NavPlan::ProfileWaypointS(bot.followProfile, arriveWp);
+					bot.lastProgressS = bot.trackState.progressS;
+				}
 
-		if (failed)
-			bot.nextRepathTime = gpGlobals->time;
+				if (failed)
+					bot.nextRepathTime = gpGlobals->time;
 
-		return false;
-	}
+				return false;
+			}
 
-	bool RunElevatorRide(CBot &bot, const Nav::NavMesh &mesh)
-	{
-		edict_t *pEdict = bot.pEdict;
+			bool RunElevatorRide(CBot &bot, const Nav::NavMesh &mesh)
+			{
+				edict_t *pEdict = bot.pEdict;
 
-		// No arclength accrues while the platform does the work, so the 2 s stall timer would fire twice
-		// over on a 5 s ride.
-		bot.lastProgressTime = gpGlobals->time;
+				bot.lastProgressTime = gpGlobals->time;
 
-		float navZ = BotNavZ(pEdict);
-		bool arrived = bot.rideUp ? (navZ >= bot.rideArriveZ - kElevatorArriveSlack)
-			: (navZ <= bot.rideArriveZ + kElevatorArriveSlack);
+				float navZ = BotNavZ(pEdict);
+				bool arrived = bot.rideUp ? (navZ >= bot.rideArriveZ - kElevatorArriveSlack)
+					: (navZ <= bot.rideArriveZ + kElevatorArriveSlack);
 		if (arrived)
 			return FinishElevatorRide(bot, mesh, "ride reached the stop of");
 		if (gpGlobals->time >= bot.rideDeadline)
@@ -1156,8 +1143,6 @@ namespace
 		Vector to(wp.point.x - origin.x, wp.point.y - origin.y, 0.f);
 		float dist = sqrtf(to.x * to.x + to.y * to.y);
 
-		// This is called for the whole stretch the ride bars, which is most of the path. Leave the walking
-		// to the tracker and take the frame only once the platform is close enough to step onto.
 		if (dist > kElevatorEngageRadius)
 			return false;
 
@@ -1469,9 +1454,6 @@ namespace
 		bot.waypoints = std::move(rebuilt);
 		bot.waypointIndex = 0;
 		bot.airmoveActive = false;
-
-		// Every arclength is about to change, and the rebuilt chain starts at the bot's own position, so
-		// there is no pre-ride geometry left to guard against.
 		bot.rideFloorWp = 0;
 
 		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
@@ -1685,15 +1667,13 @@ void Bot_ResetNavPath(CBot &bot)
 void Bot_MoveNav(CBot &bot)
 {
 	edict_t *pEdict = bot.pEdict;
-	const Nav::NavMesh *mesh = Nav::Get();
-	if (!mesh)
-		return;
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+			return;
 
-	// A server hitch during a ride can move the bot further in one frame than a teleport would, and resetting
-	// mid-shaft repaths from a point that resolves to no area at all -- the bot then drops its goal.
-	if (bot.hasLastOrigin && !bot.rideActive &&
-		(pEdict->v.origin - bot.lastOrigin).Length() > kTeleportJumpThreshold)
-		ResetPath(bot);
+		if (bot.hasLastOrigin && !bot.rideActive &&
+			(pEdict->v.origin - bot.lastOrigin).Length() > kTeleportJumpThreshold)
+			ResetPath(bot);
 	bot.lastOrigin = pEdict->v.origin;
 	bot.hasLastOrigin = true;
 
@@ -1769,15 +1749,6 @@ void Bot_MoveNav(CBot &bot)
 	if (activationWp >= bot.waypoints.size())
 		bot.activationActive = false;
 
-	// A pending ride bars the profile for the same reason an unserviced activator does, only harder: its two
-	// waypoints share an XY, so the ride is a zero-length segment the tracker cannot see at all and would
-	// otherwise walk straight through. A ride is "pending" until FinishElevatorRide clears its flag.
-	// A ladder mount is the same shape -- mount to exit is near-zero in XY -- and is "pending" until
-	// RunLadderApproach commits and steps the index past it. Letting the tracker sail through one is what
-	// stranded test53_ladder4 at ladder *5: the index reached the exit waypoint while the bot was still
-	// two units short of the volume, so the mount was never serviced, and the moment the bot drifted onto
-	// the ladder anyway the ladderEject rule below saw no ladder waypoint in range and jumped it straight
-	// back off at 270 u/s, forever.
 	NavFollow::Config followCfg;
 	size_t rideWp = bot.waypoints.size();
 	for (size_t i = 0; i < bot.waypoints.size(); ++i)
@@ -1897,10 +1868,6 @@ void Bot_MoveNav(CBot &bot)
 	if (wp->requiresLadder && RunLadderApproach(bot, *wp))
 		return;
 
-	// Driven by the barrier index rather than bot.waypointIndex, because a ride waypoint need not own any
-	// profile segment: on test18_elevator the funnel corner before the board point shares its XY, so the
-	// segment that reaches the shaft carries the corner's index and the ride's index never appears at all.
-	// Ahead of RunActivation, since a board point can sit inside the engage radius of a later button.
 	if (rideWp < bot.waypoints.size() && RunElevatorApproach(bot, rideWp))
 		return;
 

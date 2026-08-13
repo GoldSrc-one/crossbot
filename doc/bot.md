@@ -10,17 +10,14 @@ Wraps an angle into (-180, 180]. Lives here rather than in bot_move_nav.cpp so b
 translation units share one copy.
 
 ### Bot_RunPlayerMove
-Every actuation in the follower goes through this rather than calling `pfnRunPlayerMove` directly,
-because a usercmd is not the atomic unit it looks like: the engine halves any command longer than 50 ms
-and runs `PM_PlayerMove` once per half, re-reading the same buttons each time. For all but one button
-that is harmless — the halves simply integrate the same intent twice. `IN_JUMP` is the exception.
-`PM_LadderMove` reads it with no `oldbuttons` gate (`pm_shared.c:2105`) and answers by setting
-`velocity = plane.normal * 270`, so a jump that *begins* out of a ladder's reach is ejected by the
-sub-step that finally brings the bot into contact. Below the threshold the bot never noticed, because a
-10 ms frame is far too short to cross the gap; at `sys_ticrate 10` it made the standing climb in
-test53_ladder4 impossible, and the bot pogoed at the foot of the ladder until the run timed out. So a
-command carrying `IN_JUMP` is issued as at most 50 ms, and the remainder of the frame is issued
-separately with the button cleared — one frame of held jump at any server framerate.
+The engine halves any usercmd longer than 50 ms and runs PM_PlayerMove once per half, so a
+button held in a long command is re-read after the bot has already moved. IN_JUMP is the one
+button where that matters: PM_LadderMove reads it with no oldbuttons gate and answers by
+shoving the player 270 units off the ladder plane, so a jump that merely *starts* out of a
+ladder's reach ejects the bot the moment a later sub-step brings it into contact.
+
+Every actuation goes through here so a jump costs the same one frame of held button at any server
+framerate. Below the split threshold this is exactly the single call it replaces.
 
 ## bot_move_nav.cpp
 
@@ -331,6 +328,58 @@ drop into the shaft, walk to the call button, press, board — but **not** the r
 for 2.38 s while `RunActivation` holds its 2.4 s button wait, so the bot is already at the top when it
 boards and the ride finishes in 0.00 s. That is correct behaviour, not a skipped test, but a map with a
 call button *off* the platform is what would exercise waiting for a lift to arrive.
+
+### BotNavZ
+A waypoint's point is at player height in its own area, so the floor under it is the point less the
+stand lift unless the plan wants the bot ducked -- the convention BotNavZ reads off the live stance.
+
+### SolveDrive skip on zero drive
+Zero drive means stand exactly still. SolveDrive answers a residual velocity with a full-rate reverse
+command, which is the right servo answer on open ground and the wrong one on a platform edge, so the
+solve is skipped and friction does the stopping.
+
+### Elevator ride flag handling
+The ride is spent. Clearing the flag is what lifts the sLimit barrier, and it travels with the
+waypoint through SpliceDetour, which an index watermark would not.
+
+Boarding and arrival share an XY, so a global reprojection is free to snap back below the
+ride. Place progress on the far side by hand instead of clearing trackState.started, and
+floor it there: the two segments meet at one point, and walking away from a lift you entered
+and left on the same side is equidistant from both, which the earlier segment wins.
+
+No arclength accrues while the platform does the work, so the 2 s stall timer would fire twice
+over on a 5 s ride.
+
+This is called for the whole stretch the ride bars, which is most of the path. Leave the walking
+to the tracker and take the frame only once the platform is close enough to step onto.
+
+Every arclength is about to change, and the rebuilt chain starts at the bot's own position, so
+there is no pre-ride geometry left to guard against.
+
+### Server hitch during ride
+A server hitch during a ride can move the bot further in one frame than a teleport would, and resetting
+mid-shaft repaths from a point that resolves to no area at all -- the bot then drops its goal.
+
+### Pending ride bars profile
+A pending ride bars the profile for the same reason an unserviced activator does, only harder: its two
+waypoints share an XY, so the ride is a zero-length segment the tracker cannot see at all and would
+otherwise walk straight through. A ride is "pending" until FinishElevatorRide clears its flag.
+
+### Ladder mount bars profile
+A ladder mount is the same shape -- mount to exit is near-zero in XY -- and is "pending" until
+RunLadderApproach commits and steps the index past it. Letting the tracker sail through one is what
+stranded test53_ladder4 at ladder *5: the index reached the exit waypoint while the bot was still
+two units short of the volume, so the mount was never serviced, and the moment the bot drifted onto
+the ladder anyway the ladderEject rule below saw no ladder waypoint in range and jumped it straight
+back off at 270 u/s, forever.
+
+### Barrier driven by barrier index
+Driven by the barrier index rather than bot.waypointIndex, because a ride waypoint need not own any
+profile segment: on test18_elevator the funnel corner before the board point shares its XY, so the
+segment that reaches the shaft carries the corner's index and the ride's index never appears at all.
+
+### RunActivation ordering
+Ahead of RunActivation, since a board point can sit inside the engage radius of a later button.
 
 ## bot_avoid.cpp
 

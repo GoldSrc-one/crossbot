@@ -916,9 +916,6 @@ int main(int argc, char **argv)
 	supportBlockers.insert(supportBlockers.end(), elevators.supportDuck.begin(),
 			elevators.supportDuck.end());
 
-		// The movers carve their own leaves in SplitLeavesByElevatorStops, which has to claim the stop
-		// floors before the parked body is subtracted -- otherwise a lift parked at its top stop swallows
-		// the region its lower stop needs. baseDuck is `blockers` without any elevator volume.
 		const std::vector<navgen::BlockingVolume> &carveBlockers = airmoveWorlds.baseDuck;
 
 		std::vector<navgen::ExtractedLeaf> navigableLeaves;
