@@ -16,11 +16,25 @@ cvar_t g_navAvoidCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_gatherCvar = {
+	"crossbot_gather",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_gatherDebugCvar = {
+	"crossbot_gather_debug",
+	"0",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -51,6 +65,12 @@ void ClientDisconnect(edict_t *pEntity)
 void StartFrame()
 {
 	BotManager::StartFrame();
+	RETURN_META(MRES_IGNORED);
+}
+
+void Touch(edict_t *pentTouched, edict_t *pentOther)
+{
+	BotManager::Touch(pentTouched, pentOther);
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -114,7 +134,7 @@ DLL_FUNCTIONS g_DllFunctionTable_Post =
 	NULL,
 	NULL,
 	NULL,
-	NULL,
+	Touch,
 	NULL,
 	NULL,
 	NULL,

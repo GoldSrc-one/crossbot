@@ -1,5 +1,148 @@
 # Bot System Comments
 
+## bot_items.cpp
+
+The first goal source the bot has. Everything else in `src/bot/` executes a goal; this decides what
+the goal is. It runs only where `Bot_MoveNav` finds `hasGoal == false`, which is both "just arrived"
+and "just gave up", so a gather goal never preempts one in flight. `crossbot_gather 0` turns it off
+and restores the old stand-still-until-commanded behaviour — `test_nav_goal.ps1` sets it, for the
+reason under "Why the nav sweep disables it" below.
+
+### Selection is two searches, not one
+
+Phase 1 is `Nav::AreaCosts`, a plain Dijkstra over the area graph that prices every area from the
+bot's own. Phase 2 is the existing `Repath`, which does the real A* with air-move simulation to the
+chosen item's point.
+
+Doing it in one pass is the obvious design and it is wrong here. `PlanRoute` carries a full
+`PlanWalker` — including its waypoint vector — on *every* node it touches, because the funnel state
+is what makes an air move's feasibility depend on the route taken to reach it. A goal-directed plan
+on crossfire expands ~165 areas; a goal-less one expands all ~500, and pays a `PmSim` run per
+air-move edge on each. That is a third of a second to answer "which way do I walk", every time a bot
+picks up anything.
+
+The cost of splitting is that phase 1 can name an item phase 2 cannot reach — phase 1 does not know
+that the air move into that area needs a run-up the bot cannot get. That is what
+`BotItems::OnRepathFailed` absorbs: the item goes into the ignore table for 30 s and the next
+selection picks something else. Without it the two phases disagree forever and the bot re-picks the
+same unroutable item every frame.
+
+Phase 1 must charge for **`travelSeconds` as well as `costSeconds`**, and getting that wrong is not
+a subtle bug. `Connection::costSeconds` is a surcharge — door waits, flight time, ride time — and it
+is **zero on a plain walk connection** (see `doc/nav.md`, travelSeconds). A Dijkstra over
+`costSeconds` alone therefore prices most of the map at 0 and "nearest" degenerates into whichever
+area the heap happens to settle first, which is roughly area-index order. The symptom is a bot that
+walks past the battery at its feet to fetch something across the map, and items in high-numbered
+areas that are never chosen at all. `crossbot_gather_debug 1` prints the cost per candidate, which
+is how that was found: every far item read `0.0s away`.
+
+Candidates are then ranked by `AreaCosts[area] + |item − reference| / kNavRunSpeed`, where the
+reference is the bot's own origin for its current area and the area centroid elsewhere. Ranking by
+area alone leaves ties between every item in the winning area, and the tie in the bot's *own* area
+is exactly the "it is right next to me" case that matters most.
+
+### One ignore table, not two
+
+"Respawning until T" and "Repath could not reach it, retry after T" are the same fact — *do not
+consider this entity before T* — so `itemMemo` serves both. The `fullMemo` list is separate because
+it is keyed by classname, not entity: being full of 9mm means every 9mm box is pointless, not just
+the one that was touched.
+
+Both are per-bot. `fullMemo` has to be, since it describes the bot's own inventory. `itemMemo` is
+per-bot by choice: a bot only knows about pickups it made or saw, so two bots can and do walk at the
+same battery, and neither has an accurate global respawn clock. That is the humanlike answer and it
+matches the existing per-bot `activationMemo`.
+
+`fullMemo` is cleared on respawn and `itemMemo` is kept — a fresh spawn has an empty inventory, but
+the items the bot took are still on their respawn timers.
+
+### Walking in on something that came back
+
+`RefreshMemos` runs every frame and drops any *respawning* entry whose item is in the bot's current
+area and available again: "it is already here, so it must have come back sooner than I thought". It
+matters because the clock starts when the bot **noticed**, not when the item was taken — a bot that
+sees an item is gone from across the room, or arrives to find it gone, starts a full 20 or 30 s from
+that moment, and by then the real respawn may be seconds away.
+
+Only entries marked `respawning` are eligible. The ignore entries written by outcome D and by
+`OnRepathFailed` share the table and must **not** be cleared this way: the bot standing in the area
+is precisely the situation that produced them, so clearing on arrival would reinstate the
+full-framerate spin the ignore exists to break.
+
+The memo stores the item's `kind` and `areaId` at the time it was written, so this is a handful of
+integer compares per frame with no geometry — the alternative, resolving each remembered entity to
+an area, is a linear scan of every area per entry.
+
+Weapons never take this path and do not need to. `CBasePlayerItem::Respawn` creates a **new edict**
+for the copy, so the handle in the memo goes stale, `CBotEntHandle::Get` returns null and the entry
+is pruned; the respawned weapon is a fresh entity nobody has a memo for. `item_*` and `ammo_*`
+reuse their edict and are what this actually serves.
+
+### The four outcomes
+
+A gather goal ends in exactly one of four ways, and three of them are not "the follower arrived".
+
+**A — touched it.** The `pfnTouch` post hook. Because it is a *post* hook the game DLL has already
+run its touch handler, so the entity's own state is the verdict: `SOLID_NOT`, `EF_NODRAW`,
+`FL_KILLME` or freed means picked up, anything else means the bot could not use it and the classname
+goes in `fullMemo`. `FL_KILLME` is the one that is easy to miss — `UTIL_Remove` only flags the
+edict and the engine frees it at the end of the frame, so at post-touch time a removed item is
+normally flagged rather than free.
+
+**B — arrived and it was already gone.** No touch will ever fire for an item that is already
+`SOLID_NOT`, so nothing would end the goal. Detected on `currentAreaId == goalItemArea`.
+
+**C — saw from a distance that it was gone.** A trace from the entity to the bot's eye, ignoring the
+entity, that comes back with `tr.pHit == bot.pEdict`. **The trace must use `dont_ignore_monsters`**
+or it passes straight through the player and never reports it, which reads as "no line of sight" and
+the bot walks the whole way for nothing. Throttled to 4 Hz.
+
+**D — arrived, touched nothing, item still there.** Not a case anyone designs for, and the one that
+bites: the bot arrives, no touch fires because the item is above it or on a lip, the goal clears,
+selection picks the same item, the bot walks zero distance and arrives again — a full-framerate spin
+with no stall detector to catch it, because the bot is exactly where it wanted to be. The item goes
+into the ignore table for 30 s. Three bots on `test56_recharger` hit this within seconds, on the
+`weaponbox` entities they dropped when they killed each other: those spawn in mid-air where the
+player died and the bot cannot reach them.
+
+### Resolving an item to an area
+
+**`Nav::FindAreaForPoint` is the wrong function here.** It is deliberately forgiving — after the
+exact half-space test it falls back to nearest-centroid-with-AABB and then to global nearest
+centroid, so it essentially never returns null. An item inside a wall would snap to whatever area
+happened to be closest and the bot would route confidently to nothing.
+`Nav::FindAreaContainingPoint` is the strict half of it, added for this.
+
+Area z-space is duck-origin based (navgen builds in hull 3) and an item's `v.origin` is at its base,
+so the probe is `origin + 18` first and the raw origin as a fallback.
+
+**Chargers have no origin at all.** They are brush entities: `v.origin` is `(0,0,0)` and the real
+position is `(absmin + absmax) * 0.5`. That centre is inside the wall, so it never resolves to an
+area either. The use spot is found by scanning areas whose bounds come within 96 units of the centre
+and taking the closest point that is within 48 of it. 48 rather than HL's full 64-unit USE radius
+because `NavFollow` stops within `goalRadius` (12) of the goal *horizontally* and can stop on the far
+side, and 64 + 12 is out of range — the bot would stand there pressing USE at nothing until the
+15 s timeout.
+
+### Why the nav sweep disables it
+
+`test_nav_goal.ps1` polls `crossbot_nav_status` every 2 s and treats `hasGoal=0` as arrival. Gather
+re-arms `hasGoal` on the frame after arrival, roughly 20 ms later, so the poll never observes it and
+**every map in the sweep times out**. `crossbot_gather 0` in the boot commands keeps the sweep
+measuring what it measured before. Use `scripts/test_items.ps1` to exercise gathering instead.
+
+### Reading crossbot_gather_debug
+
+`crossbot_gather_debug 1` makes every selection print the whole scan: one line per item entity with
+its resolved area and either its cost in seconds or why it was skipped (`taken`, `empty`,
+`respawning for Ns`, `ignored for Ns`, `full for Ns`, `no nav area`, `no route`), with `PICKED` on
+the winner. It is the only view that distinguishes the four ways an item can be invisible to a bot,
+and the costs are what proves the phase-1 search is sane — if far items read `0.0s away`, the cost
+model is broken, not the mesh.
+
+It is deliberately verbose: ~130 lines per selection on crossfire, at up to 2 Hz per bot while a bot
+has nothing to go for. Leave it off unless reading the log.
+
 ## bot_move.cpp
 
 ### Bot_DecomposeMove
@@ -381,6 +524,30 @@ segment that reaches the shaft carries the corner's index and the ride's index n
 ### RunActivation ordering
 Ahead of RunActivation, since a board point can sit inside the engage radius of a later button.
 
+### RunChargerUse
+
+`RunActivation` again, with two differences that matter. `IN_USE` is **held every frame** rather
+than pressed once, because `CRecharge::Use` and `CWallHealth::Use` are `FCAP_CONTINUOUS_USE` and
+transfer exactly one point per call — a single press buys one armor. And the exit condition is
+measured, not timed: the runner watches `ChargerValue` and gives up `kChargerNoGainGrace` (0.5 s)
+after it stops rising.
+
+What stopped rising means depends on `pev->frame`, which is the charger's own empty flag (`Use` sets
+it to 1 when `m_iJuice` hits zero, `Recharge` puts it back to 0). Frame 1 means the charger is
+drained and the bot leaves without a memo entry — the live `frame` test in selection already filters
+it, and unlike a pickup there is no guesswork about when it returns. Frame 0 with no gain means the
+bot is full, and the classname goes in `fullMemo`.
+
+**The charger's capacity is not the bot's ceiling.** `sk_suitcharger` is 30 on `test56_recharger`'s
+skill level, so a bot at 0 armor drains the whole thing and leaves at 30, comes back after the 30 s
+recharge, and needs four visits to reach 100. The run reads `0 -> 30 -> 60 -> 90 -> topped up at
+100`. A runner that assumed one visit fills you up would have called the first three visits failures.
+
+It is dispatched from inside the `follow.done` branch rather than from the waypoint loop, because a
+charger is not a waypoint — the plan's goal is the use spot and the charger is off the mesh
+entirely. `lastProgressTime` is stamped every frame for the same reason `RunActivation` stamps it:
+no arclength accrues while standing still and the 2 s stall detector would otherwise repath.
+
 ## bot_avoid.cpp
 
 Reactive obstacle handling, layered between the follower's steering decision and the engine call. The
@@ -606,6 +773,43 @@ for.
 
 ## bot_manager.cpp
 
+### Death and respawn
+
+`StartFrame` drives a dead bot with `IGameProfile::Respawn` instead of `Bot_MoveNav`, and it has to keep
+doing so every frame: `SV_Physics` skips client edicts entirely, so a fake client's think only runs from
+inside `pfnRunPlayerMove` (`SV_RunCmd` sets `v.button` from the usercmd, then `pfnPlayerPreThink`, and
+`CBasePlayer::PreThink` dispatches to `PlayerDeathThink` whenever `deadflag >= DEAD_DYING`). Stop calling
+`pfnRunPlayerMove` for a dead bot and the game DLL never gets another chance to respawn it.
+
+**The button has to be released before it is pressed.** `PlayerDeathThink` gates the `DEAD_DEAD` →
+`DEAD_RESPAWNABLE` transition on *no* button being held (`player.cpp`, "wait for all buttons released"),
+and only the following call, with `deadflag` already `DEAD_RESPAWNABLE`, reaches `respawn()`. Holding
+`IN_ATTACK` on every dead frame — which is what `CHLDMProfile::Respawn` used to do — therefore parks the
+bot at `DEAD_DEAD` permanently; it also never reaches the `mp_forcerespawn` branch further down, so
+nothing else rescues it. `Respawn` now sends zero buttons until `deadflag == DEAD_RESPAWNABLE` and
+`IN_ATTACK` on that frame alone.
+
+Nothing resets the bot's plan across a death. It does not need to: the respawn moves the bot far enough
+that `Bot_MoveNav`'s `kTeleportJumpThreshold` guard calls `ResetPath` on the first live frame, and when
+the spawn point is *close* to where the bot died the stale plan still starts within that same distance and
+is followed correctly. `hasGoal`/`goalPoint` survive on purpose, so a respawned bot resumes walking to the
+goal it was given.
+
+`crossbot_kill` exists to make this testable from the dedicated-server console.
+
+### Level changes drop every bot, and that is the engine doing it
+
+`SV_InactivateClients` disconnects fake clients outright ("Dropping fakeclient on level change"), which
+runs `pfnClientDisconnect` and so clears the `CBot` slot. Bots are therefore gone after `changelevel` or
+`map` and have to be re-added with `crossbot_add`; this is not a plugin bug and there is no roster to
+restore. Re-adding on the new map — and after a plain `kick` — was verified to produce a fully working
+bot, so the reused client slot and its leftover `CBasePlayer` private data need no special handling.
+
+The two commands tear down in opposite orders, which matters to anything that ever wants to hook this:
+`changelevel` runs `SV_InactivateClients` (so `ClientDisconnect`) *before* `pfnServerDeactivate`, while
+`map` goes through `Host_ShutdownServer`, which calls `pfnServerDeactivate` first and drops the clients
+after.
+
 ### PrintNavStatus
 Backs `crossbot_nav_status`, and is the only view of what the runtime planner actually decided —
 `--dump-path` shows what navgen would plan for its own spawn/target pair, which is usually a different
@@ -628,6 +832,10 @@ The pairs that carry the diagnosis:
 - `hasGoal=0` with `waypoint=0/0` is ambiguous by itself: it is both "arrived and cleared the goal"
   and "gave up". Distinguish with the distance to the goal, and remember the goal was clamped
   (see `doc/nav.md`, `PlanPath`).
+- `item=` with `itemArea=`, `memo=`, `full=` — the gather goal: which entity the bot is after, the
+  area it resolved to, and how many entries are in each memo. `item=-` with `hasGoal=1` is a
+  commanded `crossbot_nav_goal`, not a gathered one. `charging=` appears only while the charger
+  runner owns the frame, and carries the value it is watching.
 - `avoid=` with `hit=` — the last obstacle decision (`duck`, `jump`, `side`, `blocked`) and the
   classname it was made against, plus `duckLeft` on the crawl latch, the `gap`/`top` the decision was
   made from, and `detour=` for how many spliced detour waypoints are still ahead. `avoid=none hit=-`

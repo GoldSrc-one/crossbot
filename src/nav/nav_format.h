@@ -7,7 +7,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 14;
+constexpr uint32_t kNavVersion = 15;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
 
@@ -136,6 +136,7 @@ struct NavConnectionRecord
 	uint8_t gateValid;
 	uint8_t pad;
 	float costSeconds;
+	float travelSeconds;
 
 	float gateA[2][3];
 	float gateB[2][3];
@@ -155,7 +156,7 @@ struct NavConnectionRecord
 	float rideWaitSeconds;
 };
 
-static_assert(sizeof(NavConnectionRecord) == 136, "NavConnectionRecord layout changed without a version bump");
+static_assert(sizeof(NavConnectionRecord) == 140, "NavConnectionRecord layout changed without a version bump");
 
 enum GateValidFlags : uint8_t
 {

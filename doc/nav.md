@@ -194,6 +194,36 @@ includes an air move's `flightTime` and a door area's `openSeconds` (see `Connec
 `area_merger.cpp`), so `PlanWalker` must not add either again — the search adds `costSeconds` once per
 edge and the walker only measures string-pulled distance.
 
+**`costSeconds` is a surcharge, not a travel cost, and a plain walk connection therefore costs zero.**
+That is correct for the planner, which measures the walk itself, and a trap for anything that wants a
+cheap search without a walker: summing `costSeconds` over a route prices every walk edge at 0, so the
+"cheapest" area is whichever the heap happens to settle first. That is what `travelSeconds` is for — see
+below.
+
+### travelSeconds
+
+A second per-connection cost, written by navgen (`ConnectionTravelSeconds` in `area_merger.cpp`) and used
+by coarse searches that cannot afford a `PlanWalker`. It is the walk between the two area centroids over
+`kNavRunSpeed`, funneled through the connection's gate: if the straight centroid-to-centroid line crosses
+the gate segment it is that line, otherwise it bends around the nearer gate endpoint. Non-walk types get
+the two ground legs only (`centroidA → pointA`, `pointB → centroidB`) because the flight, climb or ride
+itself is already in `costSeconds`.
+
+It is precomputed because it is a static property of the mesh and because the funnel correction is not
+something a runtime caller should be redoing per frame.
+
+**The planner must never add it.** `BuildGraph` deliberately does not: `PlanWalker` measures the real
+string-pulled distance, and adding `travelSeconds` on top would charge every route twice. The only
+consumer is `Nav::AreaCosts`, whose whole job is to answer "roughly how far is that area" without
+planning. `travelSeconds` inherits the centroid model's known bias — it charges a route for visiting
+every centroid, which overprices paths through many small areas — and that is acceptable for choosing a
+*target*, not for choosing a *route*.
+
+`Nav::AreaCosts` (`nav_path.cpp`) is the full Dijkstra over `travelSeconds + costSeconds +
+runtimePenalty`, honouring `CONN_FLAG_ONE_WAY` exactly as `plan_search.cpp` does. It fills a
+cost-per-area vector rather than stopping at the first hit, because the callers rank many candidates
+against each other and an early exit only saves microseconds on a ~500-area map.
+
 Being seconds is also what lets `runtimePenalty` be added straight on top in `BuildGraph` (see
 `nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
 everything.
@@ -970,12 +1000,12 @@ value and mops up whatever the pull could not reach. On `test54_window` the 1→
 
 ## nav_format.h
 
-### Nav File Format (version 12)
+### Nav File Format (version 15)
 - Magic: "CBNV"
 - Header: magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex, areaPlanes,
   detours, detourPoints)
 - AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount
-- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds
+- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds
 - ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
 - DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
 

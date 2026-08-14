@@ -2,6 +2,7 @@
 #include <meta_api.h>
 
 #include "commands.h"
+#include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
 #include "../nav/nav.h"
 
@@ -40,6 +41,12 @@ namespace
 			static_cast<float>(atof(CMD_ARGV(3))));
 
 		if (!BotManager::TeleportAllBots(point))
+			SERVER_PRINT("CrossBot: no bots connected.\n");
+	}
+
+	void Cmd_CrossBotKill()
+	{
+		if (!BotManager::KillAllBots())
 			SERVER_PRINT("CrossBot: no bots connected.\n");
 	}
 
@@ -89,6 +96,18 @@ namespace
 		}
 	}
 
+	void Cmd_CrossBotListItems()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+			return;
+		}
+
+		BotItems::PrintCandidates(*mesh);
+	}
+
 	void Cmd_CrossBotNavPenalties()
 	{
 		const Nav::NavMesh *mesh = Nav::Get();
@@ -128,11 +147,13 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_add", Cmd_CrossBotAdd);
 	ADD_SERVER_COMMAND("crossbot_nav_goal", Cmd_CrossBotNavGoal);
 	ADD_SERVER_COMMAND("crossbot_teleport", Cmd_CrossBotTeleport);
+	ADD_SERVER_COMMAND("crossbot_kill", Cmd_CrossBotKill);
 	ADD_SERVER_COMMAND("crossbot_nav_status", Cmd_CrossBotNavStatus);
 	ADD_SERVER_COMMAND("crossbot_list_spawns", Cmd_CrossBotListSpawns);
 	ADD_SERVER_COMMAND("crossbot_list_targets", Cmd_CrossBotListTargets);
 	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
 	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
+	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 }
 
 }

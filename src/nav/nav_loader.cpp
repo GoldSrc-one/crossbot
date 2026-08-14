@@ -137,6 +137,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.connType = rec.connType;
 		conn.connFlags = rec.connFlags;
 		conn.costSeconds = rec.costSeconds;
+		conn.travelSeconds = rec.travelSeconds;
 		conn.exitSpeed = rec.exitSpeed;
 		conn.exitAngle = rec.exitAngle;
 		conn.jumpBackDist = rec.jumpBackDist;

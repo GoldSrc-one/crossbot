@@ -2,6 +2,9 @@
 #include <meta_api.h>
 #include <in_buttons.h>
 
+#include <string.h>
+
+#include "ent_handle.h"
 #include "hldm_profile.h"
 
 #if defined(_WIN32)
@@ -9,6 +12,31 @@
 #else
 #define CB_STRICMP strcasecmp
 #endif
+
+namespace
+{
+	constexpr float kHLDMWeaponRespawn = 20.f;
+	constexpr float kHLDMAmmoRespawn = 20.f;
+	constexpr float kHLDMItemRespawn = 30.f;
+	constexpr float kHLDMRechargeDelay = 30.f;
+	constexpr float kHLDMHealthChargerDelay = 60.f;
+	constexpr float kHLDMFullTimeout = 60.f;
+	constexpr float kHLDMUnreachableTimeout = 30.f;
+	constexpr float kHLDMMaxNormal = 100.f;
+
+	bool HasPrefix(const char *s, const char *prefix)
+	{
+		return strncmp(s, prefix, strlen(prefix)) == 0;
+	}
+}
+
+const char *CBotClassOf(const edict_t *ent)
+{
+	if (!ent || !gpGlobals->pStringBase)
+		return "?";
+	const char *s = gpGlobals->pStringBase + static_cast<unsigned int>(ent->v.classname);
+	return (s && s[0]) ? s : "?";
+}
 
 const char *CHLDMProfile::GetName() const
 {
@@ -37,8 +65,64 @@ bool CHLDMProfile::IsDead(edict_t *pEdict) const
 
 void CHLDMProfile::Respawn(edict_t *pEdict) const
 {
+	unsigned short buttons = (pEdict->v.deadflag == DEAD_RESPAWNABLE) ? IN_ATTACK : 0;
 
-	g_engfuncs.pfnRunPlayerMove(pEdict, pEdict->v.v_angle, 0.f, 0.f, 0.f, IN_ATTACK, 0, 1);
+	g_engfuncs.pfnRunPlayerMove(pEdict, pEdict->v.v_angle, 0.f, 0.f, 0.f, buttons, 0, 1);
+}
+
+ItemKind CHLDMProfile::ClassifyItem(const char *classname) const
+{
+	if (!classname || !classname[0])
+		return ITEM_NONE;
+
+	if (HasPrefix(classname, "weapon_") || strcmp(classname, "weaponbox") == 0)
+		return ITEM_WEAPON;
+	if (HasPrefix(classname, "ammo_"))
+		return ITEM_AMMO;
+	if (HasPrefix(classname, "item_"))
+		return ITEM_PICKUP;
+	if (strcmp(classname, "func_healthcharger") == 0)
+		return ITEM_HEALTHCHARGER;
+	if (strcmp(classname, "func_recharge") == 0)
+		return ITEM_RECHARGE;
+
+	return ITEM_NONE;
+}
+
+float CHLDMProfile::ItemRespawnDelay(ItemKind kind) const
+{
+	switch (kind)
+	{
+	case ITEM_WEAPON:         return kHLDMWeaponRespawn;
+	case ITEM_AMMO:           return kHLDMAmmoRespawn;
+	case ITEM_PICKUP:         return kHLDMItemRespawn;
+	case ITEM_RECHARGE:       return kHLDMRechargeDelay;
+	case ITEM_HEALTHCHARGER:  return kHLDMHealthChargerDelay;
+	default:                  return kHLDMItemRespawn;
+	}
+}
+
+float CHLDMProfile::ItemFullTimeout() const
+{
+	return kHLDMFullTimeout;
+}
+
+float CHLDMProfile::ItemUnreachableTimeout() const
+{
+	return kHLDMUnreachableTimeout;
+}
+
+float CHLDMProfile::ChargerFullValue(ItemKind kind) const
+{
+	(void)kind;
+	return kHLDMMaxNormal;
+}
+
+float CHLDMProfile::ChargerValue(ItemKind kind, edict_t *pEdict) const
+{
+	if (!pEdict)
+		return 0.f;
+	return (kind == ITEM_HEALTHCHARGER) ? pEdict->v.health : pEdict->v.armorvalue;
 }
 
 IGameProfile *GameProfile_Detect()

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "game_profile.h"
 
@@ -11,5 +11,11 @@ public:
 	bool Detect() const override;
 	bool IsDead(edict_t *pEdict) const override;
 	void Respawn(edict_t *pEdict) const override;
-};
 
+	ItemKind ClassifyItem(const char *classname) const override;
+	float ItemRespawnDelay(ItemKind kind) const override;
+	float ItemFullTimeout() const override;
+	float ItemUnreachableTimeout() const override;
+	float ChargerFullValue(ItemKind kind) const override;
+	float ChargerValue(ItemKind kind, edict_t *pEdict) const override;
+};

@@ -4,6 +4,8 @@
 
 #include <vector>
 
+#include "../game/ent_handle.h"
+#include "../game/game_profile.h"
 #include "../nav/nav_path.h"
 #include "../nav/path_follower.h"
 #include "bot_avoid.h"
@@ -14,6 +16,21 @@ struct BotActivation
 	float time = 0.f;
 };
 
+struct BotItemMemo
+{
+	CBotEntHandle ent;
+	ItemKind kind = ITEM_NONE;
+	int areaId = -1;
+	float readyTime = 0.f;
+	bool respawning = false;
+};
+
+struct BotFullMemo
+{
+	char classname[32] = {};
+	float expireTime = 0.f;
+};
+
 struct CBot
 {
 	bool inUse = false;
@@ -22,6 +39,26 @@ struct CBot
 
 	bool hasGoal = false;
 	Vector goalPoint;
+
+	CBotEntHandle goalItem;
+	ItemKind goalItemKind = ITEM_NONE;
+	int goalItemArea = -1;
+	float goalItemSelectTime = 0.f;
+	float nextSelectTime = 0.f;
+	float goalItemSeenCheck = 0.f;
+	bool goalItemTouched = false;
+	bool goalItemDone = false;
+	std::vector<BotItemMemo> itemMemo;
+	std::vector<BotFullMemo> fullMemo;
+
+	bool chargerActive = false;
+	bool chargerPressed = false;
+	float chargerStartTime = 0.f;
+	float chargerLastGainTime = 0.f;
+	float chargerLastValue = 0.f;
+
+	bool wasDead = false;
+
 	std::vector<Nav::Waypoint> waypoints;
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;

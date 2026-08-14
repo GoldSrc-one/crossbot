@@ -75,6 +75,34 @@ Killing a child does not run its cleanup, so the runner tracks the ports it owns
 surviving `hlds.exe` at the end, matching on `+port` in the command line. It never mass-kills
 `hlds.exe`: a server you started by hand on the default 27015 is outside its range and is left alone.
 
+## scripts/test_items.ps1
+
+Drives the gather goals, which `test_nav_goal.ps1` cannot: that script commands a goal and waits for
+`hasGoal=0`, and gathering re-arms `hasGoal` a frame after every arrival, so it sets `crossbot_gather 0`
+and never exercises any of this. `test_items.ps1` is the opposite — it adds bots, gives them no goal at
+all, and lets them choose.
+
+It has no pass/fail verdict, deliberately. There is no single event that means "gathering works"; what
+you read is the decision log in `nav_debug/logs/<map>_items.log`, one line per outcome — `wants X`,
+`picked up X`, `is full of X`, `drained X`, `topped up at X`, `reached X without touching it`. A healthy
+run is a *cycle*: every `wants` is followed by an outcome and another `wants`. A `wants` with no outcome
+is the bot stuck on the way; the same `wants` repeating with no outcome between is the case-D spin that
+the ignore table exists to break.
+
+`-GatherDebug` turns on `crossbot_gather_debug` before the bots are added, which puts the full
+candidate scan — every item, its area, its cost in seconds or why it was skipped — into the same log.
+That is the view that answers "why did it go *there*"; the outcome lines only say what happened.
+
+`-Bots N` is how the contested cases get tested. One bot never races anyone, so case C (seeing from a
+distance that an item is already taken) needs at least two. Three on `test56_recharger` also kill each
+other, which is the only way `weaponbox` handling and the respawn `fullMemo` clear get exercised at all.
+
+Run `crossbot_list_items` before believing anything else on a new map: it prints every item entity with
+the area it resolved to, its `frame` and its `solid`. **An item reading `area none` is invisible to the
+bot**, and on `test56_recharger` the health charger and both batteries do exactly that — navgen prunes
+17 of that map's 20 areas as unreachable from the single spawn, so the upper floor has no mesh. That is
+a map/mesh gap, not a gather bug, and no amount of staring at the bot will show it.
+
 ## Sweeping a change
 
 Three different things can move, and each needs its own sweep. Running the wrong one is how a change

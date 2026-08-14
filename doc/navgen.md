@@ -246,6 +246,18 @@ which charged a through-route twice and skewed `airmove_prune`'s Dijkstra near d
 adds `openSeconds` to `m_extraTime` once, on entry only. The activator detour costs its own travel time through
 `m_committedLength`, which is the whole point of expressing cost as time.
 
+`ConnectionTravelSeconds` is the other half: the running time this edge costs, which the planner does not
+need (it measures the walk itself) but a walker-less search cannot live without. Centroid to centroid over
+`kNavRunSpeed`, funneled through the gate — the straight line if it crosses the gate segment, otherwise
+bent around the nearer gate endpoint, so an L-shaped area is not priced as if the bot walked through the
+wall. Non-walk connections get only the ground legs to `pointA` and from `pointB`; their flight, climb or
+ride is already in `ConnectionCostSeconds` and must not be counted twice. It goes in the nav file as
+`travelSeconds` (see `doc/nav.md`) because it is fixed by the mesh and the funnel is not worth redoing per
+frame.
+
+`airmove_prune.cpp`'s own `WalkDijkstra` still uses its local centroid-to-centroid measure rather than this
+one. Routing it through the shared helper would change pruning decisions on every map for no benefit here.
+
 ### Door/Breakable Isolation
 A merge never crosses `ExtractedLeaf::passableIndex`. A door or breakable has to stay its own area so it keeps
 its activation, and it must not absorb a different one either.
@@ -967,8 +979,8 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v14):
-- Header: magic "CBNV", version 14, mapName[64], bspChecksum, counts (including `detourCount` and
+Serializes MergeResult to crossbot_nav format (v15):
+- Header: magic "CBNV", version 15, mapName[64], bspChecksum, counts (including `detourCount` and
   `detourPointCount`)
 - Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, `activation`,
   `openSeconds`, and `detourOffset`/`detourCount`
@@ -982,7 +994,7 @@ Serializes MergeResult to crossbot_nav format (v14):
 - Every record is `fwrite`n raw, so each has explicit padding and a `static_assert` on its size — a new field
   that shifts the layout fails the build instead of silently corrupting nav files
 - Area planes come from `boundPlanes`, not `polytope.faces` — see "Area geometry vs exported region"
-- Connection records: areaA/B, connType/Flags, gateValid, costSeconds, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallDamage, flightTime, launchPos/landingPos[3]
+- Connection records: areaA/B, connType/Flags, gateValid, costSeconds, travelSeconds, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallDamage, flightTime, launchPos/landingPos[3]
 - Area-connection index (uint32 per connection per area)
 - Area planes (normal[3], dist)
 

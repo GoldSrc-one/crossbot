@@ -12,11 +12,17 @@ namespace BotManager
 	void ClientDisconnect(edict_t *pEntity);
 	void StartFrame();
 
+	CBot *FindBot(edict_t *pEdict);
+
+	void Touch(edict_t *pentTouched, edict_t *pentOther);
+
 	bool AddBot(const char *name);
 
 	bool SetGoalForAllBots(const Vector &point);
 
 	bool TeleportAllBots(const Vector &point);
+
+	bool KillAllBots();
 
 	void PrintNavStatus();
 

@@ -8,6 +8,8 @@
 #include "bot_move_nav.h"
 #include "bot_move.h"
 #include "bot_avoid.h"
+#include "bot_items.h"
+#include "../game/game_profile.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
@@ -152,6 +154,9 @@ namespace
 	constexpr float kActivationMaxHold = 3.f;
 	constexpr float kActivationTimeout = 6.f;
 	constexpr float kActivationMemory = 15.f;
+	constexpr float kChargerUseRange = 64.f;
+	constexpr float kChargerNoGainGrace = 0.5f;
+	constexpr float kChargerTimeout = 15.f;
 	constexpr float kActivationSameRadius = 8.f;
 	constexpr float kTriggerTouchRadius = 20.f;
 	constexpr float kTriggerTouchHeight = 40.f;
@@ -1363,6 +1368,133 @@ namespace
 		return true;
 	}
 
+	void FinishCharger(CBot &bot, edict_t *ent, const char *why)
+	{
+		char msg[224];
+		snprintf(msg, sizeof(msg), "CrossBot: %s %s at %s after %.1fs, now at %.0f\n", bot.name, why,
+			CBotClassOf(ent), gpGlobals->time - bot.chargerStartTime, bot.chargerLastValue);
+		SERVER_PRINT(msg);
+
+		bot.chargerActive = false;
+		bot.chargerPressed = false;
+		BotItems::ForgetGoalItem(bot);
+	}
+
+	bool RunChargerUse(CBot &bot)
+	{
+		edict_t *pEdict = bot.pEdict;
+		edict_t *ent = bot.goalItem.Get();
+		if (!ent)
+			return false;
+
+		ItemKind kind = bot.goalItemKind;
+		float value = g_pGameProfile->ChargerValue(kind, pEdict);
+
+		if (!bot.chargerActive)
+		{
+			bot.chargerActive = true;
+			bot.chargerPressed = false;
+			bot.chargerStartTime = gpGlobals->time;
+			bot.chargerLastGainTime = gpGlobals->time;
+			bot.chargerLastValue = value;
+
+			char msg[224];
+			snprintf(msg, sizeof(msg), "CrossBot: %s reached %s at %.0f, starting to charge\n",
+				bot.name, CBotClassOf(ent), value);
+			SERVER_PRINT(msg);
+		}
+
+		bot.lastProgressTime = gpGlobals->time;
+
+		if (value > bot.chargerLastValue)
+			bot.chargerLastGainTime = gpGlobals->time;
+		bot.chargerLastValue = value;
+
+		Vector center = BotItems::ItemCenter(ent, kind);
+		Vector origin = pEdict->v.origin;
+		Vector eye = origin + pEdict->v.view_ofs;
+		Vector los = center - eye;
+		float flat = sqrtf(los.x * los.x + los.y * los.y);
+		if (flat > 0.0001f || fabsf(los.z) > 0.0001f)
+			bot.desiredAngles = Vector(-atan2f(los.z, flat) * (180.f / kPiF),
+				atan2f(los.y, los.x) * (180.f / kPiF), 0.f);
+
+		Vector angles = Bot_UpdateFacing(bot);
+
+		float useDist = (center - origin).Length();
+		bool inRange = useDist <= kChargerUseRange;
+		bool aimed =
+			fabsf(Bot_NormalizeAngle(bot.desiredAngles.y - angles.y)) <= kActivationAimTolerance &&
+			fabsf(Bot_NormalizeAngle(bot.desiredAngles.x - angles.x)) <= kActivationAimTolerance;
+
+		unsigned short buttons = 0;
+		if (inRange && aimed)
+		{
+			buttons |= IN_USE;
+			bot.chargerPressed = true;
+		}
+
+		if (bot.chargerPressed && gpGlobals->time - bot.chargerLastGainTime > kChargerNoGainGrace)
+		{
+			if (BotItems::IsChargerEmpty(ent))
+				FinishCharger(bot, ent, "drained the charger");
+			else
+			{
+				BotItems::NoteFull(bot, CBotClassOf(ent));
+				FinishCharger(bot, ent, "is already full");
+			}
+			return false;
+		}
+
+		if (value >= g_pGameProfile->ChargerFullValue(kind))
+		{
+			BotItems::NoteFull(bot, CBotClassOf(ent));
+			FinishCharger(bot, ent, "topped up");
+			return false;
+		}
+
+		if (gpGlobals->time - bot.chargerStartTime > kChargerTimeout)
+		{
+			BotItems::NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
+			FinishCharger(bot, ent, inRange ? "could not aim" : "could not reach");
+			return false;
+		}
+
+		float drive = 0.f;
+		Vector moveDir(0.f, 0.f, 0.f);
+		Vector to(center.x - origin.x, center.y - origin.y, 0.f);
+		float dist = sqrtf(to.x * to.x + to.y * to.y);
+		if (!inRange && dist > 1.f)
+		{
+			moveDir = Norm2D(to);
+			drive = BotMaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
+
+			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
+				BotPhysics(pEdict));
+			if (solved.wishSpeed > 0.f)
+			{
+				moveDir = solved.wishDir;
+				drive = solved.wishSpeed;
+			}
+		}
+
+		if ((pEdict->v.flags & FL_DUCKING) != 0)
+			drive /= PmSim::kDuckingMultiplier;
+
+		float fmove = 0.f, smove = 0.f;
+		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+
+		if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
+		else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
+		if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
+		else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
+
+		Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons);
+		return true;
+	}
+
 	void ResetPath(CBot &bot)
 	{
 		bot.waypoints.clear();
@@ -1511,6 +1643,19 @@ namespace
 		}
 	}
 
+	const char *ConnTypeName(uint8_t type)
+	{
+		switch (type)
+		{
+		case crossbot_nav::CONN_WALK: return "walk";
+		case crossbot_nav::CONN_TELEPORT: return "teleport";
+		case crossbot_nav::CONN_AIRMOVE: return "airmove";
+		case crossbot_nav::CONN_LADDER: return "ladder";
+		case crossbot_nav::CONN_ELEVATOR: return "elevator";
+		}
+		return "?";
+	}
+
 	bool Repath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict)
 	{
 		bool freshAttempt = bot.waypoints.empty();
@@ -1581,6 +1726,18 @@ namespace
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,
 				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk, penalizedOnRoute);
 			SERVER_PRINT(wpMsg);
+			for (size_t i = 0; i < bot.plannedConnPath.size(); ++i)
+			{
+				uint32_t ci = bot.plannedConnPath[i];
+				if (ci >= mesh.conns.size())
+					continue;
+
+				const Nav::Connection &c = mesh.conns[ci];
+				snprintf(wpMsg, sizeof(wpMsg),
+					"CrossBot: conn[%zu]=%u %s %u<->%u cost=%.2f travel=%.2f\n", i, ci,
+					ConnTypeName(c.connType), c.areaA, c.areaB, c.costSeconds, c.travelSeconds);
+				SERVER_PRINT(wpMsg);
+			}
 			for (size_t i = 0; i < bot.waypoints.size(); ++i)
 			{
 				const Nav::Waypoint &wp = bot.waypoints[i];
@@ -1649,6 +1806,7 @@ namespace
 		if (!Repath(bot, mesh, pEdict))
 		{
 			WriteTraceLog(bot);
+			BotItems::OnRepathFailed(bot);
 			bot.hasGoal = false;
 			return false;
 		}
@@ -1680,7 +1838,16 @@ void Bot_MoveNav(CBot &bot)
 	const Nav::Area *curArea = Nav::FindAreaForPoint(*mesh, pEdict->v.origin);
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
-	if (!bot.hasGoal)
+	BotItems::RefreshMemos(bot);
+
+	if (BotItems::UpdateGoalItem(bot))
+	{
+		Vector angles = Bot_UpdateFacing(bot);
+		RunIdleMove(bot, angles);
+		return;
+	}
+
+	if (!bot.hasGoal && !BotItems::SelectGoal(bot, *mesh))
 	{
 		Vector angles = Bot_UpdateFacing(bot);
 		RunIdleMove(bot, angles);
@@ -1783,6 +1950,9 @@ void Bot_MoveNav(CBot &bot)
 
 	if (follow.done)
 	{
+		if (ItemKindIsCharger(bot.goalItemKind) && RunChargerUse(bot))
+			return;
+
 		Vector miss = pEdict->v.origin - bot.goalPoint;
 		char msg[224];
 		snprintf(msg, sizeof(msg),
@@ -1792,6 +1962,7 @@ void Bot_MoveNav(CBot &bot)
 		SERVER_PRINT(msg);
 
 		WriteTraceLog(bot);
+		BotItems::OnArrived(bot);
 		bot.hasGoal = false;
 		ResetPath(bot);
 		return;

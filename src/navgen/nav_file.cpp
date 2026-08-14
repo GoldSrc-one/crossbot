@@ -181,6 +181,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		}
 
 		rec.costSeconds = ConnectionCostSeconds(c);
+		rec.travelSeconds = ConnectionTravelSeconds(areas, c);
 
 		rec.exitSpeed = static_cast<float>(c.exitSpeed);
 		rec.exitAngle = static_cast<float>(c.exitAngle);

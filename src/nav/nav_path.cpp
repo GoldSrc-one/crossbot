@@ -1,5 +1,7 @@
 #include "nav_path.h"
 
+#include <queue>
+
 #include "astar_graph.h"
 
 namespace Nav
@@ -40,6 +42,53 @@ PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 
 	return NavPlan::PlanRoute(areaConnIndices, graphConns, mesh.planAreas, mesh.planConns, startArea,
 		goalArea, startPoint, goalPoint, traces, stats);
+}
+
+void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out)
+{
+	size_t n = mesh.areas.size();
+	out.assign(n, kUnreachableSeconds);
+	if (startArea >= n)
+		return;
+
+	std::vector<bool> settled(n, false);
+	out[startArea] = 0.f;
+
+	typedef std::pair<float, uint32_t> Entry;
+	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+	open.push(Entry(0.f, startArea));
+
+	while (!open.empty())
+	{
+		uint32_t current = open.top().second;
+		float currentDist = open.top().first;
+		open.pop();
+
+		if (settled[current])
+			continue;
+		settled[current] = true;
+
+		for (uint32_t connIdx : mesh.areas[current].connIndices)
+		{
+			if (connIdx >= mesh.conns.size())
+				continue;
+
+			const Connection &c = mesh.conns[connIdx];
+			uint32_t neighbor = (c.areaA == current) ? c.areaB : c.areaA;
+
+			if ((c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0 && c.areaA != current)
+				continue;
+			if (neighbor >= n || settled[neighbor])
+				continue;
+
+			float step = currentDist + c.travelSeconds + c.costSeconds + c.runtimePenalty;
+			if (step >= out[neighbor])
+				continue;
+
+			out[neighbor] = step;
+			open.push(Entry(step, neighbor));
+		}
+	}
 }
 
 }

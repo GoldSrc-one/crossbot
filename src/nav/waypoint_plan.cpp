@@ -32,6 +32,7 @@ constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
 constexpr float kPlanAirmoveRunupTime = 0.1f;
 constexpr float kPlanAirmoveRunupMin = 8.f;
 constexpr float kPlanAirmoveRunupEps = 1.f;
+constexpr float kPlanRunupSeamStep = 18.f;
 constexpr float kPlanAirmoveRespeedEps = 1.f;
 constexpr float kPlanAirmoveRangeEps = 1.f;
 constexpr float kPlanAirmoveRetractAlign = 0.5f;
@@ -258,10 +259,35 @@ const PlanPlane *FloorPlaneOf(const PlanArea &area)
 
 float AreaFloorZ(const PlanArea &area, float x, float y)
 {
-	const PlanPlane *floor = FloorPlaneOf(area);
-	if (!floor || floor->normal.z < 0.0001f)
-		return 0.f;
-	return (floor->dist - floor->normal.x * x - floor->normal.y * y) / floor->normal.z;
+	bool any = false;
+	float best = 0.f;
+
+	for (const PlanPlane &pl : area.boundPlanes)
+	{
+		if (pl.normal.z <= kWallNormalZ)
+			continue;
+
+		float z = (pl.dist - pl.normal.x * x - pl.normal.y * y) / pl.normal.z;
+		if (!any || z > best)
+		{
+			best = z;
+			any = true;
+		}
+	}
+
+	return any ? best : 0.f;
+}
+
+bool FloorsMeetAt(const PlanArea &here, const PlanArea &there, const Vector &seam, float tolerance)
+{
+	const PlanPlane *a = FloorPlaneOf(here);
+	const PlanPlane *b = FloorPlaneOf(there);
+	if (!a || !b)
+		return false;
+
+	float zHere = AreaFloorZ(here, seam.x, seam.y);
+	float zThere = AreaFloorZ(there, seam.x, seam.y);
+	return std::fabs(zThere - zHere) <= tolerance;
 }
 
 struct EdgeLine
@@ -829,7 +855,8 @@ float PlanWalker::RunupDistance(const Vector &launchPoint, const Vector &back, f
 		Vector seamPos = pos + back * toSeam;
 
 		if (prev >= m_areas->size() || (*m_areas)[prev].crouch ||
-			!InAreaColumn(seamPos, (*m_areas)[prev], -kLaunchInset))
+			!InAreaColumn(seamPos, (*m_areas)[prev], -kLaunchInset) ||
+			!FloorsMeetAt((*m_areas)[area], (*m_areas)[prev], seamPos, kPlanRunupSeamStep))
 		{
 			total += step;
 			break;

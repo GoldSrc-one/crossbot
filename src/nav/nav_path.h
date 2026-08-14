@@ -20,5 +20,9 @@ PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint,
 	const NavPlan::PlanTraceContext *traces = nullptr, NavPlan::PlanStats *stats = nullptr);
 
+constexpr float kUnreachableSeconds = 1.0e9f;
+
+void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out);
+
 }
 

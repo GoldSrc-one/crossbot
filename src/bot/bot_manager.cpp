@@ -3,29 +3,21 @@
 
 #include "bot_manager.h"
 #include "bot.h"
+#include "bot_items.h"
 #include "bot_move_nav.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
 
 #include <string>
 
+IGameProfile *g_pGameProfile = nullptr;
+
 namespace
 {
 	constexpr int kMaxBots = 16;
 
 	CBot g_bots[kMaxBots];
-	IGameProfile *g_pGameProfile = nullptr;
 	int g_botSerial = 0;
-
-	CBot *FindBotByEdict(edict_t *pEdict)
-	{
-		for (auto &bot : g_bots)
-		{
-			if (bot.inUse && bot.pEdict == pEdict)
-				return &bot;
-		}
-		return nullptr;
-	}
 
 	CBot *FindFreeSlot()
 	{
@@ -40,6 +32,16 @@ namespace
 
 namespace BotManager
 {
+
+CBot *FindBot(edict_t *pEdict)
+{
+	for (auto &bot : g_bots)
+	{
+		if (bot.inUse && bot.pEdict == pEdict)
+			return &bot;
+	}
+	return nullptr;
+}
 
 void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 {
@@ -80,7 +82,7 @@ void ClientPutInServer(edict_t *pEntity)
 
 void ClientDisconnect(edict_t *pEntity)
 {
-	CBot *pBot = FindBotByEdict(pEntity);
+	CBot *pBot = FindBot(pEntity);
 	if (pBot)
 		*pBot = CBot();
 }
@@ -95,11 +97,33 @@ void StartFrame()
 		if (!bot.inUse)
 			continue;
 
-		if (g_pGameProfile->IsDead(bot.pEdict))
+		bool dead = g_pGameProfile->IsDead(bot.pEdict);
+		if (dead)
+		{
 			g_pGameProfile->Respawn(bot.pEdict);
-		else
-			Bot_MoveNav(bot);
+			bot.wasDead = true;
+			continue;
+		}
+
+		if (bot.wasDead)
+		{
+			bot.wasDead = false;
+			BotItems::OnRespawn(bot);
+		}
+
+		Bot_MoveNav(bot);
 	}
+}
+
+void Touch(edict_t *pentTouched, edict_t *pentOther)
+{
+	if (!g_pGameProfile || !pentTouched || !pentOther)
+		return;
+
+	if (CBot *bot = FindBot(pentOther))
+		BotItems::OnTouch(*bot, pentTouched);
+	else if (CBot *other = FindBot(pentTouched))
+		BotItems::OnTouch(*other, pentOther);
 }
 
 bool AddBot(const char *name)
@@ -164,6 +188,20 @@ bool SetGoalForAllBots(const Vector &point)
 		bot.hasGoal = true;
 		Bot_ResetNavPath(bot);
 		bot.traceLog.clear();
+		any = true;
+	}
+	return any;
+}
+
+bool KillAllBots()
+{
+	bool any = false;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		MDLL_ClientKill(bot.pEdict);
 		any = true;
 	}
 	return any;
@@ -259,6 +297,19 @@ void PrintNavStatus()
 			bot.avoid.lastHit[0] ? bot.avoid.lastHit : "-", bot.avoid.lastGap, bot.avoid.lastTop,
 			detourLeft);
 		std::string msg = line;
+
+		edict_t *goalItem = bot.goalItem.Get();
+		snprintf(line, sizeof(line), " item=%s itemKind=%d itemArea=%d memo=%zu full=%zu",
+			goalItem ? CBotClassOf(goalItem) : "-", static_cast<int>(bot.goalItemKind),
+			bot.goalItemArea, bot.itemMemo.size(), bot.fullMemo.size());
+		msg += line;
+
+		if (bot.chargerActive)
+		{
+			snprintf(line, sizeof(line), " charging=%.1fs value=%.0f",
+				gpGlobals->time - bot.chargerStartTime, bot.chargerLastValue);
+			msg += line;
+		}
 
 		if (bot.rideActive)
 		{

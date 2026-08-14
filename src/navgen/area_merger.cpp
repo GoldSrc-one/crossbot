@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "astar_graph.h"
 #include "floor_support.h"
 #include "waypoint_plan.h"
 
@@ -34,6 +35,74 @@ float ConnectionCostSeconds(const MergedConnection &conn)
 		seconds += static_cast<float>(conn.rideSeconds + conn.rideWaitSeconds);
 
 	return seconds;
+}
+
+namespace
+{
+
+bool CrossesPortal2D(const Vec3 &from, const Vec3 &to, const Vec3 &left, const Vec3 &right)
+{
+	auto side = [](const Vec3 &a, const Vec3 &b, const Vec3 &p)
+	{
+		return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+	};
+
+	double d1 = side(from, to, left);
+	double d2 = side(from, to, right);
+	double d3 = side(left, right, from);
+	double d4 = side(left, right, to);
+
+	return ((d1 < 0.0) != (d2 < 0.0)) && ((d3 < 0.0) != (d4 < 0.0));
+}
+
+double PortalWalkDistance(const Vec3 &from, const Vec3 &to, const Vec3 &left, const Vec3 &right)
+{
+	if (CrossesPortal2D(from, to, left, right))
+		return (to - from).Length();
+
+	double viaLeft = (left - from).Length() + (to - left).Length();
+	double viaRight = (right - from).Length() + (to - right).Length();
+	return std::min(viaLeft, viaRight);
+}
+
+}
+
+float ConnectionTravelSeconds(const std::vector<Area> &areas, const MergedConnection &conn)
+{
+	if (conn.areaA < 0 || conn.areaB < 0 ||
+		static_cast<size_t>(conn.areaA) >= areas.size() || static_cast<size_t>(conn.areaB) >= areas.size())
+		return 0.0f;
+
+	Vec3 from = areas[static_cast<size_t>(conn.areaA)].polytope.Centroid();
+	Vec3 to = areas[static_cast<size_t>(conn.areaB)].polytope.Centroid();
+
+	if (conn.connType != crossbot_nav::CONN_WALK)
+		return static_cast<float>(((conn.pointA - from).Length() + (to - conn.pointB).Length()) /
+			NavAStar::kNavRunSpeed);
+
+	Vec3 left, right;
+	if (conn.gateAValid && conn.gateBValid)
+	{
+		left = (conn.gateALeft + conn.gateBLeft) * 0.5;
+		right = (conn.gateARight + conn.gateBRight) * 0.5;
+	}
+	else if (conn.gateAValid)
+	{
+		left = conn.gateALeft;
+		right = conn.gateARight;
+	}
+	else if (conn.gateBValid)
+	{
+		left = conn.gateBLeft;
+		right = conn.gateBRight;
+	}
+	else
+	{
+		left = conn.pointA;
+		right = conn.pointB;
+	}
+
+	return static_cast<float>(PortalWalkDistance(from, to, left, right) / NavAStar::kNavRunSpeed);
 }
 
 namespace

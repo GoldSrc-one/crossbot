@@ -90,6 +90,8 @@ struct MergeResult
 
 float ConnectionCostSeconds(const MergedConnection &conn);
 
+float ConnectionTravelSeconds(const std::vector<Area> &areas, const MergedConnection &conn);
+
 size_t ResolveConnectionPlanes(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 
 bool WallPlaneAsLine(const Plane &plane, Vec3 &normalOut, double &distOut);

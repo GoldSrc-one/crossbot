@@ -16,7 +16,7 @@ bool ContainsPoint(const Area &area, const Vector &point)
 }
 }
 
-const Area *FindAreaForPoint(const NavMesh &mesh, const Vector &point)
+const Area *FindAreaContainingPoint(const NavMesh &mesh, const Vector &point)
 {
 	for (const Area &area : mesh.areas)
 	{
@@ -28,6 +28,14 @@ const Area *FindAreaForPoint(const NavMesh &mesh, const Vector &point)
 		if (ContainsPoint(area, point))
 			return &area;
 	}
+
+	return nullptr;
+}
+
+const Area *FindAreaForPoint(const NavMesh &mesh, const Vector &point)
+{
+	if (const Area *exact = FindAreaContainingPoint(mesh, point))
+		return exact;
 
 	const Area *best = nullptr;
 	float bestDist = 0.f;
