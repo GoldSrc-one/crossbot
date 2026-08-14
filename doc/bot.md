@@ -294,7 +294,8 @@ of the list in `crossbot_nav_status` are the tell.
 
 `RunLadderApproach` walks the bot to the mount and latches `CBot::ladderActive`; `RunLadderMove` then
 owns every frame until it finishes, exactly as the air move does. Eight rules make the difference between
-a climb and the jump-on-jump-off loop test53_ladder4 used to run. A ninth is the descent aim, below.
+a climb and the jump-on-jump-off loop test53_ladder4 used to run. A ninth is the descent aim, and a tenth
+is how the attempt is scored; both are below.
 
 **Drive from the plane the engine picked, not the face navgen planned.** `PM_LadderMove` chooses its
 plane with `PM_TraceModel(origin -> ladder centre)` in the *point* hull, so the face is decided by where
@@ -381,6 +382,35 @@ and penalized its connection, the next plan picked the ladder, the ladder never 
 *its* connection, and the plan came back to the jump. Nothing was oscillating in the planner — penalties
 were working exactly as designed, on two edges that were both genuinely broken. A repath that keeps
 flipping between two routes is worth reading as a symptom of that, not as a planner-stability problem.
+
+**The verdict judges the maneuver, and only then the area.** `FinishLadder` decides whether the
+connection earns a `RewardConnection` or a `PenalizeConnection`, and it used to decide entirely on
+`FindAreaForPoint(origin)`. That function never returns NULL — after the exact half-space test it falls
+back to nearest-centroid-with-AABB and then to plain nearest centroid — so it always names *an* area, and
+where the ladder shaft is carved out of the mesh the nearest centroid is routinely the area the bot just
+left. test53_ladder4's `2 <-> 4` descent ends at (442.7, 272.8, 19.7), inside no area at all: area 2
+starts around y 280, and the answer came back as area 4, the ledge 62 units above. A descent that worked
+was charged `kConnFailPenalty` every single time, and the next `Replan` reported `penalized=1` because
+of it.
+
+So the verdict now takes two inputs. `FinishLadder`'s `completed` argument says whether the maneuver
+itself finished as designed — `reached the bottom of` and `dismounted off` pass true, `never caught`,
+`fell off`, `timed out on` and `stalled on` pass false — and a maneuver that did not complete is a
+failure whatever the geometry says. Only when it did complete does the area matter, and then it is read
+with the strict `Nav::FindAreaContainingPoint`: the target area rewards, a *different* area penalizes,
+and no area at all is `undecided` — neither rewarded nor penalized, because a bot still in the shaft is
+not evidence of anything. The log line carries that word, so a run tells you which of the three happened.
+
+Deferring the undecided case instead — hold the verdict, settle it once the bot is back on the ground
+and strictly inside something — was tried and is worse. By the time the bot satisfies that test it has
+walked on: test53_ladder4's `11 <-> 8` descent settled two areas later, in 13 rather than the 11 it was
+promised, and penalized a ladder that had just worked. Deferring only moves the wrong answer. Nothing is
+lost by declining to answer, either, because `RewardEnteredConnection` still decays the penalty when the
+bot actually walks into the planned next area, and that is the reward path that matters.
+
+`RunAirmoveFlight` scores its connection the same way and has the same forgiving lookup. It is far less
+exposed — its verdict fires on `FL_ONGROUND`, so the bot is standing on a floor — but the
+`kAirmoveMaxAirTime` timeout is decided in mid-air and is the same trap.
 
 **Stalls are measured in distance, not speed.** A bot wedged against the brush can hold a healthy
 `vel=(0,0,67)` forever while its origin does not move, so the detector compares against

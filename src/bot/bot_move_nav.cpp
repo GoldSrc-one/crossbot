@@ -712,16 +712,18 @@ namespace
 		RunLadderDrive(bot, drive, yaw, pitch, crouch, false);
 	}
 
-	bool FinishLadder(CBot &bot, const Nav::NavMesh &mesh, const char *why)
+	bool FinishLadder(CBot &bot, const Nav::NavMesh &mesh, const char *why, bool completed)
 	{
 		edict_t *pEdict = bot.pEdict;
 		bot.ladderActive = false;
 
-		const Nav::Area *landedArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
+		const Nav::Area *landedArea = Nav::FindAreaContainingPoint(mesh, pEdict->v.origin);
 		int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
-		bool failed = (bot.ladderTargetArea >= 0 && landedId != bot.ladderTargetArea);
+		bool failed = !completed ||
+			(landedId >= 0 && bot.ladderTargetArea >= 0 && landedId != bot.ladderTargetArea);
+		bool undecided = !failed && bot.ladderTargetArea >= 0 && landedId < 0;
 
-		if (bot.ladderConnIndex >= 0)
+		if (!undecided && bot.ladderConnIndex >= 0)
 		{
 			uint32_t connIndex = static_cast<uint32_t>(bot.ladderConnIndex);
 			if (failed)
@@ -730,12 +732,12 @@ namespace
 				Nav::RewardConnection(connIndex);
 		}
 
-		char msg[288];
+		char msg[320];
 		snprintf(msg, sizeof(msg),
-			"CrossBot: %s ladder %s %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d\n",
+			"CrossBot: %s ladder %s %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d %s\n",
 			bot.name, bot.ladderUp ? "climb" : "descent", why, gpGlobals->time - bot.ladderStartTime,
 			pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, landedId, bot.ladderTargetArea,
-			bot.ladderConnIndex);
+			bot.ladderConnIndex, undecided ? "undecided" : (failed ? "failed" : "ok"));
 		SERVER_PRINT(msg);
 
 		if (failed)
@@ -773,7 +775,7 @@ namespace
 		bot.lastProgressTime = gpGlobals->time;
 
 		if (elapsed >= kLadderMaxTime)
-			return FinishLadder(bot, mesh, "timed out on");
+			return FinishLadder(bot, mesh, "timed out on", false);
 
 		if (!bot.ladderGrabbed)
 		{
@@ -802,7 +804,7 @@ namespace
 				if (elapsed >= kLadderEntryTimeout ||
 					toMount.Length() > kLadderCommitRadius + kLadderEntryDrift ||
 					gpGlobals->time - bot.ladderMoveTime >= kLadderStallTime)
-					return FinishLadder(bot, mesh, "never caught");
+					return FinishLadder(bot, mesh, "never caught", false);
 
 				Vector aim = LadderMountAim(pEdict->v.origin, bot.ladderMountPoint, bot.ladderUp,
 					bot.ladderYaw, bot.ladderEntryYaw);
@@ -824,9 +826,9 @@ namespace
 		if (!bot.ladderUp)
 		{
 			if (navZ <= bot.ladderDismountZ + kLadderDismountSlack)
-				return FinishLadder(bot, mesh, "reached the bottom of");
+				return FinishLadder(bot, mesh, "reached the bottom of", true);
 			if (!onLadder && onGround)
-				return FinishLadder(bot, mesh, "fell off");
+				return FinishLadder(bot, mesh, "fell off", false);
 		}
 		else if (!onLadder)
 		{
@@ -834,7 +836,7 @@ namespace
 				bot.ladderLeftTime = gpGlobals->time;
 
 			if (onGround && gpGlobals->time - bot.ladderLeftTime >= kLadderMinAirTime)
-				return FinishLadder(bot, mesh, "dismounted off");
+				return FinishLadder(bot, mesh, "dismounted off", true);
 		}
 
 		if (!onLadder)
@@ -889,7 +891,7 @@ namespace
 		else if (gpGlobals->time - bot.ladderMoveTime >= kLadderStallTime)
 		{
 			if (bot.ladderStalls >= kLadderStallEscapes)
-				return FinishLadder(bot, mesh, "stalled on");
+				return FinishLadder(bot, mesh, "stalled on", false);
 
 			++bot.ladderStalls;
 			bot.ladderMoveTime = gpGlobals->time;
