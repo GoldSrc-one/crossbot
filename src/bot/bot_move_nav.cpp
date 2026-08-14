@@ -35,6 +35,7 @@ namespace
 	constexpr float kLadderCommitRadius = 48.f;
 	constexpr float kLadderMountRadius = 32.f;
 	constexpr float kLadderMountLead = 32.f;
+	constexpr float kLadderMountApproach = 8.f;
 	constexpr float kLadderEntryTimeout = 3.f;
 	constexpr float kLadderEntryDrift = 64.f;
 	constexpr float kLadderReachDwell = 0.3f;
@@ -694,9 +695,11 @@ namespace
 		if (up)
 			return mount + YawDir(climbYaw) * kLadderMountLead;
 
+		Vector entryDir = YawDir(entryYaw);
 		Vector toMount(mount.x - origin.x, mount.y - origin.y, 0.f);
-		float len = toMount.Length();
-		Vector dir = (len > 8.f) ? (toMount * (1.f / len)) : YawDir(entryYaw);
+		float ahead = toMount.x * entryDir.x + toMount.y * entryDir.y;
+		Vector dir = (ahead > kLadderMountApproach)
+			? (toMount * (1.f / toMount.Length())) : entryDir;
 		return mount + dir * kAirmoveApproachLead;
 	}
 

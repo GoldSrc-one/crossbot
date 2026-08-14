@@ -183,6 +183,13 @@ that fires after a failed air move and it would otherwise be silent. Both carry 
 count of connections on the chosen route with a nonzero `runtimePenalty` — so `penalized=0` on the
 replan after a failure means the penalty did its job and the new route avoids the bad edge.
 
+The fresh dump also prints one `conn[i]=<index> <type> <a><->b cost= travel=` line per connection on
+the route. A route used to be visible only as areas and waypoints, and neither says *which edge* the
+plan took: two areas can be joined by a walk, a jump and a ladder at once, the waypoints for them look
+alike, and the connection index is what every penalty, abort and `wanted <area>` message is keyed on.
+Both of test53_ladder4's ledge failures were only legible once the alternation could be read as conn 15
+against conn 26 rather than as two similar-looking waypoint lists.
+
 ### Bot_MoveNav
 Main navigation-driven movement function. Repath triggers are: empty path, forced (air move landed
 off-target), and stall (no progress for kRepathInterval).
@@ -287,7 +294,7 @@ of the list in `crossbot_nav_status` are the tell.
 
 `RunLadderApproach` walks the bot to the mount and latches `CBot::ladderActive`; `RunLadderMove` then
 owns every frame until it finishes, exactly as the air move does. Eight rules make the difference between
-a climb and the jump-on-jump-off loop test53_ladder4 used to run.
+a climb and the jump-on-jump-off loop test53_ladder4 used to run. A ninth is the descent aim, below.
 
 **Drive from the plane the engine picked, not the face navgen planned.** `PM_LadderMove` chooses its
 plane with `PM_TraceModel(origin -> ladder centre)` in the *point* hull, so the face is decided by where
@@ -351,6 +358,29 @@ steering *to* it stops the bot short of the capture region — for a ladder whos
 beyond the stand point that is a permanent stall, jumping in place at full drive. The approach aims
 `kLadderMountLead` further along `ladderYaw`, i.e. into the ladder, and lets the capture happen on the
 way through.
+
+**A descent approach aims past the mount and never turns back.** A climb has `ladderYaw` to steer by; a
+descent has nothing equivalent, because the bot cannot grab the ladder from where it stands. `PM_Ladder`
+is a *point* test of the origin against the brush's hull-3 volume, and where a ladder ends flush with the
+ledge it serves, that volume tops out at exactly the walkable duck-origin z — test53_ladder4's `2 <-> 4`
+ladder ends at 64, the ledge floor is 64, and both put the top of the volume at z 82 with the bot standing
+on z 82. Nothing catches until the bot walks off the ledge and starts to fall, so the descent aim exists
+to carry it over the edge, `kAirmoveApproachLead` beyond the mount along the line it is already on.
+
+Deriving that line from `origin -> mount` inverts it the instant the bot passes the mount, and the guard
+that swapped in `ladderEntryYaw` within eight units only moved the inversion to the edge of that ball:
+the bot settled on the shell `|origin - mount| = 8` on the far side and hovered there at ~16 u/s, drifting
+in and out, until `kLadderStallDist` gave up. It needed y 272 and the shell held it at y 270. The branch
+is now chosen by the *signed* progress along `ladderEntryYaw` — `dot(toMount, entryDir) >
+kLadderMountApproach` still steers through a mount genuinely ahead, level or behind drives on `entryDir`
+alone — which is the projection `RunLadderApproach` already commits on. Every origin the old
+`never caught` lines printed was 7.9-8.1 units from the mount; that number was the entire bug.
+
+Because both ways out of that ledge failed, the failures alternated: the crouch jump aborted under speed
+and penalized its connection, the next plan picked the ladder, the ladder never caught and penalized
+*its* connection, and the plan came back to the jump. Nothing was oscillating in the planner — penalties
+were working exactly as designed, on two edges that were both genuinely broken. A repath that keeps
+flipping between two routes is worth reading as a symptom of that, not as a planner-stability problem.
 
 **Stalls are measured in distance, not speed.** A bot wedged against the brush can hold a healthy
 `vel=(0,0,67)` forever while its origin does not move, so the detector compares against

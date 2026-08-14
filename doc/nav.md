@@ -617,9 +617,19 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
 
 **InAreaColumn** - tests point against wall planes only (ignores floor/ceiling), for column test
 
-**FloorPlaneOf** - finds bound plane with highest normal.z (most upward)
+**FloorPlaneOf** - finds bound plane with highest normal.z (most upward). That is the *flattest* upward
+plane, not the highest one, so it is only good for asking whether an area has a floor at all — never for
+a height.
 
-**AreaFloorZ** - computes floor height at (x,y) from floor plane
+**AreaFloorZ** - floor height at (x,y). An area is the intersection of its half-spaces, so every plane
+with `normal.z > kWallNormalZ` is a lower bound on z there and the floor is the *maximum* over all of
+them. Reading one plane instead is wrong for any area with more than one upward face, which is every
+prism area: crossfire's 168 is a ramp plus a small flat patch, and asking `FloorPlaneOf` gave the patch's
+z, -1838, for every point on a ramp that climbs to -1684. See "The clamp runs backwards along the route"
+for what that cost.
+
+**FloorsMeetAt** - true when two areas' floors agree at a seam point within a tolerance. Both areas must
+have a floor plane at all; the heights themselves come from `AreaFloorZ`.
 
 **EdgeOfPlane** - extracts wall plane as 2D line segment, clips by other walls in area
 
@@ -800,8 +810,17 @@ inset to reach the seam and continue in the area the route came from. An area's 
 straight off `m_pendingGates` — each walk connection pushes a gate pair carrying `insideArea`, and
 `m_pendingGates` only ever holds plain-walk gates because every barrier flushes the funnel — so no
 adjacency structure has to be plumbed into the walker. The chain stops at a real wall, at a seam the
-next area's column does not actually contain, or at a crouch area, where running at
-`kDuckingMultiplier` would make the extra distance worth less than the ducking costs.
+next area's column does not actually contain, at a seam where the two floors are more than
+`kPlanRunupSeamStep` apart, or at a crouch area, where running at `kDuckingMultiplier` would make the
+extra distance worth less than the ducking costs.
+
+The floor-continuity clause is there because `InAreaColumn` is a pure XY test — it skips every plane
+with `|normal.z| > kWallNormalZ` — so on its own it happily walks a run-up back across a cliff. Crossfire
+area 168 is a 26.57° ramp from the pit floor up to a ledge, sharing its column with the pit below it;
+the run-up for the ramp-top air move was placed on the pit floor 150 units under the launch, and the bot
+spent the rest of the round stalling and re-planning between a launch it could not walk to and the point
+it kept falling back to. `FloorsMeetAt` compares `AreaFloorZ` on both sides of the seam and stops the
+walk-back where they disagree by more than a step.
 
 Confining it to one area silently capped the launch speed on thin ledges. `test54_window`'s area 3 is
 a 16-unit-deep lip between the window and the pit; the 3→17 jump wants 26.7 units of run-up and got
