@@ -16,6 +16,11 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_weapons [name]` — the inventory snapshot: every weapon with its `m_iId`, clip, ammo indices
   and carried counts, both attack timers, and a `*` on the active one; see `doc/bot.md`,
   `bot_weapons.cpp`
+- `crossbot_weaponspec [name]` — how each gun is operated. With no argument, dumps the whole
+  weapon table: per weapon id, the classname and clip size, then one line per firing mode with its
+  button pattern, aim requirement, toggle, ammo pool and ballistics. With a player name, joins that
+  player's carried weapons against their specs and flags any classname that disagrees, which is the
+  one way the id-keyed table can be wrong; see `doc/game.md`, `weapon_spec.h`
 - `crossbot_equip <classname> [name]` — spawn an item at the target's feet and touch them with it,
   which is what the game's own `give` does. Default target is every bot
 - `crossbot_aim_test <bot> <yawDelta> [pitchDelta]` — command a flick relative to the bot's current view

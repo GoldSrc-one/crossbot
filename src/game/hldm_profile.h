@@ -18,4 +18,6 @@ public:
 	float ItemUnreachableTimeout() const override;
 	float ChargerFullValue(ItemKind kind) const override;
 	float ChargerValue(ItemKind kind, edict_t *pEdict) const override;
+
+	const WeaponSpec *GetWeaponSpec(int id) const override;
 };

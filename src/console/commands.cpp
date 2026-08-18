@@ -8,6 +8,8 @@
 #include "../bot/bot_manager.h"
 #include "../bot/bot_weapons.h"
 #include "../game/ent_handle.h"
+#include "../game/game_profile.h"
+#include "../game/hldm_weapons.h"
 #include "../nav/nav.h"
 
 #define SF_NORESPAWN (1 << 30)
@@ -179,6 +181,150 @@ namespace
 	void Cmd_CrossBotAimStatus()
 	{
 		BotManager::PrintAimStatus();
+	}
+
+	void AppendQuirks(unsigned int quirks, char *out, size_t cap)
+	{
+		static const struct { unsigned int bit; const char *name; } kNames[] = {
+			{ WPN_Q_HIDDEN_STATE,  "hiddenstate" },
+			{ WPN_Q_NO_UNDERWATER, "nounderwater" },
+			{ WPN_Q_SLOW_IN_WATER, "slowinwater" },
+			{ WPN_Q_THROW_ARC,     "throwarc" },
+			{ WPN_Q_INHERIT_VEL,   "inheritvel" },
+			{ WPN_Q_KEEP_AIMING,   "keepaiming" },
+		};
+
+		out[0] = '\0';
+		size_t used = 0;
+
+		for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i)
+		{
+			if ((quirks & kNames[i].bit) == 0)
+				continue;
+
+			int n = snprintf(out + used, cap - used, "%s%s", used ? "," : "", kNames[i].name);
+			if (n < 0 || static_cast<size_t>(n) >= cap - used)
+				return;
+			used += static_cast<size_t>(n);
+		}
+
+		if (used == 0)
+			snprintf(out, cap, "-");
+	}
+
+	void PrintWeaponMode(const char *label, const WeaponMode &mode)
+	{
+		if (mode.fire == FIRE_NONE && mode.toggle == TOGGLE_NONE)
+			return;
+
+		char quirks[128];
+		AppendQuirks(mode.quirks, quirks, sizeof(quirks));
+
+		char msg[320];
+		snprintf(msg, sizeof(msg),
+			"CrossBot:    %-2s %-6s %-7s toggle %-5s ammo %-4s x%d speed %-6.0f grav %.2f range %-6.0f splash %-5.0f charge %.2f/%.2f %s\n",
+			label, WeaponFireName(mode.fire), WeaponAimName(mode.aim),
+			WeaponToggleName(mode.toggle), WeaponAmmoName(mode.ammo), mode.ammoPerShot,
+			mode.speed, mode.gravity, mode.range, mode.splash,
+			mode.chargeFull, mode.chargeMax, quirks);
+		SERVER_PRINT(msg);
+	}
+
+	void PrintWeaponSpec(const WeaponSpec &spec)
+	{
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot:  id %2d %-20s clip %d\n",
+			spec.id, spec.classname, spec.clipSize);
+		SERVER_PRINT(msg);
+
+		PrintWeaponMode("P", spec.primary);
+		PrintWeaponMode("Pz", spec.primaryZoomed);
+		PrintWeaponMode("S", spec.secondary);
+	}
+
+	void Cmd_CrossBotWeaponSpec()
+	{
+		if (!g_pGameProfile)
+		{
+			SERVER_PRINT("CrossBot: no game profile detected.\n");
+			return;
+		}
+
+		if (CMD_ARGC() > 1)
+		{
+			edict_t *ent = FindPlayerByName(CMD_ARGV(1));
+			if (!ent)
+			{
+				char msg[128];
+				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(1));
+				SERVER_PRINT(msg);
+				return;
+			}
+
+			BotInventory inv;
+			if (CBot *bot = BotManager::FindBot(ent))
+				inv = bot->inventory;
+			else
+				BotWeapons::Read(ent, inv);
+
+			char msg[192];
+			snprintf(msg, sizeof(msg), "CrossBot: %s carries %d weapon(s), fov %.0f\n",
+				PlayerNameOf(ent), inv.count, ent->v.fov);
+			SERVER_PRINT(msg);
+
+			for (int i = 0; i < inv.count; ++i)
+			{
+				const BotWeapon &w = inv.weapons[i];
+				const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+
+				if (!spec)
+				{
+					snprintf(msg, sizeof(msg), "CrossBot:  %c id %2d %-20s NO SPEC\n",
+						i == inv.activeIndex ? '*' : ' ', w.id, CBotClassOf(w.ent));
+					SERVER_PRINT(msg);
+					continue;
+				}
+
+				const char *live = CBotClassOf(w.ent);
+				bool match = strcmp(live, spec->classname) == 0;
+
+				snprintf(msg, sizeof(msg), "CrossBot:  %c live %-20s spec %-20s %s\n",
+					i == inv.activeIndex ? '*' : ' ', live, spec->classname,
+					match ? "match" : "MISMATCH");
+				SERVER_PRINT(msg);
+
+				PrintWeaponSpec(*spec);
+			}
+			return;
+		}
+
+		int shown = 0;
+		int broken = 0;
+
+		for (int slot = 0; slot < kHLDMWeaponSlots; ++slot)
+		{
+			const WeaponSpec *raw = HLDM_WeaponSlot(slot);
+			if (!raw || !raw->classname)
+				continue;
+
+			if (raw->id != slot)
+			{
+				char msg[192];
+				snprintf(msg, sizeof(msg),
+					"CrossBot: TABLE BROKEN -- slot %d holds id %d (%s)\n",
+					slot, raw->id, raw->classname);
+				SERVER_PRINT(msg);
+				++broken;
+				continue;
+			}
+
+			PrintWeaponSpec(*raw);
+			++shown;
+		}
+
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot: %d weapon spec(s), %d broken slot(s)\n", shown, broken);
+		SERVER_PRINT(msg);
 	}
 
 	void Cmd_CrossBotEquip()
@@ -367,6 +513,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
+	ADD_SERVER_COMMAND("crossbot_weaponspec", Cmd_CrossBotWeaponSpec);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);
 	ADD_SERVER_COMMAND("crossbot_aim_test", Cmd_CrossBotAimTest);
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);

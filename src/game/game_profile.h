@@ -2,6 +2,8 @@
 
 #include <extdll.h>
 
+#include "weapon_spec.h"
+
 enum GameFlags : unsigned int
 {
 	GAME_NONE       = 0,
@@ -49,6 +51,8 @@ public:
 	virtual float ChargerFullValue(ItemKind kind) const = 0;
 
 	virtual float ChargerValue(ItemKind kind, edict_t *pEdict) const = 0;
+
+	virtual const WeaponSpec *GetWeaponSpec(int id) const = 0;
 };
 
 IGameProfile *GameProfile_Detect();

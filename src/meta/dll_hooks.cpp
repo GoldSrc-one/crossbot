@@ -31,13 +31,13 @@ cvar_t g_gatherDebugCvar = {
 
 cvar_t g_oppoJumpCvar = {
 	"crossbot_oppo_jump",
-	"0",
+	"1",
 	FCVAR_SERVER
 };
 
 cvar_t g_aimDelayCvar = {
 	"crossbot_aim_delay",
-	"0.25",
+	"0.3",
 	FCVAR_SERVER
 };
 

@@ -1492,6 +1492,10 @@ it is the one number in the dump that does not depend on a single offset being r
 the mask agree, the offsets are good. Bit 31 is excluded because `WEAPON_SUIT` sets it and the suit is
 not an inventory entity, so it can never appear in the walk.
 
+Which of a weapon's two modes those numbers belong to, and what the bot is supposed to do with the
+button, is not here — that is `weapon_spec.h` in `doc/game.md`. This file answers "what am I holding",
+that one answers "how is it operated".
+
 ## bot_move.h
 
 ### Bot_DecomposeMove

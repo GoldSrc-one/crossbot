@@ -6,6 +6,7 @@
 
 #include "ent_handle.h"
 #include "hldm_profile.h"
+#include "hldm_weapons.h"
 
 #if defined(_WIN32)
 #define CB_STRICMP _stricmp
@@ -123,6 +124,11 @@ float CHLDMProfile::ChargerValue(ItemKind kind, edict_t *pEdict) const
 	if (!pEdict)
 		return 0.f;
 	return (kind == ITEM_HEALTHCHARGER) ? pEdict->v.health : pEdict->v.armorvalue;
+}
+
+const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
+{
+	return HLDM_WeaponSpec(id);
 }
 
 IGameProfile *GameProfile_Detect()
