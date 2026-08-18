@@ -9,6 +9,12 @@ namespace
 	constexpr float kMaxTurnRatePerSec = 300.f;
 
 	constexpr byte kMaxJumpCommandMsec = 50;
+
+	bool HasLongJumpModule(edict_t *pEdict)
+	{
+		const char *slj = g_engfuncs.pfnGetPhysicsKeyValue(pEdict, "slj");
+		return slj && atoi(slj) == 1;
+	}
 }
 
 float Bot_NormalizeAngle(float a)
@@ -33,6 +39,9 @@ void Bot_RunPlayerMove(edict_t *pEdict, const Vector &angles, float fmove, float
 	unsigned short buttons)
 {
 	byte msec = Bot_FrameMsec();
+
+	if ((buttons & (IN_JUMP | IN_DUCK)) == (IN_JUMP | IN_DUCK) && HasLongJumpModule(pEdict))
+		buttons &= ~IN_DUCK;
 
 	if ((buttons & IN_JUMP) != 0 && msec > kMaxJumpCommandMsec)
 	{

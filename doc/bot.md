@@ -27,6 +27,13 @@ that the air move into that area needs a run-up the bot cannot get. That is what
 selection picks something else. Without it the two phases disagree forever and the bot re-picks the
 same unroutable item every frame.
 
+The ignore table is for the disagreements that are *route-dependent*. A disagreement that is a static
+property of the mesh has no business reaching it, because the 30 s timer then expires into the same failure
+forever: `AreaCosts` applies the activation gating that does not need a walker (`doc/nav.md`,
+`GateAllowsCrossing`), so an area behind a door the bot can never open from this side is priced
+`kUnreachableSeconds` and `crossbot_gather_debug` prints `no route` instead of a cost. On `crossfire` that is
+the 12-item secret cache in area 8 — and those 12 are the only items on the map that should read `no route`.
+
 Phase 1 must charge for **`travelSeconds` as well as `costSeconds`**, and getting that wrong is not
 a subtle bug. `Connection::costSeconds` is a surcharge — door waits, flight time, ride time — and it
 is **zero on a plain walk connection** (see `doc/nav.md`, travelSeconds). A Dijkstra over
@@ -162,14 +169,39 @@ ladder's reach ejects the bot the moment a later sub-step brings it into contact
 Every actuation goes through here so a jump costs the same one frame of held button at any server
 framerate. Below the split threshold this is exactly the single call it replaces.
 
+**IN_DUCK and IN_JUMP in one command is a long jump, not a crouch jump.** `PM_Jump`
+(`pm_shared.c:2554`) reads `cansuperjump` from the `slj` physinfo key — set by `CBasePlayer` the moment
+the player picks up `item_longjump` — and if the command carries IN_DUCK with `flDuckTime > 0` and
+`Length(velocity) > 50` it replaces the jump with `forward * 350 * 1.6` horizontally and
+`sqrt(2*800*56)` up. `PM_Duck` sets `flDuckTime = 1000` on the press with the comment *"Use 1 second so
+super long jump will work"*, so the very frame a crouch jump presses both buttons is inside the window.
+`PmSim` models `kJumpImpulse` and the commanded speed, so nothing in the plan knows about 560 u/s: the
+bot flies roughly twice as far as its arc and lands past the target area. Nothing was wrong on maps
+without the module, which is why it only showed up once bots started gathering on `crossfire`.
+
+So a command that carries IN_JUMP drops IN_DUCK, but **only while the bot holds the module** — the check
+is one `pfnGetPhysicsKeyValue` call, and gating on it keeps every map without an `item_longjump` sending
+byte-identical commands.
+
+Delaying the duck by one frame costs nothing, and the reason is the call order. `PM_PlayerMove` runs
+`PM_Duck` (2982) *before* `PM_Jump` (3038), and a duck pressed while still on the ground cannot finish
+inside that frame — `PM_FinishDuck` needs either the 0.4 s `TIME_TO_DUCK` ramp to elapse or
+`onground == -1`, and the jump that clears `onground` happens after `PM_Duck` has already returned. So
+the launch frame is simulated with the standing hull whether or not IN_DUCK was in it, and the first
+airborne frame finishes the duck either way: pressed on the launch frame it finishes because `bInDuck`
+survives into the air, pressed one frame later it finishes on the press itself. The hull timeline
+`JumpLandsIn` assumes — `duckTrace` for the whole arc — is met from the same frame as before. Jump
+*height* never depended on the duck either; both branches of `PM_Jump` give the same 45-unit impulse.
+
 ## bot_move_nav.cpp
 
 ### Constants
 - kFullDrive: Over maxspeed on purpose: PM_CheckParamters rescales the forward/side pair down to maxspeed, so this just means "full speed in exactly the commanded direction".
 - kAimVelocitySpeed: Below this the velocity carries no usable heading, so the aim holds where it is rather than snapping about on numerical noise.
+- kEdgeProbeAhead / kEdgeProbeDrop / kStandHullMinsZ / kDuckHullMinsZ: `PM_Friction`'s edge test, copied literally — 16 units ahead along the 3D velocity, dropped 34 from foot height. They are the engine's numbers, not tuning knobs; changing one desynchronises `AtFrictionEdge` from the friction it is trying to predict.
 
 ### WriteTraceLog
-Writes bot trajectory trace to file specified by crossbot_trace_path cvar (defaults to valve/crossbot_data/nav_trace.txt).
+Writes bot trajectory trace to file specified by crossbot_trace_path cvar (defaults to valve/addons/crossbot/trace/nav_trace.txt).
 
 ### Repath
 Finds path from current area to goal area using A* and builds waypoint plan.
@@ -213,7 +245,9 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
   short enough that a maneuver which suspends `Track` has to hold the clock open itself: `RunLadderMove`
   and `RunAirmoveFlight` both stamp `lastProgressTime` every frame, because no arclength accrues while
   they are driving. Without that a long fall (up to `kAirmoveMaxAirTime`, 6 s) trips the stall timer
-  mid-air and repaths from an airborne origin.
+  mid-air and repaths from an airborne origin. The cost of holding the clock open is that a flight which
+  never ends is invisible to every other timer, which is why the flight bounds itself — see
+  `RunAirmoveFlight`.
 - `BotPhysics` reads sv_gravity, sv_airaccelerate, sv_accelerate, sv_friction, sv_stopspeed and
   sv_edgefriction, so plan-time physics match a non-default server. Only the first three were read
   before, which silently diverged the profile from the engine.
@@ -244,6 +278,31 @@ When the bot reaches the plane still short, it penalizes the connection, request
 approach to learn the edge is undeliverable, and the +5 s penalty routes the next plan around it —
 the same penalize-and-repath loop a bad landing already used, moved earlier so the lesson costs an
 abort rather than a fall.
+
+**Before blaming the tolerance, check that the follower modelled the ledge it is standing on.**
+test53_ladder4's crouch jump (conn 15, area 4 → 2) aborted at 94 % of design on *every* run, including
+runs that got the full planned run-up, and 94 % misses `kAirmoveLaunchSpeedTolerance` by one point. The
+tolerance was right and the profile was right: the bot arrived at the launch plane holding 66.4 against
+a design 70.8, and held it — flat, frame after frame, not still decelerating. A servo that settles a
+fixed distance short of its setpoint is a gain problem, not a margin problem.
+
+The gain came from `SolveDrive` being handed `sv_friction` when the engine was applying
+`sv_friction * sv_edgefriction`. `PM_Friction` probes 16 units ahead along the velocity, from foot
+height, 34 units down, and doubles friction when that finds nothing — which is precisely the state
+every air-move approach ends in, since it is walking at the lip it is about to launch from.
+`doc/nav.md` derives the residual: a flat `V* - stopSpeed * (f_real - f_model) * dt`, invisible above a
+design speed of 80 and unavoidable below it. Crouched approaches are capped near 90, so they are the
+ones that live under the threshold.
+
+`BotDrivePhysics` runs the same probe the engine runs — same 16/34 offsets, same hull, same
+`fraction == 1` test — and doubles `groundFriction` when it misses, feeding that to every ground
+`SolveDrive`: the tracker's, the air-move approach's, and the ladder, elevator, activation and charger
+drives. `BotPhysics` stays untouched, so `MakePlanTraces` and `BuildPathProfile` keep planning against
+open-ground friction. Do not merge the two: a plan whose design speeds depend on whether the bot
+happened to be standing at a ledge when it replanned would move its own waypoints under it.
+
+With the probe in, the same launch reads `actual yaw 105 speed 71 (100%)` and lands in area 2, and the
+map stops taking the ladder detour it had been falling back to.
 
 Two things about the drive are easy to get wrong and both stalled real routes:
 
@@ -281,6 +340,60 @@ arriving in ~2 s.
 
 An oscillating `actual=` list therefore now means the penalty has not caught up yet — one more failure
 per bad edge — or that every remaining route is bad. It no longer means "no memory".
+
+**The flight ends when the bot has settled, and `FL_ONGROUND` is not the only way to settle.** Two
+states end an air move with the ground flag never set again: swimming, because `PM_CategorizePosition`
+forces `onground = -1` at `waterlevel >= 2`, and a ladder, because `PM_LadderMove` puts the player on
+`MOVETYPE_FLY`. An air move that ends in water or against a ladder therefore used to hold
+`airmoveActive` until the flat 6 s `kAirmoveMaxAirTime`, and because `RunAirmoveFlight` stamps
+`lastProgressTime` every frame the 2 s stall timer could not break it either — the bot swam or hung on
+the yaw it launched at, and the only thing that ever repathed it was that timeout. `AirmoveSettled` tests
+all three, and `AirmoveEndReason` names which one so the log line distinguishes `landed`,
+`splashed down` and `caught a ladder`.
+
+**The timeout is the connection's own flight time, not a flat 6 s.** `AirmoveTimeLimit` latches
+`conn.flightTime * kAirmoveTimeFactor + kAirmoveTimeMargin` at launch (capped at `kAirmoveMaxAirTime`,
+and the flat cap still applies when the connection carries no flight time), so a 0.4 s hop that goes
+wrong is not worth six seconds of driving on a plan the bot has left. The limit is *suspended while the
+bot is still falling* — `velocity.z < kAirmoveFallingZ` — because a bot in free fall is going to answer
+the question itself in a moment, and a fall deeper than the plan modelled is exactly the case whose
+verdict is worth waiting for. What the limit catches is the bot that is neither falling nor settled.
+
+**A verdict is only scored when the bot settled *inside an area*.** The lookup is the strict
+`Nav::FindAreaContainingPoint`, not `FindAreaForPoint`. The forgiving one cannot fail: with no containing
+area it falls back to any area whose AABB holds the point, and failing that to the globally nearest
+centroid — so a bot that ended in the void, in mid-air or on a lip outside the mesh was still scored, and
+could be scored as the area it was aiming at. `FinishLadder` was moved off it for exactly this reason and
+the air move was left behind. Settled-but-in-no-area is now `undecided`, like the timeout: neither
+penalized nor rewarded, but repathed, because the plan is void either way.
+
+**The verdict is the distance to the plan's landing waypoint; the area is the fallback.** Areas are large —
+crossfire's area 66 is 36 × 388 units — so an area-only verdict passes a landing hundreds of units from the
+modelled one, and at an area seam it fails a landing that was perfect: two of four "failures" in one
+crossfire run were `miss 0.3` and `miss 0.5`, the bot exactly where the plan put it while the strict lookup
+resolved the neighbour. So `failed` is `miss > kAirmoveLandingTolerance`, and the area comparison is used
+only when there is no landing waypoint to measure against. `miss` is 3D against
+`waypoints[waypointIndex]`, which after the launch's `++waypointIndex` *is* the plan's landing waypoint.
+
+Two things about that measurement are easy to get wrong and both produced garbage before the sweep caught
+them:
+
+- **Measure against the plan's waypoint, never `conn.landingPos`.** The connection's landing is what
+  navgen's sampler recorded for the edge; the planner re-derives the arc per route from the funnel's launch
+  point. The two differ by 65 to 134 units on landings whose flight time matched plan to a hundredth and
+  which landed in the wanted area — nine good connections penalized in one sweep.
+- **Waypoint z is origin space, not `BotNavZ` space.** `BotNavZ` exists for elevator nav-z comparisons and
+  subtracting `kPlanStandHeight` here put a systematic ~18-unit floor under every miss. The log settles it:
+  landing waypoint `(-436.6, 841.9, -1626.2)` against an actual landing origin of `(-438.1, 843.5, -1628.0)`.
+
+With both fixed the measurement is tight enough to set a threshold from: 0.2–8.2 units across the whole
+`maps/` sweep, 0.2–14.0 across a two-bot crossfire run, and the failures in that same run at 93, 100 and
+155. `kAirmoveLandingTolerance` is 48 — three times the worst good landing, half the cheapest bad one.
+
+`airmoveOverrunLogged` prints one line — not one per frame — the first time a flight passes its planned
+time by `kAirmoveOverrunGrace`, carrying `onground`, `waterlevel`, `movetype`, `FL_DUCKING`, velocity and
+the resolved area. A flight that hangs is hard to reproduce and the exit line alone cannot say *which*
+of those states it was stuck in.
 
 A repath inside an air move's run-up leg makes this worse in a way worth recognising. `Repath` starts
 the plan at the bot's own position and `Cross` then places the run-up node a fixed distance back along
@@ -409,8 +522,8 @@ lost by declining to answer, either, because `RewardEnteredConnection` still dec
 bot actually walks into the planned next area, and that is the reward path that matters.
 
 `RunAirmoveFlight` scores its connection the same way and has the same forgiving lookup. It is far less
-exposed — its verdict fires on `FL_ONGROUND`, so the bot is standing on a floor — but the
-`kAirmoveMaxAirTime` timeout is decided in mid-air and is the same trap.
+exposed — its verdict fires once `AirmoveSettled`, so the bot is on a floor, in water or on a ladder —
+and the timeout, which is decided in mid-air, is the same trap and so declines to score at all.
 
 **Stalls are measured in distance, not speed.** A bot wedged against the brush can hold a healthy
 `vel=(0,0,67)` forever while its origin does not move, so the detector compares against
@@ -575,6 +688,21 @@ stranded test53_ladder4 at ladder *5: the index reached the exit waypoint while 
 two units short of the volume, so the mount was never serviced, and the moment the bot drifted onto
 the ladder anyway the ladderEject rule below saw no ladder waypoint in range and jumped it straight
 back off at 270 u/s, forever.
+
+### An air-move launch bars the profile too
+Same shape again, and it was missing from the barrier list for a long time — `barrier` covered rides and
+ladder mounts only. The gap segment starts *at* the launch point, so once the bot is within a unit or
+two of it the nearest point on the chain flips to the far side of the hole and `wpIndex` becomes the
+landing waypoint. `RunAirmoveApproach` is only entered when the *current* waypoint carries
+`airmoveLaunch`, so a launch skipped that way is never taken at all: the bot keeps walking at a waypoint
+on the other side of a gap and drops into it.
+
+crossfire is where it showed. Area 66 is a ledge `x ∈ [140,176]`, area 47 is another at `x ∈ [240,276]`,
+there is no walk connection between them — 66's only walk neighbours are 54 and 80 — and the bot fell at
+`x = 204.7`, squarely in the 64 units of void, with `heading to wp 5/11` naming a waypoint inside area 47
+and no launch line anywhere above it. Nothing else in the follower would catch that: `ProjectOntoProfile`,
+`lateral` and the `done` test are all horizontal, so a 180-unit drop reads as zero deviation and only the
+2 s stall timer eventually fires.
 
 ### Barrier driven by barrier index
 Driven by the barrier index rather than bot.waypointIndex, because a ride waypoint need not own any
@@ -904,6 +1032,62 @@ The pairs that carry the diagnosis:
   new decision also prints its own line to the server console with distance, speed and trace count,
   which is what makes this tunable from one run — note those lines go to `qconsole.log`, not to the
   RCON transcript the test scripts capture.
+
+## bot_weapons.cpp
+
+What the bot is carrying, read straight out of `pvPrivateData` through the offsets `gamedata.cpp`
+loaded. `BotWeapons::Refresh` runs from `BotManager::StartFrame` for every live bot, unconditionally
+and with no caching: it is six short pointer chains, and a stamp check would cost more to reason about
+than the walk costs to redo. `BotWeapons::Read` takes any player edict rather than a `CBot`, which is
+what lets `crossbot_weapons` dump a human client's inventory with the same code the bots use.
+
+### The four checks, and which one earns its keep
+
+Every `CBasePlayerItem *` pulled out of `m_rgpPlayerItems` is a raw pointer into the game DLL's heap
+with nothing vouching for it. Before any field is read: the pointer is non-null, its `pev` is non-null,
+`pev->pContainingEntity` is a live edict with a plausible index, and — the one that matters —
+**`edict->pvPrivateData` points back at the same object**. The first three would pass on almost any
+plausible garbage; only the round trip out to the edict and back can fail on a pointer that is merely
+*wrong*. That check is the whole reason `pev` at offset 4 is hardcoded instead of trusted.
+
+A failure there is not recoverable and not transient — it means the offsets are wrong, so it goes
+through `GameData::Fatal` like any other gamedata failure. A null pointer is different: that is the
+normal chain terminator, and it just ends the walk.
+
+The wide read is deliberate: `m_iClip` and friends live on `CBasePlayerWeapon`, past where a plain
+`CBasePlayerItem` allocation would end. Half-Life has no non-weapon item in a player's inventory (the
+suit is a `pev->weapons` bit, not an entity), so every chain entry is a weapon. A mod that adds one
+would over-read, and that is the first thing to suspect if these numbers go strange on a new mod.
+
+### Attack timers are stored raw
+
+`nextPrimaryAttack`, `nextSecondaryAttack` and `nextAttack` are whatever was in memory, with no
+normalisation, because there is no single right normalisation to apply. In retail Half-Life they are
+**countdowns, not timestamps** — `UTIL_WeaponTimeBase()` returns `0.0` under `CLIENT_WEAPONS`, and the
+player decrements them each frame and clamps at `-1`, so "ready" reads as `<= 0` and an idle weapon
+sits at exactly `-1.00`. A handful of HLSDK paths write the absolute `gpGlobals->time + delay` form
+anyway (`glock.cpp`'s empty-click being one), so a consumer that cares has to tolerate both. Deciding
+that belongs to whatever fires the weapon, not to the reader.
+
+### Ammo counts are indices, never names
+
+`m_iPrimaryAmmoType` is an index into the player's `m_rgAmmo[32]`, assigned at runtime by
+`CBasePlayer::GetAmmoIndex` in precache order. It is **not** stable across mods and must never be
+hardcoded — on `crossfire` 9mm lands at 2 and rockets at 6, and nothing guarantees that elsewhere. It
+also does not need to be: each weapon carries its own index, so `inv.ammo[w.primaryAmmoType]` is the
+count without anyone knowing what the ammo is called. Resolving names would mean reaching
+`CBasePlayerItem::AmmoInfoArray`, a static in `hl.dll` that the gamedata dump does not describe.
+
+Non-zero `ammo[]` entries with no weapon using them are normal, not a bug: the gather goals pick up
+ammo boxes for guns the bot does not have yet.
+
+### The mask cross-check
+
+`crossbot_weapons` ORs `1 << m_iId` over everything it walked and compares that against
+`pev->weapons`, minus bit 31. `pev->weapons` is maintained on the engine-visible side of the entity, so
+it is the one number in the dump that does not depend on a single offset being right — if the walk and
+the mask agree, the offsets are good. Bit 31 is excluded because `WEAPON_SUIT` sets it and the suit is
+not an inventory entity, so it can never appear in the walk.
 
 ## bot_move.h
 

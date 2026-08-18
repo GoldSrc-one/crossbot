@@ -224,6 +224,17 @@ runtimePenalty`, honouring `CONN_FLAG_ONE_WAY` exactly as `plan_search.cpp` does
 cost-per-area vector rather than stopping at the first hit, because the callers rank many candidates
 against each other and an early exit only saves microseconds on a ~500-area map.
 
+`GateAllowsCrossing` makes it honour the **static** half of the activation gating too, the half that does
+not depend on the route taken: entering an `activation != ACT_NONE` area by anything other than a walk or a
+ride is impossible, and so is entering it from a neighbour with no `PlanDetour`, a `blocked` one, or one with
+no points. That is the same triple test `PlanWalker::Cross` and `PushActivationDetour` apply, so a Dijkstra
+that skipped it would price areas the planner will always refuse. `crossfire`'s secret room is the case that
+matters: `navgen` already records `detour area 21 <- 23 : BLOCKED (no route to any service point)` because the
+`trigger_multiple` that opens `secret_door` sits *inside* the room, and the 12 items behind it read `11.8s
+away` to the gather scan while every `Repath` to them failed. What stays outside this test is everything
+funnel-dependent — an air move that needs a run-up this approach cannot give — because answering that needs
+the walker, which is the whole reason phase 1 is a plain Dijkstra (`doc/bot.md`, "Selection is two searches").
+
 Being seconds is also what lets `runtimePenalty` be added straight on top in `BuildGraph` (see
 `nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
 everything.
@@ -433,13 +444,39 @@ wishspeed > stopSpeed * groundFriction * edgeFriction / accelerate
 ```
 
 which at defaults is 40 on open ground and **80 within a hull's reach of a ledge**, where the engine
-doubles friction by `sv_edgefriction`. `byRate` sidesteps the threshold entirely: the further the
-velocity is from `V*`, the larger the commanded wish speed, so the bot saturates the frame and then
-settles onto `V*`. See `doc/bot.md`, `RunAirmoveApproach`, for the dropoff this stalled.
+doubles friction by `sv_edgefriction`. `byRate` sidesteps the *stall*: the further the velocity is from
+`V*`, the larger the commanded wish speed, so the bot saturates the frame and closes on `V*` from any
+starting speed. See `doc/bot.md`, `RunAirmoveApproach`, for the dropoff this stalled.
 
-`physics.edgeFriction` is read from `sv_edgefriction` and stored, but nothing consumes it — neither
-`SolveDrive` nor `BuildPathProfile` models the ledge doubling, so both under-estimate drag near a drop.
-`byRate` covers for it in the follower; the profile just runs slightly optimistic there.
+What it does *not* do by itself is arrive at `V*`, and that is the next rule.
+
+**`byRate` does not cover for an unmodelled friction — it converts it into a standing speed error.**
+The formula is a deadbeat solve: it asks for the one wish speed whose `sv_accelerate * dt * wishspeed`
+exactly replaces the drop, so its gain is set by whatever `f` the caller passed. Feed it a friction
+lower than the engine's and it settles short, permanently. At the fixed point the engine takes
+`stopSpeed * f_real * dt` per frame and returns at most `accelerate * dt * W`, so holding still needs
+`W = stopSpeed * f_real / accelerate`; `byRate` produces that W at
+
+```
+v = V* - stopSpeed * (f_real - f_model) * dt
+```
+
+which for an unmodelled ledge doubling is a flat `V* - 400 * dt` at defaults — 4 units short at 100 fps,
+6.7 at 60, whatever `V*` is. Measured on test53_ladder4's crouch jump: 66.8 / 66.4 / 66.2 against a
+design 70.8, on frames of 10.0 / 11.0 / 11.6 ms.
+
+The error exists only *below* the `stopSpeed * groundFriction * edgeFriction / accelerate` threshold
+above — 80 at defaults. Above it `byCap` wins instead, `W = V*`, and a target that high is
+self-sustaining against edge friction anyway, so the model error is invisible. That is why this hid for
+so long: it needs a design speed under 80, and the one place that reliably produces one is a **crouched**
+approach, capped at `maxspeed * kDuckingMultiplier` ≈ 90 and usually decelerating into a launch below
+that.
+
+`physics.edgeFriction` is therefore consumed by the follower, but not by `SolveDrive` itself, which stays
+a pure function of the `PmPhysics` it is handed. `Bot_MoveNav` runs the probe and hands it physics whose
+`groundFriction` is already doubled — see `BotDrivePhysics` in `doc/bot.md`. `BuildPathProfile` is
+deliberately left alone: it is a whole-route model built once at plan time, and folding a momentary
+ledge state into it would make design speeds depend on where the bot stood when it replanned.
 
 ## pm_sim.cpp
 
@@ -1051,7 +1088,7 @@ plus a z-slab rather than its true faces.
 
 ### PmPhysics
 - `accelerate`, `groundFriction`, `stopSpeed` - sv_accelerate, sv_friction and sv_stopspeed. `PmSimulator` never reads them; they are carried for `BuildPathProfile` and `NavFollow::SolveDrive`, which are where ground physics is actually modelled.
-- `edgeFriction` - sv_edgefriction. Read, stored, and consumed by nothing. See `NavFollow::SolveDrive`.
+- `edgeFriction` - sv_edgefriction. Not applied here: `BotDrivePhysics` folds it into `groundFriction` for the frames the bot is within a hull's reach of a drop, so `SolveDrive` sees one already-effective friction. See `NavFollow::SolveDrive`.
 - `friction` - pmove->friction, the per-entity multiplier. Not sv_friction.
 
 ### PmSimulator

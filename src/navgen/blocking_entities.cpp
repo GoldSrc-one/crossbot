@@ -152,6 +152,15 @@ int ParseBrushModelIndex(const std::string &model)
 	return static_cast<int>(idx);
 }
 
+Vec3 EntityAngles(const Entity &ent)
+{
+	if (const std::string *angles = ent.Find("angles"))
+		return ParseEntityOrigin(*angles);
+	if (const std::string *angle = ent.Find("angle"))
+		return Vec3(0.0, ParseDouble(*angle, 0.0), 0.0);
+	return Vec3(0.0, 0.0, 0.0);
+}
+
 Vec3 ParseEntityOrigin(const std::string &origin)
 {
 	double x = 0, y = 0, z = 0;
@@ -174,7 +183,7 @@ double DoorSpeed(const Entity &ent)
 
 double DoorTravelDistance(const Entity &ent, const dmodel_t &model)
 {
-	Vec3 movedir = MoveDirFromAngles(ParseEntityOrigin(ent.Get("angles")));
+	Vec3 movedir = MoveDirFromAngles(EntityAngles(ent));
 	Vec3 size(model.maxs[0] - model.mins[0], model.maxs[1] - model.mins[1], model.maxs[2] - model.mins[2]);
 
 	double travel = std::fabs(movedir.x * (size.x - 2.0)) + std::fabs(movedir.y * (size.y - 2.0)) +

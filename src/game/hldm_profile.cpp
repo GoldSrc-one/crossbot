@@ -20,7 +20,7 @@ namespace
 	constexpr float kHLDMItemRespawn = 30.f;
 	constexpr float kHLDMRechargeDelay = 30.f;
 	constexpr float kHLDMHealthChargerDelay = 60.f;
-	constexpr float kHLDMFullTimeout = 60.f;
+	constexpr float kHLDMFullTimeout = 120.f;
 	constexpr float kHLDMUnreachableTimeout = 30.f;
 	constexpr float kHLDMMaxNormal = 100.f;
 

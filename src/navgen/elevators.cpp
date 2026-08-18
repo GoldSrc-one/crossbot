@@ -136,7 +136,7 @@ uint8_t ClassifyMover(const BspFile &bsp, const std::vector<Entity> &entities, s
 		return ELEV_NO_MODEL;
 
 	mover.origin = ParseEntityOrigin(ent.Get("origin"));
-	mover.movedir = isPlat ? Vec3(0.0, 0.0, -1.0) : MoveDirFromAngles(ParseEntityOrigin(ent.Get("angles")));
+	mover.movedir = isPlat ? Vec3(0.0, 0.0, -1.0) : MoveDirFromAngles(EntityAngles(ent));
 
 	if (std::fabs(mover.movedir.z) <= kFloorNormalZ ||
 		std::fabs(mover.movedir.x) > kElevatorAxisEpsilon ||

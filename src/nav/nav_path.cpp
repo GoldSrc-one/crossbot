@@ -30,6 +30,23 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 	}
 }
 
+bool GateAllowsCrossing(const NavMesh &mesh, uint32_t connIdx, uint32_t fromId, uint32_t toId)
+{
+	if (toId >= mesh.planAreas.size() || connIdx >= mesh.planConns.size())
+		return true;
+
+	const NavPlan::PlanArea &toArea = mesh.planAreas[toId];
+	if (toArea.activation == crossbot_nav::ACT_NONE)
+		return true;
+
+	uint8_t connType = mesh.planConns[connIdx].connType;
+	if (connType != crossbot_nav::CONN_WALK && connType != crossbot_nav::CONN_ELEVATOR)
+		return false;
+
+	const NavPlan::PlanDetour *detour = NavPlan::FindDetour(toArea, fromId);
+	return detour != nullptr && !detour->blocked && !detour->points.empty();
+}
+
 }
 
 PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
@@ -79,6 +96,8 @@ void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out)
 			if ((c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0 && c.areaA != current)
 				continue;
 			if (neighbor >= n || settled[neighbor])
+				continue;
+			if (!GateAllowsCrossing(mesh, connIdx, current, neighbor))
 				continue;
 
 			float step = currentDist + c.travelSeconds + c.costSeconds + c.runtimePenalty;

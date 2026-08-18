@@ -35,7 +35,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	g_engfuncs.pfnGetGameDir(gamedir);
 
 	char navPath[512];
-	snprintf(navPath, sizeof(navPath), "%s/crossbot_data/nav/%s.nav", gamedir, mapName);
+	snprintf(navPath, sizeof(navPath), "%s/addons/crossbot/nav/%s.nav", gamedir, mapName);
 
 	FILE *f = std::fopen(navPath, "rb");
 	if (!f)

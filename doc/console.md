@@ -13,6 +13,11 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_list_spawns` / `crossbot_list_targets` — entity positions, for picking a goal by hand
 - `crossbot_list_items` — every pickup and charger with its kind, resolved nav area, `frame`, `solid`
   and state; see `doc/bot.md`, `bot_items.cpp`
+- `crossbot_weapons [name]` — the inventory snapshot: every weapon with its `m_iId`, clip, ammo indices
+  and carried counts, both attack timers, and a `*` on the active one; see `doc/bot.md`,
+  `bot_weapons.cpp`
+- `crossbot_equip <classname> [name]` — spawn an item at the target's feet and touch them with it,
+  which is what the game's own `give` does. Default target is every bot
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
@@ -21,6 +26,11 @@ penalty table is not, and it dies with the map.
 `crossbot_list_items` answers a question no bot-side log can: an item whose area reads `none` is one
 the gather goals cannot see at all, and that is a mesh gap rather than a bot bug. Run it first on any
 map where the bots seem to ignore something.
+
+`crossbot_weapons` ends with a line comparing the walked weapon mask against `pev->weapons`. That is
+the only self-check the offsets have, so read it before believing any other number on the dump — see
+`doc/bot.md`, `bot_weapons.cpp`. `crossbot_equip` exists to reach a weapon state that gathering would
+take a whole match to produce, and it takes any entity classname, ammo boxes included.
 
 Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 

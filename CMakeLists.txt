@@ -45,6 +45,7 @@ add_library(crossbot_mm SHARED ${CROSSBOT_SOURCES}
 target_include_directories(crossbot_mm PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/navgen
+    ${CMAKE_SOURCE_DIR}/external/jsmn
     ${HLSDK_DIR}/common
     ${HLSDK_DIR}/dlls
     ${HLSDK_DIR}/engine

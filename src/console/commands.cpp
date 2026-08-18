@@ -2,12 +2,198 @@
 #include <meta_api.h>
 
 #include "commands.h"
+#include "../bot/bot.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
+#include "../bot/bot_weapons.h"
+#include "../game/ent_handle.h"
 #include "../nav/nav.h"
+
+#define SF_NORESPAWN (1 << 30)
+
+#if defined(_WIN32)
+#define CB_STRICMP _stricmp
+#else
+#define CB_STRICMP strcasecmp
+#endif
 
 namespace
 {
+	constexpr unsigned int kSuitBit = 1u << 31;
+
+	const char *PlayerNameOf(edict_t *ent)
+	{
+		if (!ent || !gpGlobals->pStringBase)
+			return "?";
+		const char *s = gpGlobals->pStringBase + static_cast<unsigned int>(ent->v.netname);
+		return (s && s[0]) ? s : "?";
+	}
+
+	bool IsLivePlayer(edict_t *ent)
+	{
+		return ent && !ent->free && ent->pvPrivateData && (ent->v.flags & FL_CLIENT) != 0;
+	}
+
+	edict_t *FindPlayerByName(const char *name)
+	{
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!IsLivePlayer(ent))
+				continue;
+			if (CB_STRICMP(PlayerNameOf(ent), name) == 0)
+				return ent;
+		}
+		return nullptr;
+	}
+
+	void PrintInventory(edict_t *player, const BotInventory &inv)
+	{
+		char msg[320];
+		snprintf(msg, sizeof(msg), "CrossBot: %s carries %d weapon(s), nextAttack %.2f\n",
+			PlayerNameOf(player), inv.count, inv.nextAttack);
+		SERVER_PRINT(msg);
+
+		unsigned int walked = 0;
+		for (int i = 0; i < inv.count; ++i)
+		{
+			const BotWeapon &w = inv.weapons[i];
+			walked |= 1u << w.id;
+
+			int primary = (w.primaryAmmoType >= 0 && w.primaryAmmoType < MAX_AMMO_SLOTS)
+				? inv.ammo[w.primaryAmmoType] : -1;
+			int secondary = (w.secondaryAmmoType >= 0 && w.secondaryAmmoType < MAX_AMMO_SLOTS)
+				? inv.ammo[w.secondaryAmmoType] : -1;
+
+			snprintf(msg, sizeof(msg),
+				"CrossBot:  %c %-20s id %2d clip %3d ammo1 %d:%-4d ammo2 %d:%-4d next %.2f/%.2f%s\n",
+				i == inv.activeIndex ? '*' : ' ', CBotClassOf(w.ent), w.id, w.clip,
+				w.primaryAmmoType, primary, w.secondaryAmmoType, secondary,
+				w.nextPrimaryAttack, w.nextSecondaryAttack, w.reloading ? " reloading" : "");
+			SERVER_PRINT(msg);
+		}
+
+		for (int i = 0; i < MAX_AMMO_SLOTS; ++i)
+		{
+			if (inv.ammo[i] == 0)
+				continue;
+			snprintf(msg, sizeof(msg), "CrossBot:  ammo[%d] = %d\n", i, inv.ammo[i]);
+			SERVER_PRINT(msg);
+		}
+
+		unsigned int pevBits = static_cast<unsigned int>(player->v.weapons);
+		snprintf(msg, sizeof(msg), "CrossBot:  walked mask 0x%08x, pev->weapons 0x%08x -- %s\n",
+			walked, pevBits, walked == (pevBits & ~kSuitBit) ? "match" : "MISMATCH");
+		SERVER_PRINT(msg);
+	}
+
+	void Cmd_CrossBotWeapons()
+	{
+		if (CMD_ARGC() > 1)
+		{
+			edict_t *ent = FindPlayerByName(CMD_ARGV(1));
+			if (!ent)
+			{
+				char msg[128];
+				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(1));
+				SERVER_PRINT(msg);
+				return;
+			}
+
+			if (CBot *bot = BotManager::FindBot(ent))
+			{
+				PrintInventory(ent, bot->inventory);
+			}
+			else
+			{
+				BotInventory inv;
+				BotWeapons::Read(ent, inv);
+				PrintInventory(ent, inv);
+			}
+			return;
+		}
+
+		int shown = 0;
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!IsLivePlayer(ent))
+				continue;
+
+			CBot *bot = BotManager::FindBot(ent);
+			if (!bot)
+				continue;
+
+			PrintInventory(ent, bot->inventory);
+			++shown;
+		}
+
+		if (shown == 0)
+			SERVER_PRINT("CrossBot: no bots connected.\n");
+	}
+
+	bool EquipPlayer(edict_t *player, const char *classname)
+	{
+		edict_t *pent = g_engfuncs.pfnCreateNamedEntity(g_engfuncs.pfnAllocString(classname));
+		if (!pent || g_engfuncs.pfnIndexOfEdict(pent) == 0)
+		{
+			char msg[160];
+			snprintf(msg, sizeof(msg), "CrossBot: the engine would not create '%s'\n", classname);
+			SERVER_PRINT(msg);
+			return false;
+		}
+
+		pent->v.origin = player->v.origin;
+		pent->v.spawnflags |= SF_NORESPAWN;
+
+		gpGamedllFuncs->dllapi_table->pfnSpawn(pent);
+		gpGamedllFuncs->dllapi_table->pfnTouch(pent, player);
+
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot: gave %s to %s\n", classname, PlayerNameOf(player));
+		SERVER_PRINT(msg);
+		return true;
+	}
+
+	void Cmd_CrossBotEquip()
+	{
+		if (CMD_ARGC() < 2)
+		{
+			SERVER_PRINT("usage: crossbot_equip <classname> [name]\n");
+			return;
+		}
+
+		const char *classname = CMD_ARGV(1);
+
+		if (CMD_ARGC() > 2)
+		{
+			edict_t *ent = FindPlayerByName(CMD_ARGV(2));
+			if (!ent)
+			{
+				char msg[128];
+				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(2));
+				SERVER_PRINT(msg);
+				return;
+			}
+			EquipPlayer(ent, classname);
+			return;
+		}
+
+		int bots = 0;
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!IsLivePlayer(ent) || !BotManager::FindBot(ent))
+				continue;
+			++bots;
+			if (!EquipPlayer(ent, classname))
+				return;
+		}
+
+		if (bots == 0)
+			SERVER_PRINT("CrossBot: no bots connected.\n");
+	}
+
 	void Cmd_CrossBotAdd()
 	{
 		const char *name = CMD_ARGC() > 1 ? CMD_ARGV(1) : nullptr;
@@ -154,6 +340,8 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
 	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
+	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
+	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);
 }
 
 }

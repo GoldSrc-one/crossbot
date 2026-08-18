@@ -23,6 +23,11 @@ in `doc/`.
   Every debug dump is a `--dump-*` flag on navgen, so a run is reproducible from its command line alone
   and shows up in `--help`.
 
+- **Everything the plugin reads at runtime lives under `<gamedir>/addons/crossbot/`** next to the DLL:
+  `gamedata/<gamedir>-<win|linux>.json` (member offsets into the game DLL's private data), `nav/<map>.nav`,
+  and `trace/`. `build.bat` creates all three and deploys `gamedata/` from the repo. Missing or wrong
+  gamedata **kills the server on purpose** — see `doc/game.md`, `gamedata.cpp`.
+
 - **Coordinate conventions (GoldSrc / Hammer):**
   - X = East, Y = North, Z = Up (right-handed)
   - SVG debug view: Y is flipped (screen Y down), so world Y+ = North = SVG Y-

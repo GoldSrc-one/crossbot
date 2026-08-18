@@ -17,5 +17,16 @@ if exist "%~dp0hlds\valve\addons\crossbot\" (
         echo build.bat: FAILED to copy crossbot_mm.dll into hlds -- is the server still running?
         exit /b 1
     )
+
+    if not exist "%~dp0hlds\valve\addons\crossbot\gamedata\" mkdir "%~dp0hlds\valve\addons\crossbot\gamedata"
+    if not exist "%~dp0hlds\valve\addons\crossbot\nav\" mkdir "%~dp0hlds\valve\addons\crossbot\nav"
+    if not exist "%~dp0hlds\valve\addons\crossbot\trace\" mkdir "%~dp0hlds\valve\addons\crossbot\trace"
+
+    copy /y "%~dp0gamedata\*.json" "%~dp0hlds\valve\addons\crossbot\gamedata\" >nul
+    if errorlevel 1 (
+        echo build.bat: FAILED to copy gamedata into hlds
+        exit /b 1
+    )
+
     echo build.bat: deployed crossbot_mm.dll to hlds\valve\addons\crossbot
 )

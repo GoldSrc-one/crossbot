@@ -3,10 +3,11 @@
 
 #include "../bot/bot_manager.h"
 #include "../console/commands.h"
+#include "../game/gamedata.h"
 
 cvar_t g_tracePathCvar = {
 	"crossbot_trace_path",
-	"valve/crossbot_data/nav_trace.txt",
+	"valve/addons/crossbot/trace/nav_trace.txt",
 	FCVAR_SERVER
 };
 
@@ -30,6 +31,7 @@ cvar_t g_gatherDebugCvar = {
 
 void GameDLLInit()
 {
+	GameData::Load();
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);

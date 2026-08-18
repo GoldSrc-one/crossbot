@@ -9,6 +9,7 @@
 #include "../nav/nav_path.h"
 #include "../nav/path_follower.h"
 #include "bot_avoid.h"
+#include "bot_weapons.h"
 
 struct BotActivation
 {
@@ -59,6 +60,8 @@ struct CBot
 
 	bool wasDead = false;
 
+	BotInventory inventory;
+
 	std::vector<Nav::Waypoint> waypoints;
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;
@@ -71,6 +74,9 @@ struct CBot
 	float airmoveYaw = 0.f;
 	float airmoveSpeed = 0.f;
 	float airmoveStartTime = 0.f;
+	float airmovePlannedTime = 0.f;
+	float airmoveMaxTime = 0.f;
+	bool airmoveOverrunLogged = false;
 	int airmoveTargetArea = -1;
 	int airmoveConnIndex = -1;
 

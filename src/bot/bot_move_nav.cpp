@@ -31,6 +31,17 @@ namespace
 	constexpr float kAirmoveApproachLead = 32.f;
 	constexpr float kAirmoveMinAirTime = 0.1f;
 	constexpr float kAirmoveMaxAirTime = 6.f;
+	constexpr float kAirmoveTimeFactor = 2.f;
+	constexpr float kAirmoveTimeMargin = 1.f;
+	constexpr float kAirmoveOverrunGrace = 0.5f;
+	constexpr float kAirmoveFallingZ = -60.f;
+	constexpr float kAirmoveLandingTolerance = 48.f;
+	constexpr int kWaterlevelSwimming = 2;
+
+	constexpr float kEdgeProbeAhead = 16.f;
+	constexpr float kEdgeProbeDrop = 34.f;
+	constexpr float kStandHullMinsZ = -36.f;
+	constexpr float kDuckHullMinsZ = -18.f;
 
 	constexpr float kLadderCommitRadius = 48.f;
 	constexpr float kLadderMountRadius = 32.f;
@@ -135,6 +146,37 @@ namespace
 		physics.edgeFriction = edgeFriction;
 		physics.friction = 1.f;
 		physics.frameTime = frameTime;
+		return physics;
+	}
+
+	bool AtFrictionEdge(edict_t *pEdict)
+	{
+		if ((pEdict->v.flags & FL_ONGROUND) == 0)
+			return false;
+
+		const Vector &vel = pEdict->v.velocity;
+		float speed = vel.Length();
+		if (speed < 0.1f)
+			return false;
+
+		bool ducking = (pEdict->v.flags & FL_DUCKING) != 0;
+		const Vector &origin = pEdict->v.origin;
+		Vector start(origin.x + vel.x / speed * kEdgeProbeAhead,
+			origin.y + vel.y / speed * kEdgeProbeAhead,
+			origin.z + (ducking ? kDuckHullMinsZ : kStandHullMinsZ));
+		Vector stop(start.x, start.y, start.z - kEdgeProbeDrop);
+
+		TraceResult tr;
+		g_engfuncs.pfnTraceHull(start, stop, dont_ignore_monsters, ducking ? kHullDuck : kHullHuman,
+			pEdict, &tr);
+		return tr.flFraction == 1.f;
+	}
+
+	PmSim::PmPhysics BotDrivePhysics(edict_t *pEdict)
+	{
+		PmSim::PmPhysics physics = BotPhysics(pEdict);
+		if (AtFrictionEdge(pEdict))
+			physics.groundFriction *= physics.edgeFriction;
 		return physics;
 	}
 
@@ -341,6 +383,54 @@ namespace
 		return plane;
 	}
 
+	float BotNavZ(edict_t *pEdict)
+	{
+		return pEdict->v.origin.z -
+			(((pEdict->v.flags & FL_DUCKING) != 0) ? 0.f : NavPlan::kPlanStandHeight);
+	}
+
+	float AirmoveLandingMiss(const CBot &bot, edict_t *pEdict)
+	{
+		if (bot.waypointIndex >= bot.waypoints.size())
+			return -1.f;
+
+		return (pEdict->v.origin - bot.waypoints[bot.waypointIndex].point).Length();
+	}
+
+	bool AirmoveSettled(edict_t *pEdict)
+	{
+		if ((pEdict->v.flags & FL_ONGROUND) != 0)
+			return true;
+		if (pEdict->v.waterlevel >= kWaterlevelSwimming)
+			return true;
+		return OnLadder(pEdict);
+	}
+
+	const char *AirmoveEndReason(edict_t *pEdict)
+	{
+		if ((pEdict->v.flags & FL_ONGROUND) != 0)
+			return "landed";
+		if (pEdict->v.waterlevel >= kWaterlevelSwimming)
+			return "splashed down";
+		if (OnLadder(pEdict))
+			return "caught a ladder";
+		return "timed out";
+	}
+
+	float AirmovePlannedTime(const Nav::NavMesh &mesh, int connIndex)
+	{
+		if (connIndex < 0 || static_cast<size_t>(connIndex) >= mesh.conns.size())
+			return 0.f;
+		return mesh.conns[static_cast<size_t>(connIndex)].flightTime;
+	}
+
+	float AirmoveTimeLimit(float plannedTime)
+	{
+		if (plannedTime <= 0.f)
+			return kAirmoveMaxAirTime;
+		return std::min(plannedTime * kAirmoveTimeFactor + kAirmoveTimeMargin, kAirmoveMaxAirTime);
+	}
+
 	void RunAirmoveDrive(CBot &bot, const Vector &moveDir, float drive, float aimYaw, bool crouch, bool jump)
 	{
 		edict_t *pEdict = bot.pEdict;
@@ -352,7 +442,7 @@ namespace
 		if ((pEdict->v.flags & FL_ONGROUND) != 0)
 		{
 			NavFollow::Drive solved =
-				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, BotPhysics(pEdict));
+				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, BotDrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				wishDir = solved.wishDir;
@@ -382,7 +472,7 @@ namespace
 		Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons);
 	}
 
-	void RunAirmoveApproach(CBot &bot, const Nav::Waypoint &wp)
+	void RunAirmoveApproach(CBot &bot, const Nav::NavMesh &mesh, const Nav::Waypoint &wp)
 	{
 		edict_t *pEdict = bot.pEdict;
 		const Vector &origin = pEdict->v.origin;
@@ -432,6 +522,9 @@ namespace
 			bot.airmoveStartTime = gpGlobals->time;
 			bot.airmoveTargetArea = wp.targetAreaId;
 			bot.airmoveConnIndex = wp.connIndex;
+			bot.airmovePlannedTime = AirmovePlannedTime(mesh, wp.connIndex);
+			bot.airmoveMaxTime = AirmoveTimeLimit(bot.airmovePlannedTime);
+			bot.airmoveOverrunLogged = false;
 			++bot.waypointIndex;
 
 			Vector offTrack(toLaunch.x - launchDir.x * remaining,
@@ -465,20 +558,28 @@ namespace
 	{
 		edict_t *pEdict = bot.pEdict;
 		float airTime = gpGlobals->time - bot.airmoveStartTime;
-		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
+		bool settled = AirmoveSettled(pEdict);
 
 		bot.lastProgressTime = gpGlobals->time;
 
-		if ((onGround && airTime >= kAirmoveMinAirTime) || airTime >= kAirmoveMaxAirTime)
+		bool falling = pEdict->v.velocity.z < kAirmoveFallingZ;
+		bool overdue = airTime >= bot.airmoveMaxTime && !falling;
+
+		if ((settled && airTime >= kAirmoveMinAirTime) || overdue || airTime >= kAirmoveMaxAirTime)
 		{
 			bot.airmoveActive = false;
 
-			const Nav::Area *landedArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
+			const Nav::Area *landedArea = Nav::FindAreaExact(mesh, pEdict->v.origin);
 			int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
+			float miss = AirmoveLandingMiss(bot, pEdict);
 
-			bool failed = (bot.airmoveTargetArea >= 0 && landedId != bot.airmoveTargetArea);
+			bool haveMiss = miss >= 0.f;
+			bool decided = settled && (haveMiss || landedArea != nullptr);
+			bool failed = decided && (haveMiss
+				? miss > kAirmoveLandingTolerance
+				: (bot.airmoveTargetArea >= 0 && landedId != bot.airmoveTargetArea));
 
-			if (bot.airmoveConnIndex >= 0)
+			if (decided && bot.airmoveConnIndex >= 0)
 			{
 				uint32_t connIndex = static_cast<uint32_t>(bot.airmoveConnIndex);
 				if (failed)
@@ -487,32 +588,48 @@ namespace
 					Nav::RewardConnection(connIndex);
 			}
 
-			char msg[288];
+			char msg[384];
 			snprintf(msg, sizeof(msg),
-				"CrossBot: %s airmove %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) "
-				"conn %d penalty %.1f\n", bot.name,
-				onGround ? "landed" : "timed out", airTime, pEdict->v.origin.x, pEdict->v.origin.y,
-				pEdict->v.origin.z, landedId, bot.airmoveTargetArea, bot.airmoveConnIndex,
+				"CrossBot: %s airmove %s after %.2fs (planned %.2fs limit %.2fs) at (%.1f,%.1f,%.1f) "
+				"area %d (wanted %d) miss %.1f conn %d penalty %.1f%s\n", bot.name,
+				AirmoveEndReason(pEdict), airTime, bot.airmovePlannedTime, bot.airmoveMaxTime,
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, landedId,
+				bot.airmoveTargetArea, miss, bot.airmoveConnIndex,
 				(bot.airmoveConnIndex >= 0)
 					? Nav::ConnectionPenalty(static_cast<uint32_t>(bot.airmoveConnIndex))
-					: 0.f);
+					: 0.f,
+				decided ? "" : " undecided");
 			SERVER_PRINT(msg);
 
-			if (failed)
+			if (failed || !decided)
 				bot.nextRepathTime = gpGlobals->time;
 
 			return false;
 		}
 
+		if (!bot.airmoveOverrunLogged && bot.airmovePlannedTime > 0.f &&
+			airTime > bot.airmovePlannedTime + kAirmoveOverrunGrace)
+		{
+			bot.airmoveOverrunLogged = true;
+
+			const Nav::Area *hereArea = Nav::FindAreaNearest(mesh, pEdict->v.origin);
+			char msg[352];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s airmove overrunning at %.2fs (planned %.2fs limit %.2fs) at "
+				"(%.1f,%.1f,%.1f) vel=(%.0f,%.0f,%.0f) onground=%d water=%d movetype=%d duck=%d "
+				"area %d (wanted %d) conn %d\n", bot.name, airTime, bot.airmovePlannedTime,
+				bot.airmoveMaxTime, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
+				pEdict->v.velocity.x, pEdict->v.velocity.y, pEdict->v.velocity.z,
+				(pEdict->v.flags & FL_ONGROUND) != 0 ? 1 : 0, pEdict->v.waterlevel,
+				pEdict->v.movetype, (pEdict->v.flags & FL_DUCKING) != 0 ? 1 : 0,
+				hereArea ? static_cast<int>(hereArea->id) : -1, bot.airmoveTargetArea,
+				bot.airmoveConnIndex);
+			SERVER_PRINT(msg);
+		}
+
 		RunAirmoveDrive(bot, YawDir(bot.airmoveYaw), bot.airmoveSpeed, bot.airmoveYaw, bot.airmoveCrouch,
 			false);
 		return true;
-	}
-
-	float BotNavZ(edict_t *pEdict)
-	{
-		return pEdict->v.origin.z -
-			(((pEdict->v.flags & FL_DUCKING) != 0) ? 0.f : NavPlan::kPlanStandHeight);
 	}
 
 	void RunLadderDrive(CBot &bot, float drive, float aimYaw, float aimPitch, bool crouch, bool jump)
@@ -537,7 +654,7 @@ namespace
 			if ((pEdict->v.flags & FL_ONGROUND) != 0)
 			{
 				NavFollow::Drive solved =
-					NavFollow::SolveDrive(wishDir * drive, pEdict->v.velocity, BotPhysics(pEdict));
+					NavFollow::SolveDrive(wishDir * drive, pEdict->v.velocity, BotDrivePhysics(pEdict));
 				if (solved.wishSpeed > 0.f)
 				{
 					wishDir = solved.wishDir;
@@ -717,7 +834,7 @@ namespace
 		edict_t *pEdict = bot.pEdict;
 		bot.ladderActive = false;
 
-		const Nav::Area *landedArea = Nav::FindAreaContainingPoint(mesh, pEdict->v.origin);
+		const Nav::Area *landedArea = Nav::FindAreaExact(mesh, pEdict->v.origin);
 		int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
 		bool failed = !completed ||
 			(landedId >= 0 && bot.ladderTargetArea >= 0 && landedId != bot.ladderTargetArea);
@@ -1038,7 +1155,7 @@ namespace
 		if (drive > 0.f && (pEdict->v.flags & FL_ONGROUND) != 0)
 		{
 			NavFollow::Drive solved =
-				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, BotPhysics(pEdict));
+				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, BotDrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				wishDir = solved.wishDir;
@@ -1072,7 +1189,7 @@ namespace
 		edict_t *pEdict = bot.pEdict;
 		bot.rideActive = false;
 
-		const Nav::Area *landedArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
+		const Nav::Area *landedArea = Nav::FindAreaNearest(mesh, pEdict->v.origin);
 		int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
 		bool failed = (bot.rideTargetArea >= 0 && landedId != bot.rideTargetArea);
 
@@ -1347,7 +1464,7 @@ namespace
 			drive = BotMaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
 
 			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
-				BotPhysics(pEdict));
+				BotDrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				moveDir = solved.wishDir;
@@ -1475,7 +1592,7 @@ namespace
 			drive = BotMaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
 
 			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
-				BotPhysics(pEdict));
+				BotDrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				moveDir = solved.wishDir;
@@ -1509,6 +1626,9 @@ namespace
 		bot.airmoveActive = false;
 		bot.airmoveTargetArea = -1;
 		bot.airmoveConnIndex = -1;
+		bot.airmovePlannedTime = 0.f;
+		bot.airmoveMaxTime = kAirmoveMaxAirTime;
+		bot.airmoveOverrunLogged = false;
 		bot.ladderActive = false;
 		bot.ladderTargetArea = -1;
 		bot.ladderConnIndex = -1;
@@ -1534,7 +1654,7 @@ namespace
 		if (bot.traceLog.empty())
 			return;
 		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_trace_path");
-		const char *path = (cvar && cvar->string && cvar->string[0]) ? cvar->string : "valve/crossbot_data/nav_trace.txt";
+		const char *path = (cvar && cvar->string && cvar->string[0]) ? cvar->string : "valve/addons/crossbot/trace/nav_trace.txt";
 		FILE *f = fopen(path, "w");
 		if (f)
 		{
@@ -1665,8 +1785,8 @@ namespace
 	{
 		bool freshAttempt = bot.waypoints.empty();
 
-		const Nav::Area *startArea = Nav::FindAreaForPoint(mesh, pEdict->v.origin);
-		const Nav::Area *goalArea = Nav::FindAreaForPoint(mesh, bot.goalPoint);
+		const Nav::Area *startArea = Nav::FindAreaNearest(mesh, pEdict->v.origin);
+		const Nav::Area *goalArea = Nav::FindAreaNearest(mesh, bot.goalPoint);
 		if (!startArea || !goalArea)
 			return false;
 
@@ -1840,7 +1960,7 @@ void Bot_MoveNav(CBot &bot)
 	bot.lastOrigin = pEdict->v.origin;
 	bot.hasLastOrigin = true;
 
-	const Nav::Area *curArea = Nav::FindAreaForPoint(*mesh, pEdict->v.origin);
+	const Nav::Area *curArea = Nav::FindAreaNearest(*mesh, pEdict->v.origin);
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
 	BotItems::RefreshMemos(bot);
@@ -1909,7 +2029,7 @@ void Bot_MoveNav(CBot &bot)
 			return;
 	}
 
-	PmSim::PmPhysics physics = BotPhysics(pEdict);
+	PmSim::PmPhysics physics = BotDrivePhysics(pEdict);
 
 	size_t activationWp = NextActivation(bot);
 	while (activationWp < bot.waypoints.size() && TriggerTouched(bot, bot.waypoints[activationWp]))
@@ -1927,7 +2047,8 @@ void Bot_MoveNav(CBot &bot)
 	{
 		const Nav::Waypoint &step = bot.waypoints[i];
 		bool gate = step.requiresButtonUse || step.requiresTriggerTouch;
-		bool barrier = step.requiresElevatorRide || (step.requiresLadder && i >= bot.waypointIndex);
+		bool barrier = step.requiresElevatorRide ||
+			((step.requiresLadder || step.airmoveLaunch) && i >= bot.waypointIndex);
 		if (!gate && !barrier)
 			continue;
 
@@ -2037,7 +2158,7 @@ void Bot_MoveNav(CBot &bot)
 
 	if (wp->airmoveLaunch)
 	{
-		RunAirmoveApproach(bot, *wp);
+		RunAirmoveApproach(bot, *mesh, *wp);
 		return;
 	}
 

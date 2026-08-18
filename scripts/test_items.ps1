@@ -31,7 +31,7 @@ function Invoke-Rcon {
 $hldsMapPath = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if ((Resolve-Path $mapPath).Path -ne $hldsMapPath) { Copy-Item $mapPath $hldsMapPath -Force }
 
-$botNavDir = Join-Path $HLDSDir "valve\crossbot_data\nav"
+$botNavDir = Join-Path $HLDSDir "valve\addons\crossbot\nav"
 if (-not (Test-Path $botNavDir)) { New-Item -ItemType Directory -Path $botNavDir | Out-Null }
 & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $mapPath -o (Join-Path $botNavDir "$mapName.nav") 2>&1 |
     Select-Object -Last 3 | ForEach-Object { Write-Host "navgen: $_" }

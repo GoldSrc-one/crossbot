@@ -5,6 +5,7 @@
 #include "bot.h"
 #include "bot_items.h"
 #include "bot_move_nav.h"
+#include "bot_weapons.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
 
@@ -27,6 +28,27 @@ namespace
 				return &bot;
 		}
 		return nullptr;
+	}
+
+	bool TouchDebugEnabled()
+	{
+		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_gather_debug");
+		return cvar && cvar->value != 0.f;
+	}
+
+	void DumpTouch(const CBot &bot, edict_t *ent)
+	{
+		edict_t *goal = bot.goalItem.Get();
+		char msg[288];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: TOUCH %s at (%.1f,%.1f,%.1f) <- #%d %s at (%.1f,%.1f,%.1f) "
+			"solid=%d effects=0x%x flags=0x%x free=%d | goal #%d %s done=%d\n",
+			bot.name, bot.pEdict->v.origin.x, bot.pEdict->v.origin.y, bot.pEdict->v.origin.z,
+			g_engfuncs.pfnIndexOfEdict(ent), CBotClassOf(ent), ent->v.origin.x, ent->v.origin.y,
+			ent->v.origin.z, ent->v.solid, ent->v.effects, ent->v.flags, ent->free ? 1 : 0,
+			goal ? g_engfuncs.pfnIndexOfEdict(goal) : -1, goal ? CBotClassOf(goal) : "-",
+			bot.goalItemDone ? 1 : 0);
+		SERVER_PRINT(msg);
 	}
 }
 
@@ -111,6 +133,8 @@ void StartFrame()
 			BotItems::OnRespawn(bot);
 		}
 
+		BotWeapons::Refresh(bot);
+
 		Bot_MoveNav(bot);
 	}
 }
@@ -120,10 +144,20 @@ void Touch(edict_t *pentTouched, edict_t *pentOther)
 	if (!g_pGameProfile || !pentTouched || !pentOther)
 		return;
 
+	bool debug = TouchDebugEnabled();
+
 	if (CBot *bot = FindBot(pentOther))
+	{
+		if (debug)
+			DumpTouch(*bot, pentTouched);
 		BotItems::OnTouch(*bot, pentTouched);
+	}
 	else if (CBot *other = FindBot(pentTouched))
+	{
+		if (debug)
+			DumpTouch(*other, pentOther);
 		BotItems::OnTouch(*other, pentOther);
+	}
 }
 
 bool AddBot(const char *name)

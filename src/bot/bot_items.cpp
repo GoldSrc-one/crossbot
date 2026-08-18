@@ -52,9 +52,9 @@ namespace
 	const Nav::Area *ResolvePickupArea(const Nav::NavMesh &mesh, const Vector &origin)
 	{
 		if (const Nav::Area *lifted =
-			Nav::FindAreaContainingPoint(mesh, origin + Vector(0.f, 0.f, kItemAreaLift)))
+			Nav::FindAreaExact(mesh, origin + Vector(0.f, 0.f, kItemAreaLift)))
 			return lifted;
-		return Nav::FindAreaContainingPoint(mesh, origin);
+		return Nav::FindAreaExact(mesh, origin);
 	}
 
 	const Nav::Area *ResolveChargerArea(const Nav::NavMesh &mesh, const Vector &center)

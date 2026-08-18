@@ -52,6 +52,8 @@ int ParseBrushModelIndex(const std::string &model);
 
 Vec3 ParseEntityOrigin(const std::string &origin);
 
+Vec3 EntityAngles(const Entity &ent);
+
 Vec3 MoveDirFromAngles(const Vec3 &angles);
 
 Vec3 ModelWorldCenter(const dmodel_t &model, const Vec3 &origin);

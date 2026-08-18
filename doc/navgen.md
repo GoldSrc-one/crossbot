@@ -731,6 +731,15 @@ door loses its identity the moment its leaf is split again.
 `(90 0 0)`, east `(0 0 0)`, north `(0 90 0)` — plus two legacy sentinels the engine still honours,
 `angles == (0 -1 0)` → up and `(0 -2 0)` → down. It is not a yaw-only convention.
 
+**The triple may not be under the `angles` key.** Valve's own maps write the legacy scalar `angle` instead,
+which the engine widens to `(0 value 0)` — that is why the sentinels live in `.y` at all. `EntityAngles` reads
+`angles` first and falls back to `angle`, and every movedir consumer (`DoorTravelDistance`, `ClassifyMover`)
+goes through it. Reading only `angles` yields the empty-string default `(0 0 0)`, i.e. movedir `(1 0 0)`: a
+vertical lift then looks like a door that slides east. All four `crossfire` lifts (`lift1`..`lift4`, `angle
+-1`) failed `ClassifyMover` that way with `movedir is not axis-aligned vertical`, and with no elevator
+connection to ride, the whole `z = -1518` roof ring — 50 areas, 18 spawn points, 17 items — became a one-way
+trap: reachable from a spawn, so never pruned, but with no edge leading back up into it.
+
 ### Door/Neighbor Connection
 Both halves come out of the same clip planes, so their floors tile without a gap and `CollectFloorSeams`
 connects the door piece to its neighbours with no extra linking. This is the same property prism merging relies
