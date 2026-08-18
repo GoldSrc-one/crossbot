@@ -197,7 +197,7 @@ Direct index lookup with fallback to linear search.
 
 ### LoadNavFile
 Loads and validates .nav file:
-- Checks magic ("CBNV") and version (9)
+- Checks magic ("CBNV") and version (16)
 - Reads area records, connection records, area-connection indices, area planes
 - Verifies BSP checksum against live map
 - Converts to runtime NavMesh with PlanArea/PlanConnection views
@@ -1098,7 +1098,7 @@ value and mops up whatever the pull could not reach. On `test54_window` the 1→
 
 ## nav_format.h
 
-### Nav File Format (version 15)
+### Nav File Format (version 16)
 - Magic: "CBNV"
 - Header: magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex, areaPlanes,
   detours, detourPoints)
