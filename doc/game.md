@@ -102,3 +102,13 @@ unrelated entity that happened to reuse the slot.
 **`Get()` checks `ent->free` as well as the serial number**, which the HLSDK original does not. It
 does not need to — a `CBaseEntity` never outlives its edict — but a memo entry does, and a freed
 edict keeps its old serial number until the slot is reused.
+
+### CBotPlayerNameOf / CBotIsLivePlayer
+
+Two one-liners in `ent_handle.cpp`, for walking `pfnPEntityOfEntIndex(1..maxClients)`. They lived as
+statics in `commands.cpp` until the aim gaze scaffold needed the same scan from `bot_aim.cpp`; they are
+here rather than duplicated because a second copy of "what counts as a live player" is exactly the kind
+of thing that silently diverges.
+
+`CBotClassOf` is declared alongside them but defined in `hldm_profile.cpp`, which is a wart — nothing
+about it is mod-specific.

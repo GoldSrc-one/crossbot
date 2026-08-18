@@ -22,18 +22,9 @@ namespace
 {
 	constexpr unsigned int kSuitBit = 1u << 31;
 
-	const char *PlayerNameOf(edict_t *ent)
-	{
-		if (!ent || !gpGlobals->pStringBase)
-			return "?";
-		const char *s = gpGlobals->pStringBase + static_cast<unsigned int>(ent->v.netname);
-		return (s && s[0]) ? s : "?";
-	}
+	const char *PlayerNameOf(edict_t *ent) { return CBotPlayerNameOf(ent); }
 
-	bool IsLivePlayer(edict_t *ent)
-	{
-		return ent && !ent->free && ent->pvPrivateData && (ent->v.flags & FL_CLIENT) != 0;
-	}
+	bool IsLivePlayer(edict_t *ent) { return CBotIsLivePlayer(ent); }
 
 	edict_t *FindPlayerByName(const char *name)
 	{
@@ -183,6 +174,11 @@ namespace
 		snprintf(msg, sizeof(msg), "CrossBot: %s aim test yaw %+.1f pitch %+.1f from (%.1f, %.1f)\n",
 			bot->name, yawDelta, pitchDelta, bot->pEdict->v.v_angle.x, bot->pEdict->v.v_angle.y);
 		SERVER_PRINT(msg);
+	}
+
+	void Cmd_CrossBotAimStatus()
+	{
+		BotManager::PrintAimStatus();
 	}
 
 	void Cmd_CrossBotEquip()
@@ -373,6 +369,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);
 	ADD_SERVER_COMMAND("crossbot_aim_test", Cmd_CrossBotAimTest);
+	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 }
 
 }

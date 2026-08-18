@@ -103,6 +103,42 @@ bot**, and on `test56_recharger` the health charger and both batteries do exactl
 17 of that map's 20 areas as unreachable from the single spawn, so the upper floor has no mesh. That is
 a map/mesh gap, not a gather bug, and no amount of staring at the bot will show it.
 
+## scripts/test_aim_gaze.ps1
+
+Drives the aim delay queue, which nothing else can. `test_nav_goal.ps1` spawns exactly one bot, and the
+gaze scaffold that feeds the queue is line-of-sight gated, so a lone bot never has a target — the nav
+sweep can only ever prove the queue is inert when `crossbot_aim_gaze` is off.
+
+Two bots turned loose on a map is not enough either. They chase items independently and are almost never
+in each other's line of sight; a first pass at this script did exactly that and the ring sat empty
+through nearly the whole run. So the script sends both bots to one spawn point with `crossbot_nav_goal`
+and `crossbot_gather 0`, waits for them to arrive, and lets them idle facing each other.
+
+**Do not converge them with `crossbot_teleport`.** It puts every bot on the *identical* origin, which
+makes the eye-to-eye vector zero — there is no angle to compute, so `err` reads `-`, the ring is never
+fed, and the bots are wedged inside each other and cannot walk out. That looks exactly like a broken
+queue and is not one.
+
+Read the `err` column and nothing else. It is the angle between a bot's real view and the true
+present-time angles to its target, and it is the only thing that separates "correctly delayed" from
+"delayed and also wrong" — both of which look identical when spectating.
+
+The **static** phase is the sharp test: a stationary target must be tracked exactly at *every* delay,
+because extrapolating a still target forward and reading it back cancels perfectly. Any nonzero `err`
+there, or a `served` that does not match the requested delay, is a real defect. It currently measures
+0.00 at 0, 0.25 and 0.5.
+
+The **roam** phase cannot be read that way and the script says so. `err` there runs 4 to 19 degrees and
+mixes three unrelated causes — genuine target acceleration, the parallax cost of storing angles, and the
+gate suppression pointing the bot at a ladder instead — with no way to attribute it. Watch `queue` and
+`served` in that phase, not `err`.
+
+Neither phase exercises the extrapolation, because a still target has no velocity to extrapolate and
+`crossfire` has no stretch long enough to hold a constant one. That check is manual: join the server,
+let a bot lock on, and strafe at constant speed — its head should stay *glued* to you, not trail you.
+Reverse sharply and it should overshoot and correct. Step behind a wall and it should keep tracking for
+about a delay before stopping; step back out and nothing should move for about a delay before the flick.
+
 ## Sweeping a change
 
 Three different things can move, and each needs its own sweep. Running the wrong one is how a change

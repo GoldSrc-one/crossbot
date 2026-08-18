@@ -1,12 +1,18 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+#include <algorithm>
+
 #include "bot_aim.h"
 #include "bot.h"
 #include "bot_move.h"
+#include "../game/game_profile.h"
+#include "../nav/nav_math.h"
 
 namespace
 {
+	using NavMath::kPiF;
+
 	constexpr float kReferenceFov = 90.f;
 
 	constexpr float kMaxAccelYaw = 4500.f;
@@ -20,6 +26,12 @@ namespace
 
 	constexpr float kTestSettleTolerance = 0.5f;
 	constexpr float kTestTimeout = 3.f;
+
+	constexpr float kDefaultDelay = 0.25f;
+	constexpr float kGazeCheckInterval = 0.25f;
+	constexpr size_t kGazeGateLookahead = 3;
+
+	constexpr float kDegenerateLos = 0.0001f;
 
 	float FovScale(edict_t *pEdict)
 	{
@@ -83,12 +95,244 @@ namespace
 			bot.name, gpGlobals->time - aim.testStart, aim.testPeakSpeed, fov);
 		SERVER_PRINT(msg);
 	}
+
+	bool LosAngles(const Vector &from, const Vector &to, float &yaw, float &pitch)
+	{
+		Vector los = to - from;
+		float flat = sqrtf(los.x * los.x + los.y * los.y);
+		if (flat < kDegenerateLos && fabsf(los.z) < kDegenerateLos)
+			return false;
+
+		yaw = atan2f(los.y, los.x) * (180.f / kPiF);
+		pitch = -atan2f(los.z, flat) * (180.f / kPiF);
+		return true;
+	}
+
+	void PushDelaySlot(CBot &bot, float yaw, float pitch)
+	{
+		BotAim::State &aim = bot.aim;
+
+		BotAim::DelaySlot &slot = aim.delaySlots[aim.delayHead];
+		slot.time = gpGlobals->time;
+		slot.yaw = yaw;
+		slot.pitch = pitch;
+
+		aim.delayHead = (aim.delayHead + 1) % BotAim::kDelaySlots;
+		if (aim.delayCount < BotAim::kDelaySlots)
+			++aim.delayCount;
+	}
+
+	bool ReadDelayed(const CBot &bot, float delay, float &yaw, float &pitch)
+	{
+		const BotAim::State &aim = bot.aim;
+		if (aim.delayCount == 0)
+			return false;
+
+		float want = gpGlobals->time - delay;
+
+		size_t newer = (aim.delayHead + BotAim::kDelaySlots - 1) % BotAim::kDelaySlots;
+		if (aim.delaySlots[newer].time < want)
+			return false;
+
+		for (size_t back = 0; back + 1 < aim.delayCount; ++back)
+		{
+			size_t older = (newer + BotAim::kDelaySlots - 1) % BotAim::kDelaySlots;
+			const BotAim::DelaySlot &a = aim.delaySlots[older];
+			if (a.time > want)
+			{
+				newer = older;
+				continue;
+			}
+
+			const BotAim::DelaySlot &b = aim.delaySlots[newer];
+			float span = b.time - a.time;
+			float f = (span > 1e-6f) ? (want - a.time) / span : 0.f;
+			if (f < 0.f)
+				f = 0.f;
+			else if (f > 1.f)
+				f = 1.f;
+
+			yaw = Bot_NormalizeAngle(a.yaw + Bot_NormalizeAngle(b.yaw - a.yaw) * f);
+			pitch = a.pitch + (b.pitch - a.pitch) * f;
+			return true;
+		}
+
+		return false;
+	}
+
+	bool GazeCandidate(const CBot &bot, edict_t *ent)
+	{
+		if (!ent || ent == bot.pEdict || !CBotIsLivePlayer(ent))
+			return false;
+		if (g_pGameProfile && g_pGameProfile->IsDead(ent))
+			return false;
+		return true;
+	}
+
+	bool VisibleTo(const CBot &bot, edict_t *target)
+	{
+		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+		Vector tgt = target->v.origin + target->v.view_ofs;
+
+		TraceResult tr;
+		TRACE_LINE(eye, tgt, dont_ignore_monsters, bot.pEdict, &tr);
+		return tr.flFraction >= 1.f || tr.pHit == target;
+	}
+
+	edict_t *PickGazeTarget(const CBot &bot)
+	{
+		edict_t *best = nullptr;
+		float bestDist = 0.f;
+
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!GazeCandidate(bot, ent))
+				continue;
+
+			float dist = (ent->v.origin - bot.pEdict->v.origin).Length();
+			if (best && dist >= bestDist)
+				continue;
+			if (!VisibleTo(bot, ent))
+				continue;
+
+			best = ent;
+			bestDist = dist;
+		}
+
+		return best;
+	}
+
+	bool GazeGated(const CBot &bot)
+	{
+		size_t end = std::min(bot.waypointIndex + kGazeGateLookahead, bot.waypoints.size());
+		for (size_t i = bot.waypointIndex; i < end; ++i)
+		{
+			const Nav::Waypoint &wp = bot.waypoints[i];
+			if (wp.requiresLadder || wp.airmoveLaunch || wp.requiresElevatorRide ||
+				wp.requiresButtonUse || wp.requiresTriggerTouch)
+				return true;
+		}
+		return false;
+	}
 }
 
 float BotAim::ViewSpeed(const CBot &bot)
 {
 	const BotAim::State &aim = bot.aim;
 	return sqrtf(aim.yawVel * aim.yawVel + aim.pitchVel * aim.pitchVel);
+}
+
+float BotAim::Delay()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_delay");
+	float delay = cvar ? cvar->value : kDefaultDelay;
+	if (delay < 0.f)
+		delay = 0.f;
+	else if (delay > kMaxDelay)
+		delay = kMaxDelay;
+	return delay;
+}
+
+bool BotAim::GazeEnabled()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_gaze");
+	return cvar && cvar->value != 0.f;
+}
+
+void BotAim::ClearDelayQueue(CBot &bot)
+{
+	bot.aim.delayHead = 0;
+	bot.aim.delayCount = 0;
+}
+
+bool BotAim::AnglesToTarget(const CBot &bot, edict_t *target, float &yaw, float &pitch)
+{
+	if (!target)
+		return false;
+
+	return LosAngles(bot.pEdict->v.origin + bot.pEdict->v.view_ofs,
+		target->v.origin + target->v.view_ofs, yaw, pitch);
+}
+
+float BotAim::QueueAge(const CBot &bot)
+{
+	const BotAim::State &aim = bot.aim;
+	if (aim.delayCount == 0)
+		return 0.f;
+
+	size_t oldest = (aim.delayHead + kDelaySlots - aim.delayCount) % kDelaySlots;
+	return gpGlobals->time - aim.delaySlots[oldest].time;
+}
+
+void BotAim::UpdateGaze(CBot &bot)
+{
+	BotAim::State &aim = bot.aim;
+
+	if (!GazeEnabled())
+	{
+		if (aim.gazeTarget.Get())
+			ClearDelayQueue(bot);
+		aim.gazeTarget.Clear();
+		aim.gazeVisible = false;
+		return;
+	}
+
+	if (gpGlobals->time >= aim.gazeNextCheck)
+	{
+		aim.gazeNextCheck = gpGlobals->time + kGazeCheckInterval;
+
+		edict_t *cur = aim.gazeTarget.Get();
+		if (cur && (!GazeCandidate(bot, cur) || !VisibleTo(bot, cur)))
+			cur = nullptr;
+
+		if (!cur)
+		{
+			cur = PickGazeTarget(bot);
+			if (cur)
+				ClearDelayQueue(bot);
+			aim.gazeTarget.Set(cur);
+		}
+
+		aim.gazeVisible = cur != nullptr;
+	}
+
+	edict_t *target = aim.gazeTarget.Get();
+	if (!target)
+		return;
+
+	float delay = Delay();
+	edict_t *pEdict = bot.pEdict;
+
+	Vector eyeAt = pEdict->v.origin + pEdict->v.view_ofs + pEdict->v.velocity * delay;
+	Vector tgtAt = target->v.origin + target->v.view_ofs + target->v.velocity * delay;
+
+	float yaw = 0.f, pitch = 0.f;
+	if (LosAngles(eyeAt, tgtAt, yaw, pitch))
+		PushDelaySlot(bot, yaw, pitch);
+}
+
+bool BotAim::ApplyGaze(CBot &bot)
+{
+	BotAim::State &aim = bot.aim;
+	aim.servedDelay = 0.f;
+
+	if (!GazeEnabled() || GazeGated(bot))
+		return false;
+
+	float delay = Delay();
+	float yaw = 0.f, pitch = 0.f;
+	if (!ReadDelayed(bot, delay, yaw, pitch))
+		return false;
+
+	if (pitch > kPitchLimit)
+		pitch = kPitchLimit;
+	else if (pitch < -kPitchLimit)
+		pitch = -kPitchLimit;
+
+	aim.servedDelay = delay;
+	bot.desiredAngles = Vector(pitch, yaw, 0.f);
+	return true;
 }
 
 void BotAim::BeginTest(CBot &bot, float yawDelta, float pitchDelta)

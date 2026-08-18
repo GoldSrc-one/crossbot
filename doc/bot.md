@@ -153,7 +153,7 @@ has nothing to go for. Leave it off unless reading the log.
 ## bot_aim.cpp
 
 Everything the bot looks at goes through one function. `bot.desiredAngles` is the request, written by six
-sites across `bot_move_nav.cpp`; `Bot_UpdateFacing` is the only writer of `pev->v_angle` anywhere in the
+sites across `bot_move_nav.cpp` plus `BotAim::ApplyGaze`; `Bot_UpdateFacing` is the only writer of `pev->v_angle` anywhere in the
 plugin, and every drive branch calls it exactly once per frame and threads its return value into both
 `Bot_DecomposeMove` and `pfnRunPlayerMove`. Aim is therefore fully decoupled from movement: the view can
 point anywhere without disturbing where the bot walks, because the wish direction is world-space and gets
@@ -290,6 +290,133 @@ within 0.5 degrees in 0.37-0.38s at a peak of 900 deg/s hand speed, and `0 90` i
 540-560. The spread is the frame rate -- lower fps settles slower. Peak hand speed is the more stable number
 and the better thing to check: it is set by the constants, not the sampling, and 900 for a 180 is the
 derivation above closing on itself.
+
+### The reaction delay queue
+
+Everything above is the motor half: how fast the hand can move once it decides to. The queue is the
+perception half: the bot acts on what it saw `crossbot_aim_delay` seconds ago, never on the present frame.
+Default 0.25s, clamped to [0, 0.5]. Human simple visual reaction is roughly 200-250ms; 0.5s is
+choice-reaction territory and reads as sluggish, so the clamp is a usable range rather than a safety rail.
+
+`BotAim::State` carries a 256-slot ring of `{ time, yaw, pitch }`. 256 rather than 128 because 128 slots at
+250fps only spans 0.512s, right on the boundary of the maximum delay.
+
+**Slots hold angles, not world points**, and the write extrapolates *both ends* of the line of sight:
+
+    eyeAt = eye    + botVelocity    * delay
+    tgtAt = target + targetVelocity * delay
+    push { now, angles from eyeAt to tgtAt }
+
+The read then takes the newest slot older than `now - delay`, and linearly interpolates it with the next
+newer one so the served delay is exact regardless of frame rate rather than quantized to a frame. Yaw
+interpolates the short way round through `Bot_NormalizeAngle`.
+
+The two halves cancel, and that cancellation is the entire point. At time `T` the bot records where the
+target will be at `T + delay`, seen from where the bot itself will be at `T + delay`. At `T + delay` it
+reads that slot back. If both bodies moved at constant velocity over the window, the prediction was exact
+and the bot is aimed exactly at the target despite acting on quarter-second-old information. Only
+*acceleration* -- a target changing direction -- produces error. That is the human signature being modelled:
+a good player tracks steady movement perfectly and gets beaten by the change of direction, not by the speed.
+
+The bot's own aiming velocity is deliberately **not** an input to the extrapolation. Turning the view does
+not move the eye, so it does not enter the geometry; feeding it in would inject error rather than remove it.
+
+### The two queue edges are the behaviour, not error handling
+
+**Underflow.** When a target has just been acquired the ring holds nothing older than `delay`, so the read
+fails and the queue writes nothing -- the bot keeps whatever `desiredAngles` the navigation branch set. It
+therefore sits perfectly still for a full reaction time and *then* flicks. The obvious alternative, falling
+back to the oldest slot, would snap the head to truth the instant a target appears, which is exactly zero
+reaction time. The silent quarter second before anything moves is the most human artifact the whole system
+produces, and it costs nothing.
+
+**Drain.** On losing line of sight the bot stops *writing* but keeps *reading*. It therefore continues
+tracking a target that has already left view, for exactly `delay`, and then stops -- because its input is
+`delay` stale and it does not know yet. Also free: it falls out of the ring rather than being coded.
+
+The ring is cleared on acquiring a target, on teleport, and on respawn (the last via `bot = CBot()`).
+Clearing on acquire is what makes the reaction time apply to every reacquisition, not just the first.
+
+### The gaze scaffold is temporary
+
+There is no enemy selection anywhere in the plugin yet, so nothing would ever feed the queue. `UpdateGaze`
+is a stand-in: with `crossbot_aim_gaze 1` a bot takes the nearest live player it can see -- bots and humans
+both, so a human can join and drive the target motion deliberately -- rechecks line of sight every 0.25s
+with an eye-to-eye `TRACE_LINE`, and drops the target when blocked. **This will be deleted when a real sense
+system lands.** It exists so the queue and the acceleration curve can be watched against something that
+actually moves; the nav sweep only ever exercises waypoint aim, which changes too slowly and smoothly to
+show either.
+
+`crossbot_aim_gaze` defaults to **0**, and that default is load-bearing: it is what keeps the queue
+completely inert and the phase-1 sweep result valid.
+
+### Where the gaze is allowed to win
+
+Gaze is applied **opt-in, at the free sites only** -- the plain walk branch and the three `RunIdleMove`
+branches in `Bot_MoveNav`. It is never applied on the branches where the view drives the movement:
+`RunAirmoveDrive` (yaw is the launch reference the airmove was simulated at), `RunLadderDrive` (climbing is
+view-relative and cannot be decomposed), `RunElevatorDrive`, and the two activation branches (which must be
+looking at the button to press it).
+
+No suppression flag is needed for that, because every one of those helpers already writes `desiredAngles`
+itself immediately before calling `Bot_UpdateFacing` -- their own write simply lands later and wins. The
+direction of the opt matters: opt-in fails safe, since a missed site means no gaze there and nothing else.
+Opt-out would fail dangerous, since a missed site breaks a ladder.
+
+Walking while looking somewhere else is safe because `Bot_DecomposeMove` reprojects a world-space wish
+direction onto whatever yaw was commanded, and everything downstream of it is world-space too -- the
+follower's `wishDir` and `BotAvoid`'s `pathDir` both. `bot.moveForward` / `moveSide` are telemetry only.
+
+`ApplyGaze` additionally refuses when any waypoint in `waypointIndex .. +2` requires a ladder, an airmove
+launch, an elevator ride, a button use or a trigger touch. Without that lookahead the bot arrives at a gate
+with its head turned the wrong way and pays the full `kLadderAimTolerance` / `kActivationAimTolerance` latch
+cost measured above -- which is the controller's one real cost, and gaze would multiply it.
+
+### The angle-storage caveat
+
+Storing angles rather than world points bakes the bot's own predicted position into every slot. If the bot
+jumps, gets blocked, or repaths inside the delay window, the stored angles are right about *where the target
+is* and wrong about *where the bot is looking from*: parallax error, worst at close range where a small
+positional error is a large angular one. This is inherent to the angle form and is accepted -- it reads as
+human error, on top of the target misprediction that is already the point. If tuning ever shows it
+dominating the honest error, storing a world point per slot and converting at read time is a contained
+change to `PushDelaySlot` and `ReadDelayed`.
+
+### crossbot_aim_status
+
+Prints, per bot: the gaze target, whether it was visible at the last check, ring occupancy, how much history
+the ring holds, the delay actually served, hand speed, and `err` -- the angle between the bot's real
+`v_angle` and the true present-time angles to its target.
+
+`err` is the number that decides whether any of this works, and it is why the command exists at all.
+Spectating cannot distinguish "correctly delayed" from "delayed and also wrong": both look like a head
+lagging behind a target. `err` separates them. At `crossbot_aim_delay 0` it is the controller's own tracking
+error with no queue involved, which is the baseline. At 0.25 it should still sit near zero whenever the
+target is moving at constant velocity, and spike only on direction reversals. A large `err` under steady
+target motion means the extrapolation or the read index is wrong, not that the delay is working.
+
+`scripts/test_aim_gaze.ps1` drives exactly this: two bots on `crossfire`, gaze on, sweeping the delay while
+polling the command. The nav sweep cannot substitute for it -- `test_nav_goal.ps1` spawns a single bot, and
+with line-of-sight gating a lone bot never has a target, so the sweep can only ever prove the feature is
+inert when switched off.
+
+Measured, two bots idling in sight of each other, about 95fps:
+
+| `crossbot_aim_delay` | served | ring | err |
+|---|---|---|---|
+| 0.000 | 0.000 | 256/256 | 0.00 |
+| 0.250 | 0.250 | 256/256 | 0.00 |
+| 0.500 | 0.500 | 256/256 | 0.00 |
+
+`served` tracking the request exactly is the interpolated read working: without the lerp it would quantize
+to whole frames and drift with the frame rate.
+
+**What that table does not prove.** Both bots are *stationary*, so `velocity * delay` is zero on both ends
+and the extrapolation is never exercised -- it proves the ring, the read index and the interpolation, not
+the prediction. Constant-velocity tracking has to be checked by hand, by joining and strafing at a steady
+speed; see `doc/testing.md`. Roaming bots are not a substitute either: `crossfire` has no stretch long
+enough to hold a constant velocity, and the roam phase mixes in the gate suppression, so err there runs 4 to
+19 degrees with no way to attribute it.
 
 ## bot_move.cpp
 

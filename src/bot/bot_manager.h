@@ -26,6 +26,8 @@ namespace BotManager
 
 	void PrintNavStatus();
 
+	void PrintAimStatus();
+
 	void PrintWaypoints();
 }
 

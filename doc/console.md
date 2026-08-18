@@ -18,6 +18,12 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   `bot_weapons.cpp`
 - `crossbot_equip <classname> [name]` — spawn an item at the target's feet and touch them with it,
   which is what the game's own `give` does. Default target is every bot
+- `crossbot_aim_test <bot> <yawDelta> [pitchDelta]` — command a flick relative to the bot's current view
+  and print settle time and peak hand speed; the only check on the 180-in-0.4s derivation. Overrides
+  navigation aim for 3 seconds; see `doc/bot.md`, `bot_aim.cpp`
+- `crossbot_aim_status` — per bot: gaze target, ring occupancy, delay served, hand speed, and `err`, the
+  angle between the real view and the true present-time angles to the target. `err` is the one number
+  that separates "correctly delayed" from "delayed and also wrong"; see `doc/bot.md`, `bot_aim.cpp`
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
@@ -40,6 +46,12 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   that picks a new goal a frame after arriving never shows the harness the `hasGoal=0` it polls for
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped. Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`
+- `crossbot_oppo_jump` — opportunistic jumping. Default 0
+- `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default 0.25. Inert unless
+  `crossbot_aim_gaze` is on, since nothing else feeds the queue yet
+- `crossbot_aim_gaze` — temporary scaffold: bots track the nearest live player they can see, so the aim
+  model has something to aim at. Default 0, and that default is what keeps the nav sweep meaningful.
+  Will be deleted when a real sense system lands; see `doc/bot.md`, `bot_aim.cpp`
 
 Output from all of these is `SERVER_PRINT`, so it goes to the HLDS console and `hlds/qconsole.log` —
 **not** to the stdout of whatever script sent the command over RCON.

@@ -257,6 +257,7 @@ bool TeleportAllBots(const Vector &point)
 		bot.pEdict->v.angles = Vector(0.f, 0.f, 0.f);
 		bot.aim.yawVel = 0.f;
 		bot.aim.pitchVel = 0.f;
+		BotAim::ClearDelayQueue(bot);
 		Bot_ResetNavPath(bot);
 		any = true;
 	}
@@ -294,6 +295,45 @@ void AppendAreaList(std::string &msg, const char *label, const std::vector<uint3
 	if (truncated && !fromTail)
 		msg += ",...";
 	msg += "]";
+}
+
+void PrintAimStatus()
+{
+	int shown = 0;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		++shown;
+
+		edict_t *target = bot.aim.gazeTarget.Get();
+		const Vector &view = bot.pEdict->v.v_angle;
+
+		char errBuf[64] = "-";
+		float truthYaw = 0.f, truthPitch = 0.f;
+		if (BotAim::AnglesToTarget(bot, target, truthYaw, truthPitch))
+		{
+			float dYaw = Bot_NormalizeAngle(truthYaw - view.y);
+			float dPitch = Bot_NormalizeAngle(truthPitch - view.x);
+			snprintf(errBuf, sizeof(errBuf), "%.2f (yaw %+.2f pitch %+.2f)",
+				sqrtf(dYaw * dYaw + dPitch * dPitch), dYaw, dPitch);
+		}
+
+		char line[352];
+		snprintf(line, sizeof(line),
+			"CrossBot: %s gaze=%s vis=%d queue=%zu/%zu hist=%.2fs served=%.3fs hand=%.0f deg/s "
+			"view=(%.1f,%.1f) err=%s\n",
+			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.aim.gazeVisible ? 1 : 0,
+			bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot), bot.aim.servedDelay,
+			BotAim::ViewSpeed(bot), view.x, view.y, errBuf);
+		SERVER_PRINT(line);
+	}
+
+	char summary[160];
+	snprintf(summary, sizeof(summary), "CrossBot: %d bot(s), aim_gaze=%d aim_delay=%.3f\n", shown,
+		BotAim::GazeEnabled() ? 1 : 0, BotAim::Delay());
+	SERVER_PRINT(summary);
 }
 
 void PrintNavStatus()
