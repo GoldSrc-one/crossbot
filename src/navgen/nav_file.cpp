@@ -66,7 +66,7 @@ void WriteRaw(FILE *f, const void *data, size_t bytes, const char *what)
 }
 
 void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t bspChecksum,
-	const std::vector<Area> &areas, const std::vector<MergedConnection> &conns)
+	const std::vector<Area> &areas, const std::vector<MergedConnection> &conns, float designMaxSpeed)
 {
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
@@ -212,6 +212,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	header.areaPlaneCount = static_cast<uint32_t>(areaPlanes.size());
 	header.detourCount = static_cast<uint32_t>(detourRecords.size());
 	header.detourPointCount = static_cast<uint32_t>(detourPoints.size());
+	header.designMaxSpeed = designMaxSpeed;
 
 	WriteRaw(f, &header, sizeof(header), "header");
 	WriteRaw(f, areaRecords.data(), areaRecords.size() * sizeof(NavAreaRecord), "area records");

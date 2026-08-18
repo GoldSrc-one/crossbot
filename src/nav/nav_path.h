@@ -24,5 +24,7 @@ constexpr float kUnreachableSeconds = 1.0e9f;
 
 void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out);
 
+void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out);
+
 }
 

@@ -101,6 +101,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 
 	auto mesh = std::make_unique<NavMesh>();
 	mesh->mapName = mapName;
+	mesh->designMaxSpeed = (header.designMaxSpeed > 1.f) ? header.designMaxSpeed : kNavDefaultDesignSpeed;
 
 	mesh->areas.resize(areaRecords.size());
 	for (size_t i = 0; i < areaRecords.size(); ++i)

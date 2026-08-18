@@ -35,6 +35,8 @@ struct PmPhysics
 constexpr float kDuckingMultiplier = 0.333f;
 
 constexpr float kJumpImpulse = 268.328156f;
+constexpr float kLongJumpSpeed = 350.f * 1.6f;
+constexpr float kLongJumpImpulse = 299.332591f;
 constexpr float kBunnyJumpMaxSpeedFactor = 1.7f;
 constexpr float kAirAccelWishSpeedCap = 30.f;
 constexpr float kMaxOnGroundVelocityZ = 180.f;

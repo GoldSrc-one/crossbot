@@ -7,9 +7,11 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 15;
+constexpr uint32_t kNavVersion = 16;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
+
+constexpr float kNavDefaultDesignSpeed = 320.f;
 
 enum AreaFlags : uint32_t
 {
@@ -73,7 +75,10 @@ struct NavHeader
 	uint32_t areaPlaneCount;
 	uint32_t detourCount;
 	uint32_t detourPointCount;
+	float designMaxSpeed;
 };
+
+static_assert(sizeof(NavHeader) == 108, "NavHeader layout changed without a version bump");
 
 struct NavAreaRecord
 {

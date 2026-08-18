@@ -4,7 +4,9 @@
 #include "bot_manager.h"
 #include "bot.h"
 #include "bot_items.h"
+#include "bot_move.h"
 #include "bot_move_nav.h"
+#include "bot_opportunist.h"
 #include "bot_weapons.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
@@ -253,6 +255,8 @@ bool TeleportAllBots(const Vector &point)
 		bot.pEdict->v.velocity = Vector(0.f, 0.f, 0.f);
 		bot.pEdict->v.v_angle = Vector(0.f, 0.f, 0.f);
 		bot.pEdict->v.angles = Vector(0.f, 0.f, 0.f);
+		bot.aim.yawVel = 0.f;
+		bot.aim.pitchVel = 0.f;
 		Bot_ResetNavPath(bot);
 		any = true;
 	}
@@ -356,6 +360,18 @@ void PrintNavStatus()
 			snprintf(line, sizeof(line), " ladder=%.1fs up=%d grabbed=%d top=%d stalls=%d offz=%.0f",
 				gpGlobals->time - bot.ladderStartTime, bot.ladderUp ? 1 : 0, bot.ladderGrabbed ? 1 : 0,
 				bot.ladderAtTop ? 1 : 0, bot.ladderStalls, bot.ladderDismountZ);
+			msg += line;
+		}
+
+		if (BotOppo::Enabled())
+		{
+			float cooldown = bot.oppoCooldownUntil - gpGlobals->time;
+			if (cooldown < 0.f)
+				cooldown = 0.f;
+			snprintf(line, sizeof(line), " oppo=%s costs=%d cooldown=%.1fs",
+				bot.airmoveOpportunistic ? "flying"
+					: (Bot_HasLongJumpModule(bot.pEdict) ? "lj" : "speed"),
+				bot.oppoCostsGoalArea, cooldown);
 			msg += line;
 		}
 

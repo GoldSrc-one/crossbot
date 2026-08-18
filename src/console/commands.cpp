@@ -3,6 +3,7 @@
 
 #include "commands.h"
 #include "../bot/bot.h"
+#include "../bot/bot_aim.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
 #include "../bot/bot_weapons.h"
@@ -153,6 +154,35 @@ namespace
 		snprintf(msg, sizeof(msg), "CrossBot: gave %s to %s\n", classname, PlayerNameOf(player));
 		SERVER_PRINT(msg);
 		return true;
+	}
+
+	void Cmd_CrossBotAimTest()
+	{
+		if (CMD_ARGC() < 3)
+		{
+			SERVER_PRINT("CrossBot: usage: crossbot_aim_test <bot> <yawDelta> [pitchDelta]\n");
+			return;
+		}
+
+		edict_t *ent = FindPlayerByName(CMD_ARGV(1));
+		CBot *bot = ent ? BotManager::FindBot(ent) : nullptr;
+		if (!bot)
+		{
+			char msg[128];
+			snprintf(msg, sizeof(msg), "CrossBot: no bot named '%s'\n", CMD_ARGV(1));
+			SERVER_PRINT(msg);
+			return;
+		}
+
+		float yawDelta = static_cast<float>(atof(CMD_ARGV(2)));
+		float pitchDelta = (CMD_ARGC() > 3) ? static_cast<float>(atof(CMD_ARGV(3))) : 0.f;
+
+		BotAim::BeginTest(*bot, yawDelta, pitchDelta);
+
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot: %s aim test yaw %+.1f pitch %+.1f from (%.1f, %.1f)\n",
+			bot->name, yawDelta, pitchDelta, bot->pEdict->v.v_angle.x, bot->pEdict->v.v_angle.y);
+		SERVER_PRINT(msg);
 	}
 
 	void Cmd_CrossBotEquip()
@@ -342,6 +372,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);
+	ADD_SERVER_COMMAND("crossbot_aim_test", Cmd_CrossBotAimTest);
 }
 
 }

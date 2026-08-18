@@ -55,6 +55,7 @@ struct Connection
 struct NavMesh
 {
 	std::string mapName;
+	float designMaxSpeed = crossbot_nav::kNavDefaultDesignSpeed;
 	std::vector<Area> areas;
 	std::vector<Connection> conns;
 

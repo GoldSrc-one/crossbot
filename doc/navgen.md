@@ -988,9 +988,13 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v15):
-- Header: magic "CBNV", version 15, mapName[64], bspChecksum, counts (including `detourCount` and
-  `detourPointCount`)
+Serializes MergeResult to crossbot_nav format (v16):
+- Header: magic "CBNV", version 16, mapName[64], bspChecksum, counts (including `detourCount` and
+  `detourPointCount`), and `designMaxSpeed`
+- `designMaxSpeed` is the `--maxspeed` the run was built with. Nothing navgen does reads it back; it is
+  recorded because the runtime has no other way to know what speed the mesh assumes, and a bot faster
+  than that has movement options no connection on this mesh describes (`doc/bot.md`,
+  `bot_opportunist.cpp`)
 - Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, `activation`,
   `openSeconds`, and `detourOffset`/`detourCount`
 - Activation detour records: fromAreaId, pointOffset/Count, actIndex, waitSeconds, detourSeconds,

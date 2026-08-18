@@ -114,11 +114,11 @@ player died and the bot cannot reach them.
 
 ### Resolving an item to an area
 
-**`Nav::FindAreaForPoint` is the wrong function here.** It is deliberately forgiving — after the
+**`Nav::FindAreaNearest` is the wrong function here.** It is deliberately forgiving — after the
 exact half-space test it falls back to nearest-centroid-with-AABB and then to global nearest
 centroid, so it essentially never returns null. An item inside a wall would snap to whatever area
 happened to be closest and the bot would route confidently to nothing.
-`Nav::FindAreaContainingPoint` is the strict half of it, added for this.
+`Nav::FindAreaExact` is the strict half of it, added for this.
 
 Area z-space is duck-origin based (navgen builds in hull 3) and an item's `v.origin` is at its base,
 so the probe is `origin + 18` first and the raw origin as a fallback.
@@ -149,6 +149,147 @@ model is broken, not the mesh.
 
 It is deliberately verbose: ~130 lines per selection on crossfire, at up to 2 Hz per bot while a bot
 has nothing to go for. Leave it off unless reading the log.
+
+## bot_aim.cpp
+
+Everything the bot looks at goes through one function. `bot.desiredAngles` is the request, written by six
+sites across `bot_move_nav.cpp`; `Bot_UpdateFacing` is the only writer of `pev->v_angle` anywhere in the
+plugin, and every drive branch calls it exactly once per frame and threads its return value into both
+`Bot_DecomposeMove` and `pfnRunPlayerMove`. Aim is therefore fully decoupled from movement: the view can
+point anywhere without disturbing where the bot walks, because the wish direction is world-space and gets
+reprojected onto whatever yaw was actually commanded that frame.
+
+### Why the flat turn rate had to go
+
+The original controller stepped toward `desiredAngles` at a flat 300 deg/s, pitch and yaw clamped
+independently. It turned at full speed from the first frame and stopped dead on the last one. Nothing
+holding a mouse does that, and it was the single most obvious tell that a bot was not a player.
+
+### Hand space, not angle space
+
+The integrator state (`BotAim::State::yawVel`, `pitchVel`) is **not** angular velocity. It is hand velocity,
+in degrees per second at a reference 90 degree FOV. Angles are converted in and out of it with
+`s = fov / 90` (`pev->fov <= 0` means default, which is the normal case -- nothing else in the plugin reads
+or writes `fov` today).
+
+This is what makes zoom correct for free. A scope shrinking FOV from 90 to 20 means the same mouse movement
+now covers 4.5x less angle, so the bot needs 4.5x more hand travel to make the same turn and gets there 4.5x
+slower. Doing it in hand space means that when the scope snaps, hand velocity is untouched -- the hand keeps
+its physical speed -- and the angular velocity drops on its own. Had the state been angular, the FOV change
+would have been a velocity discontinuity needing its own special case.
+
+### The control law
+
+Per axis, time-optimal with a saturating acceleration:
+
+    step     = aMax * dt
+    envelope = sqrt(2 * aMax * |e| + step^2 / 4) - step / 2
+    v_target = sign(e) * min( |e| / dt, envelope, kMaxHandSpeed )
+    a        = clamp( (v_target - v) / dt, +/-aMax )
+    v += a * dt ;  angle += v * s * dt
+
+The envelope term is the whole model. It is the velocity of a body decelerating at `aMax` that arrives at
+the target with zero velocity, so following it gives the accelerate-then-decelerate profile without any
+explicit phase switching: far from target the required acceleration exceeds `aMax` and the clamp saturates,
+near it the envelope takes over and brakes.
+
+### Why the envelope carries a step correction
+
+The obvious form is `sqrt(2 * aMax * |e|)`, the continuous-time optimum. Sampled at a finite frame rate it
+overshoots badly, because it assumes braking begins the instant the envelope is touched when in fact it
+begins up to a full frame later. Measured at 2880 deg/s^2, the plain form overshoots a 180 by 3.6 degrees at
+100fps, 5.9 at 60fps and **12.4 at 30fps** -- and the framerate dependence is the real problem, because it
+makes aim accuracy a function of server load. At the shipped 4500 it is worse still, since the error scales
+with `aMax * dt`.
+
+The `+ step^2 / 4` under the root and the `- step / 2` outside it invert the *discrete* stopping distance
+rather than the continuous one. That drops overshoot below 0.7 degrees at every frame rate tested, and it
+converges *faster* despite braking earlier (0.617s to 0.467s for a 180 at 60fps, at 2880), because none of the budget
+is spent recovering from an overshoot. This matters beyond tidiness: deliberate over/undershoot is a planned
+feature, and it has to be the only source of overshoot or it cannot be tuned.
+
+The `|e| / dt` term is a dead-beat clamp and it is not optional. A bang-bang controller sampled at a finite
+frame rate limit-cycles near zero at roughly `aMax * dt^2`, which is about 0.8 degrees at 60fps -- clearly
+visible jitter. Capping the target velocity at "the speed that lands exactly this frame" makes any error
+small enough to close in one step close in one step, and the limit cycle disappears.
+
+`kMaxHandSpeed` is a hand speed ceiling. It is near-inert at the current constants, since the largest
+reachable error is 180 degrees and that only peaks at 720 deg/s, but it is the knob for a bot whose hand
+should be slower than its acceleration allows.
+
+### Where the constants come from
+
+`kMaxAccelYaw` is derived, not tuned. For a symmetric accelerate-then-decelerate turn covering angle `t` in
+time `T`, `t = a * T^2 / 4`. Requiring a 180 in 0.4s gives `a = 4 * 180 / 0.16 = 4500 deg/s^2`, peaking at
+900 deg/s halfway through. `kMaxAccelPitch` is 80% of that: vertical mouse travel is the awkward direction
+for a human wrist. For reference, the CS zbot uses a hand-tuned 3000 deg/s^2 and peaks around 750 deg/s on
+the same turn, so this bot's hand is somewhat quicker than a zbot's.
+
+The first cut used 0.5s (2880 deg/s^2). It was raised to 0.4s because 0.5s measurably slowed
+`test10_doorbutton` -- see below. `kMaxHandSpeed` is deliberately above the 900 deg/s peak so it stays a
+ceiling rather than a clip; at exactly 900 it would bind at the top of every 180.
+
+### The cost at the aim gates
+
+Below about 80 degrees of error (the crossover, `4 * 300^2 / aMax`) the controller is *slower* than the old
+flat 300 deg/s rate, because it spends the start of the turn accelerating. A 6 degree correction goes from
+20ms to 73ms. The places that care are the two that **zero drive until the view has converged**: the ladder
+gate (`kLadderAimTolerance`, 6 degrees) and the activation gate (`kActivationAimTolerance`, 8 degrees).
+
+`test10_doorbutton` is the map that feels it. Isolated repeat runs, goal-arrival time:
+
+| controller | 8.1s | 11.1s |
+|---|---|---|
+| old flat 300 deg/s | 8 of 8 | 0 |
+| aMax 2880 (180 in 0.5s) | 0 | 2 of 2 |
+| aMax 4500 (180 in 0.4s) | ~7 of 16 | ~9 of 16 |
+
+**Read that table with the quantization in mind.** `test_nav_goal.ps1` polls for arrival on a grid -- the
+observed times are 2.0, 5.0, 8.1, 11.1 -- so consecutive buckets are ~3s apart and a run that misses the
+8.1s poll by a tenth of a second reports 11.1s. The real slowdown is well under a second; the table measures
+which side of a threshold the bot lands on, not how much time it lost. Raising the acceleration moved it
+back across that threshold about half the time.
+
+Two things that look like they explain this and do **not**: every run on this map, on *every* controller
+including the original, logs exactly one `mid-route repath (stalled)` at the route reversal in front of the
+button and exactly one `avoid side func_door_rotating`. Neither is caused by the aim model, and neither
+discriminates the fast runs from the slow ones.
+
+For calibration when reading sweep numbers: `test45_slopes2` looked like a 5.2s-to-8.1s regression in the
+parallel sweep and was not one -- the old controller measures 8.1s in isolation too, and the 5.2s came from
+a run at `-MaxParallel 6`. The general rule for this suite: a single parallel-sweep number proves nothing,
+and neither does a two-run isolated sample when the metric is bucketed. Repeat until the distribution is
+visible.
+
+### dt is clamped
+
+The old first-order ramp could survive a raw `gpGlobals->frametime`: the worst a hitch did was let it snap
+further than intended, bounded by the remaining error. A second-order integrator has memory, so a hitch
+feeds a huge `dt` into both the acceleration and the position step and flings the view. `dt` is clamped to
+[1/1000, 1/20], the same defensive range `Bot_Physics` uses.
+
+### Pitch clamp and velocity reset
+
+Pitch is clamped to +/-89 to avoid gimbal lock, and `pitchVel` is zeroed when it hits the stop -- otherwise
+velocity winds up against the limit and the view stays pinned for several frames after the target comes
+back into range. `TeleportAllBots` zeroes both velocities alongside the `v_angle` reset for the same reason.
+Everything else is covered by `bot = CBot()`, since `BotAim::State` is default-initialized.
+
+### crossbot_aim_test
+
+`crossbot_aim_test <bot> <yawDelta> [pitchDelta]` commands a flick relative to the bot's current view and
+prints the time to settle within 0.5 degrees plus the peak hand speed. It exists because there is otherwise
+no way to check the 180-in-0.5s claim against the running server.
+
+The test angles are an **override**, not a write to `desiredAngles`: navigation rewrites `desiredAngles`
+every frame, so a plain write would be stomped before the next frame. The override releases itself after 3
+seconds and the bot goes back to whatever it was looking at.
+
+Expected, from an offline simulation of the same step function at the shipped constants: `180 0` settles to
+within 0.5 degrees in 0.37-0.38s at a peak of 900 deg/s hand speed, and `0 90` in about 0.30s at a peak near
+540-560. The spread is the frame rate -- lower fps settles slower. Peak hand speed is the more stable number
+and the better thing to check: it is set by the constants, not the sampling, and 900 for a 180 is the
+derivation above closing on itself.
 
 ## bot_move.cpp
 
@@ -360,7 +501,7 @@ the question itself in a moment, and a fall deeper than the plan modelled is exa
 verdict is worth waiting for. What the limit catches is the bot that is neither falling nor settled.
 
 **A verdict is only scored when the bot settled *inside an area*.** The lookup is the strict
-`Nav::FindAreaContainingPoint`, not `FindAreaForPoint`. The forgiving one cannot fail: with no containing
+`Nav::FindAreaExact`, not `FindAreaNearest`. The forgiving one cannot fail: with no containing
 area it falls back to any area whose AABB holds the point, and failing that to the globally nearest
 centroid — so a bot that ended in the void, in mid-air or on a lip outside the mesh was still scored, and
 could be scored as the area it was aiming at. `FinishLadder` was moved off it for exactly this reason and
@@ -498,7 +639,7 @@ flipping between two routes is worth reading as a symptom of that, not as a plan
 
 **The verdict judges the maneuver, and only then the area.** `FinishLadder` decides whether the
 connection earns a `RewardConnection` or a `PenalizeConnection`, and it used to decide entirely on
-`FindAreaForPoint(origin)`. That function never returns NULL — after the exact half-space test it falls
+`FindAreaNearest(origin)`. That function never returns NULL — after the exact half-space test it falls
 back to nearest-centroid-with-AABB and then to plain nearest centroid — so it always names *an* area, and
 where the ladder shaft is carved out of the mesh the nearest centroid is routinely the area the bot just
 left. test53_ladder4's `2 <-> 4` descent ends at (442.7, 272.8, 19.7), inside no area at all: area 2
@@ -510,7 +651,7 @@ So the verdict now takes two inputs. `FinishLadder`'s `completed` argument says 
 itself finished as designed — `reached the bottom of` and `dismounted off` pass true, `never caught`,
 `fell off`, `timed out on` and `stalled on` pass false — and a maneuver that did not complete is a
 failure whatever the geometry says. Only when it did complete does the area matter, and then it is read
-with the strict `Nav::FindAreaContainingPoint`: the target area rewards, a *different* area penalizes,
+with the strict `Nav::FindAreaExact`: the target area rewards, a *different* area penalizes,
 and no area at all is `undecided` — neither rewarded nor penalized, because a bot still in the shaft is
 not evidence of anything. The log line carries that word, so a run tells you which of the three happened.
 
@@ -587,6 +728,53 @@ the *lower* `s` and put the bot back on the approach. `FinishElevatorRide` sets 
 the arrival waypoint's `ProfileWaypointS` by hand and leaves `started` true; the incremental window then
 reaches at most `projectBack` behind, where the profile is 32 units away and cannot win the tie.
 
+**A ride is only scored when the bot settled *inside an area*.** `FinishElevatorRide` grades its
+connection exactly as `FinishLadder` and the air move do, and for a long time it was the odd one out: it
+read the landing with `FindAreaNearest`, which never fails. An elevator column is precisely where two
+areas overlap in AABB, and a bot standing on the mover's brush is routinely outside every area's exact
+planes, so a ride that ended on the wrong floor snapped onto a plausible neighbour and a ride that never
+arrived earned `RewardConnection`. It uses `FindAreaExact` now, with the same three-way verdict the other
+two use: the target area rewards, a different area penalizes, and no area at all is `undecided` —
+neither, because a bot the mesh cannot place is not evidence about the connection. Undecided still
+repaths, since the bot no longer knows where it stands relative to the plan.
+
+**But the exact lookup has to be handed a constructed point, not `pEdict->v.origin`.** Switching to
+`FindAreaExact` alone made every *correct* arrival report `undecided` and repath, for two independent
+reasons that each hide the other:
+
+- **The origin is in stand space, the mesh is in duck space.** Areas are built in hull 3, so their z
+  range is duck-origin z — `BotNavZ` exists for exactly this conversion. That is harmless for an
+  ordinary area, which spans floor to ceiling (`test18_elevator` area 1 is `z 18..110`, and a standing
+  origin at 36 is well inside), and fatal for an elevator stop, which is a carved slab two units tall:
+  `test18_elevator` area 7 is `16..18`, and crossfire's top stops 11, 154 and 188 are `-1520..-1518`.
+  A standing bot's origin sits 18 units above that, past `kAabbEpsilon`, so the raw origin can
+  *never* resolve a top stop. On crossfire the bot stands at `-1500`, `BotNavZ` is `-1518`, and the
+  slab is `-1520..-1518`.
+- **The ride ends up to `kElevatorArriveSlack` short.** On `test18_elevator` it ends at nav z 8.6
+  against a stop at 16, and a two-unit slab does not reach down 7.4 units even with the AABB epsilon.
+
+So the probe is the bot's XY at `rideArriveZ` whenever the residual is inside the slack, and at
+`BotNavZ` otherwise. The snap condition is the arrival predicate reused: the slack that is allowed to
+*end* the ride early is the slack that is allowed to *judge* it at the stop. A ride that stalled
+mid-shaft is hundreds of units from `rideArriveZ`, gets no snap, resolves to the shaft area and is
+penalized exactly as before. `test55_plat` is the map that pins both halves down: it resolves today
+only by luck, because its stop area is `18..110` and the raw origin 28.5 happens to fall inside, while
+its nav z at ride end is 10.5 and needs the snap to reach 18.
+
+**The target area wins a boundary tie.** Stop slabs abut the shaft exactly — `test18_elevator` area 6
+ends at `z 16` and area 7 begins at `16` — so a probe at the stop is inside both within
+`kPlaneEpsilon`, and `FindAreaExact` returns whichever comes first in id order, which is the shaft.
+`FinishElevatorRide` therefore asks `Nav::AreaContainsPoint(*target, probe)` first and only falls back
+to the sweep when the answer is no. That is also the more honest question: the verdict being sought is
+"did I arrive at the stop I wanted", not "which of two overlapping areas wins the iteration". A ride
+that ended on the wrong floor is nowhere near the target in z, fails the test, and is penalized by the
+fallback.
+
+The same raw-origin probe is still used by `RunAirmoveFlight` and `FinishLadder`. Neither has a
+reproducible failure: crossfire's two-unit stops carry only walk and elevator connections, no air
+moves, and ladder tops are ordinary volumetric areas. The `undecided` lines those two still emit
+(`test25_ladder2`, `test53_ladder4`) are genuine — a descent that ends mid-drop is in no area.
+
 **`totalTime` under-reports by the whole ride.** The ETA integrates over segments, and there is no segment,
 so `BuildPathProfile` adds `elevatorWaitTime + elevatorTravelTime` after the loop. Without it
 `test55_plat`'s ETA is 3.8 s against a 4.96 s ride and `test_nav_goal.ps1` — which times out at twice the
@@ -608,13 +796,14 @@ arrival one so the bot is already turned to walk off — `func_plat`'s `PLAT_DEL
 full-rate reverse command, which is right on open ground and wrong on a platform edge, so friction does
 the stopping instead. `lastProgressTime` is stamped every frame for the same reason the ladder stamps it,
 and the 150-unit teleport reset at the top of `Bot_MoveNav` is skipped while riding, since a server hitch
-would otherwise repath from mid-shaft where `FindAreaForPoint` finds nothing and the bot drops its goal.
+would otherwise repath from mid-shaft where `FindAreaNearest` finds nothing and the bot drops its goal.
 
 The arrival test is `BotNavZ` against the arrival waypoint's own floor Z, directional with
 `kElevatorArriveSlack`. The slack means the bot can step off up to 8 units short, and that is safe for a
 reason worth stating: navgen only builds a walk seam off a stop when the step is under 18 units, so
 anything within the slack is steppable by construction. On `test55_plat` the ride ends at nav 10 against
-a stop at nav 18 and the bot walks out over the remainder.
+a stop at nav 18 and the bot walks out over the remainder. That same slack is what the landing
+verdict snaps its probe by, above.
 
 The engage radius is pure XY distance to the board point, so a route that merely *passes* within 48 units
 of a shaft it has not reached yet would hand the frame over early. Ordering is what protects this today:
@@ -735,6 +924,93 @@ It is dispatched from inside the `follow.done` branch rather than from the waypo
 charger is not a waypoint — the plan's goal is the use spot and the charger is off the mesh
 entirely. `lastProgressTime` is stamped every frame for the same reason `RunActivation` stamps it:
 no arclength accrues while standing still and the 2 s stall detector would otherwise repath.
+
+## bot_opportunist.cpp
+
+The nav mesh is generated once at a fixed design speed and every connection's `costSeconds`,
+`flightTime` and `exitSpeed` is baked at it. A bot that is *faster* than that — `sv_maxspeed` raised, or
+holding `item_longjump`, which replaces a jump with `forward * 560` and `sqrt(2*800*56)` up — has a
+movement option no plan on that mesh can contain. This checks, four times a second, whether taking it
+right now beats walking the plan, and if so hops off-plan and repaths from wherever it lands. It is not a
+planner change: the plan stays what it is and the bot occasionally short-circuits it. Off by default,
+behind `crossbot_oppo_jump`.
+
+### Why the design speed had to go in the nav file
+
+The trigger is "the bot is faster than the mesh assumes", and until version 16 nothing recorded what the
+mesh assumed — navgen's `--maxspeed` was a command-line option that vanished after the run. The obvious
+substitute, `kNavRunSpeed`, is the wrong number and fails loudly: it is 250, so a bot at the stock 320
+already clears `1.25 x` and the check would arm on every map. `NavHeader::designMaxSpeed` is the number
+navgen actually built with. The loader falls back to `kNavDefaultDesignSpeed` if it reads as zero, which
+only happens for a file this field predates — and the version check rejects those anyway.
+
+### One reverse search, not one per candidate
+
+The comparison needs the cost-to-goal of two different positions, and needs it again every tick.
+`Nav::AreaCostsToGoal` prices *every* area to the goal in one Dijkstra (`doc/nav.md`), so both lookups
+are array indexes and the per-tick cost is a hull-traced `PmSim` run and nothing else.
+
+The field is cached per bot and rebuilt when the goal area changes **or on any successful `Repath`**. The
+second condition is the one that is easy to miss: `runtimePenalty` mutates edge costs between repaths
+through the penalize/reward loop, so a field built before a penalty landed prices a route the planner has
+already given up on. Rebuilding is cheap — this is the search with no `PlanWalker` and no `PmSim`, the
+one `BotItems::SelectGoal` already runs at up to 2 Hz per bot.
+
+### Comparing plan-seconds against real seconds
+
+`AreaCostsToGoal` values are centroid-anchored and priced at `kNavRunSpeed`; `PmSimulator::Time()` is
+real seconds. Subtracting one from the other directly is wrong in a way that always errs the same
+direction: both cost terms are inflated relative to what the bot really achieves on the ground, the
+flight is not, so the difference between them looks bigger than the flight it is being weighed against
+and the bot jumps for gains that do not exist. The flight is converted into plan-seconds instead:
+
+```
+gain = C[here] - C[landing] - flightTime * (maxSpeed / kNavRunSpeed)
+```
+
+and has to clear `kMinGainSeconds` to fire, which absorbs the centroid noise both terms carry.
+
+**The ratio is `maxSpeed`, not the bot's current speed**, and that distinction is worth more than it
+looks. A long jump overwrites horizontal velocity with a flat 560 whatever the bot was doing, so a
+launch at 68 u/s and a launch at 270 u/s produce the *same* 0.8 s flight — but scaling by instantaneous
+speed charged the first one 0.22 plan-seconds and the second 0.86, making a jump look nearly free
+precisely when the bot was too slow to be jumping. `maxSpeed` is what the cost field is being compared
+against: the field prices ground travel at `kNavRunSpeed` while the bot actually cruises at `maxSpeed`,
+and that ratio is a property of the map's physics, not of this frame.
+
+No sub-area `|origin - centroid|` term is added to either side. Both endpoints price to the same goal, so
+the centroid offsets largely cancel; the item-ranking formula in `bot_items.cpp` does add one, but it is
+ranking *targets* against each other, not two routes to one target, and copying it here would charge the
+bot for walking back to its own centroid. A landing in the area it started in is rejected outright rather
+than priced: the two costs are then identical by construction and the flight is pure loss.
+
+### Simulating a long jump without teaching PmSim about it
+
+`PmSim` models `kJumpImpulse` and the commanded speed and knows nothing about the module. It does not
+need to: `BeginAirborne` takes an explicit launch velocity, so the caller builds the one `PM_Jump` would
+have produced — `kLongJumpSpeed` horizontally, `kLongJumpImpulse` up. That impulse is `sqrt(2*800*56)`
+with the 800 **hardcoded in `pm_shared.c`**, not `sv_gravity`; a map with altered gravity changes the
+arc's fall but not its launch. The arc is traced with the duck hull throughout, the same timeline
+`JumpLandsIn` assumes and the same one the engine produces (see "IN_DUCK and IN_JUMP in one command").
+
+The loop has to notice the bot leaving the ground before it can notice it landing. `Begin(..., jump)`
+returns with `OnGround()` still true — the impulse is applied inside the first `Step` — so a
+`while (!OnGround())` never runs a single frame. It tracks an `airborne` flag instead, and a sim that
+never gets airborne is rejected rather than treated as an instant landing.
+
+### Letting the command through, and what happens after
+
+`Bot_RunPlayerMove` strips `IN_DUCK` from any `IN_JUMP` command while `slj` is set, which is exactly the
+long jump this wants. The strip is now gated on an `allowLongJump` argument defaulting to false, so every
+other call site sends byte-identical commands and only the opportunistic launch frame opts in.
+
+The hop reuses the airmove flight machinery with `airmoveConnIndex = -1` and `airmoveOpportunistic` set.
+That flag does three things at landing: it suppresses `AirmoveLandingMiss`, which measures distance to the
+plan's next waypoint and is meaningless for a jump that deliberately left the plan; it forces a repath
+unconditionally, since the landing is off-plan by construction; and a landing in an area other than the
+predicted one starts a cooldown. Without that cooldown a bot whose sim disagrees with the engine retries
+from the same spot at 4 Hz forever. There is no connection to grade, so the reward/penalty branch is
+skipped — it already keys on `connIndex >= 0`.
 
 ## bot_avoid.cpp
 

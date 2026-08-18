@@ -162,11 +162,33 @@ starts choosing it, and end-to-end pass rates drop while every plan remains vali
 
 ## nav_query.cpp
 
-### FindAreaForPoint
-Two-phase lookup:
-1. AABB test with 4-unit epsilon, then exact plane test (2-unit epsilon)
-2. If no containing area, fallback to nearest centroid within AABB
-3. If still none, global nearest centroid
+Two lookups that answer different questions, and the names say which. `FindAreaExact` asks *which area
+contains this point* and is allowed to answer none. `FindAreaNearest` asks *which area is nearest* and is
+a total function that essentially never fails. Picking the wrong one is a recurring bug — a strict lookup
+where a forgiving one belongs makes a bot on a lip forget where it is, and a forgiving one where a strict
+one belongs scores a maneuver against an area the bot never reached (`doc/bot.md`, `FinishLadder` and
+`FinishElevatorRide`).
+
+### AreaContainsPoint
+The shared predicate both lookups are built from: AABB test with 4-unit epsilon, then exact plane test
+(2-unit epsilon). Public because a caller sometimes knows *which* area it is asking about, and asking
+directly is not the same question as sweeping the mesh. Areas abut on shared planes, so a point on a
+seam is inside both within the plane epsilon and `FindAreaExact` returns whichever comes first in id
+order — arbitrary. `FinishElevatorRide` tests its ride target with this first for exactly that reason
+(`doc/bot.md`, "The target area wins a boundary tie"); the stop slab and the shaft below it share a
+plane, and the sweep would always answer "shaft".
+
+### FindAreaExact
+`AreaContainsPoint` against every area, first hit wins. Null when nothing contains the point. Note the
+point is tested in the mesh's own space: areas are built in hull 3, so their z range is duck-origin z,
+and a caller holding a player's `v.origin` may need `BotNavZ` first. It usually does not matter,
+because an ordinary area spans floor to ceiling and swallows an 18-unit offset — it matters wherever
+areas are thin, which in practice means elevator stop slabs.
+
+### FindAreaNearest
+`FindAreaExact` first, then two fallbacks:
+1. nearest centroid among areas whose AABB holds the point
+2. global nearest centroid
 
 ### FindAreaById
 Direct index lookup with fallback to linear search.
@@ -238,6 +260,26 @@ the walker, which is the whole reason phase 1 is a plain Dijkstra (`doc/bot.md`,
 Being seconds is also what lets `runtimePenalty` be added straight on top in `BuildGraph` (see
 `nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
 everything.
+
+### AreaCostsToGoal
+
+The same Dijkstra run backwards: `AreaCosts(a)` prices every area *from* `a`, `AreaCostsToGoal(g)` prices
+every area's cost *to* `g`. Both share `AreaCostsImpl`, which takes the direction as a flag, because the
+only difference is which endpoint of each edge plays `from`.
+
+Both edge tests have to flip with it, and neither is symmetric. `CONN_FLAG_ONE_WAY` means the edge is
+legal only as `areaA -> areaB`, so the forward pass requires `c.areaA == current` and the reverse pass
+requires `c.areaA == neighbor` — the reverse walk is looking for the *forward* edge that would have
+arrived here. `GateAllowsCrossing` takes an ordered pair for the same reason: an activation-gated area is
+enterable only by walk or ride and only from a neighbour with a live `PlanDetour`, and reversing the
+search does not reverse the door.
+
+It exists because a caller that has to price *many candidate positions against one fixed goal* would
+otherwise run one search per candidate. One reverse pass turns every such question into an array index,
+which is what makes a 4 Hz check affordable (`doc/bot.md`, `bot_opportunist.cpp`). Its values inherit
+everything `travelSeconds` inherits: centroid-anchored, and priced at `kNavRunSpeed` rather than the
+bot's real speed. They are plan-seconds, not real seconds, and mixing them with a real duration without
+converting is the trap the opportunist section describes.
 
 ## funnel_graph.cpp
 

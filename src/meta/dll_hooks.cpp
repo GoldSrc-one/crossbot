@@ -29,6 +29,12 @@ cvar_t g_gatherDebugCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_oppoJumpCvar = {
+	"crossbot_oppo_jump",
+	"0",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	GameData::Load();
@@ -37,6 +43,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	RETURN_META(MRES_IGNORED);
 }
 

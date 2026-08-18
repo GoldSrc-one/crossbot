@@ -8,6 +8,7 @@
 #include "../game/game_profile.h"
 #include "../nav/nav_path.h"
 #include "../nav/path_follower.h"
+#include "bot_aim.h"
 #include "bot_avoid.h"
 #include "bot_weapons.h"
 
@@ -79,6 +80,12 @@ struct CBot
 	bool airmoveOverrunLogged = false;
 	int airmoveTargetArea = -1;
 	int airmoveConnIndex = -1;
+	bool airmoveOpportunistic = false;
+
+	std::vector<float> oppoCosts;
+	int oppoCostsGoalArea = -1;
+	float oppoNextCheck = 0.f;
+	float oppoCooldownUntil = 0.f;
 
 	bool ladderActive = false;
 	bool ladderUp = false;
@@ -122,6 +129,7 @@ struct CBot
 	float activationHoldUntil = 0.f;
 	std::vector<BotActivation> activationMemo;
 
+	BotAim::State aim;
 	BotAvoid::State avoid;
 
 	bool fallTelemetryLogged = false;

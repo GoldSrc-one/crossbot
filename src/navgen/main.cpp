@@ -1421,7 +1421,8 @@ int main(int argc, char **argv)
 		if (!navPath.empty())
 		{
 			std::string mapName = DeriveMapName(bspPath);
-			navgen::WriteNavFile(navPath, mapName, bsp.Checksum(), merged.areas, merged.conns);
+			navgen::WriteNavFile(navPath, mapName, bsp.Checksum(), merged.areas, merged.conns,
+				physics.maxSpeed);
 			std::printf("wrote %s (map \"%s\", checksum 0x%08X)\n", navPath.c_str(), mapName.c_str(), bsp.Checksum());
 		}
 	}

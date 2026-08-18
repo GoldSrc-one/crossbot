@@ -61,19 +61,22 @@ PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 		goalArea, startPoint, goalPoint, traces, stats);
 }
 
-void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out)
+namespace
+{
+
+void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::vector<float> &out)
 {
 	size_t n = mesh.areas.size();
 	out.assign(n, kUnreachableSeconds);
-	if (startArea >= n)
+	if (rootArea >= n)
 		return;
 
 	std::vector<bool> settled(n, false);
-	out[startArea] = 0.f;
+	out[rootArea] = 0.f;
 
 	typedef std::pair<float, uint32_t> Entry;
 	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-	open.push(Entry(0.f, startArea));
+	open.push(Entry(0.f, rootArea));
 
 	while (!open.empty())
 	{
@@ -92,12 +95,14 @@ void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out)
 
 			const Connection &c = mesh.conns[connIdx];
 			uint32_t neighbor = (c.areaA == current) ? c.areaB : c.areaA;
+			uint32_t from = reverse ? neighbor : current;
+			uint32_t to = reverse ? current : neighbor;
 
-			if ((c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0 && c.areaA != current)
+			if ((c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0 && c.areaA != from)
 				continue;
 			if (neighbor >= n || settled[neighbor])
 				continue;
-			if (!GateAllowsCrossing(mesh, connIdx, current, neighbor))
+			if (!GateAllowsCrossing(mesh, connIdx, from, to))
 				continue;
 
 			float step = currentDist + c.travelSeconds + c.costSeconds + c.runtimePenalty;
@@ -108,6 +113,18 @@ void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out)
 			open.push(Entry(step, neighbor));
 		}
 	}
+}
+
+}
+
+void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out)
+{
+	AreaCostsImpl(mesh, startArea, false, out);
+}
+
+void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out)
+{
+	AreaCostsImpl(mesh, goalArea, true, out);
 }
 
 }

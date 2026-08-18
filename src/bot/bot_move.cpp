@@ -3,18 +3,21 @@
 
 #include "bot_move.h"
 #include "../nav/nav_math.h"
+#include "../nav/pm_sim.h"
 
 namespace
 {
-	constexpr float kMaxTurnRatePerSec = 300.f;
-
 	constexpr byte kMaxJumpCommandMsec = 50;
 
-	bool HasLongJumpModule(edict_t *pEdict)
-	{
-		const char *slj = g_engfuncs.pfnGetPhysicsKeyValue(pEdict, "slj");
-		return slj && atoi(slj) == 1;
-	}
+	constexpr float kMoveSpeed = 250.f;
+
+	using NavMath::kPiF;
+}
+
+bool Bot_HasLongJumpModule(edict_t *pEdict)
+{
+	const char *slj = g_engfuncs.pfnGetPhysicsKeyValue(pEdict, "slj");
+	return slj && atoi(slj) == 1;
 }
 
 float Bot_NormalizeAngle(float a)
@@ -36,11 +39,12 @@ byte Bot_FrameMsec()
 }
 
 void Bot_RunPlayerMove(edict_t *pEdict, const Vector &angles, float fmove, float smove,
-	unsigned short buttons)
+	unsigned short buttons, bool allowLongJump)
 {
 	byte msec = Bot_FrameMsec();
 
-	if ((buttons & (IN_JUMP | IN_DUCK)) == (IN_JUMP | IN_DUCK) && HasLongJumpModule(pEdict))
+	if (!allowLongJump && (buttons & (IN_JUMP | IN_DUCK)) == (IN_JUMP | IN_DUCK) &&
+		Bot_HasLongJumpModule(pEdict))
 		buttons &= ~IN_DUCK;
 
 	if ((buttons & IN_JUMP) != 0 && msec > kMaxJumpCommandMsec)
@@ -52,28 +56,6 @@ void Bot_RunPlayerMove(edict_t *pEdict, const Vector &angles, float fmove, float
 	}
 
 	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, msec);
-}
-
-Vector Bot_UpdateFacing(CBot &bot)
-{
-	edict_t *pEdict = bot.pEdict;
-	Vector current = pEdict->v.v_angle;
-
-	float yawDelta = Bot_NormalizeAngle(bot.desiredAngles.y - current.y);
-	float pitchDelta = Bot_NormalizeAngle(bot.desiredAngles.x - current.x);
-
-	float maxStep = kMaxTurnRatePerSec * gpGlobals->frametime;
-
-	float yawStep = (yawDelta > maxStep) ? maxStep : (yawDelta < -maxStep ? -maxStep : yawDelta);
-	float pitchStep = (pitchDelta > maxStep) ? maxStep : (pitchDelta < -maxStep ? -maxStep : pitchDelta);
-
-	Vector smoothed(Bot_NormalizeAngle(current.x + pitchStep), Bot_NormalizeAngle(current.y + yawStep), 0.f);
-
-	pEdict->v.v_angle = smoothed;
-
-	pEdict->v.angles = Vector(-smoothed.x / 3.f, smoothed.y, 0.f);
-
-	return smoothed;
 }
 
 void Bot_DecomposeMove(float viewYawDeg, const Vector &worldDir, float driveLength, float &forwardMove,
@@ -93,4 +75,85 @@ void Bot_DecomposeMove(float viewYawDeg, const Vector &worldDir, float driveLeng
 
 	forwardMove = (nx * cy + ny * sy) * driveLength;
 	sideMove = (nx * sy - ny * cy) * driveLength;
+}
+
+Vector Bot_YawDir(float yawDeg)
+{
+	float r = yawDeg * (kPiF / 180.f);
+	return Vector(cosf(r), sinf(r), 0.f);
+}
+
+PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
+{
+	return [ignore, hull](const Vector &start, const Vector &end)
+	{
+		TraceResult tr;
+		g_engfuncs.pfnTraceHull(start, end, ignore_monsters, hull, ignore, &tr);
+
+		PmSim::PmTrace out;
+		out.endpos = tr.vecEndPos;
+		out.planeNormal = tr.vecPlaneNormal;
+		out.fraction = tr.flFraction;
+		out.allsolid = tr.fAllSolid != 0;
+		out.startsolid = tr.fStartSolid != 0;
+		return out;
+	};
+}
+
+float Bot_MaxSpeed(edict_t *pEdict)
+{
+	float maxspeed = pEdict->v.maxspeed;
+	if (maxspeed <= 1.f)
+		maxspeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");
+	if (maxspeed <= 1.f)
+		maxspeed = kMoveSpeed;
+	return maxspeed;
+}
+
+PmSim::PmPhysics Bot_Physics(edict_t *pEdict)
+{
+	PmSim::PmPhysics physics;
+
+	float maxspeed = Bot_MaxSpeed(pEdict);
+
+	float gravity = g_engfuncs.pfnCVarGetFloat("sv_gravity");
+	if (gravity <= 1.f)
+		gravity = 800.f;
+	if (pEdict->v.gravity > 0.f)
+		gravity *= pEdict->v.gravity;
+
+	float airAccel = g_engfuncs.pfnCVarGetFloat("sv_airaccelerate");
+	if (airAccel <= 0.f)
+		airAccel = 10.f;
+
+	float accel = g_engfuncs.pfnCVarGetFloat("sv_accelerate");
+	if (accel <= 0.f)
+		accel = 10.f;
+
+	float groundFriction = g_engfuncs.pfnCVarGetFloat("sv_friction");
+	if (groundFriction <= 0.f)
+		groundFriction = 4.f;
+
+	float stopSpeed = g_engfuncs.pfnCVarGetFloat("sv_stopspeed");
+	if (stopSpeed <= 0.f)
+		stopSpeed = 100.f;
+
+	float edgeFriction = g_engfuncs.pfnCVarGetFloat("sv_edgefriction");
+	if (edgeFriction <= 0.f)
+		edgeFriction = 2.f;
+
+	float frameTime = gpGlobals->frametime;
+	if (frameTime < 1.f / 128.f || frameTime > 1.f / 20.f)
+		frameTime = 1.f / 60.f;
+
+	physics.maxSpeed = maxspeed;
+	physics.gravity = gravity;
+	physics.airAccelerate = airAccel;
+	physics.accelerate = accel;
+	physics.groundFriction = groundFriction;
+	physics.stopSpeed = stopSpeed;
+	physics.edgeFriction = edgeFriction;
+	physics.friction = 1.f;
+	physics.frameTime = frameTime;
+	return physics;
 }
