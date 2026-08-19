@@ -1,7 +1,9 @@
 ﻿#include <extdll.h>
 #include <meta_api.h>
+#include <pm_defs.h>
 
 #include "../bot/bot_manager.h"
+#include "../bot/bot_sense.h"
 #include "../console/commands.h"
 #include "../game/gamedata.h"
 
@@ -41,9 +43,15 @@ cvar_t g_aimDelayCvar = {
 	FCVAR_SERVER
 };
 
-cvar_t g_aimGazeCvar = {
-	"crossbot_aim_gaze",
-	"0",
+cvar_t g_senseCvar = {
+	"crossbot_sense",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_senseDecayCvar = {
+	"crossbot_sense_decay",
+	"5",
 	FCVAR_SERVER
 };
 
@@ -69,7 +77,8 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_aimGazeCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimErrorCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDriftCvar);
 	RETURN_META(MRES_IGNORED);
@@ -111,113 +120,41 @@ void Touch(edict_t *pentTouched, edict_t *pentOther)
 	RETURN_META(MRES_IGNORED);
 }
 
-DLL_FUNCTIONS g_DllFunctionTable =
-{
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-};
+static int g_pmPlayerEnt = 0;
+static void (*g_pmPlaySound)(int, const char *, float, float, int, int) = NULL;
 
-DLL_FUNCTIONS g_DllFunctionTable_Post =
+static void PM_PlaySoundHook(int channel, const char *sample, float volume, float attenuation,
+	int fFlags, int pitch)
 {
-	GameDLLInit,
-	NULL,
-	NULL,
-	NULL,
-	Touch,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	ClientDisconnect,
-	NULL,
-	ClientPutInServer,
-	NULL,
-	NULL,
-	ServerActivate,
-	ServerDeactivate,
-	NULL,
-	NULL,
-	StartFrame,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-};
+	if (g_pmPlaySound)
+		g_pmPlaySound(channel, sample, volume, attenuation, fFlags, pitch);
+
+	if (g_pmPlayerEnt <= 0)
+		return;
+
+	edict_t *player = g_engfuncs.pfnPEntityOfEntIndex(g_pmPlayerEnt);
+	if (player)
+		BotManager::OnSound(player, channel, sample, volume, attenuation);
+}
+
+static void PM_Move(playermove_t *ppmove, qboolean server)
+{
+	if (ppmove && BotSense::Enabled() && ppmove->PM_PlaySound != PM_PlaySoundHook)
+	{
+		g_pmPlayerEnt = ppmove->player_index + 1;
+		g_pmPlaySound = ppmove->PM_PlaySound;
+		ppmove->PM_PlaySound = PM_PlaySoundHook;
+	}
+	RETURN_META(MRES_IGNORED);
+}
+
+static void PM_Move_Post(playermove_t *ppmove, qboolean server)
+{
+	if (ppmove && ppmove->PM_PlaySound == PM_PlaySoundHook)
+		ppmove->PM_PlaySound = g_pmPlaySound;
+	g_pmPlayerEnt = 0;
+	RETURN_META(MRES_IGNORED);
+}
 
 NEW_DLL_FUNCTIONS g_NewDllFunctionTable =
 {
@@ -249,7 +186,8 @@ C_DLLEXPORT int GetEntityAPI2(DLL_FUNCTIONS *pFunctionTable, int *interfaceVersi
 		return FALSE;
 	}
 
-	memcpy(pFunctionTable, &g_DllFunctionTable, sizeof(DLL_FUNCTIONS));
+	memset(pFunctionTable, 0, sizeof(DLL_FUNCTIONS));
+	pFunctionTable->pfnPM_Move = PM_Move;
 	return TRUE;
 }
 
@@ -265,7 +203,15 @@ C_DLLEXPORT int GetEntityAPI2_Post(DLL_FUNCTIONS *pFunctionTable, int *interface
 		return FALSE;
 	}
 
-	memcpy(pFunctionTable, &g_DllFunctionTable_Post, sizeof(DLL_FUNCTIONS));
+	memset(pFunctionTable, 0, sizeof(DLL_FUNCTIONS));
+	pFunctionTable->pfnGameInit = GameDLLInit;
+	pFunctionTable->pfnTouch = Touch;
+	pFunctionTable->pfnClientDisconnect = ClientDisconnect;
+	pFunctionTable->pfnClientPutInServer = ClientPutInServer;
+	pFunctionTable->pfnServerActivate = ServerActivate;
+	pFunctionTable->pfnServerDeactivate = ServerDeactivate;
+	pFunctionTable->pfnStartFrame = StartFrame;
+	pFunctionTable->pfnPM_Move = PM_Move_Post;
 	return TRUE;
 }
 

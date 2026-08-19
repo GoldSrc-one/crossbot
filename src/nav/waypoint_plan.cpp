@@ -596,8 +596,9 @@ Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnecti
 	return sum;
 }
 
-PlanWalker::PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces)
-	: m_areas(&areas), m_traces(traces)
+PlanWalker::PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces,
+	const std::vector<std::vector<uint32_t>> *walkPredecessors)
+	: m_areas(&areas), m_walkPreds(walkPredecessors), m_traces(traces)
 {
 }
 
@@ -889,6 +890,78 @@ float PlanWalker::RunupDistance(const Vector &launchPoint, const Vector &back, f
 	}
 
 	return total;
+}
+
+float PlanWalker::ReachBack(const Vector &from, const Vector &back, float want, uint32_t fromId) const
+{
+	if (!m_walkPreds || fromId >= m_areas->size() || want <= 0.f)
+		return 0.f;
+
+	std::vector<uint32_t> seen;
+	uint32_t area = fromId;
+	Vector pos = from;
+	float total = 0.f;
+	float remaining = want;
+
+	while (true)
+	{
+		seen.push_back(area);
+
+		float step = ClampTravelInsideArea((*m_areas)[area], pos, back, remaining, kLaunchInset);
+		if (step >= remaining)
+			return total + remaining;
+
+		float toSeam = ClampTravelInsideArea((*m_areas)[area], pos, back, remaining, 0.f);
+		Vector seamPos = pos + back * toSeam;
+
+		uint32_t next = static_cast<uint32_t>(m_areas->size());
+		if (area < m_walkPreds->size())
+		{
+			for (uint32_t cand : (*m_walkPreds)[area])
+			{
+				if (cand >= m_areas->size() || (*m_areas)[cand].crouch)
+					continue;
+				if (std::find(seen.begin(), seen.end(), cand) != seen.end())
+					continue;
+				if (!InAreaColumn(seamPos, (*m_areas)[cand], -kLaunchInset))
+					continue;
+				if (!FloorsMeetAt((*m_areas)[area], (*m_areas)[cand], seamPos, kPlanRunupSeamStep))
+					continue;
+
+				next = cand;
+				break;
+			}
+		}
+
+		if (next >= m_areas->size())
+			return total + step;
+
+		total += toSeam;
+		remaining -= toSeam;
+		pos = seamPos;
+		area = next;
+	}
+}
+
+bool PlanWalker::LegIsWalkable(const Vector &from, const Vector &to, uint32_t fromId) const
+{
+	Vector dir(to.x - from.x, to.y - from.y, 0.f);
+	float len = dir.Length();
+	if (len <= kPlanAirmoveRangeEps)
+		return false;
+
+	dir = dir * (1.f / len);
+
+	return ReachBack(from, dir, len, fromId) >= len - kPlanAirmoveRangeEps;
+}
+
+int PlanWalker::AreaContaining(const Vector &point) const
+{
+	for (size_t i = 0; i < m_areas->size(); ++i)
+		if (PointInArea(point, (*m_areas)[i], 1.f))
+			return static_cast<int>(i);
+
+	return -1;
 }
 
 bool PlanWalker::PushActivationDetour(const PlanArea &fromArea, const PlanArea &toArea, uint32_t fromId)
@@ -1306,7 +1379,8 @@ void PlanWalker::Retract()
 		PendingLaunch &prev = m_launches[k - 1];
 		const PendingLaunch &later = m_launches[k];
 
-		if (later.index != prev.index + 3)
+		bool hasRunupNode = (later.index == prev.index + 3);
+		if (!hasRunupNode && later.index != prev.index + 2)
 			continue;
 
 		float extra = later.needRunup - later.haveRunup;
@@ -1347,12 +1421,26 @@ void PlanWalker::Retract()
 		bool ok = JumpLandsIn(prev.launchFloor, prev.yaw, pulled, prev.jump, prev.fromId, prev.toId,
 			prev.needsCrouch, end, &why);
 
+		uint32_t landArea = prev.toId;
+		if (!ok)
+		{
+			int alt = AreaContaining(end);
+			if (alt >= 0 && static_cast<uint32_t>(alt) != prev.toId &&
+				!(*m_areas)[static_cast<size_t>(alt)].crouch &&
+				LegIsWalkable(m_result[later.index].point, end, later.fromId))
+			{
+				landArea = static_cast<uint32_t>(alt);
+				ok = true;
+				why = "landed in neighbour";
+			}
+		}
+
 		if (m_traces->dumpAirmoves)
 		{
 			std::printf("    airmove %u->%u retract %.0f -> %.0f (need %.1f have %.1f "
-				"align %.2f): %s -> end (%.1f,%.1f,%.1f)\n",
+				"align %.2f): %s -> end (%.1f,%.1f,%.1f) area %u\n",
 				prev.fromId, prev.toId, prev.designSpeed, pulled, later.needRunup,
-				later.haveRunup, align, why, end.x, end.y, end.z);
+				later.haveRunup, align, why, end.x, end.y, end.z, landArea);
 		}
 
 		if (!ok)
@@ -1363,9 +1451,17 @@ void PlanWalker::Retract()
 
 		m_result[prev.index].launchSpeed = pulled;
 		m_result[prev.index].launchSimTo = end;
-		m_result[prev.index + 1].point = AtPlayerHeight(end, prev.toId);
+		m_result[prev.index + 1].point = AtPlayerHeight(end, landArea);
+		if (landArea != prev.toId)
+		{
+			m_result[prev.index + 1].targetAreaId = static_cast<int>(landArea);
+			m_result[prev.index + 1].requiresCrouch = (*m_areas)[landArea].crouch;
+		}
 		prev.designSpeed = pulled;
 		++m_stats.airmovesRetracted;
+
+		if (!hasRunupNode)
+			continue;
 
 		PlanWaypoint &runupWp = m_result[later.index - 1];
 		if (runupWp.targetAreaId < 0 || static_cast<size_t>(runupWp.targetAreaId) >= m_areas->size())

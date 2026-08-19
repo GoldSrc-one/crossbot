@@ -103,11 +103,11 @@ bot**, and on `test56_recharger` the health charger and both batteries do exactl
 17 of that map's 20 areas as unreachable from the single spawn, so the upper floor has no mesh. That is
 a map/mesh gap, not a gather bug, and no amount of staring at the bot will show it.
 
-## scripts/test_aim_gaze.ps1
+## scripts/test_sense.ps1
 
-Drives the aim delay queue, which nothing else can. `test_nav_goal.ps1` spawns exactly one bot, and the
-gaze scaffold that feeds the queue is line-of-sight gated, so a lone bot never has a target — the nav
-sweep can only ever prove the queue is inert when `crossbot_aim_gaze` is off.
+Drives the sense system and the aim delay queue, which nothing else can. `test_nav_goal.ps1` spawns
+exactly one bot, and vision is line-of-sight gated, so a lone bot never has a target and hears almost
+nothing — the nav sweep can only ever prove the system is inert when `crossbot_sense` is off.
 
 Two bots turned loose on a map is not enough either. They chase items independently and are almost never
 in each other's line of sight; a first pass at this script did exactly that and the ring sat empty
@@ -123,21 +123,50 @@ Read the `err` column and nothing else. It is the angle between a bot's real vie
 present-time angles to its target, and it is the only thing that separates "correctly delayed" from
 "delayed and also wrong" — both of which look identical when spectating.
 
-The **static** phase is the sharp test: a stationary target must be tracked exactly at *every* delay,
-because extrapolating a still target forward and reading it back cancels perfectly. Any nonzero `err`
-there, or a `served` that does not match the requested delay, is a real defect. It currently measures
-0.00 at 0, 0.25 and 0.5.
+The **static** phase is the sharp test: a stationary target must be tracked consistently at *every* delay,
+because extrapolating a still target forward and reading it back cancels perfectly. A `served` that does
+not match the requested delay is a real defect, and so is an `err` that **trends** with the delay.
 
-The **roam** phase cannot be read that way and the script says so. `err` there runs 4 to 19 degrees and
-mixes three unrelated causes — genuine target acceleration, the parallax cost of storing angles, and the
-gate suppression pointing the bot at a ladder instead — with no way to attribute it. Watch `queue` and
-`served` in that phase, not `err`.
+`err` no longer reads 0.00 there, and the old "any nonzero err is a defect" rule is gone with the gaze
+scaffold. The bot now aims at a randomly chosen hitbox bone while `err` is measured against the target's
+eye, so the bone spread is a standing floor. It is a floor that grows as the range closes, and the script
+converges the bots to point-blank to hold line of sight, so there it is tens of degrees and almost pure
+negative pitch (every bone sits below the eye). That floor is the bone sampling working. Read `served`
+here, and read `err` only for its shape across the delay sweep, never for its value.
 
-Neither phase exercises the extrapolation, because a still target has no velocity to extrapolate and
+The **roam** phase cannot be read that way and the script says so. `err` there has been seen anywhere
+between 2 and 48 degrees, mixing genuine target acceleration with the gate suppression pointing the bot at
+a ladder instead, and no run is comparable to the last. Watch `queue` and `served` in that phase, not
+`err`.
+
+The **suspicion** phase reports which senses actually fired and asserts that heard entries age out. Only
+`SIGHT` and `SOUND` are reachable from it. `EVENT` and `DAMAGE` are wired but need weapon fire, which no
+bot does yet, so their absence is expected rather than a failure — and they are consequently the two paths
+in `bot_sense.cpp` that have never run against a live server.
+
+Sound there now comes mostly from **footsteps**, plus item pickups, doors and chargers. Footsteps dominate
+by a wide margin: two roaming bots on `crossfire` produce around 85 step sounds in 25 seconds, against 64
+sounds of every other kind over a comparable run. They do not arrive through `pfnEmitSound` -- pmove emits
+them through `pmove->PM_PlaySound`, which is hooked separately via `pfnPM_Move` (see `doc/bot.md`). If they
+ever seem to stop, check `sv_footsteps` before suspecting the hook, and remember that a player moving at or
+below 220 units/s emits none at all, by engine design.
+
+Do not force the quiet period with `crossbot_kill`. Respawn resets the bot with `CBot()`, which empties the
+suspicion list whether or not the decay works -- the assertion would pass unconditionally. Nor should you
+assert that no `SOUND` entry survives: `crossbot_gather 0` does not make the map silent, because doors and
+chargers keep emitting and any bot still walking keeps making footsteps. The invariant that actually holds
+regardless of background noise is that no live entry may be older than `crossbot_sense_decay`, so the test
+shrinks the window to 1s and checks the age column instead.
+
+Neither aim phase exercises the extrapolation, because a still target has no velocity to extrapolate and
 `crossfire` has no stretch long enough to hold a constant one. That check is manual: join the server,
 let a bot lock on, and strafe at constant speed — its head should stay *glued* to you, not trail you.
 Reverse sharply and it should overshoot and correct. Step behind a wall and it should keep tracking for
 about a delay before stopping; step back out and nothing should move for about a delay before the flick.
+
+Joining as a human is also the only way to exercise `EVENT` and `DAMAGE`: fire a weapon near a bot that
+cannot see you and its head should turn toward the shot, and shoot one in the back and it should turn
+around.
 
 ## scripts/test_aim_error.ps1
 

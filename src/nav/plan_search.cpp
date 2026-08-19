@@ -50,10 +50,26 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 		return (goalPoint - from).Length() / NavAStar::kNavRunSpeed;
 	};
 
+	std::vector<std::vector<uint32_t>> walkPreds(n);
+	size_t connCount = std::min(graphConns.size(), planConns.size());
+	for (size_t i = 0; i < connCount; ++i)
+	{
+		if (planConns[i].connType != crossbot_nav::CONN_WALK)
+			continue;
+
+		const NavAStar::Connection &gc = graphConns[i];
+		if (gc.areaA >= n || gc.areaB >= n)
+			continue;
+
+		walkPreds[gc.areaB].push_back(gc.areaA);
+		if (!gc.oneWay)
+			walkPreds[gc.areaA].push_back(gc.areaB);
+	}
+
 	std::vector<SearchNode> state(n);
 	std::vector<bool> closed(n, false);
 
-	state[startArea].walker = PlanWalker(planAreas, traces);
+	state[startArea].walker = PlanWalker(planAreas, traces, &walkPreds);
 	state[startArea].walker.Reset(startPoint);
 	state[startArea].g = 0.f;
 

@@ -1083,14 +1083,59 @@ so their relative position is preserved and no new corner appears.
 Guards, each keeping the design speed and counting `airmovesRetractKept`: a degenerate flight length,
 an alignment below `kPlanAirmoveRetractAlign` (0.5) between the earlier flight and the later launch
 heading — beyond 60° the pull is mostly lateral and the required distance blows up — and a
-`JumpLandsIn` that no longer lands in the earlier destination area. Nothing is ever truncated.
+`JumpLandsIn` that lands neither in the earlier destination area nor in a walkable neighbour of it —
+see below. Nothing is ever truncated.
 
 `Retract` runs between `Finish` and `Respeed`, and writes `PendingLaunch::designSpeed` as well as the
 waypoint. Without that write `Respeed` compares its reach against the *original* design speed and
 raises the launch straight back up; with it, `Respeed` stays downward-only relative to the retracted
-value and mops up whatever the pull could not reach. On `test54_window` the 1→2 launch retracts
-149 → 128, the node moves level with the landing, and the 3→17 launch re-speeds 265 → 237 and lands —
-`1 re-speed kept design` becomes `0`, and the bot delivers 96% of design instead of 75%.
+value and mops up whatever the pull could not reach.
+
+#### Landing in a walk-connected neighbour
+Two things stopped `Retract` from firing at all on the shape it was written for.
+
+**The adjacency gate assumed a run-up node.** It required `later.index == prev.index + 3`, the
+`[launch][landing][run-up][launch]` layout. But when the anchor clamp leaves `runupBack` under
+`kPlanAirmoveRunupEps` no run-up node is pushed, the pair is `[launch][landing][launch]` and the gap
+is 2 — exactly the worst case, skipped. Both shapes are accepted now, and the node-moving tail runs
+only for the longer one. No waypoint is inserted for the short one: with no node the landing waypoint
+itself starts the approach segment, which is the segment `ProfileLaunchReach` measures, so the pull
+lengthens it directly.
+
+**The pulled landing may leave the destination area.** Pulling the landing back is the whole point,
+and on a thin destination it lands short of it. `test54_window`'s area 3 is a 16-unit lip; pulling the
+`1→3` landing the 39 units the `3→17` launch needs puts it in area 2, and the plain `JumpLandsIn`
+refuses. So a failed `JumpLandsIn` now gets a second look: `AreaContaining` finds where the mover
+actually came to rest, and the landing is accepted there when the area is not the destination, is not
+`crouch`, and `LegIsWalkable` confirms the bot can walk the straight leg from that point to the
+launch.
+
+That leg check is the load-bearing guard, not a formality. The landing moves along the *earlier
+flight line* while the run-up runs along the *launch heading*, and `kPlanAirmoveRetractAlign` only
+holds those within 60° of each other, so the landing can drift sideways off walkable ground while
+still passing every other test. `LegIsWalkable` validates the leg the bot will actually walk.
+
+**`ReachBack` is the walk-back the area graph knows, and it is not `RunupDistance`.** `RunupDistance`
+chains areas off `m_pendingGates`, and that is right for `Cross`: the funnel's gate trail is exactly
+the ground the route came over, and walking a run-up back past a barrier the route crossed — a door,
+the route's own start — is not something the funnel can express. `Retract` has neither problem. It
+runs after `Finish` on a settled route and only asks whether a straight leg is walkable, so it reads
+walk adjacency directly: `PlanRoute` builds a per-area predecessor list from the `CONN_WALK`
+connections and hands it to every `PlanWalker`. `ReachBack` keeps every guard `RunupDistance` uses —
+`ClampTravelInsideArea` inside each convex area, the next area's column must contain the seam point,
+`FloorsMeetAt` within `kPlanRunupSeamStep`, no crouch areas — plus a visited set, because the area
+graph has cycles and a gate trail does not.
+
+**The follower does not care which area the landing is in.** `AirmoveLandingMiss` measures against the
+landing *waypoint*, and `haveMiss` is therefore always true on a planned air move, so the
+`landedId != airmoveTargetArea` fallback never runs and the connection is never penalized for landing
+in the neighbour. The launch waypoint keeps the connection's own destination in `targetAreaId`, which
+is why the log reads `landed ... area 2 (wanted 3) miss 1.9 ... penalty 0.0`.
+
+On `test54_window` the `1→3` launch retracts 142 → 74 and lands in area 2 at `(555.2, 784.9)`. The
+`3→17` approach goes from 0.4 units to 39.0, `1 re-speed kept design` becomes `0`, and the launch
+the bot delivers goes from 80% of its 270 design to 100%. It is the only map in the suite whose plan
+moves — every other route is byte-identical, at both `--plan-speed` settings.
 
 ### Edge friction on the approach
 Every run-up ends at a ledge — that is what an air move is — and GoldSrc charges for that. `PM_Friction`

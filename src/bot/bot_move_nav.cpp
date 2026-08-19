@@ -8,6 +8,7 @@
 #include "bot_move_nav.h"
 #include "bot_move.h"
 #include "bot_aim.h"
+#include "bot_sense.h"
 #include "bot_avoid.h"
 #include "bot_items.h"
 #include "bot_opportunist.h"
@@ -1900,13 +1901,13 @@ void Bot_MoveNav(CBot &bot)
 	const Nav::Area *curArea = Nav::FindAreaNearest(*mesh, pEdict->v.origin);
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
-	BotAim::UpdateGaze(bot);
+	BotSense::Update(bot);
 
 	BotItems::RefreshMemos(bot);
 
 	if (BotItems::UpdateGoalItem(bot))
 	{
-		BotAim::ApplyGaze(bot);
+		BotSense::ApplyLook(bot);
 		Vector angles = Bot_UpdateFacing(bot);
 		RunIdleMove(bot, angles);
 		return;
@@ -1914,7 +1915,7 @@ void Bot_MoveNav(CBot &bot)
 
 	if (!bot.hasGoal && !BotItems::SelectGoal(bot, *mesh))
 	{
-		BotAim::ApplyGaze(bot);
+		BotSense::ApplyLook(bot);
 		Vector angles = Bot_UpdateFacing(bot);
 		RunIdleMove(bot, angles);
 		return;
@@ -1932,7 +1933,7 @@ void Bot_MoveNav(CBot &bot)
 	if (stalled && !forcedRepath && gpGlobals->time < bot.avoid.blockedUntil)
 	{
 		BotItems::OnBlocked(bot, bot.avoid.lastHit);
-		BotAim::ApplyGaze(bot);
+		BotSense::ApplyLook(bot);
 		Vector angles = Bot_UpdateFacing(bot);
 		RunIdleMove(bot, angles);
 		return;
@@ -2063,7 +2064,7 @@ void Bot_MoveNav(CBot &bot)
 
 	if (bot.waypointIndex >= bot.waypoints.size())
 	{
-		BotAim::ApplyGaze(bot);
+		BotSense::ApplyLook(bot);
 		Vector angles = Bot_UpdateFacing(bot);
 		RunIdleMove(bot, angles);
 		return;
@@ -2145,7 +2146,7 @@ void Bot_MoveNav(CBot &bot)
 			bot.desiredAngles = Vector(0.f, atan2f(vel.y, vel.x) * (180.f / kPiF), 0.f);
 	}
 
-	BotAim::ApplyGaze(bot);
+	BotSense::ApplyLook(bot);
 
 	Vector angles = Bot_UpdateFacing(bot);
 

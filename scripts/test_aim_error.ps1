@@ -72,7 +72,7 @@ Write-Host "Server PID=$serverPid"
 
 try {
     Invoke-Rcon "crossbot_gather 0" | Out-Null
-    Invoke-Rcon "crossbot_aim_gaze 0" | Out-Null
+    Invoke-Rcon "crossbot_sense 0" | Out-Null
     Invoke-Rcon "crossbot_add Flicker" | Out-Null
     Start-Sleep -Seconds 3
 

@@ -217,7 +217,8 @@ class PlanWalker
 {
 public:
 	PlanWalker() = default;
-	PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces);
+	PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces,
+		const std::vector<std::vector<uint32_t>> *walkPredecessors = nullptr);
 
 	void Reset(const Vector &startPoint);
 	bool Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t fromId, uint32_t toId);
@@ -252,7 +253,14 @@ private:
 	float RunupDistance(const Vector &launchPoint, const Vector &back, float want, uint32_t fromId,
 		uint32_t &runupAreaOut, size_t &gatesKeptOut) const;
 
+	float ReachBack(const Vector &from, const Vector &back, float want, uint32_t fromId) const;
+
+	bool LegIsWalkable(const Vector &from, const Vector &to, uint32_t fromId) const;
+
+	int AreaContaining(const Vector &point) const;
+
 	const std::vector<PlanArea> *m_areas = nullptr;
+	const std::vector<std::vector<uint32_t>> *m_walkPreds = nullptr;
 	const PlanTraceContext *m_traces = nullptr;
 	PlanStats m_stats;
 

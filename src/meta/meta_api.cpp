@@ -34,8 +34,8 @@ META_FUNCTIONS gMetaFunctionTable =
 	GetEntityAPI2_Post,
 	GetNewDLLFunctions,
 	GetNewDLLFunctions_Post,
-	NULL,
-	NULL,
+	GetEngineFunctions,
+	GetEngineFunctions_Post,
 };
 
 C_DLLEXPORT int Meta_Attach(PLUG_LOADTIME now, META_FUNCTIONS *pFunctionTable, meta_globals_t *pMGlobals, gamedll_funcs_t *pGamedllFuncs)

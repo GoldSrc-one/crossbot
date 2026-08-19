@@ -7,6 +7,7 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_opportunist.h"
+#include "bot_sense.h"
 #include "bot_weapons.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
@@ -76,6 +77,8 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 	for (auto &bot : g_bots)
 		bot = CBot();
 
+	BotSense::ResetBoneCache();
+
 	g_pGameProfile = GameProfile_Detect();
 
 	char msg[256];
@@ -93,6 +96,8 @@ void ServerDeactivate()
 {
 	for (auto &bot : g_bots)
 		bot = CBot();
+
+	BotSense::ResetBoneCache();
 
 	g_pGameProfile = nullptr;
 	Nav::Unload();
@@ -307,7 +312,7 @@ void PrintAimStatus()
 
 		++shown;
 
-		edict_t *target = bot.aim.gazeTarget.Get();
+		edict_t *target = bot.sense.target.Get();
 		const Vector &view = bot.pEdict->v.v_angle;
 
 		char errBuf[64] = "-";
@@ -322,9 +327,9 @@ void PrintAimStatus()
 
 		char line[416];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s gaze=%s vis=%d queue=%zu/%zu hist=%.2fs served=%.3fs hand=%.0f deg/s "
+			"CrossBot: %s target=%s bone=%d queue=%zu/%zu hist=%.2fs served=%.3fs hand=%.0f deg/s "
 			"brake=(%.3f,%.3f) view=(%.1f,%.1f) err=%s\n",
-			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.aim.gazeVisible ? 1 : 0,
+			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
 			bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot), bot.aim.servedDelay,
 			BotAim::ViewSpeed(bot), bot.aim.brakeYaw, bot.aim.brakePitch, view.x, view.y, errBuf);
 		SERVER_PRINT(line);
@@ -332,10 +337,88 @@ void PrintAimStatus()
 
 	char summary[192];
 	snprintf(summary, sizeof(summary),
-		"CrossBot: %d bot(s), aim_gaze=%d aim_delay=%.3f aim_error=%.2f aim_drift=%.2f\n", shown,
-		BotAim::GazeEnabled() ? 1 : 0, BotAim::Delay(), BotAim::ErrorScale(),
+		"CrossBot: %d bot(s), sense=%d aim_delay=%.3f aim_error=%.2f aim_drift=%.2f\n", shown,
+		BotSense::Enabled() ? 1 : 0, BotAim::Delay(), BotAim::ErrorScale(),
 		BotAim::DriftAmplitude());
 	SERVER_PRINT(summary);
+}
+
+void PrintSenseStatus()
+{
+	int shown = 0;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		++shown;
+
+		edict_t *target = bot.sense.target.Get();
+		const BotSense::Suspicion *fresh = BotSense::Freshest(bot);
+
+		char freshBuf[96] = "-";
+		if (fresh)
+			snprintf(freshBuf, sizeof(freshBuf), "%s age=%.2fs ent=%d (%.0f,%.0f,%.0f)",
+				BotSense::SourceName(fresh->source), gpGlobals->time - fresh->time,
+				fresh->entIndex, fresh->pos.x, fresh->pos.y, fresh->pos.z);
+
+		char lookBuf[96] = "-";
+		if (bot.sense.lookValid)
+			snprintf(lookBuf, sizeof(lookBuf), "(%.2f,%.2f,%.2f) auth=%.2f kept=%d",
+				bot.sense.lookDir.x, bot.sense.lookDir.y, bot.sense.lookDir.z,
+				bot.sense.lookAuthority, bot.sense.lookEntries);
+
+		char line[448];
+		snprintf(line, sizeof(line),
+			"CrossBot: %s target=%s bone=%d susp=%d/%zu fresh=%s look=%s\n",
+			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
+			BotSense::LiveCount(bot), BotSense::kSuspicionSlots, freshBuf, lookBuf);
+		SERVER_PRINT(line);
+	}
+
+	char summary[160];
+	snprintf(summary, sizeof(summary),
+		"CrossBot: %d bot(s), sense=%d sense_decay=%.2f\n", shown,
+		BotSense::Enabled() ? 1 : 0, BotSense::Decay());
+	SERVER_PRINT(summary);
+}
+
+void OnSound(edict_t *src, int channel, const char *sample, float volume, float attenuation)
+{
+	if (!BotSense::Enabled() || !src || src->free)
+		return;
+	if (g_engfuncs.pfnIndexOfEdict(src) == 0)
+		return;
+	if (volume <= 0.f)
+		return;
+	if (sample && strcmp(sample, "common/null.wav") == 0)
+		return;
+
+	Vector pos = BotSense::EntitySoundOrigin(src);
+
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse || bot.pEdict == src)
+			continue;
+		BotSense::Hear(bot, src, pos, volume, attenuation);
+	}
+}
+
+void OnEvent(int flags, const edict_t *pInvoker)
+{
+	if (!BotSense::Enabled() || !pInvoker || pInvoker->free)
+		return;
+	if ((flags & FEV_HOSTONLY) != 0)
+		return;
+	if (!CBotIsLivePlayer(pInvoker))
+		return;
+
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse || bot.pEdict == pInvoker)
+			continue;
+		BotSense::Notice(bot, pInvoker);
+	}
 }
 
 void PrintNavStatus()

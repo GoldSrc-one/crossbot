@@ -18,8 +18,7 @@ constexpr float kMaxDelay = 0.5f;
 struct DelaySlot
 {
 	float time = 0.f;
-	float yaw = 0.f;
-	float pitch = 0.f;
+	Vector point;
 };
 
 struct State
@@ -40,9 +39,6 @@ struct State
 	size_t delayHead = 0;
 	size_t delayCount = 0;
 
-	CBotEntHandle gazeTarget;
-	float gazeNextCheck = 0.f;
-	bool gazeVisible = false;
 	float servedDelay = 0.f;
 
 	bool testActive = false;
@@ -59,21 +55,23 @@ void BeginTest(CBot &bot, float yawDelta, float pitchDelta);
 
 float Delay();
 
-bool GazeEnabled();
-
 float ErrorScale();
 
 float DriftAmplitude();
 
 void ClearDelayQueue(CBot &bot);
 
-void UpdateGaze(CBot &bot);
+void PushDelaySlot(CBot &bot, const Vector &point);
 
-bool ApplyGaze(CBot &bot);
+bool ReadDelayed(const CBot &bot, float delay, Vector &point);
+
+bool LosAngles(const Vector &from, const Vector &to, float &yaw, float &pitch);
 
 bool AnglesToTarget(const CBot &bot, edict_t *target, float &yaw, float &pitch);
 
 float QueueAge(const CBot &bot);
+
+float PitchLimit();
 
 }
 

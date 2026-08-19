@@ -26,9 +26,14 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_aim_test <bot> <yawDelta> [pitchDelta]` — command a flick relative to the bot's current view
   and print settle time and peak hand speed; the only check on the 180-in-0.4s derivation. Overrides
   navigation aim for 3 seconds; see `doc/bot.md`, `bot_aim.cpp`
-- `crossbot_aim_status` — per bot: gaze target, ring occupancy, delay served, hand speed, and `err`, the
-  angle between the real view and the true present-time angles to the target. `err` is the one number
-  that separates "correctly delayed" from "delayed and also wrong"; see `doc/bot.md`, `bot_aim.cpp`
+- `crossbot_aim_status` — per bot: sense target, bone sampled, ring occupancy, delay served, hand speed,
+  and `err`, the angle between the real view and the true present-time angles to the target. `err` is the
+  one number that separates "correctly delayed" from "delayed and also wrong", but it no longer bottoms out
+  at zero: it is measured against the target eye while the bot aims at a random hitbox bone, so a couple of
+  degrees is the floor. Read its trend across delays, not its value; see `doc/bot.md`, `bot_aim.cpp`
+- `crossbot_sense_status` — per bot: aim target and bone, live suspicion count, the freshest entry with
+  source, age and position, and the look direction with its authority and how many entries survived the
+  cone refinement; see `doc/bot.md`, `bot_sense.cpp`
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
@@ -53,10 +58,12 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   reason it was skipped. Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`
 - `crossbot_oppo_jump` — opportunistic jumping. Default 1
 - `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default 0.3. Inert unless
-  `crossbot_aim_gaze` is on, since nothing else feeds the queue yet
-- `crossbot_aim_gaze` — temporary scaffold: bots track the nearest live player they can see, so the aim
-  model has something to aim at. Default 0, and that default is what keeps the nav sweep meaningful.
-  Will be deleted when a real sense system lands; see `doc/bot.md`, `bot_aim.cpp`
+  `crossbot_sense` is on, since vision is what feeds the queue
+- `crossbot_sense` — the whole sense system: vision, heard sounds and events, damage, and the suspicion
+  list that drives where the bot looks when it has no target. Default 1, held there by a 45/45 nav sweep
+  at both settings; see `doc/bot.md`, `bot_sense.cpp`
+- `crossbot_sense_decay` — suspicion weight and decay window in seconds, clamped [0.1, 60]. Default 5.
+  Doubles as the blend authority: a suspicion this old has zero pull on the view
 - `crossbot_aim_error` — scale on the intentional over/undershoot, clamped [0, 4]. Default 1. At 0 the brake
   is forced to exactly 1 and the controller is time-optimal again, which is the regression baseline
   `scripts/test_aim_error.ps1` measures against. Above 1 is for seeing the effect, not for playing against
