@@ -36,6 +36,8 @@ namespace BotItems
 
 	void OnRepathFailed(CBot &bot);
 
+	void OnBlocked(CBot &bot, const char *what);
+
 	void OnRespawn(CBot &bot);
 
 	void PrintCandidates(const Nav::NavMesh &mesh);

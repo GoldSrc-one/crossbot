@@ -51,12 +51,18 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   that picks a new goal a frame after arriving never shows the harness the `hasGoal=0` it polls for
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped. Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`
-- `crossbot_oppo_jump` — opportunistic jumping. Default 0
-- `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default 0.25. Inert unless
+- `crossbot_oppo_jump` — opportunistic jumping. Default 1
+- `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default 0.3. Inert unless
   `crossbot_aim_gaze` is on, since nothing else feeds the queue yet
 - `crossbot_aim_gaze` — temporary scaffold: bots track the nearest live player they can see, so the aim
   model has something to aim at. Default 0, and that default is what keeps the nav sweep meaningful.
   Will be deleted when a real sense system lands; see `doc/bot.md`, `bot_aim.cpp`
+- `crossbot_aim_error` — scale on the intentional over/undershoot, clamped [0, 4]. Default 1. At 0 the brake
+  is forced to exactly 1 and the controller is time-optimal again, which is the regression baseline
+  `scripts/test_aim_error.ps1` measures against. Above 1 is for seeing the effect, not for playing against
+- `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
+  `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean
+  the test never settles at all
 
 Output from all of these is `SERVER_PRINT`, so it goes to the HLDS console and `hlds/qconsole.log` —
 **not** to the stdout of whatever script sent the command over RCON.

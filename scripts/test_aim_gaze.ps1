@@ -12,7 +12,7 @@
     independently and are almost never in each other's line of sight, so the
     queue sits empty. So the run has two phases.
 
-    STATIC: gather off, no goals, all bots teleported to one spawn. They stand
+    STATIC: gather off, no goals, all bots sent to one spawn by nav goal. They stand
     together, hold line of sight continuously, and the target is stationary --
     which is the case the design says must be exact at *any* delay, because
     extrapolating a still target forward and reading it back cancels perfectly.
@@ -97,6 +97,10 @@ try {
     Write-Host "err should stay near zero at every delay -- a stationary target cancels exactly."
     Write-Host "Do not use crossbot_teleport here: it stacks every bot on the identical origin, which"
     Write-Host "makes the eye-to-eye vector zero, so no angle exists and the queue is never fed."
+    Write-Host "Idle micro-drift is switched off for this phase: it is a deliberate ~1 degree of error,"
+    Write-Host "and leaving it on would mask exactly the small defects this phase exists to catch."
+
+    Invoke-Rcon "crossbot_aim_drift 0" | Out-Null
 
     Invoke-Rcon "crossbot_nav_goal $($spawn.X) $($spawn.Y) $($spawn.Z)" | Out-Null
     Write-Host "Walking to the goal..."
@@ -117,6 +121,7 @@ try {
         Write-Host "`n===== ROAM: gather on, bots move ====="
         Write-Host "err may be large -- that is target acceleration. Watch queue and served instead."
         Invoke-Rcon "crossbot_aim_delay 0.25" | Out-Null
+        Invoke-Rcon "crossbot_aim_drift 1" | Out-Null
         Invoke-Rcon "crossbot_gather 1" | Out-Null
 
         $deadline = (Get-Date).AddSeconds($RoamSeconds)

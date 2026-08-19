@@ -14,6 +14,4 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh);
 
 void OnRepath(CBot &bot);
 
-void OnLanded(CBot &bot, int landedAreaId);
-
 }

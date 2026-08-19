@@ -47,6 +47,18 @@ cvar_t g_aimGazeCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_aimErrorCvar = {
+	"crossbot_aim_error",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_aimDriftCvar = {
+	"crossbot_aim_drift",
+	"1",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	GameData::Load();
@@ -58,6 +70,8 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimGazeCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_aimErrorCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDriftCvar);
 	RETURN_META(MRES_IGNORED);
 }
 

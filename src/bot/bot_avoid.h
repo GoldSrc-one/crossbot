@@ -40,6 +40,8 @@ struct State
 	float detourExpire = 0.f;
 	float nextSearchTime = 0.f;
 
+	float blockedUntil = 0.f;
+
 	Kind lastKind = AVOID_NONE;
 	char lastHit[32] = {};
 	float lastGap = 0.f;

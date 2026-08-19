@@ -27,6 +27,15 @@ struct State
 	float yawVel = 0.f;
 	float pitchVel = 0.f;
 
+	float brakeYaw = 1.f;
+	float brakePitch = 1.f;
+	float flickMag = 0.f;
+
+	bool rngSeeded = false;
+	unsigned int rngState = 0;
+	float driftPhaseYaw = 0.f;
+	float driftPhasePitch = 0.f;
+
 	DelaySlot delaySlots[kDelaySlots];
 	size_t delayHead = 0;
 	size_t delayCount = 0;
@@ -51,6 +60,10 @@ void BeginTest(CBot &bot, float yawDelta, float pitchDelta);
 float Delay();
 
 bool GazeEnabled();
+
+float ErrorScale();
+
+float DriftAmplitude();
 
 void ClearDelayQueue(CBot &bot);
 

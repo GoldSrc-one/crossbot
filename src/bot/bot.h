@@ -85,7 +85,6 @@ struct CBot
 	std::vector<float> oppoCosts;
 	int oppoCostsGoalArea = -1;
 	float oppoNextCheck = 0.f;
-	float oppoCooldownUntil = 0.f;
 
 	bool ladderActive = false;
 	bool ladderUp = false;

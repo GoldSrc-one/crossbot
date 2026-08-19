@@ -139,6 +139,32 @@ let a bot lock on, and strafe at constant speed — its head should stay *glued*
 Reverse sharply and it should overshoot and correct. Step behind a wall and it should keep tracking for
 about a delay before stopping; step back out and nothing should move for about a delay before the flick.
 
+## scripts/test_aim_error.ps1
+
+Measures the intentional aim error by firing the same flick many times through `crossbot_aim_test` and
+reporting the spread of settle times at each `crossbot_aim_error` scale.
+
+The point is the spread, not any single row. `brake` is sampled once per flick, so one flick is one draw
+from a distribution and proves nothing on its own — the same argument as the `~3s` poll grid under
+`test_nav_goal.ps1`, for a different reason.
+
+Two things to read off it:
+
+- **At `crossbot_aim_error 0` the spread must collapse** onto the phase 1 controller numbers (about 0.37s
+  at 900 deg/s for a 180, 0.28s at 557 for 90 of pitch). Brake is forced to exactly 1 there, so anything
+  else means the error model leaked outside its cvar. This is the regression check.
+- **At scale 1 the distribution must open up asymmetrically** — the maximum should move much further than
+  the mean. That long tail is the overshoot-and-correct case. A symmetric widening would mean the flick
+  detector is resampling mid-movement instead of once per flick.
+
+The script leaves `crossbot_aim_drift` at its default on purpose: micro-drift is suppressed while a test is
+active, and a run that produces settle lines at all is what proves that suppression works. If drift ever
+leaks into a test, no flick settles and the log is empty rather than wrong.
+
+Settle is gated on hand speed as well as angle, so a view flying through the target on its way to an
+overshoot cannot report a false early settle. It is a threshold and not a proof: a small enough overshoot
+crosses slowly enough to slip under it, which is another reason to read the spread rather than a row.
+
 ## Sweeping a change
 
 Three different things can move, and each needs its own sweep. Running the wrong one is how a change

@@ -418,6 +418,118 @@ speed; see `doc/testing.md`. Roaming bots are not a substitute either: `crossfir
 enough to hold a constant velocity, and the roam phase mixes in the gate suppression, so err there runs 4 to
 19 degrees with no way to attribute it.
 
+### The brake multiplier, and why b<1 is not really an undershoot
+
+The controller in `StepAxis` is time-optimal, so it arrives with zero velocity every time. That is the one
+thing a hand never does. Phase 3 makes it miss on purpose with a single number: `brake`, multiplying the
+deceleration envelope and nothing else.
+
+```
+envelope = (sqrt(2*a*m + 0.25*s^2) - 0.5*s) * brake
+```
+
+The dead-beat `m/dt` term is deliberately left alone. It is what closes an error small enough to close this
+frame, and multiplying it too would make tiny errors miss forever instead of terminating.
+
+`brake > 1` lets the axis carry more speed than it can shed, so it arrives moving and sails past. The
+overshoot is exact: deceleration starts at remaining `v^2/(2*a*b^2)` but stopping needs `v^2/(2*a)`, so it
+overshoots by `v^2/(2*a) * (1 - 1/b^2)`. For a large flick the peak is `v^2/(2*a) ~ E/2`, which makes the
+overshoot a fixed *fraction* of the movement rather than a fixed angle -- constant relative error, which is
+the Fitts' law signature, and it falls out of the algebra rather than being imposed.
+
+`brake < 1` is the asymmetric case and the name is a slight lie. Decelerating early does not leave the axis
+short of the target: solving `dm/dt = -b*sqrt(2*a*m)` gives `sqrt(m)` falling linearly to zero in
+`sqrt(2*E/a)/b`, so it still converges, just `1/b` times slower. What you see is a soft landing, not a
+discrete undershoot and correction. A real undershoot needs the *aim point* to be wrong, not the braking,
+and that is an offset model rather than this one. The soft landing is worth having anyway, so it stays.
+
+### Sampled once per flick, not driven by a sine
+
+The original sketch modulated the error with a sine. That was dropped: anything periodic reads as robotic
+once you watch it for a minute, which is the exact failure the model exists to avoid.
+
+`UpdateBrake` resamples both axes when the combined error magnitude is above `kFlickMinError` (3 degrees)
+*and* grew by more than `kFlickGrowth` (0.5) since last frame. During a converging movement the error falls
+monotonically, so nothing retriggers. Two things make it grow: a genuinely new target, and the bot's own
+overshoot flipping the error sign and pushing it back up through the threshold. So the correction movement
+gets its own independent brake for free, and the visible result is one ballistic movement followed by one or
+two smaller ones -- again, not imposed anywhere.
+
+The chain terminates on its own. At 60fps the dead-beat term dominates below `2*a*b^2*dt^2` ~ 2.5 degrees,
+so a correction smaller than that closes in a single frame no matter what brake was drawn, and there is no
+limit cycle at the end of a flick.
+
+Both axes are sampled independently on the same trigger. That is deliberate: a shared brake would make every
+miss land exactly along the movement's own line, and humans miss to the side too.
+
+`crossbot_aim_status` prints the live `brake` pair, and **a frozen value there is the correct reading, not a
+stuck one.** A bot idling on a stationary target never lets the error grow past 3 degrees, so it never
+resamples and holds whatever it drew on the last real flick — which is exactly what the static phase of
+`test_aim_gaze.ps1` shows. Watch it change during the roam phase instead.
+
+### The RNG is per bot and seeded from the entity index
+
+`RandomUnit` is a plain LCG on `BotAim::State`, not `RANDOM_FLOAT`. Two reasons. It does not consume the
+shared engine RNG, which the game uses for weapon spread. More importantly it is seeded from
+`pfnIndexOfEdict` alone, so a given bot draws the same sequence on every run of a map -- the nav sweep stays
+reproducible, which matters more here than usual, because the measurement discipline this work needed
+(`doc/testing.md`) already has enough sources of run-to-run noise without aim error adding another.
+
+`kBrakeSpread` is 0.06, scaled by `crossbot_aim_error`. Sampling is uniform and symmetric about 1. Motor
+control literature says the primary submovement usually undershoots rather than overshooting, so biasing the
+sample low is the obvious next tuning knob; it is not done because there is no measurement here that could
+justify a particular bias.
+
+### Idle micro-drift
+
+A bot holding still with a settled view is visibly a statue. `Bot_UpdateFacing` adds a slow sine to the
+*local* copy of the desired angles -- `crossbot_aim_drift` degrees of yaw at 1.7 rad/s, 60% of that in pitch
+at 1.19 rad/s, per-bot phases drawn at seed time. The two rates are incommensurate, so the pattern does not
+visibly repeat.
+
+It is added to a local copy, not to `bot.desiredAngles`, so `RunActivation` and `RunChargerUse` keep
+comparing the view against the same angles they wrote and their gates are untouched. The ladder gate at
+`kLadderAimTolerance` compares against its own locally computed `aimYaw`, so drift does show up there as
+steady-state error -- 1 degree of it, against a 6 degree tolerance.
+
+**Drift is suppressed while `testActive`.** This is not optional. `crossbot_aim_test` settles on a 0.5 degree
+tolerance and the drift amplitude is 1 degree, so with drift running the test could never settle at all.
+
+### The settle gate had to learn about overshoot
+
+`UpdateTest` previously reported settle on the first frame inside `kTestSettleTolerance`. With overshoot in
+play, a view flying through the target at 200+ deg/s on its way past can land inside that band for one frame
+and report a settle that never happened. It now also requires hand speed below `kTestSettleSpeed` (150
+deg/s), which is above the ~50 deg/s the dead-beat term produces on genuine arrival at typical frame rates
+and well below flythrough speed.
+
+This is a threshold, not a proof: an overshoot small enough to cross the target slowly can still slip under
+it. Read the spread across many flicks rather than any single number, which is what
+`scripts/test_aim_error.ps1` exists to produce.
+
+### What the error actually measures out at
+
+45/45 on the nav sweep at the shipped defaults (`crossbot_aim_error 1`, `crossbot_aim_drift 1`), so the
+gate-latch cost the phase 1 controller introduced is not compounded by the error model. Eight flicks per
+cell, `crossfire`, one bot:
+
+| `crossbot_aim_error` | flick | settle min | avg | max | spread | peak |
+|---|---|---|---|---|---|---|
+| 0 | 180 0 | 0.308 | 0.349 | 0.372 | 0.064s | 895 deg/s |
+| 0 | 0 90 | 0.255 | 0.266 | 0.297 | 0.042s | 563 deg/s |
+| 1 | 180 0 | 0.296 | 0.398 | 0.543 | 0.247s | 908 deg/s |
+| 1 | 0 90 | 0.245 | 0.285 | 0.354 | 0.109s | 557 deg/s |
+
+The `crossbot_aim_error 0` rows are the regression check: brake forced to exactly 1, and the numbers land on
+the phase 1 measurements (0.37s at 899 deg/s for a 180, 0.28s at 557 for 90 of pitch). The residual 0.06s
+spread there is frame-phase jitter, not the model.
+
+At scale 1 the distribution opens up and, importantly, opens up *asymmetrically*: the mean moves up 0.05s
+but the max moves up 0.17s. That long tail is the overshoot-and-correct case, and it is the shape that was
+wanted. The minimum going slightly *below* the scale-0 minimum is not an anomaly -- a small `brake > 1`
+carries more speed in and lands with an overshoot under the dead-beat threshold, so it arrives faster than
+time-optimal-with-a-full-stop does.
+
 ## bot_move.cpp
 
 ### Bot_DecomposeMove
@@ -1059,8 +1171,8 @@ The nav mesh is generated once at a fixed design speed and every connection's `c
 holding `item_longjump`, which replaces a jump with `forward * 560` and `sqrt(2*800*56)` up — has a
 movement option no plan on that mesh can contain. This checks, four times a second, whether taking it
 right now beats walking the plan, and if so hops off-plan and repaths from wherever it lands. It is not a
-planner change: the plan stays what it is and the bot occasionally short-circuits it. Off by default,
-behind `crossbot_oppo_jump`.
+planner change: the plan stays what it is and the bot occasionally short-circuits it. Can be disabled with
+`crossbot_oppo_jump = 0`.
 
 ### Why the design speed had to go in the nav file
 
@@ -1125,6 +1237,38 @@ returns with `OnGround()` still true — the impulse is applied inside the first
 `while (!OnGround())` never runs a single frame. It tracks an `airborne` flag instead, and a sim that
 never gets airborne is rejected rather than treated as an instant landing.
 
+### The long jump leaves along the view, not along velocity
+
+The plain jump and the long jump take their direction from different places, and the difference is not
+cosmetic. `PM_Jump` keeps horizontal velocity for an ordinary jump, so simulating one from
+`atan2(vel.y, vel.x)` is exact. The module branch instead *overwrites* it:
+
+```c
+for (i = 0; i < 2; i++)
+    pmove->velocity[i] = pmove->forward[i] * PLAYER_LONGJUMP_SPEED * 1.6;
+```
+
+`pmove->forward` is `AngleVectors(cmd.viewangles + punchangle)` (`PM_CheckParamters`, then
+`PM_PlayerMove`), so the whole horizontal launch is *where the bot is looking* and the velocity it had is
+used for nothing but the `Length(velocity) > 50` gate. The comment sitting above that branch in
+`pm_shared.c` — "UNDONE -- note this should be based on forward angles, not current velocity" — reads
+like the opposite of what the code does, and simulating the velocity yaw makes the bot predict a landing
+area it then flies nowhere near: navigation aim points at `waypointIndex + 1` and `ApplyGaze` can drag it
+onto an enemy, so the two yaws routinely disagree by tens of degrees.
+
+`forward` is also not flattened. `forward[0..1]` is `cos(pitch) * (cos(yaw), sin(yaw))`, so pitch scales
+the horizontal launch while `velocity[2]` stays the flat `sqrt(2*800*56)` — a bot looking 30° down long
+jumps at 485, not 560.
+
+**The launch frame is one `Bot_UpdateFacing` step away from the angles the check reads.** `TryJump` runs
+before the follower's aim code and the command is issued by `RunAirmoveDrive` right after, which sets
+`desiredAngles` to the launch yaw — so the yaw error is nulled, but residual `aim.yawVel` and drift still
+move the view during that step, and pitch is dragged toward 0. Both are handled by refusing to launch
+rather than by modelling them: `kMaxLaunchYawRate` skips the tick while the aim is slewing (it retries in
+250 ms), and `kMaxLaunchPitch` keeps the `cos(pitch)` term inside a couple of percent of whatever the
+step leaves behind. The oppo log prints the launch yaw and the velocity yaw side by side, so a hop that
+misses can be read as "wrong prediction" or "aim moved" without guessing.
+
 ### Letting the command through, and what happens after
 
 `Bot_RunPlayerMove` strips `IN_DUCK` from any `IN_JUMP` command while `slj` is set, which is exactly the
@@ -1176,6 +1320,20 @@ opened door has translated out of that volume, no longer overlaps, and is avoide
 This matters because `NavAreaRecord` stores no entity or model index — a direct edict↔area link does
 not exist in the format. `requiresElevatorRide` in the same window exempts every `SOLID_BSP` hit, so
 the bot does not fight a plat it is about to board.
+
+**The goal item is exempt too, and that one does need the edict.** `RouteExemptsHit` returns true for
+`bot.goalItem`, before the `SOLID_BSP` test, because avoiding the thing you are deliberately walking up
+to is never right. In practice it only fires for chargers — every other item is `SOLID_TRIGGER` and
+never qualifies in the first place — and it only matters for the last stride, which is exactly where a
+32-wide hull grazes the brush it is about to press `+use` against. Without it that graze costs a
+forced repath, and the charger case turns out to be the one where a forced repath cannot help (below).
+
+Note the carve set and the `FL_WORLDBRUSH` set are close but not identical. `func_wall`,
+`func_conveyor` and `func_wall_toggle` are both carved by navgen and flagged, so the two filters agree.
+`func_healthcharger` and `func_recharge` are carved but **not** flagged — `CWallHealth::Spawn` never
+sets it — so the mesh routes around them while a trace still sees them. That asymmetry is deliberate:
+the plan keeps its 16 units of clearance, and a bot that has drifted off the plan into one still gets
+the detour search rather than pushing at it.
 
 ### The three maneuvers
 
@@ -1301,7 +1459,12 @@ ETA-derived timeout stays honest. The splice invalidates the `wp` pointer, so th
 ### When no route exists
 
 Treated like a failed air move: `Nav::PenalizeConnection` on the connection the bot is trying to
-cross, then an immediate repath. `PlanWaypoint::connIndex` is only set on airmove launches, so the
+cross, then an immediate repath — **but only when the penalty actually lands.**
+`PenalizeCurrentConnection` returns whether it found a connection to charge, and the repath is forced
+only on true. When the plan is a single area there is no connection on the route, the penalty is a
+no-op, and the replan is guaranteed to return the identical plan; forcing it is not merely wasted work
+but actively harmful, because `TryRepath` resets `lastProgressTime` and the stall detector below can
+then never fire. See "When there is nothing to reroute". `PlanWaypoint::connIndex` is only set on airmove launches, so the
 connection is recovered from `plannedConnPath` (captured from `path.connPath` in `Repath`) at the
 index where `plannedAreaPath` holds `currentAreaId`.
 
@@ -1361,6 +1524,49 @@ its stop and `avelocity` goes to zero, at which point the next search penalises 
 stall detector is the outer net if the classification is ever wrong. A stationary obstacle scores
 exactly zero and keeps the old behaviour, which is what the `closing` field in the decision line is
 for.
+
+### When there is nothing to reroute
+
+A blocked search used to be able to livelock the bot outright, and the failure is worth understanding
+because nothing about it looks wrong in isolation. On crossfire a bot printed this once a second,
+forever, from a position that never changed:
+
+```
+2 avoid blocked by func_healthcharger at (464.1,368.0,-1500.0) no clear rejoin point closing 0 traces 0
+2 mid-route repath (forced) at (464.1,368.0,-1500.0) wp 1/2
+2 Replan from=(464.1,368.0,-1500.0) waypoints=2 areas=1 eta=0.4s | penalized=0
+```
+
+Read the three numbers together. `traces 0` says `PickDestination` gave up before probing any
+geometry, which happens when every sample of the remaining path lies inside the obstacle's box padded
+by `kAvoidHullHalf + kAvoidCornerMargin` — here the charger's padded box was `x 430…474, y 366…434`
+and it contained the bot's own position and its goal. `areas=1` says the plan is a single area, so
+`plannedConnPath` holds nothing `PenalizeCurrentConnection` can charge, which `penalized=0` confirms.
+And the forced repath therefore rebuilt the same two waypoints. One second later, all of it again.
+
+The trap is that the forced repath was also **suppressing the recovery**. `TryRepath` resets
+`lastProgressTime`, the avoid failure repeats every `kAvoidSearchCooldown` (1 s), and the stall
+detector needs `kRepathInterval` (2 s) of no progress — so the loop kept its own safety net
+permanently one second from firing. A useless repath is not a no-op.
+
+Two changes close it. The repath is conditional on the penalty landing (above), so `lastProgressTime`
+is allowed to age. And when the stall does fire while the bot is still reporting blocked, the bot
+gives up on the goal rather than repathing into the same plan: `BotItems::OnBlocked` prints what
+stopped it, `NoteIgnored`s the item for `ItemUnreachableTimeout`, and clears the goal so `SelectGoal`
+picks something else next frame. It is the same escalation `OnRepathFailed` already used for "no route
+exists at all", which is the honest description of this situation too.
+
+**The "still blocked" test uses its own timestamp, not `state.lastKind`.** The sticky window on
+`lastKind` expires exactly at `nextSearchTime`, which with a 1 s cooldown and a 2 s stall is exactly
+when the stall lands — a coin flip on frame timing. `state.blockedUntil`, set to
+`now + 2 * kAvoidSearchCooldown` on every non-receding failure, covers the gap by construction.
+
+A receding mover never reaches any of this: `hitRecedes` short-circuits before the penalty, so a bot
+walking after a swinging door neither penalises nor gives up.
+
+The root cause of that particular loop was upstream, in navgen — the charger was not in the mesh at
+all, so the goal point was inside it. `doc/navgen.md` has that half. This section is about why the
+runtime could not save itself from a bad goal, which is a property worth keeping fixed independently.
 
 ## bot_manager.cpp
 

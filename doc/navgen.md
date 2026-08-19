@@ -668,9 +668,28 @@ GoldSrc RecursiveHullCheck:
 ### Carved vs passable
 Two classes of brush entity, handled oppositely:
 
-- **`func_wall`** is permanently solid, so `ExtractBlockingVolumes` returns it and it is
-  **carved** out of the world leaves — the space simply ceases to exist. `func_detail` is not listed: the
+- **The permanently solid brush entities** are returned by `ExtractBlockingVolumes` and **carved** out of
+  the world leaves — the space simply ceases to exist. `IsBlockingEntity` lists them:
+
+  | classname | carved when |
+  | --- | --- |
+  | `func_wall` | always |
+  | `func_healthcharger`, `func_recharge` | always |
+  | `func_conveyor` | `!(spawnflags & 2)` — `SF_CONVEYOR_NOTSOLID` spawns it `SOLID_NOT` |
+  | `func_wall_toggle` | `!(spawnflags & 1)` — `SF_WALL_START_OFF` spawns it `SOLID_NOT` |
+
+  The two conditional ones are conditional because the spawnflag is the difference between a wall and a
+  decoration, and carving a decoration deletes a route that exists. `func_detail` is not listed at all: the
   compiler folds it into world geometry, so it never reaches the entity lump.
+
+  **The chargers are why this list is not just `func_wall`.** A wall charger protrudes a few units out of
+  the wall it hangs on, and with only `func_wall` carved the mesh had no idea: on crossfire the charger at
+  `(448,384,-1504)…(456,416,-1456)` sat in front of a wall at x=448, and the area in front of it started at
+  x=464 — the wall plus the 16-unit hull, with nothing subtracted for the charger. Every consumer then
+  inherited that lie. `ResolveChargerArea` clamped the charger centre into that area and produced a service
+  point at x=464, where a bot's hull would be 8 units inside the brush, so the bot could never arrive; and
+  any route hugging that wall planned straight through the charger. Carving moves the area edge to x=472 and
+  both problems go away at the source. See `doc/bot.md` for the runtime half of that story.
 - **`func_door`, `func_door_rotating`, `func_breakable`** are not, so `ExtractPassableVolumes` returns them and
   they **split** the leaf they sit in. The interior piece survives as its own area tagged `NAV_AREA_DOOR` or
   `NAV_AREA_BREAKABLE`, carrying activation, activator position and opening time.

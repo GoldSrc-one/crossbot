@@ -608,6 +608,22 @@ void OnRepathFailed(CBot &bot)
 	ForgetGoalItem(bot);
 }
 
+void OnBlocked(CBot &bot, const char *what)
+{
+	edict_t *ent = bot.goalItem.Get();
+	if (ent)
+	{
+		char msg[224];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s could not get past %s reaching %s, ignoring it for %.0fs\n",
+			bot.name, what, CBotClassOf(ent), g_pGameProfile->ItemUnreachableTimeout());
+		SERVER_PRINT(msg);
+		NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
+	}
+
+	ClearGoalItem(bot);
+}
+
 void OnRespawn(CBot &bot)
 {
 	bot.fullMemo.clear();

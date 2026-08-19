@@ -21,11 +21,12 @@ namespace
 	constexpr int kHullDuck = 3;
 
 	constexpr float kCheckInterval = 0.25f;
-	constexpr float kCooldownSeconds = 5.f;
 	constexpr float kMinGainSeconds = 0.35f;
 	constexpr float kSpeedTriggerRatio = 1.25f;
 	constexpr float kMinLaunchSpeed = 60.f;
 	constexpr float kMaxSimSeconds = 6.f;
+	constexpr float kMaxLaunchYawRate = 30.f;
+	constexpr float kMaxLaunchPitch = 20.f;
 
 	float Speed2D(const Vector &v)
 	{
@@ -59,19 +60,13 @@ void OnRepath(CBot &bot)
 	bot.oppoCostsGoalArea = -1;
 }
 
-void OnLanded(CBot &bot, int landedAreaId)
-{
-	if (landedAreaId != bot.airmoveTargetArea)
-		bot.oppoCooldownUntil = gpGlobals->time + kCooldownSeconds;
-}
-
 bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 {
 	edict_t *pEdict = bot.pEdict;
 
 	if (!Enabled() || !bot.hasGoal)
 		return false;
-	if (gpGlobals->time < bot.oppoNextCheck || gpGlobals->time < bot.oppoCooldownUntil)
+	if (gpGlobals->time < bot.oppoNextCheck)
 		return false;
 	if (bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive)
 		return false;
@@ -93,6 +88,10 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 	if (!longJump && speed < kSpeedTriggerRatio * mesh.designMaxSpeed)
 		return false;
 
+	if (longJump && (fabsf(bot.aim.yawVel) > kMaxLaunchYawRate ||
+		fabsf(pEdict->v.v_angle.x) > kMaxLaunchPitch))
+		return false;
+
 	if (!RebuildCosts(bot, mesh))
 		return false;
 
@@ -103,13 +102,17 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 	PmSim::PmPhysics physics = Bot_Physics(pEdict);
 	PmSim::PmSimulator sim(Bot_EngineTraceFn(pEdict, kHullDuck), physics);
 
-	float yaw = atan2f(vel.y, vel.x) * (180.f / NavMath::kPiF);
-	Vector fwd = Bot_YawDir(yaw);
+	float velYaw = atan2f(vel.y, vel.x) * (180.f / NavMath::kPiF);
+	float yaw = velYaw;
 
 	if (longJump)
 	{
-		Vector launchVel(fwd.x * PmSim::kLongJumpSpeed, fwd.y * PmSim::kLongJumpSpeed,
-			PmSim::kLongJumpImpulse);
+		float pitch = pEdict->v.v_angle.x + pEdict->v.punchangle.x;
+		yaw = Bot_NormalizeAngle(pEdict->v.v_angle.y + pEdict->v.punchangle.y);
+
+		float horizontal = PmSim::kLongJumpSpeed * cosf(pitch * (NavMath::kPiF / 180.f));
+		Vector fwd = Bot_YawDir(yaw);
+		Vector launchVel(fwd.x * horizontal, fwd.y * horizontal, PmSim::kLongJumpImpulse);
 		sim.BeginAirborne(pEdict->v.origin, launchVel, yaw, physics.maxSpeed);
 	}
 	else
@@ -162,9 +165,9 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 
 	char msg[320];
 	snprintf(msg, sizeof(msg),
-		"CrossBot: %s oppo jump at (%.1f,%.1f,%.1f) yaw %.0f speed %.0f kind %s | here %.2fs land %.2fs "
-		"flight %.2fs (%.2fs real) gain %.2fs -> area %u\n",
-		bot.name, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, yaw, speed,
+		"CrossBot: %s oppo jump at (%.1f,%.1f,%.1f) yaw %.0f (vel %.0f) speed %.0f kind %s | "
+		"here %.2fs land %.2fs flight %.2fs (%.2fs real) gain %.2fs -> area %u\n",
+		bot.name, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, yaw, velYaw, speed,
 		longJump ? "lj" : "jump", bot.oppoCosts[here], bot.oppoCosts[land], flight, sim.Time(), gain,
 		land);
 	SERVER_PRINT(msg);

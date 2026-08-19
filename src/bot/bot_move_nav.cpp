@@ -525,9 +525,6 @@ namespace
 				decided ? "" : " undecided");
 			SERVER_PRINT(msg);
 
-			if (oppo)
-				BotOppo::OnLanded(bot, landedId);
-
 			if (oppo || failed || !decided)
 				bot.nextRepathTime = gpGlobals->time;
 
@@ -1565,7 +1562,6 @@ namespace
 		bot.airmoveConnIndex = -1;
 		bot.airmoveOpportunistic = false;
 		bot.oppoCostsGoalArea = -1;
-		bot.oppoCooldownUntil = 0.f;
 		bot.airmovePlannedTime = 0.f;
 		bot.airmoveMaxTime = kAirmoveMaxAirTime;
 		bot.airmoveOverrunLogged = false;
@@ -1665,10 +1661,10 @@ namespace
 			bot.estimatedArrivalTime += extra / physics.maxSpeed;
 	}
 
-	void PenalizeCurrentConnection(CBot &bot)
+	bool PenalizeCurrentConnection(CBot &bot)
 	{
 		if (bot.currentAreaId < 0)
-			return;
+			return false;
 
 		uint32_t cur = static_cast<uint32_t>(bot.currentAreaId);
 		size_t areaSteps = bot.plannedAreaPath.empty() ? 0 : bot.plannedAreaPath.size() - 1;
@@ -1686,8 +1682,10 @@ namespace
 				bot.name, bot.plannedConnPath[i], cur, bot.plannedAreaPath[i + 1],
 				Nav::ConnectionPenalty(bot.plannedConnPath[i]));
 			SERVER_PRINT(msg);
-			return;
+			return true;
 		}
+
+		return false;
 	}
 
 	void RewardEnteredConnection(CBot &bot, uint32_t enteredId)
@@ -1933,6 +1931,15 @@ void Bot_MoveNav(CBot &bot)
 	bool forcedRepath = RepathDue(bot);
 	bool stalled = !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
+	if (stalled && !forcedRepath && gpGlobals->time < bot.avoid.blockedUntil)
+	{
+		BotItems::OnBlocked(bot, bot.avoid.lastHit);
+		BotAim::ApplyGaze(bot);
+		Vector angles = Bot_UpdateFacing(bot);
+		RunIdleMove(bot, angles);
+		return;
+	}
+
 	if (bot.waypoints.empty() || forcedRepath || stalled)
 	{
 		if (!TryRepath(bot, *mesh, pEdict, forcedRepath ? "forced" : "stalled"))
@@ -2160,11 +2167,8 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	if (avoid.searchFailed && !avoid.hitRecedes)
-	{
-		PenalizeCurrentConnection(bot);
+	if (avoid.searchFailed && !avoid.hitRecedes && PenalizeCurrentConnection(bot))
 		bot.nextRepathTime = gpGlobals->time;
-	}
 
 	bool planCrouch = wp->requiresCrouch
 		|| (curArea && (curArea->areaFlags & crossbot_nav::NAV_AREA_CROUCH));

@@ -25,7 +25,20 @@ namespace
 	constexpr float kMaxFrameTime = 1.f / 20.f;
 
 	constexpr float kTestSettleTolerance = 0.5f;
+	constexpr float kTestSettleSpeed = 150.f;
 	constexpr float kTestTimeout = 3.f;
+
+	constexpr float kBrakeSpread = 0.06f;
+	constexpr float kFlickMinError = 3.f;
+	constexpr float kFlickGrowth = 0.5f;
+	constexpr float kDefaultErrorScale = 1.f;
+	constexpr float kMaxErrorScale = 4.f;
+
+	constexpr float kDefaultDrift = 1.f;
+	constexpr float kMaxDrift = 5.f;
+	constexpr float kDriftYawRate = 1.7f;
+	constexpr float kDriftPitchRate = 1.19f;
+	constexpr float kDriftPitchScale = 0.6f;
 
 	constexpr float kDefaultDelay = 0.25f;
 	constexpr float kGazeCheckInterval = 0.25f;
@@ -41,7 +54,52 @@ namespace
 		return fov / kReferenceFov;
 	}
 
-	float StepAxis(float errAngle, float fovScale, float maxAccel, float dt, float &vel)
+	float RandomUnit(BotAim::State &aim)
+	{
+		aim.rngState = aim.rngState * 1664525u + 1013904223u;
+		return static_cast<float>((aim.rngState >> 8) & 0xFFFFFFu) / 16777216.f;
+	}
+
+	float RandomSigned(BotAim::State &aim)
+	{
+		return RandomUnit(aim) * 2.f - 1.f;
+	}
+
+	void SeedAim(CBot &bot)
+	{
+		BotAim::State &aim = bot.aim;
+		if (aim.rngSeeded)
+			return;
+
+		aim.rngSeeded = true;
+		aim.rngState = static_cast<unsigned int>(
+			g_engfuncs.pfnIndexOfEdict(bot.pEdict)) * 2654435761u + 1u;
+		aim.driftPhaseYaw = RandomUnit(aim) * 2.f * kPiF;
+		aim.driftPhasePitch = RandomUnit(aim) * 2.f * kPiF;
+	}
+
+	void UpdateBrake(CBot &bot, float yawErr, float pitchErr)
+	{
+		BotAim::State &aim = bot.aim;
+
+		float mag = sqrtf(yawErr * yawErr + pitchErr * pitchErr);
+		float spread = kBrakeSpread * BotAim::ErrorScale();
+
+		if (spread <= 0.f)
+		{
+			aim.brakeYaw = 1.f;
+			aim.brakePitch = 1.f;
+		}
+		else if (mag > kFlickMinError && mag > aim.flickMag + kFlickGrowth)
+		{
+			aim.brakeYaw = 1.f + RandomSigned(aim) * spread;
+			aim.brakePitch = 1.f + RandomSigned(aim) * spread;
+		}
+
+		aim.flickMag = mag;
+	}
+
+	float StepAxis(float errAngle, float fovScale, float maxAccel, float brake, float dt, float &vel)
 	{
 		float errHand = errAngle / fovScale;
 		float mag = fabsf(errHand);
@@ -49,7 +107,7 @@ namespace
 		float limit = mag / dt;
 
 		float step = maxAccel * dt;
-		float envelope = sqrtf(2.f * maxAccel * mag + 0.25f * step * step) - 0.5f * step;
+		float envelope = (sqrtf(2.f * maxAccel * mag + 0.25f * step * step) - 0.5f * step) * brake;
 		if (envelope < limit)
 			limit = envelope;
 		if (limit > kMaxHandSpeed)
@@ -81,6 +139,8 @@ namespace
 		float yawErr = fabsf(Bot_NormalizeAngle(aim.testAngles.y - angles.y));
 		float pitchErr = fabsf(Bot_NormalizeAngle(aim.testAngles.x - angles.x));
 		if (yawErr > kTestSettleTolerance || pitchErr > kTestSettleTolerance)
+			return;
+		if (speed > kTestSettleSpeed)
 			return;
 
 		aim.testSettled = true;
@@ -234,6 +294,28 @@ float BotAim::Delay()
 	return delay;
 }
 
+float BotAim::ErrorScale()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_error");
+	float scale = cvar ? cvar->value : kDefaultErrorScale;
+	if (scale < 0.f)
+		scale = 0.f;
+	else if (scale > kMaxErrorScale)
+		scale = kMaxErrorScale;
+	return scale;
+}
+
+float BotAim::DriftAmplitude()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_drift");
+	float amp = cvar ? cvar->value : kDefaultDrift;
+	if (amp < 0.f)
+		amp = 0.f;
+	else if (amp > kMaxDrift)
+		amp = kMaxDrift;
+	return amp;
+}
+
 bool BotAim::GazeEnabled()
 {
 	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_gaze");
@@ -360,10 +442,23 @@ Vector Bot_UpdateFacing(CBot &bot)
 	BotAim::State &aim = bot.aim;
 	Vector current = pEdict->v.v_angle;
 
+	SeedAim(bot);
+
 	if (aim.testActive && gpGlobals->time > aim.testUntil)
 		aim.testActive = false;
 
-	const Vector &desired = aim.testActive ? aim.testAngles : bot.desiredAngles;
+	Vector desired = aim.testActive ? aim.testAngles : bot.desiredAngles;
+
+	if (!aim.testActive)
+	{
+		float amp = BotAim::DriftAmplitude();
+		if (amp > 0.f)
+		{
+			desired.y += amp * sinf(gpGlobals->time * kDriftYawRate + aim.driftPhaseYaw);
+			desired.x += amp * kDriftPitchScale *
+				sinf(gpGlobals->time * kDriftPitchRate + aim.driftPhasePitch);
+		}
+	}
 
 	float dt = gpGlobals->frametime;
 	if (dt < kMinFrameTime)
@@ -376,8 +471,12 @@ Vector Bot_UpdateFacing(CBot &bot)
 	float yawErr = Bot_NormalizeAngle(desired.y - current.y);
 	float pitchErr = Bot_NormalizeAngle(desired.x - current.x);
 
-	float yaw = Bot_NormalizeAngle(current.y + StepAxis(yawErr, fovScale, kMaxAccelYaw, dt, aim.yawVel));
-	float pitch = current.x + StepAxis(pitchErr, fovScale, kMaxAccelPitch, dt, aim.pitchVel);
+	UpdateBrake(bot, yawErr, pitchErr);
+
+	float yaw = Bot_NormalizeAngle(current.y +
+		StepAxis(yawErr, fovScale, kMaxAccelYaw, aim.brakeYaw, dt, aim.yawVel));
+	float pitch = current.x +
+		StepAxis(pitchErr, fovScale, kMaxAccelPitch, aim.brakePitch, dt, aim.pitchVel);
 
 	if (pitch > kPitchLimit)
 	{

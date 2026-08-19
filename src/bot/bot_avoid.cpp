@@ -127,6 +127,9 @@ namespace
 
 	bool RouteExemptsHit(const CBot &bot, const Nav::NavMesh &mesh, edict_t *hit, int solid)
 	{
+		if (bot.goalItem.Is(hit))
+			return true;
+
 		if (solid != SOLID_BSP)
 			return false;
 
@@ -520,6 +523,8 @@ namespace
 			out.searchFailed = true;
 			out.hitRecedes = recedes;
 			state.lastKind = recedes ? BotAvoid::AVOID_FOLLOW : BotAvoid::AVOID_BLOCKED;
+			if (!recedes)
+				state.blockedUntil = now + 2.f * kAvoidSearchCooldown;
 			snprintf(msg, sizeof(msg),
 				"CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) no clear rejoin point "
 				"closing %.0f traces %d\n",
@@ -561,6 +566,8 @@ namespace
 		out.searchFailed = true;
 		out.hitRecedes = recedes;
 		state.lastKind = recedes ? BotAvoid::AVOID_FOLLOW : BotAvoid::AVOID_BLOCKED;
+		if (!recedes)
+			state.blockedUntil = now + 2.f * kAvoidSearchCooldown;
 
 		snprintf(msg, sizeof(msg),
 			"CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) %s length %.0f budget %.0f "

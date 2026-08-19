@@ -320,19 +320,21 @@ void PrintAimStatus()
 				sqrtf(dYaw * dYaw + dPitch * dPitch), dYaw, dPitch);
 		}
 
-		char line[352];
+		char line[416];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s gaze=%s vis=%d queue=%zu/%zu hist=%.2fs served=%.3fs hand=%.0f deg/s "
-			"view=(%.1f,%.1f) err=%s\n",
+			"brake=(%.3f,%.3f) view=(%.1f,%.1f) err=%s\n",
 			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.aim.gazeVisible ? 1 : 0,
 			bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot), bot.aim.servedDelay,
-			BotAim::ViewSpeed(bot), view.x, view.y, errBuf);
+			BotAim::ViewSpeed(bot), bot.aim.brakeYaw, bot.aim.brakePitch, view.x, view.y, errBuf);
 		SERVER_PRINT(line);
 	}
 
-	char summary[160];
-	snprintf(summary, sizeof(summary), "CrossBot: %d bot(s), aim_gaze=%d aim_delay=%.3f\n", shown,
-		BotAim::GazeEnabled() ? 1 : 0, BotAim::Delay());
+	char summary[192];
+	snprintf(summary, sizeof(summary),
+		"CrossBot: %d bot(s), aim_gaze=%d aim_delay=%.3f aim_error=%.2f aim_drift=%.2f\n", shown,
+		BotAim::GazeEnabled() ? 1 : 0, BotAim::Delay(), BotAim::ErrorScale(),
+		BotAim::DriftAmplitude());
 	SERVER_PRINT(summary);
 }
 
@@ -400,18 +402,6 @@ void PrintNavStatus()
 			snprintf(line, sizeof(line), " ladder=%.1fs up=%d grabbed=%d top=%d stalls=%d offz=%.0f",
 				gpGlobals->time - bot.ladderStartTime, bot.ladderUp ? 1 : 0, bot.ladderGrabbed ? 1 : 0,
 				bot.ladderAtTop ? 1 : 0, bot.ladderStalls, bot.ladderDismountZ);
-			msg += line;
-		}
-
-		if (BotOppo::Enabled())
-		{
-			float cooldown = bot.oppoCooldownUntil - gpGlobals->time;
-			if (cooldown < 0.f)
-				cooldown = 0.f;
-			snprintf(line, sizeof(line), " oppo=%s costs=%d cooldown=%.1fs",
-				bot.airmoveOpportunistic ? "flying"
-					: (Bot_HasLongJumpModule(bot.pEdict) ? "lj" : "speed"),
-				bot.oppoCostsGoalArea, cooldown);
 			msg += line;
 		}
 

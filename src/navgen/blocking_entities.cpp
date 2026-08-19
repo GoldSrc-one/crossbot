@@ -23,15 +23,27 @@ constexpr int kSfBreakTriggerOnly = 1;
 constexpr int kSfDoorStartOpen = 1;
 constexpr int kSfDoorPassable = 8;
 constexpr int kSfDoorUseOnly = 256;
+constexpr int kSfWallStartOff = 1;
+constexpr int kSfConveyorNotSolid = 2;
 
 constexpr double kDefaultDoorSpeed = 100.0;
 constexpr double kDefaultRotateDistance = 90.0;
 constexpr double kDefaultBreakableHealth = 1.0;
 constexpr double kBreakSecondsPerHealth = 0.1;
 
-bool IsBlockingClassname(const std::string &classname)
+bool IsBlockingEntity(const Entity &ent)
 {
-	return classname == "func_wall";
+	std::string classname = ent.Get("classname");
+	if (classname == "func_wall" || classname == "func_healthcharger" || classname == "func_recharge")
+		return true;
+
+	int spawnflags = ParseInt(ent.Get("spawnflags"), 0);
+	if (classname == "func_wall_toggle")
+		return (spawnflags & kSfWallStartOff) == 0;
+	if (classname == "func_conveyor")
+		return (spawnflags & kSfConveyorNotSolid) == 0;
+
+	return false;
 }
 
 bool IsDoorClassname(const std::string &classname)
@@ -258,7 +270,7 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 
 	for (const Entity &ent : entities)
 	{
-		if (!IsBlockingClassname(ent.Get("classname")))
+		if (!IsBlockingEntity(ent))
 			continue;
 
 		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
