@@ -559,7 +559,8 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 	return profile;
 }
 
-float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead)
+float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead,
+	float edgeFriction, float edgeZone)
 {
 	const ProfileSeg *approach = nullptr;
 	for (const ProfileSeg &seg : profile.segs)
@@ -569,8 +570,13 @@ float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead)
 	if (!approach)
 		return 0.f;
 
-	float usable = std::max(0.f, approach->sLen - std::max(lead, 0.f));
-	float reach = AccelForward(approach->vReachEntry, usable, profile.accel, profile.friction,
+	float clipped = std::max(lead, 0.f);
+	float usable = std::max(0.f, approach->sLen - clipped);
+	float edge = std::min(usable, std::max(0.f, edgeZone - clipped));
+
+	float reach = AccelForward(approach->vReachEntry, usable - edge, profile.accel, profile.friction,
+		profile.stopSpeed);
+	reach = AccelForward(reach, edge, profile.accel, profile.friction * edgeFriction,
 		profile.stopSpeed);
 
 	return std::min(reach, approach->vExit);

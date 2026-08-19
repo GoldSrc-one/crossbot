@@ -42,6 +42,8 @@ constexpr float kAirAccelWishSpeedCap = 30.f;
 constexpr float kMaxOnGroundVelocityZ = 180.f;
 constexpr float kGroundNormalZ = 0.7f;
 constexpr float kGroundTraceDist = 2.f;
+constexpr float kEdgeProbeAhead = 16.f;
+constexpr float kEdgeProbeDrop = 34.f;
 
 constexpr float kPlayerFatalFallSpeed = 1024.f;
 constexpr float kPlayerMaxSafeFallSpeed = 580.f;

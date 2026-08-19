@@ -39,8 +39,6 @@ namespace
 	constexpr float kAirmoveLandingTolerance = 48.f;
 	constexpr int kWaterlevelSwimming = 2;
 
-	constexpr float kEdgeProbeAhead = 16.f;
-	constexpr float kEdgeProbeDrop = 34.f;
 	constexpr float kStandHullMinsZ = -36.f;
 	constexpr float kDuckHullMinsZ = -18.f;
 
@@ -81,10 +79,10 @@ namespace
 
 		bool ducking = (pEdict->v.flags & FL_DUCKING) != 0;
 		const Vector &origin = pEdict->v.origin;
-		Vector start(origin.x + vel.x / speed * kEdgeProbeAhead,
-			origin.y + vel.y / speed * kEdgeProbeAhead,
+		Vector start(origin.x + vel.x / speed * PmSim::kEdgeProbeAhead,
+			origin.y + vel.y / speed * PmSim::kEdgeProbeAhead,
 			origin.z + (ducking ? kDuckHullMinsZ : kStandHullMinsZ));
-		Vector stop(start.x, start.y, start.z - kEdgeProbeDrop);
+		Vector stop(start.x, start.y, start.z - PmSim::kEdgeProbeDrop);
 
 		TraceResult tr;
 		g_engfuncs.pfnTraceHull(start, stop, dont_ignore_monsters, ducking ? kHullDuck : kHullHuman,

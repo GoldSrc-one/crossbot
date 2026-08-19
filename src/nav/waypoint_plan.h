@@ -210,6 +210,7 @@ struct PendingLaunch
 	float designSpeed = 0.f;
 	float needRunup = 0.f;
 	float haveRunup = 0.f;
+	bool atEdge = false;
 };
 
 class PlanWalker
@@ -245,6 +246,8 @@ private:
 
 	bool JumpLandsIn(const Vector &launchFloor, float yaw, float speed, bool jump, uint32_t fromAreaId,
 		uint32_t destAreaId, bool needsCrouch, Vector &endOut, const char **whyOut) const;
+
+	bool LaunchAtEdge(const Vector &launchFloor, const Vector &launchDir, uint32_t fromId) const;
 
 	float RunupDistance(const Vector &launchPoint, const Vector &back, float want, uint32_t fromId,
 		uint32_t &runupAreaOut, size_t &gatesKeptOut) const;

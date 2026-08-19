@@ -881,7 +881,8 @@ then pulled the approach against geometry that is not walkable and the arc fitte
 with. The offset is length, not direction: it does not stop the node landing behind the bot when the
 route arrives perpendicular to the launch heading, which is what produces the hairpin above. When the
 route arrives by *air move* the node can land behind the bot outright — see "Landing on the next
-run-up".
+run-up". The `AccelDistance` bound is charged at doubled friction whenever the launch sits at a ledge —
+see "Edge friction on the approach".
 
 **The clamp runs backwards along the route, not inside one area.** `PlanWalker::RunupDistance` steps
 area by area: clamp inside the current one, and when that falls short of the offset, re-clamp with no
@@ -1090,6 +1091,63 @@ raises the launch straight back up; with it, `Respeed` stays downward-only relat
 value and mops up whatever the pull could not reach. On `test54_window` the 1→2 launch retracts
 149 → 128, the node moves level with the landing, and the 3→17 launch re-speeds 265 → 237 and lands —
 `1 re-speed kept design` becomes `0`, and the bot delivers 96% of design instead of 75%.
+
+### Edge friction on the approach
+Every run-up ends at a ledge — that is what an air move is — and GoldSrc charges for that. `PM_Friction`
+traces `kEdgeProbeAhead` (16 units) ahead along the velocity and `kEdgeProbeDrop` (34) down; when that
+trace comes back clear it multiplies ground friction by `sv_edgefriction`, normally 2. So the last 16
+units before *any* launch run at friction 8, not 4.
+
+The follower always knew this — `BotDrivePhysics` doubles `groundFriction` when `AtFrictionEdge` says
+so — but doubling it there only corrects the throttle the bot asks for, not the physics the engine
+applies. The planner did not know it at all: `MakePlanTraces` copies plain `Bot_Physics`, and both
+`BuildPathProfile` and `PlanWalker::Cross` used `groundFriction * friction` neat. The plan therefore
+sized every launch approach with half the friction the run-up actually sees.
+
+It only bites when the run-up is short, because the shortfall is the whole cost of the last 16 units.
+At `accel = 2700`, `stopSpeed = 100`, reaching 236 u/s from a standstill takes 13.7 units at friction 4
+and **21.5** at friction 8. On `crossfire` the bot launches west out of area 32 — a box only 36 units
+wide in x — so the run-up is 14 to 23 units, entirely inside the edge zone:
+
+```
+airmove aborted at (255.7,961.6,-1468.0) plan speed 236 actual 189 (80% of design) conn 1430
+airmove aborted at (242.3,961.5,-1468.0) plan speed 237 actual 198 (84% of design) conn  866
+```
+
+14 units at friction 8 delivers ~198. The plan said 236, the follower demands 95%, and the launch
+aborts. `Respeed` cannot save it because it sets `launchSpeed` to exactly the reach it measured, with
+no margin, using the same friction that produced the wrong number.
+
+`PlanWalker::LaunchAtEdge` runs the engine's probe from the launch floor along the launch heading,
+with the hull the bot has on the run-up (the launch area's `crouch` flag). It is evaluated once per
+launch in `Cross` and cached on `PendingLaunch::atEdge`, because both the run-up sizing and `Respeed`
+need it and neither should re-trace. Probing from the launch point rather than along the approach is
+the right read: it is the closest point to the drop, so a clear probe there means the whole final 16
+units are inside the zone.
+
+**The two users of that flag treat it differently on purpose.** `Cross` doubles the friction for the
+whole of `needed`, past 16 units where the real friction is back to normal. That is deliberately
+pessimistic, and it is safe because `needed` can only ever *lengthen* `runupBack` — `RunupDistance`
+and the anchor clamp then cut it back to whatever the geometry actually offers. It never asserts a
+speed. `ProfileLaunchReach` does assert one, so it integrates exactly: `AccelForward` over the plain
+stretch, then `AccelForward` again over the edge stretch at doubled friction. Composing two forward
+integrals needs no new solver and no inverse.
+
+The edge stretch is `min(usable, edgeZone - lead)`, not `min(usable, edgeZone)`. The bot commits to the
+jump one `AirmoveLaunchLead` *before* the waypoint, so the ground it covers inside the zone is shorter
+than the zone by exactly that lead. Dropping the term over-charges every launch by a frame of travel.
+
+Sweeping this changed 5 of 45 maps at each plan speed, and launch speeds moved in **both** directions.
+A longer `needed` pushes the run-up node further back, and a longer approach can support a faster
+launch even at doubled friction: `test6_crouchjump` goes 235 → 258 on its 2→x jump while
+`test38_islands` goes 282 → 278 on its 4→x. The point is not that launches got slower, it is that the
+number the plan asserts is now the number the ground delivers.
+
+**Still optimistic:** `BuildPathProfile`'s backward braking and forward reachable passes carry one
+global `profile.friction`, so `vReachEntry` — the speed handed to `ProfileLaunchReach` at the start of
+the approach — is still computed without edge friction. That is second order here, because it feeds the
+long haul rather than the last 16 units, and making the profile carry per-segment friction is a much
+larger change than this one.
 
 - `BuildAreaGates(PlanArea&)` - fills edgeGates from boundPlanes
 - `BuildConnectionGates(areas, conns)` - builds shared face gates

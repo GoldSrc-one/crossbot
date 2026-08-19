@@ -73,7 +73,8 @@ float PivotSpeed(const PmSim::PmPhysics &physics, float maxSpeed);
 PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 	const PmSim::PmPhysics &physics, const PlanTraceContext *traces = nullptr);
 
-float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead);
+float ProfileLaunchReach(const PlanProfile &profile, size_t wpIndex, float lead,
+	float edgeFriction = 1.f, float edgeZone = 0.f);
 
 float ProfileWaypointS(const PlanProfile &profile, size_t wpIndex);
 

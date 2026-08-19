@@ -819,6 +819,23 @@ bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, 
 	return false;
 }
 
+bool PlanWalker::LaunchAtEdge(const Vector &launchFloor, const Vector &launchDir,
+	uint32_t fromId) const
+{
+	if (!m_traces)
+		return false;
+
+	bool duckLaunch = (fromId < m_areas->size()) && (*m_areas)[fromId].crouch;
+	const PmSim::PmTraceFn &trace = duckLaunch ? m_traces->duckTrace : m_traces->standTrace;
+	if (!trace)
+		return false;
+
+	Vector start = launchFloor + launchDir * PmSim::kEdgeProbeAhead;
+	Vector end(start.x, start.y, start.z - PmSim::kEdgeProbeDrop);
+
+	return trace(start, end).fraction == 1.f;
+}
+
 float PlanWalker::RunupDistance(const Vector &launchPoint, const Vector &back, float want,
 	uint32_t fromId, uint32_t &runupAreaOut, size_t &gatesKeptOut) const
 {
@@ -1140,6 +1157,9 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		Vector launchDir(std::cos(yaw * kDegToRad), std::sin(yaw * kDegToRad), 0.f);
 		float accel = m_traces->physics.accelerate * m_traces->physics.maxSpeed;
 		float ground = m_traces->physics.groundFriction * m_traces->physics.friction;
+		bool atEdge = LaunchAtEdge(launch, launchDir, fromId);
+		if (atEdge)
+			ground *= m_traces->physics.edgeFriction;
 		float needed = AccelDistance(0.f, launchSpeed, accel, ground, m_traces->physics.stopSpeed) +
 			AirmoveLaunchLead(launchSpeed, m_traces->physics.frameTime);
 
@@ -1209,6 +1229,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		pl.designSpeed = launchSpeed;
 		pl.needRunup = needed;
 		pl.haveRunup = runupBack;
+		pl.atEdge = atEdge;
 		m_launches.push_back(pl);
 
 		PushWaypoint(launchWp);
@@ -1372,7 +1393,8 @@ void PlanWalker::Respeed()
 	for (const PendingLaunch &pl : m_launches)
 	{
 		float lead = AirmoveLaunchLead(pl.designSpeed, m_traces->physics.frameTime);
-		float reached = ProfileLaunchReach(probe, pl.index, lead);
+		float reached = ProfileLaunchReach(probe, pl.index, lead,
+			pl.atEdge ? m_traces->physics.edgeFriction : 1.f, PmSim::kEdgeProbeAhead);
 		if (reached <= 0.f || reached >= pl.designSpeed - kPlanAirmoveRespeedEps)
 			continue;
 
