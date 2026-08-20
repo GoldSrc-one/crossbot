@@ -327,13 +327,14 @@ void PrintAimStatus()
 				sqrtf(dYaw * dYaw + dPitch * dPitch), dYaw, dPitch);
 		}
 
-		char line[416];
+		char line[448];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s target=%s bone=%d queue=%zu/%zu hist=%.2fs served=%.3fs hand=%.0f deg/s "
-			"brake=(%.3f,%.3f) view=(%.1f,%.1f) err=%s\n",
+			"CrossBot: %s target=%s bone=%d leadblk=%d queue=%zu/%zu hist=%.2fs served=%.3fs "
+			"hand=%.0f deg/s brake=(%.3f,%.3f) view=(%.1f,%.1f) err=%s\n",
 			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
-			bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot), bot.aim.servedDelay,
-			BotAim::ViewSpeed(bot), bot.aim.brakeYaw, bot.aim.brakePitch, view.x, view.y, errBuf);
+			bot.sense.leadVetoes, bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot),
+			bot.aim.servedDelay, BotAim::ViewSpeed(bot), bot.aim.brakeYaw, bot.aim.brakePitch,
+			view.x, view.y, errBuf);
 		SERVER_PRINT(line);
 	}
 
@@ -372,9 +373,10 @@ void PrintSenseStatus()
 
 		char line[448];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s target=%s bone=%d susp=%d/%zu fresh=%s look=%s\n",
+			"CrossBot: %s target=%s bone=%d leadblk=%d susp=%d/%zu fresh=%s look=%s\n",
 			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
-			BotSense::LiveCount(bot), BotSense::kSuspicionSlots, freshBuf, lookBuf);
+			bot.sense.leadVetoes, BotSense::LiveCount(bot), BotSense::kSuspicionSlots, freshBuf,
+			lookBuf);
 		SERVER_PRINT(line);
 	}
 

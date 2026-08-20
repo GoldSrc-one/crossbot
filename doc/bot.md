@@ -305,6 +305,10 @@ choice-reaction territory and reads as sluggish, so the clamp is a usable range 
 
     push { now, targetPoint + targetVelocity * delay }
 
+The push is conditional: that predicted point is traced first, and a lead that has already crossed into
+geometry is dropped rather than queued. See `### The lead point is traced before it is queued` under
+`## bot_sense.cpp`.
+
 The read takes the newest slot older than `now - delay`, linearly interpolates it with the next newer one
 so the served delay is exact regardless of frame rate rather than quantized to a frame, and only then
 converts to angles -- from the bot's **actual current eye**, in `ApplyLook`.
@@ -346,9 +350,9 @@ Nothing above this paragraph changed — the behaviour it described is simply tr
 ### What feeds the queue
 
 `BotSense::Update` does, once per frame, from the slot in `Bot_MoveNav` that `UpdateGaze` used to hold.
-See `## bot_sense.cpp` below for the whole producer. The contract the queue cares about is unchanged: one
-`PushDelaySlot` per frame while a target is held, the target extrapolated forward by `crossbot_aim_delay`,
-and `ClearDelayQueue` on acquiring a *different* target.
+See `## bot_sense.cpp` below for the whole producer. The contract the queue cares about is one
+`PushDelaySlot` per frame while a target is held *and its lead point comes back clear*, the target
+extrapolated forward by `crossbot_aim_delay`, and `ClearDelayQueue` on acquiring a *different* target.
 
 The one thing that did change is what point gets pushed. It is no longer the target's eye but a randomly
 chosen hitbox bone, re-picked every frame. The queue therefore stores points that jitter over the enemy's
@@ -717,6 +721,48 @@ transforming `bbmin`/`bbmax` into world space would need the bone's rotation. An
 bounds-checks `iBone` under `#ifdef REHLDS_FIXES`, so an out-of-range index is an out-of-bounds read on
 vanilla HLDS -- the bone set is built from `numhitboxes` and every index checked against `numbones`.
 
+### The lead point is traced before it is queued
+
+The queue write pushes `bestPoint + targetVelocity * delay` -- where the target is predicted to be one
+reaction time from now. For a long time nothing checked that this predicted point was anywhere a bullet
+could reach. At the default 0.25s and full run speed the lead runs to about 80 units, so it crosses into a
+wall roughly a whole reaction time before the target does, and a bot leading someone into cover spent the
+entire drain window aimed at brickwork.
+
+So the lead is traced, from the bot's real current eye, and the slot is pushed only if it comes back clear.
+A blocked lead pushes nothing at all.
+
+**It gates the queue write and nothing else.** The per-candidate trace above still runs against the raw bone
+point, so `SUSP_SIGHT` and target selection are untouched. Pointing that one trace at the lead instead --
+the obvious version -- would let an occluded lead null out `best`, and when it returned the next frame
+`best != sense.target.Get()` would fire `ClearDelayQueue` and wipe the whole ring. With 80-unit leads and a
+hitbox bone redrawn at random every frame, that flickers at every doorway and railing, and each flicker
+costs a full reaction delay of silence. Gating only the write also costs one trace per bot per frame rather
+than one per candidate, because the write happens once, for the winner.
+
+**The flags differ from the perception trace, deliberately.** This one is `ignore_monsters`; the one above
+is `dont_ignore_monsters` and has to be, or `tr.pHit == ent` could never be true. The two ask different
+questions. Perception asks *can I see this player*. The lead trace asks *is this predicted point inside or
+behind world geometry* -- a teammate, or the target's own body, standing between the eye and a point 80
+units past it must not suppress the lead, and under `dont_ignore_monsters` the target itself would be
+`tr.pHit` most of the time. Brush entities still block, which is right: a closed door is a wall. It is the
+same flag and the same question as the fire-side trace in `BotFire::Buttons`.
+
+**The trace is skipped when the lead is the sample point**, which covers both a stationary target and
+`crossbot_aim_delay 0`. That is not only an optimisation -- it is what makes `test_sense.ps1`'s static phase
+provably unchanged, since two motionless bots produce no lead, which keeps that phase usable as a regression
+check for everything else in the queue.
+
+Nothing is pushed in place of a vetoed lead. The ring drains, and if the block outlasts `delay` the read
+underflows and `ApplyLook` falls through to the suspicion blend, which points at the last `SUSP_SIGHT`
+entry -- the target's real last-seen position, at the corner. `ReadDelayed` needs no help with the gap: it
+interpolates on time, so a hole in the write history is just a longer span, and the served point slides
+across it smoothly when writes resume rather than jumping.
+
+Both `crossbot_aim_status` and `crossbot_sense_status` report `leadblk`, a per-bot count of vetoes since
+spawn. A count rather than a current-frame flag because a two-second poll would almost never catch the flag
+set, and the thing worth verifying is that the veto fires at all.
+
 ### The bone cache and when it flushes
 
 `g_boneSets` is a file-static array of 64 entries, map-scoped rather than per-bot. 64 rather than one per
@@ -894,8 +940,11 @@ makes the test ask *is my hand where my intent is*, and three things fall out of
 - A bot whose reaction delay has it tracking a stale position fires at that stale position and
   **misses**, the way a human does. Aiming error stops being cosmetic.
 - Line-of-sight loss needs no special case. The queue drains for `crossbot_aim_delay` after the
-  target is gone and the bot keeps shooting into cover for exactly that long, then stops when
-  `ReadDelayed` runs dry.
+  target is gone and the bot keeps tracking the place it last believed them to be for exactly that
+  long, then stops when `ReadDelayed` runs dry. Whether any of those frames become *shots* is the
+  world trace below, and increasingly they do not: `UpdateVision` no longer queues a lead point that
+  has already crossed into geometry, so the drain now mostly runs out over open ground rather than
+  into a wall.
 
 That drain only works because `BotSense::UpdateVision` clears the queue on acquiring a *different*
 live target and not on losing one — see `bot_sense.cpp`.

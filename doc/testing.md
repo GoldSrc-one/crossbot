@@ -139,6 +139,20 @@ between 2 and 48 degrees, mixing genuine target acceleration with the gate suppr
 a ladder instead, and no run is comparable to the last. Watch `queue` and `served` in that phase, not
 `err`.
 
+Both `crossbot_aim_status` and `crossbot_sense_status` carry `leadblk`, a per-bot count of frames where the
+queue write was vetoed because the target's extrapolated lead point had already crossed into geometry. It is
+a cumulative count rather than a current-frame flag precisely so a two-second poll can see it: the veto
+lasts one frame and a flag would almost always be sampled low. It sits on the aim line as well as the sense
+line because the static phase polls only the former.
+
+The two phases say different things about it. In the **static** phase `leadblk` must not move at all across
+the polls — the bots are motionless, so there is no lead, so the trace is skipped and the phase is identical
+to a build without the feature. It will already be non-zero on arrival, banked during the walk to the goal;
+what matters is that it is flat. Any increase there is a bug in the skip, not a behaviour change. In the
+**roam** phase it must climb. Bots chasing items on `crossfire` cross doorways and corners constantly, and a
+`leadblk` that stays put through a whole roam phase means the trace is wrong — flags, direction, or the skip
+swallowing every case — not that the map was unusually open.
+
 The **suspicion** phase reports which senses actually fired and asserts that heard entries age out. Only
 `SIGHT` and `SOUND` are reachable from it, because it runs with `crossbot_gather 0` and converged bots
 that never fight. `EVENT` and `DAMAGE` need weapon fire; `scripts/test_fire.ps1` is where all four
@@ -163,6 +177,12 @@ Neither aim phase exercises the extrapolation, because a still target has no vel
 let a bot lock on, and strafe at constant speed — its head should stay *glued* to you, not trail you.
 Reverse sharply and it should overshoot and correct. Step behind a wall and it should keep tracking for
 about a delay before stopping; step back out and nothing should move for about a delay before the flick.
+
+Do that wall check at walking pace, not a sprint. A slow target leads by a few units, so the queue keeps
+being written right up to the moment it vanishes and the drain above is what you see. A *sprinting* target
+leads by ~80 units at the default delay, so the lead is vetoed while the target is still in the open and
+the head parks at the corner rather than swinging into the wall behind it. Both are correct; they are
+different checks. The sprint one is the only test of the lead trace's actual purpose and no script makes it.
 
 Joining as a human is another way to exercise `EVENT` and `DAMAGE` by hand: fire a weapon near a bot that
 cannot see you and its head should turn toward the shot, and shoot one in the back and it should turn

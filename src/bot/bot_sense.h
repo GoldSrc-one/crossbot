@@ -39,6 +39,7 @@ struct State
 	float targetTime = 0.f;
 	Vector targetPoint;
 	int targetBone = -1;
+	int leadVetoes = 0;
 
 	unsigned int rngState = 0;
 	bool rngSeeded = false;

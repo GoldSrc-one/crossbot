@@ -32,6 +32,8 @@ namespace
 
 	constexpr float kDegenerateMean = 0.05f;
 
+	constexpr float kLeadEpsilonSq = 1.f;
+
 	constexpr int kRefinePasses = 2;
 
 	struct BoneSetEntry
@@ -274,7 +276,21 @@ namespace
 		sense.targetPoint = bestPoint;
 
 		float delay = BotAim::Delay();
-		BotAim::PushDelaySlot(bot, bestPoint + best->v.velocity * delay);
+		Vector offset = best->v.velocity * delay;
+		Vector lead = bestPoint + offset;
+
+		if (offset.LengthSquared() > kLeadEpsilonSq)
+		{
+			TraceResult leadTrace;
+			TRACE_LINE(eye, lead, ignore_monsters, pEdict, &leadTrace);
+			if (leadTrace.flFraction < 1.f)
+			{
+				++sense.leadVetoes;
+				return;
+			}
+		}
+
+		BotAim::PushDelaySlot(bot, lead);
 	}
 
 	bool LookDirection(CBot &bot, Vector &dirOut, float &authorityOut, int &entriesOut)
