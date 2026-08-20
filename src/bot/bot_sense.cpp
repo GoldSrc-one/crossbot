@@ -7,6 +7,7 @@
 #include "bot_sense.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_fire.h"
 #include "bot_move.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
@@ -290,7 +291,7 @@ namespace
 			}
 		}
 
-		BotAim::PushDelaySlot(bot, lead);
+		BotAim::PushDelaySlot(bot, lead, best->v.velocity);
 	}
 
 	bool LookDirection(CBot &bot, Vector &dirOut, float &authorityOut, int &entriesOut)
@@ -556,7 +557,8 @@ bool BotSense::ApplyLook(CBot &bot)
 	float delay = BotAim::Delay();
 	Vector point;
 	float yaw = 0.f, pitch = 0.f;
-	if (BotAim::ReadDelayed(bot, delay, point) && BotAim::LosAngles(eye, point, yaw, pitch))
+	bool have = BotFire::AimPoint(bot, point) || BotAim::ReadDelayed(bot, delay, point);
+	if (have && BotAim::LosAngles(eye, point, yaw, pitch))
 	{
 		if (pitch > limit)
 			pitch = limit;

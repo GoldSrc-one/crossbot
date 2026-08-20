@@ -62,7 +62,7 @@ namespace
 			kNoMode,
 			kNoMode },
 		{ HLDM_HORNETGUN, "weapon_hornetgun", -1,
-			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 600.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_NONE },
+			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 600.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_HOMING },
 			kNoMode,
 			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 1200.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_NONE } },
 		{ HLDM_HANDGRENADE, "weapon_handgrenade", -1,

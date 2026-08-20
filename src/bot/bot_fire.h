@@ -26,6 +26,13 @@ struct State
 	Vector targetSize;
 	bool haveSize = false;
 
+	Vector basePoint;
+	Vector aimPoint;
+	float flightTime = 0.f;
+	bool aimValid = false;
+	bool aimLead = false;
+	bool aimHoming = false;
+
 	int pendingId = 0;
 	float nextSelectTime = 0.f;
 
@@ -38,13 +45,19 @@ struct State
 	float lastSecondaryTimer = 0.f;
 	int lastTimerId = 0;
 	bool pressed = false;
+	bool pressedLead = false;
 	const char *lastReason = "-";
 	int shots = 0;
+	int leadShots = 0;
 	int switches = 0;
 	int reloads = 0;
 };
 
 bool Enabled();
+
+void Pin(const char *classname);
+
+const char *Pinned();
 
 bool Supported(const WeaponMode &mode);
 
@@ -55,6 +68,8 @@ bool ModeUsable(const CBot &bot, const BotWeapon &w, const WeaponMode &m, float 
 void Reset(CBot &bot);
 
 void Think(CBot &bot);
+
+bool AimPoint(const CBot &bot, Vector &point);
 
 unsigned short Buttons(CBot &bot, const Vector &angles);
 

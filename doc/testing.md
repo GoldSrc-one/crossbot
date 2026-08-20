@@ -224,6 +224,15 @@ deaths, 43 weapon switches, 22 reloads, and all four suspicion sources. The `rea
 most useful line in the output — `off-target` and `blocked` both appearing is what shows the fire ray
 is actually rejecting shots rather than waving everything through.
 
+**The projectile phases need `crossbot_fire_pin`, and equipping instead does not work.** A bot keeps
+any weapon that still has a usable mode, so handing a roaming bot a crossbow puts it in the inventory
+and nothing else ever happens — a first attempt gave 288 crossbows and hornetguns away across two
+minutes and recorded zero projectiles fired. The pin makes every other weapon unusable, which is the
+only lever that reaches selection. Each weapon runs its own pass so `aim=lead` and `aim=homing` are
+attributable, and both must appear: they can only come from different weapons, so one label covering
+both would mean `WPN_Q_HOMING` never reached the tolerance box. `off-target` must appear here too — a
+lead solve that never withholds a shot is a lead solve that is not running.
+
 `reloads` is counted in the plugin rather than scraped, because `why=reloading` is true for a single
 frame and no 2-second poll would ever see it. Reload is the behaviour the SDK reading says is easiest
 to get wrong — hold the trigger through an empty clip and the weapon clicks forever — so it needs a

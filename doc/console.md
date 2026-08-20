@@ -35,10 +35,15 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   source, age and position, and the look direction with its authority and how many entries survived the
   cone refinement; see `doc/bot.md`, `bot_sense.cpp`
 - `crossbot_fire_status` — per bot: the weapon held, the fire mode chosen, why the bot is or is not
-  shooting, live clip and ammo, and `miss`/`tol` — the angle from the fire ray to the served aim point
+  shooting, live clip and ammo, and `miss`/`tol` — the angle from the fire ray to the aim point
   against the angle the target's own size subtends there, which is the whole tolerance model in two
-  numbers. `shots`, `switches` and `reloads` are **per life**: respawn zeroes them, so a drop is a
-  death; see `doc/bot.md`, `bot_fire.cpp`
+  numbers. `aim` is `target`, `lead` or `homing` and `flight` is the solved projectile flight time in
+  milliseconds, zero for hitscan. `shots`, `leadshots`, `switches` and `reloads` are **per life**:
+  respawn zeroes them, so a drop is a death; see `doc/bot.md`, `bot_fire.cpp`
+- `crossbot_fire_pin <classname|off>` — restrict weapon selection to one classname, making every other
+  weapon unusable. Only useful for testing, and necessary there: a bot keeps any weapon that still has
+  a usable mode, so a bot that spawned with a glock never voluntarily picks up anything else and the
+  projectile path is otherwise unreachable from the console. With no argument it reports the pin
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the

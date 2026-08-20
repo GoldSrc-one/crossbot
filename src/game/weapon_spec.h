@@ -40,6 +40,7 @@ enum WeaponQuirks : unsigned int
 	WPN_Q_THROW_ARC     = 1u << 3,
 	WPN_Q_INHERIT_VEL   = 1u << 4,
 	WPN_Q_KEEP_AIMING   = 1u << 5,
+	WPN_Q_HOMING        = 1u << 6,
 };
 
 struct WeaponMode

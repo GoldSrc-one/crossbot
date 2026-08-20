@@ -416,17 +416,21 @@ void PrintFireStatus()
 				w.reloading ? 1 : 0);
 		}
 
-		char aimBuf[64] = "-";
+		char aimBuf[96] = "-";
 		if (fire.lastMiss >= 0.f)
-			snprintf(aimBuf, sizeof(aimBuf), "miss=%.2f tol=%.2f", fire.lastMiss, fire.lastTol);
+			snprintf(aimBuf, sizeof(aimBuf), "aim=%s flight=%.0f miss=%.2f tol=%.2f",
+				fire.aimLead ? (fire.aimHoming ? "homing" : "lead") : "target",
+				fire.flightTime * 1000.f, fire.lastMiss, fire.lastTol);
 
 		edict_t *target = bot.sense.target.Get();
 
 		char line[416];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s held=%s mode=%s why=%s %s %s shots=%d switches=%d reloads=%d target=%s\n",
+			"CrossBot: %s held=%s mode=%s why=%s %s %s shots=%d leadshots=%d switches=%d "
+			"reloads=%d target=%s\n",
 			bot.name, heldBuf, BotFire::ModeName(fire.mode), fire.lastReason, ammoBuf, aimBuf,
-			fire.shots, fire.switches, fire.reloads, target ? CBotPlayerNameOf(target) : "-");
+			fire.shots, fire.leadShots, fire.switches, fire.reloads,
+			target ? CBotPlayerNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}
 

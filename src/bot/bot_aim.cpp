@@ -167,20 +167,21 @@ bool BotAim::LosAngles(const Vector &from, const Vector &to, float &yaw, float &
 	return true;
 }
 
-void BotAim::PushDelaySlot(CBot &bot, const Vector &point)
+void BotAim::PushDelaySlot(CBot &bot, const Vector &point, const Vector &vel)
 {
 	BotAim::State &aim = bot.aim;
 
 	BotAim::DelaySlot &slot = aim.delaySlots[aim.delayHead];
 	slot.time = gpGlobals->time;
 	slot.point = point;
+	slot.vel = vel;
 
 	aim.delayHead = (aim.delayHead + 1) % BotAim::kDelaySlots;
 	if (aim.delayCount < BotAim::kDelaySlots)
 		++aim.delayCount;
 }
 
-bool BotAim::ReadDelayed(const CBot &bot, float delay, Vector &point)
+bool BotAim::ReadDelayed(const CBot &bot, float delay, Vector &point, Vector *vel)
 {
 	const BotAim::State &aim = bot.aim;
 	if (aim.delayCount == 0)
@@ -211,6 +212,8 @@ bool BotAim::ReadDelayed(const CBot &bot, float delay, Vector &point)
 			f = 1.f;
 
 		point = a.point + (b.point - a.point) * f;
+		if (vel)
+			*vel = a.vel + (b.vel - a.vel) * f;
 		return true;
 	}
 

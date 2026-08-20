@@ -19,7 +19,13 @@ namespace
 
 	constexpr float kSelectInterval = 0.5f;
 
+	constexpr float kMaxFlightTime = 1.5f;
+
+	constexpr int kLeadPasses = 4;
+
 	constexpr int kMaxChoices = 64;
+
+	char g_pin[32] = "";
 
 	struct Choice
 	{
@@ -87,13 +93,46 @@ namespace
 		return inv.ammo[type];
 	}
 
+	float ModeSpeed(const CBot &bot, const WeaponMode &m)
+	{
+		float speed = m.speed;
+		if ((m.quirks & WPN_Q_SLOW_IN_WATER) != 0 && bot.pEdict->v.waterlevel == 3)
+			speed *= 0.5f;
+		return speed;
+	}
+
+	bool SolveLead(const Vector &eye, const Vector &base, const Vector &vel, float speed,
+		Vector &point, float &flight)
+	{
+		if (speed <= 0.f)
+			return false;
+
+		Vector p = base;
+		float t = 0.f;
+
+		for (int i = 0; i < kLeadPasses; ++i)
+		{
+			t = (p - eye).Length() / speed;
+			p = base + vel * t;
+		}
+
+		if (t > kMaxFlightTime)
+			return false;
+
+		point = p;
+		flight = t;
+		return true;
+	}
+
 	void CountShots(CBot &bot)
 	{
 		BotFire::State &fire = bot.fire;
 		const BotInventory &inv = bot.inventory;
 
 		bool pressed = fire.pressed;
+		bool pressedLead = fire.pressedLead;
 		fire.pressed = false;
+		fire.pressedLead = false;
 
 		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
 		{
@@ -105,10 +144,15 @@ namespace
 
 		if (pressed && fire.lastTimerId == w.id)
 		{
-			if (fire.lastPrimaryTimer <= 0.f && w.nextPrimaryAttack > 0.f)
+			bool fired = (fire.lastPrimaryTimer <= 0.f && w.nextPrimaryAttack > 0.f) ||
+				(fire.lastSecondaryTimer <= 0.f && w.nextSecondaryAttack > 0.f);
+
+			if (fired)
+			{
 				++fire.shots;
-			else if (fire.lastSecondaryTimer <= 0.f && w.nextSecondaryAttack > 0.f)
-				++fire.shots;
+				if (pressedLead)
+					++fire.leadShots;
+			}
 		}
 
 		fire.lastTimerId = w.id;
@@ -121,6 +165,10 @@ namespace
 		fire.mode = BotFire::MODE_NONE;
 		fire.weaponId = 0;
 		fire.wantReload = false;
+		fire.aimValid = false;
+		fire.aimLead = false;
+		fire.aimHoming = false;
+		fire.flightTime = 0.f;
 		fire.lastReason = reason;
 	}
 }
@@ -132,6 +180,22 @@ bool Enabled()
 {
 	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_fire");
 	return cvar && cvar->value != 0.f;
+}
+
+void Pin(const char *classname)
+{
+	if (!classname || !classname[0])
+	{
+		g_pin[0] = 0;
+		return;
+	}
+
+	snprintf(g_pin, sizeof(g_pin), "%s", classname);
+}
+
+const char *Pinned()
+{
+	return g_pin[0] ? g_pin : nullptr;
 }
 
 const char *ModeName(Mode mode)
@@ -147,11 +211,16 @@ const char *ModeName(Mode mode)
 
 bool Supported(const WeaponMode &mode)
 {
-	if (mode.fire != FIRE_HOLD || mode.aim != AIM_TARGET || mode.toggle != TOGGLE_NONE)
+	if (mode.fire != FIRE_HOLD || mode.toggle != TOGGLE_NONE)
 		return false;
-	if (mode.speed != 0.f || mode.gravity != 0.f || mode.splash != 0.f)
+	if (mode.aim != AIM_TARGET && mode.aim != AIM_LEAD)
 		return false;
-	return (mode.quirks & (WPN_Q_HIDDEN_STATE | WPN_Q_KEEP_AIMING)) == 0;
+	if (mode.aim == AIM_LEAD && mode.speed <= 0.f)
+		return false;
+	if (mode.gravity != 0.f || mode.splash != 0.f)
+		return false;
+	return (mode.quirks & (WPN_Q_HIDDEN_STATE | WPN_Q_KEEP_AIMING |
+		WPN_Q_THROW_ARC | WPN_Q_INHERIT_VEL)) == 0;
 }
 
 const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode)
@@ -168,12 +237,26 @@ bool ModeUsable(const CBot &bot, const BotWeapon &w, const WeaponMode &m, float 
 	if (!Supported(m))
 		return false;
 
+	if (g_pin[0] && g_pGameProfile)
+	{
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+		if (!spec || !spec->classname || strcmp(spec->classname, g_pin) != 0)
+			return false;
+	}
+
 	if ((m.quirks & WPN_Q_NO_UNDERWATER) != 0 && bot.pEdict->v.waterlevel == 3)
 		return false;
 
 	float range = (m.range > 0.f) ? m.range : kHitscanRange;
 	if (dist > range)
 		return false;
+
+	if (m.aim == AIM_LEAD)
+	{
+		float speed = ModeSpeed(bot, m);
+		if (speed <= 0.f || dist / speed > kMaxFlightTime)
+			return false;
+	}
 
 	const BotInventory &inv = bot.inventory;
 	int need = (m.ammoPerShot > 0) ? m.ammoPerShot : 1;
@@ -224,15 +307,18 @@ void Think(CBot &bot)
 		fire.haveSize = true;
 	}
 
-	Vector aimPoint;
-	if (!fire.haveSize || !BotAim::ReadDelayed(bot, BotAim::Delay(), aimPoint))
+	Vector basePoint;
+	Vector baseVel(0.f, 0.f, 0.f);
+	if (!fire.haveSize || !BotAim::ReadDelayed(bot, BotAim::Delay(), basePoint, &baseVel))
 	{
 		Idle(fire, "no-target");
 		return;
 	}
 
+	fire.basePoint = basePoint;
+
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
-	float dist = (aimPoint - eye).Length();
+	float dist = (basePoint - eye).Length();
 
 	const BotInventory &inv = bot.inventory;
 
@@ -255,9 +341,21 @@ void Think(CBot &bot)
 				if (!m || !ModeUsable(bot, active, *m, dist))
 					continue;
 
+				Vector point = basePoint;
+				float flight = 0.f;
+				if (m->aim == AIM_LEAD &&
+					!SolveLead(eye, basePoint, baseVel, ModeSpeed(bot, *m), point, flight))
+					continue;
+
 				int need = (m->ammoPerShot > 0) ? m->ammoPerShot : 1;
 
 				bool wasReload = fire.wantReload;
+
+				fire.aimPoint = point;
+				fire.flightTime = flight;
+				fire.aimValid = true;
+				fire.aimLead = m->aim == AIM_LEAD;
+				fire.aimHoming = (m->quirks & WPN_Q_HOMING) != 0;
 
 				fire.mode = candidate;
 				fire.weaponId = active.id;
@@ -325,6 +423,16 @@ void Think(CBot &bot)
 		++fire.switches;
 }
 
+bool AimPoint(const CBot &bot, Vector &point)
+{
+	const State &fire = bot.fire;
+	if (!fire.aimValid)
+		return false;
+
+	point = fire.aimPoint;
+	return true;
+}
+
 unsigned short Buttons(CBot &bot, const Vector &angles)
 {
 	State &fire = bot.fire;
@@ -361,8 +469,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 		return 0;
 	}
 
-	Vector aimPoint;
-	if (!BotAim::ReadDelayed(bot, BotAim::Delay(), aimPoint))
+	if (!fire.aimValid)
 		return 0;
 
 	edict_t *pEdict = bot.pEdict;
@@ -372,7 +479,18 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	Vector dir = gpGlobals->v_forward;
 
 	Vector half = fire.targetSize * 0.5f;
-	Vector los = aimPoint - eye;
+	Vector centre = fire.aimPoint;
+
+	if (fire.aimHoming)
+	{
+		Vector span = fire.aimPoint - fire.basePoint;
+		centre = fire.basePoint + span * 0.5f;
+		half.x += fabsf(span.x) * 0.5f;
+		half.y += fabsf(span.y) * 0.5f;
+		half.z += fabsf(span.z) * 0.5f;
+	}
+
+	Vector los = centre - eye;
 	float dist = los.Length();
 
 	if (dist > 0.001f)
@@ -392,7 +510,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	float range = (m->range > 0.f) ? m->range : kHitscanRange;
 
 	float entry = 0.f;
-	if (!RayHitsBox(eye, dir, aimPoint, half, range, entry))
+	if (!RayHitsBox(eye, dir, centre, half, range, entry))
 	{
 		fire.lastReason = "off-target";
 		return 0;
@@ -408,6 +526,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	fire.lastReason = "firing";
 	fire.pressed = true;
+	fire.pressedLead = fire.aimLead;
 	return (fire.mode == MODE_SECONDARY) ? IN_ATTACK2 : IN_ATTACK;
 }
 

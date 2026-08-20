@@ -27,6 +27,14 @@
     variety, weapon switches and reloads are reported rather than asserted:
     every one of them depends on which guns happen to spawn near which bot.
 
+    PROJECTILE: one pass per lead weapon, each pinned with crossbot_fire_pin.
+    Equipping alone is not enough and no amount of patience fixes it -- a bot
+    keeps a weapon for as long as it has one usable mode, so a bot that spawned
+    with a glock and 68 rounds will never choose anything else. The pin makes
+    every other weapon unusable, which is the only lever that reaches selection.
+    The two weapons run in separate passes so aim=lead and aim=homing are each
+    attributable to the weapon that produced them.
+
 .PARAMETER Bots
     More bots means more encounters per second of wall clock. Four is enough to
     make crossfire produce a fight inside a minute; two can take several.
@@ -37,6 +45,7 @@ param(
     [int]$Bots = 4,
     [int]$ControlSeconds = 20,
     [int]$DuelSeconds = 180,
+    [int]$ProjectileSeconds = 90,
     [int]$PollSeconds = 2,
     # Run the whole duel window instead of stopping at the first confirmed
     # engagement. Deaths, reloads and the rarer suspicion sources need several
@@ -81,6 +90,9 @@ function Update-FireState {
         if ($line -match 'switches=(\d+)') { $switches = [int]$Matches[1] }
         $reloads = 0
         if ($line -match 'reloads=(\d+)') { $reloads = [int]$Matches[1] }
+        $leadShots = 0
+        if ($line -match 'leadshots=(\d+)') { $leadShots = [int]$Matches[1] }
+        if ($line -match 'aim=(\w+)') { $state.Aims[$Matches[1]] = $true }
         $target = '-'
         if ($line -match 'target=(\S+)') { $target = $Matches[1] }
         $clip = -1
@@ -88,10 +100,15 @@ function Update-FireState {
         $prim = -1
         if ($line -match 'prim=(-?\d+)') { $prim = [int]$Matches[1] }
 
+        # A bot met for the first time is entered at whatever it already reads,
+        # not at zero. Every counter is per life and each phase starts a fresh
+        # tally, so entering at zero would make the first poll of a phase import
+        # everything the bot did in the phase before it.
         if (-not $state.Bots.ContainsKey($name)) {
             $state.Bots[$name] = @{
-                Shots = 0; Switches = 0; Reloads = 0
-                Total = 0; TotalSwitches = 0; TotalReloads = 0; Deaths = 0
+                Shots = $shots; Switches = $switches; Reloads = $reloads; Lead = $leadShots
+                Base = $shots; BaseSwitches = $switches; BaseReloads = $reloads; BaseLead = $leadShots
+                Total = 0; TotalSwitches = 0; TotalReloads = 0; TotalLead = 0; Deaths = 0
                 Held = '-'; Clip = -1; Prim = -1; Burned = 0
             }
         }
@@ -101,19 +118,23 @@ function Update-FireState {
         # whole fire state -- so a drop is a death, and the running tally has to
         # be banked at that point rather than differenced across the gap.
         if ($shots -lt $bot.Shots -or $switches -lt $bot.Switches -or $reloads -lt $bot.Reloads) {
-            $bot.Total += $bot.Shots
-            $bot.TotalSwitches += $bot.Switches
-            $bot.TotalReloads += $bot.Reloads
+            $bot.Total += $bot.Shots - $bot.Base
+            $bot.TotalSwitches += $bot.Switches - $bot.BaseSwitches
+            $bot.TotalReloads += $bot.Reloads - $bot.BaseReloads
+            $bot.TotalLead += $bot.Lead - $bot.BaseLead
+            $bot.Base = 0; $bot.BaseSwitches = 0; $bot.BaseReloads = 0; $bot.BaseLead = 0
             $bot.Deaths++
         }
         else {
             $bot.Total += $shots - $bot.Shots
             $bot.TotalSwitches += $switches - $bot.Switches
             $bot.TotalReloads += $reloads - $bot.Reloads
+            $bot.TotalLead += $leadShots - $bot.Lead
         }
         $bot.Shots = $shots
         $bot.Switches = $switches
         $bot.Reloads = $reloads
+        $bot.Lead = $leadShots
 
         # Ammo actually consumed, read independently of anything the plugin
         # reports about itself. A clip only ever falls by firing -- reloading
@@ -143,15 +164,23 @@ function New-FireState {
         Bots = @{}
         Weapons = @{}
         Reasons = @{}
+        Aims = @{}
         Firing = 0
         Targets = 0
     }
 }
 
+function Get-TotalLead {
+    param([hashtable]$state)
+    $sum = 0
+    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalLead + $bot.Lead - $bot.BaseLead }
+    return $sum
+}
+
 function Get-TotalShots {
     param([hashtable]$state)
     $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.Total + $bot.Shots }
+    foreach ($bot in $state.Bots.Values) { $sum += $bot.Total + $bot.Shots - $bot.Base }
     return $sum
 }
 
@@ -250,8 +279,8 @@ try {
     $reloads = 0
     foreach ($bot in $duel.Bots.Values) {
         $deaths += $bot.Deaths
-        $switches += $bot.TotalSwitches + $bot.Switches
-        $reloads += $bot.TotalReloads + $bot.Reloads
+        $switches += $bot.TotalSwitches + $bot.Switches - $bot.BaseSwitches
+        $reloads += $bot.TotalReloads + $bot.Reloads - $bot.BaseReloads
     }
 
     Write-Host ("  shots={0} burned={1} firing={2} targets={3} deaths={4} switches={5} reloads={6}" -f `
@@ -264,6 +293,54 @@ try {
     if ($duel.Firing -eq 0) { $failures += "DUEL: no bot ever decided to fire" }
     if ($duelShots -eq 0) { $failures += "DUEL: no shot was observed leaving a weapon" }
     if ($duelBurned -eq 0) { $failures += "DUEL: no ammo was spent" }
+
+    $projFailures = @()
+    $projSeen = @{}
+
+    foreach ($pin in @('weapon_crossbow', 'weapon_hornetgun')) {
+        $seconds = [int]($ProjectileSeconds / 2)
+        Write-Host "`n===== PROJECTILE: $pin, up to ${seconds}s ====="
+
+        Invoke-Rcon "crossbot_fire_pin $pin" | Out-Null
+
+        $proj = New-FireState
+        Update-FireState $proj
+        $deadline = (Get-Date).AddSeconds($seconds)
+        while ((Get-Date) -lt $deadline) {
+            # Re-issued every poll rather than once. Respawning drops the whole
+            # inventory, and a second pickup of a weapon already held is what
+            # refills the five bolts a crossbow carries.
+            Invoke-Rcon "crossbot_equip $pin" | Out-Null
+
+            Start-Sleep -Seconds $PollSeconds
+            Update-FireState $proj
+
+            if ($Full) { continue }
+            if ((Get-TotalLead $proj) -gt 0 -and $proj.Reasons.ContainsKey('off-target')) { break }
+        }
+
+        $lead = Get-TotalLead $proj
+        foreach ($k in $proj.Aims.Keys) { $projSeen[$k] = $true }
+
+        Write-Host ("  shots={0} leadshots={1} firing={2}" -f (Get-TotalShots $proj), $lead, $proj.Firing)
+        Write-Host ("  weapons held: {0}" -f (($proj.Weapons.Keys | Sort-Object) -join ','))
+        Write-Host ("  aim kinds seen: {0}" -f (($proj.Aims.Keys | Sort-Object) -join ','))
+        Write-Host ("  reasons: {0}" -f (($proj.Reasons.Keys | Sort-Object | ForEach-Object { "$_=$($proj.Reasons[$_])" }) -join ' '))
+
+        if ($lead -eq 0) { $projFailures += "PROJECTILE ${pin}: no projectile was ever fired" }
+        if (-not $proj.Reasons.ContainsKey('off-target')) {
+            $projFailures += "PROJECTILE ${pin}: no shot was ever withheld -- a lead that never rejects is not running"
+        }
+    }
+
+    Invoke-Rcon "crossbot_fire_pin off" | Out-Null
+
+    # Both kinds have to appear, and they can only come from different weapons:
+    # the crossbow bolt flies straight and the tracking hornet does not, so a
+    # single shared "lead" label would mean WPN_Q_HOMING never reached the box.
+    if (-not $projSeen.ContainsKey('lead')) { $projFailures += "PROJECTILE: aim=lead never appeared" }
+    if (-not $projSeen.ContainsKey('homing')) { $projFailures += "PROJECTILE: aim=homing never appeared" }
+    $failures += $projFailures
 }
 finally {
     & "$scriptDir\test_server_stop.ps1" -Id $serverPid | Out-Null

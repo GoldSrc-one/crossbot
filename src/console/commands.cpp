@@ -4,6 +4,7 @@
 #include "commands.h"
 #include "../bot/bot.h"
 #include "../bot/bot_aim.h"
+#include "../bot/bot_fire.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
 #include "../bot/bot_weapons.h"
@@ -193,6 +194,28 @@ namespace
 		BotManager::PrintFireStatus();
 	}
 
+	void Cmd_CrossBotFirePin()
+	{
+		if (CMD_ARGC() < 2)
+		{
+			const char *pin = BotFire::Pinned();
+			char msg[128];
+			snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s\n", pin ? pin : "off");
+			SERVER_PRINT(msg);
+			SERVER_PRINT("usage: crossbot_fire_pin <classname|off>\n");
+			return;
+		}
+
+		const char *arg = CMD_ARGV(1);
+		bool off = strcmp(arg, "off") == 0;
+
+		BotFire::Pin(off ? nullptr : arg);
+
+		char msg[128];
+		snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s\n", off ? "off" : arg);
+		SERVER_PRINT(msg);
+	}
+
 	void AppendQuirks(unsigned int quirks, char *out, size_t cap)
 	{
 		static const struct { unsigned int bit; const char *name; } kNames[] = {
@@ -202,6 +225,7 @@ namespace
 			{ WPN_Q_THROW_ARC,     "throwarc" },
 			{ WPN_Q_INHERIT_VEL,   "inheritvel" },
 			{ WPN_Q_KEEP_AIMING,   "keepaiming" },
+			{ WPN_Q_HOMING,        "homing" },
 		};
 
 		out[0] = '\0';
@@ -529,6 +553,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
+	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
 }
 
 }

@@ -19,6 +19,7 @@ struct DelaySlot
 {
 	float time = 0.f;
 	Vector point;
+	Vector vel;
 };
 
 struct State
@@ -61,9 +62,9 @@ float DriftAmplitude();
 
 void ClearDelayQueue(CBot &bot);
 
-void PushDelaySlot(CBot &bot, const Vector &point);
+void PushDelaySlot(CBot &bot, const Vector &point, const Vector &vel);
 
-bool ReadDelayed(const CBot &bot, float delay, Vector &point);
+bool ReadDelayed(const CBot &bot, float delay, Vector &point, Vector *vel = nullptr);
 
 bool LosAngles(const Vector &from, const Vector &to, float &yaw, float &pitch);
 

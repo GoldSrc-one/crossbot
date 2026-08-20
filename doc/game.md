@@ -241,6 +241,22 @@ Three more shapes a single `speed` float cannot hold, all recorded as quirks:
 snark and RPG all add the player's own velocity, and the MP5 grenade explicitly does not. Hence
 `WPN_Q_INHERIT_VEL` rather than a blanket assumption either way.
 
+### WPN_Q_HOMING is a tolerance, not a trajectory
+
+Only hornetgun primary carries it. The RED hornet it fires launches at 300, accelerates, and steers
+toward its target every think — so the 600 in the `speed` column is an effective figure for a
+projectile whose real speed is a curve, and no single float could be more honest than that.
+
+The quirk exists because a consumer cannot recover "this thing corrects itself" from any other field,
+and the correction is worth a decision: a hornet forgives a lead the bot got wrong, so the bot may
+commit on a wider error than a bolt allows. `bot_fire.cpp` spends it as exactly that and nothing more
+— the tolerance box is stretched to span both the target's present and predicted positions. The
+launch is still solved as a straight shot at `speed`, because a hornet that has to turn hard pays for
+it in flight time, and aiming at the middle of the turn is what keeps that cheap.
+
+Hornetgun **secondary** does not carry it: the ORANGE dart flies straight at 1200 and never tracks.
+The two modes of one weapon differing here is the reason this is a mode-level quirk.
+
 ### Why ammo is a field when the inventory already has counts
 
 `BotWeapon` carries `primaryAmmoType`, `secondaryAmmoType` and the counts, so `WeaponAmmo` looks
@@ -290,7 +306,7 @@ do not get re-proposed:
 | Rejected | Why |
 |---|---|
 | `MELEE` / `HITSCAN` / `BEAM` as separate aim values | One instruction between them. Reach is `range`, sustained fire is `FIRE_HOLD`. |
-| `HOMING` as its own aim value | Still has flight time, still wants leading. It is `AIM_LEAD` with a wider tolerance. |
+| `HOMING` as its own aim value | Still has flight time, still wants leading. It is `AIM_LEAD` plus `WPN_Q_HOMING`, which widens the tolerance without changing the instruction. |
 | `cycleTime` | The live `nextPrimaryAttack` on the weapon in hand is authoritative. A table value only helps rank guns you are *not* holding, which is selection. |
 | `zoomFov` | `pev->fov != 0` answers "am I zoomed". 20 vs 40 changes no handling decision. |
 | a `needsSurface` quirk | Redundant with `AIM_SURFACE`. |

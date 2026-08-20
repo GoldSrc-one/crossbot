@@ -364,6 +364,14 @@ partially-hidden enemy still trackable.
 `ClearDelayQueue` keys on the target *entity*, not the bone. Keying it on the sample point would clear the
 ring every frame and destroy the reaction delay entirely.
 
+### Slots also hold velocity
+
+Beside the point, and interpolated the same way. The reader is `BotFire`, which needs the target's
+velocity to lead a projectile, and needs it as **perceived** rather than as it is right now — a lead
+computed from live velocity would give a bot with a quarter-second reaction time perfect prediction.
+`ReadDelayed` takes it as an optional out pointer, so `ApplyLook`, which only wants the point, is
+unchanged. See `## bot_fire.cpp` for what the composition means.
+
 ### Why slots hold points and not angles
 
 Slots held `{ time, yaw, pitch }` first, which forced the write to guess where the *bot itself* would be one
@@ -929,9 +937,10 @@ primary is its `else if` — so `Buttons` returns one bit or the other and never
 
 ### The box is centred on the served aim point, not on the enemy
 
-`Buttons` builds a box the size of the target's own `maxs - mins` around **the point the aim delay
-queue is currently serving**, and fires when the ray enters it. The enemy's extents are the tolerance:
-a bigger target is easier to justify shooting at, which is the whole of the error budget.
+`Buttons` builds a box the size of the target's own `maxs - mins` around **the point `Think` published
+this frame** — the served aim point for hitscan, the solved lead point for a projectile — and fires
+when the ray enters it. The enemy's extents are the tolerance: a bigger target is easier to justify
+shooting at, which is the whole of the error budget.
 
 Centring it on the served point rather than the enemy's live origin is the interesting choice. It
 makes the test ask *is my hand where my intent is*, and three things fall out of that:
@@ -960,28 +969,103 @@ still hear.
 ### Supported is the incremental frontier
 
 ```cpp
-mode.fire == FIRE_HOLD && mode.aim == AIM_TARGET && mode.toggle == TOGGLE_NONE &&
-mode.speed == 0 && mode.gravity == 0 && mode.splash == 0 &&
-(mode.quirks & (WPN_Q_HIDDEN_STATE | WPN_Q_KEEP_AIMING)) == 0
+mode.fire == FIRE_HOLD && mode.toggle == TOGGLE_NONE &&
+(mode.aim == AIM_TARGET || (mode.aim == AIM_LEAD && mode.speed > 0)) &&
+mode.gravity == 0 && mode.splash == 0 &&
+(mode.quirks & (WPN_Q_HIDDEN_STATE | WPN_Q_KEEP_AIMING |
+                WPN_Q_THROW_ARC | WPN_Q_INHERIT_VEL)) == 0
 ```
 
-A predicate over the spec, deliberately **not** a list of weapon ids. It admits exactly the
-instant-hit set and rejects every projectile, charge, toggle and hidden-state mode without naming one
-of them. Turning projectiles on later is relaxing a clause here and supplying the aim override they
-need; it is not editing a table.
+A predicate over the spec, deliberately **not** a list of weapon ids. It admits the instant-hit set
+plus the three straight-flight projectiles — crossbow primary, both hornetgun modes — and rejects
+every arcing, charge, toggle and hidden-state mode without naming one of them. Turning the next group
+on is relaxing a clause here; it is not editing a table.
+
+`WPN_Q_THROW_ARC` and `WPN_Q_INHERIT_VEL` are named explicitly rather than left to the gravity
+clause. Neither is implied by it and both change the **launch vector**: an inherited-velocity
+projectile leaves at `speed * dir + ownerVelocity`, so pointing at the solved lead point is simply the
+wrong direction, and the fix is a vector triangle rather than a longer iteration.
 
 Note what this buys on the crossbow: `primaryZoomed` is never consulted, because nothing zooms, so the
 `(zoomed && spec->primaryZoomed.fire) ? ... : spec->primary` one-liner in `doc/game.md` stays a
 one-liner and no weapon is special-cased in `bot/`.
 
-`ModeUsable` adds the three conditions the spec exists to answer: `range` (which is what keeps the
-crowbar holstered past 32 units and the shotgun and egon past 2048), the `ammo` pool (the one field
-that genuinely cannot be derived at runtime — secondary fire does *not* imply secondary ammo), and
-`WPN_Q_NO_UNDERWATER` against `waterlevel == 3`.
+`ModeUsable` adds the conditions the spec exists to answer: `range` (which is what keeps the crowbar
+holstered past 32 units and the shotgun and egon past 2048), the `ammo` pool (the one field that
+genuinely cannot be derived at runtime — secondary fire does *not* imply secondary ammo),
+`WPN_Q_NO_UNDERWATER` against `waterlevel == 3`, and for `AIM_LEAD` a flight-time ceiling described
+below.
 
 Ammo is judged differently at the two levels, on purpose. For *selection*, a clip weapon with an empty
 clip but a non-empty reserve is still usable — otherwise the bot throws away a good gun the instant it
 needs reloading. For *firing*, the clip has to actually hold `ammoPerShot`.
+
+### The lead solve, and why four passes with no convergence test
+
+`AIM_LEAD` needs the point where the target will be when the projectile arrives, and the flight time
+depends on that point, which depends on the flight time. `SolveLead` runs the obvious fixed point:
+
+```
+p = servedPoint
+repeat 4:
+    t = |p - eye| / speed
+    p = servedPoint + servedVelocity * t
+```
+
+Four passes, unconditionally, and **no convergence test** — testing costs about what the pass it
+saves costs. The map is a contraction whenever the target is slower than the projectile, which every
+admitted mode satisfies by a wide margin against a 320 u/s player, so four passes land far inside the
+target's own hitbox and the residual cannot change any decision downstream.
+
+`kMaxFlightTime` (1.5s) rejects the solve, and `ModeUsable` pre-rejects any mode whose straight-line
+`dist / speed` already exceeds it. That is a **plausibility limit on prediction, not a lifetime
+model**: extrapolating a player who is free to turn 1.5 seconds ahead is fiction whatever the
+projectile's real range is. It happens to park the tracking hornet past roughly 900 units, which is
+where a bot should be choosing a different gun anyway.
+
+`WPN_Q_SLOW_IN_WATER` halves `speed` at `waterlevel == 3`, matching `CCrossbow::FireBolt`, which
+tests the *player's* waterlevel and not the bolt's.
+
+### The queue carries velocity, so the lead is as stale as the perception
+
+`BotAim::DelaySlot` stores the target's velocity beside the point, interpolated the same way, and
+`SolveLead` uses the *served* velocity rather than the target's live `pev->velocity`.
+
+This is the whole reason the lead is honest. Reading the live velocity would let a bot with a 250ms
+reaction time predict a target's future perfectly — reaction delay would cost it position error but
+never *prediction* error, which is backwards. With the served velocity, a target that changed
+direction inside the delay window is led along the direction it was last seen going, and the shot
+misses. The composition is
+
+    perceived position + perceived velocity * (reaction delay + flight time)
+
+since `UpdateVision` already folds `velocity * delay` into the point it queues. Both terms come from
+the same stale sample, which is what a human has.
+
+### Weapon choice drives the aim, and the call order already allowed it
+
+`Think` publishes `aimPoint` — the served point for `AIM_TARGET`, the solved lead for `AIM_LEAD` —
+and `BotSense::ApplyLook` prefers it over its own `ReadDelayed`. So the bot *looks* where the weapon
+in its hands needs it to look, and `Buttons` tests the ray against the same value rather than reading
+the queue a second time.
+
+This was expected to need restructuring and did not. `Bot_MoveNav` already runs `BotSense::Update`,
+then `BotFire::Think`, and only then reaches any `ApplyLook` call site — so the weapon decision was
+already sitting between perception and aiming. No pass was added and nothing was reordered.
+
+For `AIM_TARGET` the published point *is* the served point, so hitscan aiming is unchanged by
+construction, which is what makes the existing duel phase a regression check on this.
+
+### WPN_Q_HOMING widens the box rather than bending the path
+
+For hornetgun primary the tolerance box is the AABB union of the box at the served point and the box
+at the lead point — "anywhere between where they are and where they will be". Since `RayHitsBox`
+takes a centre and half-extents, the union is four lines of arithmetic before the call, not a second
+code path.
+
+The launch is still solved as a straight shot. A hornet that has to turn hard pays for it in flight
+time it may not have (3.5s in multiplayer), so aiming into the middle of the turn is what keeps the
+correction cheap. The quirk buys permission to commit on a wider error, and nothing else.
 
 ### Selection is random, and that is the placeholder
 
@@ -999,8 +1083,15 @@ the switch is observed rather than assumed, and the frame that issues the comman
 `mode=none` and tries again next frame.
 
 This runs more often than it looks like it should. Half-Life auto-switches to whatever it considers
-the best weapon on pickup, which for a roaming bot is regularly an RPG or a crossbow — a weapon this
-file cannot drive. Every one of those pickups costs a switch back.
+the best weapon on pickup, which for a roaming bot is regularly an RPG — a weapon this file cannot
+drive. Every one of those pickups costs a switch back.
+
+It also runs far **less** often than it looks like it should, and that is worth knowing before
+believing any measurement. Keeping a working weapon is sticky by definition: a bot that spawned with
+a glock and 68 rounds has a usable mode essentially forever, so it never rolls the dice at all.
+Giving it a crossbow changes nothing — the crossbow simply sits in the inventory. `crossbot_fire_pin`
+exists because of this: it makes every weapon but one unusable, which is the only lever that reaches
+selection from outside, and without it `test_fire.ps1` cannot get a projectile fired on purpose.
 
 ### Why the trigger lives inside Bot_RunPlayerMove
 
@@ -1023,6 +1114,11 @@ and `GetNextBestWeapon`'s empty-weapon switch both arm `m_flNextPrimaryAttack` t
 without it reads several shots per weapon pickup with firing disabled entirely. The observation is
 still the game's own timer — the gate only decides attribution.
 
+`leadShots` is the same observation gated on the press having been a projectile one, carried on the
+press flag rather than read back afterwards — by the time the timer moves, selection may already have
+chosen something else. It is separate from `shots` because a bot keeps its spawn glock throughout a
+test and would otherwise let a completely dead lead solve pass on hitscan alone.
+
 `reloads` counts the rising edge of `wantReload`, because the state itself lasts one frame and is
 invisible to any poll.
 
@@ -1031,10 +1127,13 @@ in any of them is a death, which is how `test_fire.ps1` counts deaths without re
 
 ### What is not here
 
-Leading, gravity, splash sampling, charge weapons, zoom and the laser — everything `Supported`
-rejects. The user's architectural question about weapon choice driving the aim is real, but it
-belongs to `AIM_LEAD`: hitscan needs no aim change at all, because `AIM_TARGET` is already exactly
-what `BotSense` produces. No hooks for the projectile case were added speculatively.
+Everything `Supported` still rejects: gravity and splash (the ballistic elevation solve, a coarse
+traced flight sim, splash sampling at the target's `mins.z`, and the minimum range splash forces so a
+bot stops gibbing itself), `FIRE_CHARGE`, `FIRE_TAP`, `WPN_Q_THROW_ARC` and `WPN_Q_INHERIT_VEL`,
+`AIM_SURFACE`, the zoom and laser toggles, and the two `WPN_Q_HIDDEN_STATE` modes — which also want
+`CSatchel::m_chargeReady` and `CRpg::m_fSpotActive` in `GameOffsets`.
+
+The aim override those all need does now exist, and none of them needs a second one.
 
 ## bot_move.cpp
 
