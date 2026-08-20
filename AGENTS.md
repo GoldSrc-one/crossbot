@@ -87,6 +87,12 @@ The script's own output is the pass/fail verdict only. Everything the plugin pri
 Per-map transcripts in `nav_debug\logs\`. Raising `-MaxParallel` past the default 6 loads the box enough
 to change bot behaviour — see `doc/testing.md` before trading that for wall clock.
 
+### Test combat
+```powershell
+.\scripts\test_fire.ps1
+```
+The nav sweep cannot see firing -- one bot per server means no target. `-Full` for the rarer cases.
+
 ### Sweep the mesh, then the routes
 ```powershell
 & .\.claude\skills\crossbot-navgen\scripts\sweep.ps1 -Out before.txt

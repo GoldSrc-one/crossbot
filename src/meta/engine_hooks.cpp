@@ -2,6 +2,7 @@
 #include <meta_api.h>
 
 #include "../bot/bot_manager.h"
+#include "../game/fake_cmd.h"
 
 void EmitSound(edict_t *entity, int channel, const char *sample, float volume, float attenuation,
 	int fFlags, int pitch)
@@ -31,6 +32,9 @@ C_DLLEXPORT int GetEngineFunctions(enginefuncs_t *pengfuncsFromEngine, int *inte
 	}
 
 	memset(pengfuncsFromEngine, 0, sizeof(enginefuncs_t));
+	pengfuncsFromEngine->pfnCmd_Args = FakeCmd::Args;
+	pengfuncsFromEngine->pfnCmd_Argv = FakeCmd::Argv;
+	pengfuncsFromEngine->pfnCmd_Argc = FakeCmd::Argc;
 	return TRUE;
 }
 

@@ -20,6 +20,6 @@ float Bot_MaxSpeed(edict_t *pEdict);
 
 PmSim::PmPhysics Bot_Physics(edict_t *pEdict);
 
-void Bot_RunPlayerMove(edict_t *pEdict, const Vector &angles, float fmove, float smove,
+void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
 	unsigned short buttons, bool allowLongJump = false);
 

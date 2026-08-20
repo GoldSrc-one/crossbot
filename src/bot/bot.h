@@ -10,6 +10,7 @@
 #include "../nav/path_follower.h"
 #include "bot_aim.h"
 #include "bot_avoid.h"
+#include "bot_fire.h"
 #include "bot_sense.h"
 #include "bot_weapons.h"
 
@@ -132,6 +133,7 @@ struct CBot
 	BotAim::State aim;
 	BotAvoid::State avoid;
 	BotSense::State sense;
+	BotFire::State fire;
 
 	bool fallTelemetryLogged = false;
 

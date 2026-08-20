@@ -61,6 +61,12 @@ cvar_t g_aimErrorCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_fireCvar = {
+	"crossbot_fire",
+	"1",
+	FCVAR_SERVER
+};
+
 cvar_t g_aimDriftCvar = {
 	"crossbot_aim_drift",
 	"1",
@@ -81,6 +87,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimErrorCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDriftCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_fireCvar);
 	RETURN_META(MRES_IGNORED);
 }
 

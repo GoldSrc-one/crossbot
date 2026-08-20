@@ -8,6 +8,7 @@
 #include "bot_move_nav.h"
 #include "bot_move.h"
 #include "bot_aim.h"
+#include "bot_fire.h"
 #include "bot_sense.h"
 #include "bot_avoid.h"
 #include "bot_items.h"
@@ -133,7 +134,7 @@ namespace
 	{
 		bot.moveForward = 0.f;
 		bot.moveSide = 0.f;
-		Bot_RunPlayerMove(bot.pEdict, angles, 0.f, 0.f, 0);
+		Bot_RunPlayerMove(bot, angles, 0.f, 0.f, 0);
 	}
 
 	bool OnLadder(edict_t *pEdict)
@@ -389,7 +390,7 @@ namespace
 		if (crouch) buttons |= IN_DUCK;
 		if (jump && !OnLadder(pEdict)) buttons |= IN_JUMP;
 
-		Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons, allowLongJump);
+		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons, allowLongJump);
 	}
 
 	void RunAirmoveApproach(CBot &bot, const Nav::NavMesh &mesh, const Nav::Waypoint &wp)
@@ -614,7 +615,7 @@ namespace
 			pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 			pEdict->v.velocity.x, pEdict->v.velocity.y, pEdict->v.velocity.z);
 
-		Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons);
+		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
 
 		LADDER_DBG(bot, "after",
 			"fly=%d grnd=%d duck=%d org=(%.1f,%.1f,%.1f) vel=(%.0f,%.0f,%.0f)",
@@ -1104,7 +1105,7 @@ namespace
 		else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
 		if (crouch) buttons |= IN_DUCK;
 
-		Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons);
+		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
 	}
 
 	bool FinishElevatorRide(CBot &bot, const Nav::NavMesh &mesh, const char *why)
@@ -1419,7 +1420,7 @@ namespace
 		else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
 		if (wp.requiresCrouch) buttons |= IN_DUCK;
 
-		Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons);
+		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
 		return true;
 	}
 
@@ -1546,7 +1547,7 @@ namespace
 		if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
 		else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
 
-		Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons);
+		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
 		return true;
 	}
 
@@ -1902,6 +1903,7 @@ void Bot_MoveNav(CBot &bot)
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
 	BotSense::Update(bot);
+	BotFire::Think(bot);
 
 	BotItems::RefreshMemos(bot);
 
@@ -2210,5 +2212,5 @@ void Bot_MoveNav(CBot &bot)
 			pEdict->v.velocity.x, pEdict->v.velocity.y, pEdict->v.velocity.z, ladderEject ? 1 : 0,
 			avoid.jump ? 1 : 0);
 
-	Bot_RunPlayerMove(pEdict, angles, fmove, smove, buttons);
+	Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
 }

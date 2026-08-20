@@ -3,6 +3,7 @@
 
 #include "bot_manager.h"
 #include "bot.h"
+#include "bot_fire.h"
 #include "bot_items.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
@@ -138,6 +139,7 @@ void StartFrame()
 		{
 			bot.wasDead = false;
 			BotItems::OnRespawn(bot);
+			BotFire::Reset(bot);
 		}
 
 		BotWeapons::Refresh(bot);
@@ -380,6 +382,55 @@ void PrintSenseStatus()
 	snprintf(summary, sizeof(summary),
 		"CrossBot: %d bot(s), sense=%d sense_decay=%.2f\n", shown,
 		BotSense::Enabled() ? 1 : 0, BotSense::Decay());
+	SERVER_PRINT(summary);
+}
+
+void PrintFireStatus()
+{
+	int shown = 0;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		++shown;
+
+		const BotFire::State &fire = bot.fire;
+		const BotInventory &inv = bot.inventory;
+
+		char heldBuf[64] = "-";
+		char ammoBuf[64] = "-";
+		if (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
+		{
+			const BotWeapon &w = inv.weapons[inv.activeIndex];
+			const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(w.id) : nullptr;
+			snprintf(heldBuf, sizeof(heldBuf), "%s", spec && spec->classname ? spec->classname : "?");
+
+			int prim = (w.primaryAmmoType >= 0 && w.primaryAmmoType < MAX_AMMO_SLOTS)
+				? inv.ammo[w.primaryAmmoType] : -1;
+			int sec = (w.secondaryAmmoType >= 0 && w.secondaryAmmoType < MAX_AMMO_SLOTS)
+				? inv.ammo[w.secondaryAmmoType] : -1;
+			snprintf(ammoBuf, sizeof(ammoBuf), "clip=%d prim=%d sec=%d rel=%d", w.clip, prim, sec,
+				w.reloading ? 1 : 0);
+		}
+
+		char aimBuf[64] = "-";
+		if (fire.lastMiss >= 0.f)
+			snprintf(aimBuf, sizeof(aimBuf), "miss=%.2f tol=%.2f", fire.lastMiss, fire.lastTol);
+
+		edict_t *target = bot.sense.target.Get();
+
+		char line[416];
+		snprintf(line, sizeof(line),
+			"CrossBot: %s held=%s mode=%s why=%s %s %s shots=%d switches=%d reloads=%d target=%s\n",
+			bot.name, heldBuf, BotFire::ModeName(fire.mode), fire.lastReason, ammoBuf, aimBuf,
+			fire.shots, fire.switches, fire.reloads, target ? CBotPlayerNameOf(target) : "-");
+		SERVER_PRINT(line);
+	}
+
+	char summary[160];
+	snprintf(summary, sizeof(summary), "CrossBot: %d bot(s), fire=%d\n", shown,
+		BotFire::Enabled() ? 1 : 0);
 	SERVER_PRINT(summary);
 }
 

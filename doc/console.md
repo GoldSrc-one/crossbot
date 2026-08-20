@@ -34,6 +34,11 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_sense_status` — per bot: aim target and bone, live suspicion count, the freshest entry with
   source, age and position, and the look direction with its authority and how many entries survived the
   cone refinement; see `doc/bot.md`, `bot_sense.cpp`
+- `crossbot_fire_status` — per bot: the weapon held, the fire mode chosen, why the bot is or is not
+  shooting, live clip and ammo, and `miss`/`tol` — the angle from the fire ray to the served aim point
+  against the angle the target's own size subtends there, which is the whole tolerance model in two
+  numbers. `shots`, `switches` and `reloads` are **per life**: respawn zeroes them, so a drop is a
+  death; see `doc/bot.md`, `bot_fire.cpp`
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
@@ -67,6 +72,10 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 - `crossbot_aim_error` — scale on the intentional over/undershoot, clamped [0, 4]. Default 1. At 0 the brake
   is forced to exactly 1 and the controller is time-optimal again, which is the regression baseline
   `scripts/test_aim_error.ps1` measures against. Above 1 is for seeing the effect, not for playing against
+- `crossbot_fire` — whether bots shoot at all. Default 1. Inert without `crossbot_sense`, since firing
+  needs a target and an aim queue; and inert in the nav sweep either way, because a lone bot never
+  acquires one. Turning it off also stops weapon *switching*, which is the same decision; see
+  `doc/bot.md`, `bot_fire.cpp`
 - `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
   `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean
   the test never settles at all

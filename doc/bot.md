@@ -335,6 +335,14 @@ tracking a target that has already left view, for exactly `delay`, and then stop
 The ring is cleared on acquiring a target, on teleport, and on respawn (the last via `bot = CBot()`).
 Clearing on acquire is what makes the reaction time apply to every reacquisition, not just the first.
 
+**The drain did not actually work until firing needed it.** `UpdateVision` compared the new target
+against the old and cleared on any difference, and *losing* a target is a difference — so the ring was
+wiped on the same frame line of sight broke and there was no drain at all, only the suspicion fallback
+in `ApplyLook`. The test is now `best && best != sense.target.Get()`: clear when a different live
+target is acquired, never when one is lost. Reacquiring the same enemy after a gap still clears,
+because the handle was set to null in between, so the reaction delay is still paid every time.
+Nothing above this paragraph changed — the behaviour it described is simply true now.
+
 ### What feeds the queue
 
 `BotSense::Update` does, once per frame, from the slot in `Bot_MoveNav` that `UpdateGaze` used to hold.
@@ -816,8 +824,168 @@ cone refinement.
 `kept` versus `susp` is the interesting pair -- it is the mean-shift reporting how much of what the bot
 knows about it can actually face at once.
 
-Only `SIGHT` and `SOUND` have been observed at runtime. `EVENT` and `DAMAGE` are wired and filtered but
-unexercised, because both need weapon fire and nothing pulls a trigger yet.
+All four sources are now observed at runtime. `EVENT` and `DAMAGE` were wired and filtered but
+unexercised for as long as nothing pulled a trigger; `scripts/test_fire.ps1` sees all four in a duel.
+
+The status line reports only the *freshest* entry, and footsteps make `SOUND` the freshest almost
+every frame, so a single poll is a poor witness for the other three. That is why `test_fire.ps1`
+samples this command several times per poll rather than once.
+
+## bot_fire.cpp
+
+The bot could see, aim and describe every gun it carried long before it could pull a trigger. This is
+the piece that closes the loop, and it does it for **instant-hit weapons only** — crowbar, glock,
+python, MP5, shotgun, gauss primary, egon. Everything else is skipped rather than mishandled.
+
+Two entry points, and the split between them is the design:
+
+- `BotFire::Think` is **policy**. It runs once per frame from `Bot_MoveNav`, immediately after
+  `BotSense::Update`, and decides which weapon and which fire mode the bot is trying to use. It has
+  side effects — it can issue a weapon-select command — so it needs a single known slot in the frame.
+- `BotFire::Buttons` is the **trigger**. It is pure, it runs inside `Bot_RunPlayerMove`, and it
+  answers one question: given the angles about to be sent to the engine this instant, does the shot
+  hit?
+
+### Running dry has to release the trigger
+
+The single most important fact about `CBasePlayerWeapon::ItemPostFrame`: the auto-reload lives in the
+`else if ( !(button & (IN_ATTACK|IN_ATTACK2)) )` branch. **A bot that holds `IN_ATTACK` through an
+empty clip clicks forever and never reloads.** Every ammo check in this file exists to release the
+button rather than to save a wasted press.
+
+`IN_RELOAD` is honoured directly by the same dispatcher, so the bot reloads deliberately instead of
+falling through to the idle branch. That matters: the idle branch also runs `GetNextBestWeapon`, which
+would change the weapon out from under the choice `Think` just made.
+
+`wantReload` is set in `Think` and consumed in `Buttons` ahead of every other test. It is deliberately
+cleared while `m_fInReload` is set, so the sequence is one frame of `IN_RELOAD`, then nothing at all
+until the reload completes — which is exactly what a released trigger looks like to `ItemPostFrame`.
+
+### Ready means <= 0
+
+`CanAttack` under `CLIENT_WEAPONS` is `attack_time <= 0.0`, and `CBasePlayer::ItemPostFrame` gates
+everything on `m_flNextAttack > 0`. That settles the question `bot_weapons.cpp` left open: in retail
+Half-Life these are countdowns, not timestamps, and `BotInventory::nextAttack > 0` means nothing will
+fire this frame no matter what the buttons say. `Buttons` returns 0 there rather than pressing into a
+closed gate.
+
+### The fire ray is v_angle + punchangle, and that is burst fire for free
+
+Bullets travel along `pev->v_angle + pev->punchangle`, not `v_angle`. Testing the fire ray with
+punchangle folded in means the bot sprays, recoil walks the muzzle off the target, the ray leaves the
+box, the trigger releases, punchangle decays and it fires again. **There is no burst timer in this
+file and none is needed.** It also means the bot never compensates for its own recoil, which is the
+top item still outstanding in `bot_aim.cpp`'s deferred list; here that gap produces the right
+behaviour by accident and should not be "fixed" without replacing it with something.
+
+`IN_ATTACK2` short-circuits `IN_ATTACK` in the dispatcher — the secondary test is an `if` and the
+primary is its `else if` — so `Buttons` returns one bit or the other and never both.
+
+### The box is centred on the served aim point, not on the enemy
+
+`Buttons` builds a box the size of the target's own `maxs - mins` around **the point the aim delay
+queue is currently serving**, and fires when the ray enters it. The enemy's extents are the tolerance:
+a bigger target is easier to justify shooting at, which is the whole of the error budget.
+
+Centring it on the served point rather than the enemy's live origin is the interesting choice. It
+makes the test ask *is my hand where my intent is*, and three things fall out of that:
+
+- A bot mid-flick is not yet pointing where it means to, so it holds fire. No separate settle timer.
+- A bot whose reaction delay has it tracking a stale position fires at that stale position and
+  **misses**, the way a human does. Aiming error stops being cosmetic.
+- Line-of-sight loss needs no special case. The queue drains for `crossbot_aim_delay` after the
+  target is gone and the bot keeps shooting into cover for exactly that long, then stops when
+  `ReadDelayed` runs dry.
+
+That drain only works because `BotSense::UpdateVision` clears the queue on acquiring a *different*
+live target and not on losing one — see `bot_sense.cpp`.
+
+The served point is a randomly chosen hitbox bone, so a box centred on a foot reaches a full body
+height below the enemy. That is generous, and it is generosity being spent deliberately rather than
+by oversight.
+
+A second trace, `ignore_monsters` from the eye out to `range`, rejects the shot if world geometry
+stops the ray before the box entry. Without it a bot happily fires through a wall at someone it can
+still hear.
+
+### Supported is the incremental frontier
+
+```cpp
+mode.fire == FIRE_HOLD && mode.aim == AIM_TARGET && mode.toggle == TOGGLE_NONE &&
+mode.speed == 0 && mode.gravity == 0 && mode.splash == 0 &&
+(mode.quirks & (WPN_Q_HIDDEN_STATE | WPN_Q_KEEP_AIMING)) == 0
+```
+
+A predicate over the spec, deliberately **not** a list of weapon ids. It admits exactly the
+instant-hit set and rejects every projectile, charge, toggle and hidden-state mode without naming one
+of them. Turning projectiles on later is relaxing a clause here and supplying the aim override they
+need; it is not editing a table.
+
+Note what this buys on the crossbow: `primaryZoomed` is never consulted, because nothing zooms, so the
+`(zoomed && spec->primaryZoomed.fire) ? ... : spec->primary` one-liner in `doc/game.md` stays a
+one-liner and no weapon is special-cased in `bot/`.
+
+`ModeUsable` adds the three conditions the spec exists to answer: `range` (which is what keeps the
+crowbar holstered past 32 units and the shotgun and egon past 2048), the `ammo` pool (the one field
+that genuinely cannot be derived at runtime — secondary fire does *not* imply secondary ammo), and
+`WPN_Q_NO_UNDERWATER` against `waterlevel == 3`.
+
+Ammo is judged differently at the two levels, on purpose. For *selection*, a clip weapon with an empty
+clip but a non-empty reserve is still usable — otherwise the bot throws away a good gun the instant it
+needs reloading. For *firing*, the clip has to actually hold `ammoPerShot`.
+
+### Selection is random, and that is the placeholder
+
+If the active weapon's current mode still works, keep it. If the other mode of the same weapon works,
+switch to that — free, no command, no deploy delay. Otherwise pick uniformly at random among every
+usable weapon+mode pair and select that weapon.
+
+Uniform random is the explicit stand-in for the weighting layer. When preferences arrive they replace
+this function body and nothing else moves.
+
+`kSelectInterval` throttles re-selection to 2 Hz so that a select the game refuses — a classname typo,
+a weapon dropped between the walk and the command — cannot become a per-frame command loop.
+Completion is never inferred from a timer: `BotWeapons::Refresh` reports `activeIndex` every frame, so
+the switch is observed rather than assumed, and the frame that issues the command simply reports
+`mode=none` and tries again next frame.
+
+This runs more often than it looks like it should. Half-Life auto-switches to whatever it considers
+the best weapon on pickup, which for a roaming bot is regularly an RPG or a crossbow — a weapon this
+file cannot drive. Every one of those pickups costs a switch back.
+
+### Why the trigger lives inside Bot_RunPlayerMove
+
+`Bot_RunPlayerMove` is the one funnel every drive branch passes through, and it is the only place that
+has the angles actually being commanded this frame. Putting the call there gets firing into walking,
+ladders, elevator rides, airmoves and idling at once, instead of seven copies of the decision — and it
+gets the exact ray the engine is about to use, rather than one aim-controller step stale.
+
+It takes `CBot &` instead of `edict_t *` for that reason alone.
+
+The jump split means a held `IN_ATTACK` can span two `pfnRunPlayerMove` calls in one frame. That is
+harmless, and it is why nothing here depends on button *edges* — which is just as well, since
+`ITEM_FLAG_NOAUTOFIRE` does not exist in this SDK and no weapon reads `m_afButtonPressed`.
+
+### The shot counter counts the game DLL, not the plugin
+
+`shots` increments when the active weapon's primary or secondary attack timer goes from ready to busy
+**on a frame after the bot actually pressed**. The press gate is not decoration: deploying a weapon
+and `GetNextBestWeapon`'s empty-weapon switch both arm `m_flNextPrimaryAttack` too, and a counter
+without it reads several shots per weapon pickup with firing disabled entirely. The observation is
+still the game's own timer — the gate only decides attribution.
+
+`reloads` counts the rising edge of `wantReload`, because the state itself lasts one frame and is
+invisible to any poll.
+
+Every counter is per life. `BotFire::Reset` runs on respawn from `BotManager::StartFrame`, so a drop
+in any of them is a death, which is how `test_fire.ps1` counts deaths without reading the scoreboard.
+
+### What is not here
+
+Leading, gravity, splash sampling, charge weapons, zoom and the laser — everything `Supported`
+rejects. The user's architectural question about weapon choice driving the aim is real, but it
+belongs to `AIM_LEAD`: hitscan needs no aim change at all, because `AIM_TARGET` is already exactly
+what `BotSense` produces. No hooks for the projectile case were added speculatively.
 
 ## bot_move.cpp
 
@@ -837,6 +1005,12 @@ ladder's reach ejects the bot the moment a later sub-step brings it into contact
 
 Every actuation goes through here so a jump costs the same one frame of held button at any server
 framerate. Below the split threshold this is exactly the single call it replaces.
+
+It takes `CBot &` rather than `edict_t *` because it is also where the fire button is added. Being the
+one funnel every drive branch passes through is exactly what firing wants, and this is the only place
+that holds the angles actually being commanded this frame — see `bot_fire.cpp`, *Why the trigger lives
+inside Bot_RunPlayerMove*. A fire button is held, never edged, so the jump split spanning it across
+two sub-commands changes nothing.
 
 **IN_DUCK and IN_JUMP in one command is a long jump, not a crouch jump.** `PM_Jump`
 (`pm_shared.c:2554`) reads `cansuperjump` from the `slj` physinfo key — set by `CBasePlayer` the moment
@@ -1966,6 +2140,10 @@ player decrements them each frame and clamps at `-1`, so "ready" reads as `<= 0`
 sits at exactly `-1.00`. A handful of HLSDK paths write the absolute `gpGlobals->time + delay` form
 anyway (`glock.cpp`'s empty-click being one), so a consumer that cares has to tolerate both. Deciding
 that belongs to whatever fires the weapon, not to the reader.
+
+`bot_fire.cpp` is that consumer and it decided: retail Half-Life is the countdown case, so ready is
+`<= 0` and `nextAttack > 0` means nothing will fire this frame. It never needs the absolute form,
+because the only weapon it presses is one it is already holding.
 
 ### Ammo counts are indices, never names
 

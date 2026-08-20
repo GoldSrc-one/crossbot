@@ -188,6 +188,11 @@ namespace
 		BotManager::PrintSenseStatus();
 	}
 
+	void Cmd_CrossBotFireStatus()
+	{
+		BotManager::PrintFireStatus();
+	}
+
 	void AppendQuirks(unsigned int quirks, char *out, size_t cap)
 	{
 		static const struct { unsigned int bit; const char *name; } kNames[] = {
@@ -523,6 +528,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_aim_test", Cmd_CrossBotAimTest);
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
+	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 }
 
 }

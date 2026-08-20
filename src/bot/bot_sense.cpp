@@ -261,7 +261,7 @@ namespace
 
 		BotSense::State &sense = bot.sense;
 
-		if (best != sense.target.Get())
+		if (best && best != sense.target.Get())
 			BotAim::ClearDelayQueue(bot);
 
 		sense.target.Set(best);

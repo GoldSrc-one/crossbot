@@ -2,6 +2,7 @@
 #include <meta_api.h>
 
 #include "bot_move.h"
+#include "bot_fire.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
 
@@ -38,10 +39,13 @@ byte Bot_FrameMsec()
 	return static_cast<byte>(msec);
 }
 
-void Bot_RunPlayerMove(edict_t *pEdict, const Vector &angles, float fmove, float smove,
+void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
 	unsigned short buttons, bool allowLongJump)
 {
+	edict_t *pEdict = bot.pEdict;
 	byte msec = Bot_FrameMsec();
+
+	buttons |= BotFire::Buttons(bot, angles);
 
 	if (!allowLongJump && (buttons & (IN_JUMP | IN_DUCK)) == (IN_JUMP | IN_DUCK) &&
 		Bot_HasLongJumpModule(pEdict))

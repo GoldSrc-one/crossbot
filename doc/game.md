@@ -96,6 +96,53 @@ engine only fills in once it spawns a server, so profile detection cannot run th
 where it is. And the gamedir is the better key anyway: these offsets describe a *game binary*, and the
 gamedir is what selects which binary the engine loaded. `IGameProfile` gains nothing from this file.
 
+## fake_cmd.cpp
+
+Making a fake client issue a console command. `FakeCmd::Run(player, "weapon_9mmAR")` is the whole
+interface, and today it has exactly one caller: `BotFire::Think` changing weapons.
+
+### Why a client command is the only correct route
+
+`client.cpp:553` — any command whose name begins with `weapon_` goes to
+`CBasePlayer::SelectItem(pcmd)`. That is the only path that runs `Holster()` on the old weapon and
+`Deploy()` on the new one, sets `m_flNextAttack` to the deploy time, and updates the client's weapon
+state. Nothing else in the plugin's reach does.
+
+The two alternatives are both wrong rather than merely inconvenient. `pfnClientCommand` sends a
+command *to* a client, and a fake client has no client to send it to. Writing
+`CBasePlayer::m_pActiveItem` through `GameOffsets` — cheap, since the offset would be one line —
+skips Holster and Deploy entirely: the old weapon is never told it was put away, the new one never
+deploys, and `m_flNextAttack` never gets set, so the bot would fire through a switch that a human
+cannot.
+
+### The hook is flag-gated and inert everywhere else
+
+The game DLL reads its command through `CMD_ARGV` / `CMD_ARGC` / `CMD_ARGS`, which are engine
+functions. So `Run` tokenises the string, raises a module-local flag, calls `MDLL_ClientCommand`, and
+lowers the flag; three Metamod **pre**-hooks on `pfnCmd_Argv` / `pfnCmd_Argc` / `pfnCmd_Args` return
+`MRES_SUPERCEDE` with the fake tokens while the flag is up and `MRES_IGNORED` otherwise.
+
+These three are on the hot path for every real command from every real client on the server, so the
+gating is not an optimisation. They are live only inside the single synchronous `MDLL_ClientCommand`
+call and are a plain passthrough at every other instant. `Run` refuses to re-enter for the same
+reason.
+
+This is also why `engine_hooks.cpp` now installs anything at all in the **pre** table, which until
+this change was memset to zero and returned.
+
+### The classname is case sensitive
+
+`SelectItem` compares with `FClassnameIs`, which is `strcmp`. `weapon_9mmAR` works and `weapon_9mmar`
+silently selects nothing — no error, no return value, the bot simply keeps holding what it had. The
+classnames in `hldm_weapons.cpp` are the exact SDK spellings and `crossbot_weaponspec <name>` is what
+proves it, by joining each spec against `CBotClassOf` on the live weapon entity.
+
+For the same reason `Run` **drops** a command that would not fit its buffer rather than truncating
+it: a truncated classname is indistinguishable from a working one at the call site.
+
+`Run` returns whether it dispatched, not whether the game did anything. Nothing downstream should
+trust it as confirmation — `BotFire` watches `BotInventory::activeIndex` change instead.
+
 ## ent_handle.h
 
 ### CBotEntHandle

@@ -140,9 +140,9 @@ a ladder instead, and no run is comparable to the last. Watch `queue` and `serve
 `err`.
 
 The **suspicion** phase reports which senses actually fired and asserts that heard entries age out. Only
-`SIGHT` and `SOUND` are reachable from it. `EVENT` and `DAMAGE` are wired but need weapon fire, which no
-bot does yet, so their absence is expected rather than a failure — and they are consequently the two paths
-in `bot_sense.cpp` that have never run against a live server.
+`SIGHT` and `SOUND` are reachable from it, because it runs with `crossbot_gather 0` and converged bots
+that never fight. `EVENT` and `DAMAGE` need weapon fire; `scripts/test_fire.ps1` is where all four
+sources have now been seen.
 
 Sound there now comes mostly from **footsteps**, plus item pickups, doors and chargers. Footsteps dominate
 by a wide margin: two roaming bots on `crossfire` produce around 85 step sounds in 25 seconds, against 64
@@ -164,9 +164,50 @@ let a bot lock on, and strafe at constant speed — its head should stay *glued*
 Reverse sharply and it should overshoot and correct. Step behind a wall and it should keep tracking for
 about a delay before stopping; step back out and nothing should move for about a delay before the flick.
 
-Joining as a human is also the only way to exercise `EVENT` and `DAMAGE`: fire a weapon near a bot that
+Joining as a human is another way to exercise `EVENT` and `DAMAGE` by hand: fire a weapon near a bot that
 cannot see you and its head should turn toward the shot, and shoot one in the back and it should turn
 around.
+
+## scripts/test_fire.ps1
+
+Drives the hitscan firing loop, which is the whole chain at once — sense, aim queue, weapon choice, the
+fire ray, the button. It does the **opposite** of `test_sense.ps1` and that is the point: converging
+bots onto one spawn is precisely the arrangement firing cannot be measured in, because converged bots
+land on the same origin and vision drops them for having no eye-to-eye vector at all. So this script
+leaves `crossbot_gather 1` and lets bots roam, collect guns and meet at real ranges.
+
+Encounters are stochastic. More bots is the only reliable lever — six on `crossfire` produce a fight
+inside a minute where two can take several — so the pass condition is "shots were fired at real
+targets", never a count. `-Full` runs the whole duel window instead of stopping at the first confirmed
+engagement, which is what you want when the interesting numbers are deaths, reloads and the rarer
+suspicion sources.
+
+**The control phase is the load-bearing half.** With `crossbot_fire 0` nothing may fire, and it is
+checked two independent ways: the plugin's own shot counter, and ammo the bots actually spent, read
+from clip and reserve counts. Ammo is the honest witness — a clip only ever falls by firing, since
+reloading raises it, and clipless weapons spend their reserve directly — and it is what catches a shot
+counter that has quietly become a no-op.
+
+Two things the control phase has already caught, both worth not reintroducing:
+
+- **`crossbot_fire 0` has to be set before the bots are added, not after.** Several bots spawn inside
+  each other's line of sight and the few milliseconds an rcon round trip takes is long enough for the
+  default `crossbot_fire 1` to get shots away.
+- **A shot is not "the attack timer became busy".** Deploying a weapon and `GetNextBestWeapon`'s
+  empty-weapon switch arm `m_flNextPrimaryAttack` too, so an ungated counter reads several shots per
+  weapon pickup with firing switched off entirely. The counter in `bot_fire.cpp` is gated on the bot
+  having actually pressed the frame before.
+
+Numbers from a passing 6-bot, 300s `-Full` run on `crossfire`, as an order-of-magnitude reference and
+not a threshold: ~1000 shots, ~420 rounds burned, 36 firing decisions, 83 target acquisitions, 47
+deaths, 43 weapon switches, 22 reloads, and all four suspicion sources. The `reasons` histogram is the
+most useful line in the output — `off-target` and `blocked` both appearing is what shows the fire ray
+is actually rejecting shots rather than waving everything through.
+
+`reloads` is counted in the plugin rather than scraped, because `why=reloading` is true for a single
+frame and no 2-second poll would ever see it. Reload is the behaviour the SDK reading says is easiest
+to get wrong — hold the trigger through an empty clip and the weapon clicks forever — so it needs a
+witness that does not depend on sampling luck.
 
 ## scripts/test_aim_error.ps1
 
@@ -227,3 +268,8 @@ search:'` is the cheaper filter.
 behaviour, so a planner change only needs those plus a control. A change in `path_follower.cpp` or
 `bot_move_nav.cpp` moves no waypoint at all, so there is no diff to narrow by and the map list has to
 come from what the change touches.
+
+**Combat.** `test_fire.ps1`. The nav sweep is blind to it -- one bot per server means no target, so
+`BotFire::Think` exits on its first branch every frame and the whole system is inert. That cuts both
+ways: it is also why a firing change can be cleared for movement regressions by the nav sweep alone,
+and why a nav sweep result of 45/45 says nothing whatsoever about whether firing works.
