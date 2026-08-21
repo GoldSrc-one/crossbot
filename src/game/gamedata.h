@@ -4,6 +4,9 @@ struct GameOffsets
 {
 	int pev;
 
+	int ent_fInAttack;
+	int ent_flStartThrow;
+
 	int item_pPlayer;
 	int item_pNext;
 	int item_iId;
@@ -15,6 +18,8 @@ struct GameOffsets
 	int wpn_flNextPrimaryAttack;
 	int wpn_flNextSecondaryAttack;
 	int wpn_flTimeWeaponIdle;
+
+	int rpg_cActiveRockets;
 
 	int mon_flNextAttack;
 

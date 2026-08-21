@@ -32,6 +32,8 @@ struct PmPhysics
 	float frameTime = 1.f / 60.f;
 };
 
+constexpr float kGravity = 800.f;
+
 constexpr float kDuckingMultiplier = 0.333f;
 
 constexpr float kJumpImpulse = 268.328156f;

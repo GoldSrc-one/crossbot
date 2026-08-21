@@ -56,6 +56,13 @@ The same test over every `maps/*.bsp`, at most `-MaxParallel` at a time. Each ma
 PowerShell child process, so its verdict is a real process exit code and its whole transcript lands in
 `nav_debug/logs/<map>.log`. Summary prints map, PASS/FAIL, elapsed and reason; exit 1 if anything failed.
 
+**Run it under `pwsh` 7, not Windows PowerShell 5.1.** Because the verdict is the child's exit code
+rather than anything the child printed, a broken `Start-Process -PassThru` handle fails every map at
+once — under 5.1 the sweep reports **0/45** with a null `StartTime`, a nonsensical negative elapsed
+(around -63,922,828,000s, which is `Get-Date` minus nothing), and every per-map reason still reading
+"goal reached". That combination — total failure, absurd elapsed, transcripts that all say PASS — is
+the shell, not the bots. Confirm with a single `test_nav_goal.ps1` run before believing a regression.
+
 **`-MaxParallel` is a correctness knob, not just a speed one.** Default 6 (~210s for 45 maps). At 12 the
 run takes ~140s, but the box is loaded enough that the *bots* behave differently — maps that pass alone
 and at 6 have been observed falling off geometry and failing. A faster sweep you cannot trust is worth
@@ -70,6 +77,14 @@ inside it. `pfnRunPlayerMove` is where that bites — the engine halves any comm
 re-simulates it, which is how a held `IN_JUMP` came to eject the bot off a ladder it had just touched
 (see `Bot_RunPlayerMove` in `doc/bot.md`). At 100 Hz that bug was invisible; at 10 Hz it failed 5 runs
 out of 5. Verify the rate actually took with `rcon stats`, whose FPS column should read ~10.9.
+
+**Plugin cvars must go through `-BootCommands`, not `-ServerArgs`.** `-BootCommands "crossbot_sense 0"`
+(forwarded to each child, and available on `test_nav_goal.ps1` alone) appends to the generated cfg that
+runs once the level is active. The obvious `-ServerArgs "+crossbot_sense","0"` **silently does nothing**:
+the engine parses the command line before `GameDLLInit` registers the cvar, so the cvar's own default
+overwrites it and the sweep runs at `1` while appearing to run at `0`. Confirm any such run took by
+checking `sense=` in `crossbot_sense_status` rather than trusting the flag. Engine cvars like
+`sys_ticrate` already exist at parse time and are unaffected.
 
 Killing a child does not run its cleanup, so the runner tracks the ports it owns and sweeps for
 surviving `hlds.exe` at the end, matching on `+port` in the command line. It never mass-kills
@@ -153,10 +168,14 @@ what matters is that it is flat. Any increase there is a bug in the skip, not a 
 `leadblk` that stays put through a whole roam phase means the trace is wrong — flags, direction, or the skip
 swallowing every case — not that the map was unusually open.
 
-The **suspicion** phase reports which senses actually fired and asserts that heard entries age out. Only
-`SIGHT` and `SOUND` are reachable from it, because it runs with `crossbot_gather 0` and converged bots
-that never fight. `EVENT` and `DAMAGE` need weapon fire; `scripts/test_fire.ps1` is where all four
-sources have now been seen.
+The **suspicion** phase reports which senses actually fired, asserts that the player tier always wins the
+look vote, and asserts that heard entries age out. `SIGHT` and `SOUND` are the two it can rely on;
+`EVENT` and `DAMAGE` do turn up from weapon deploys and fall damage, but `scripts/test_fire.ps1` is where
+all four are exercised deliberately.
+
+Sources are read from the `pushed=` counters, never by sampling `fresh=`. Since the list holds one entry
+per entity, a player's `SIGHT` entry overwrites their own `SOUND` and `DAMAGE` entries within a single
+`BotSense::Update`, so `fresh=` is a poor witness for anything but `SIGHT`.
 
 Sound there now comes mostly from **footsteps**, plus item pickups, doors and chargers. Footsteps dominate
 by a wide margin: two roaming bots on `crossfire` produce around 85 step sounds in 25 seconds, against 64
@@ -167,10 +186,17 @@ below 220 units/s emits none at all, by engine design.
 
 Do not force the quiet period with `crossbot_kill`. Respawn resets the bot with `CBot()`, which empties the
 suspicion list whether or not the decay works -- the assertion would pass unconditionally. Nor should you
-assert that no `SOUND` entry survives: `crossbot_gather 0` does not make the map silent, because doors and
-chargers keep emitting and any bot still walking keeps making footsteps. The invariant that actually holds
-regardless of background noise is that no live entry may be older than `crossbot_sense_decay`, so the test
-shrinks the window to 1s and checks the age column instead.
+assert that no `SOUND` entry survives. The invariant that actually holds is that no live entry may be older
+than `crossbot_sense_decay`, so the test shrinks the window to 1s and checks the age column instead.
+
+That phase **keeps gathering on**, which it did not used to. With one suspicion entry per entity, an idle
+map really does go silent: `susp=` sits at `0/256` and the age assertion then passes against an empty list,
+which is worse than not running it at all -- it looks like a green check and proves nothing. Moving bots
+keep emitting footsteps, so there is always something live to measure, and the test now fails outright if
+it never observed a single live entry.
+
+The same trap is worth generalising: **an assertion over a set that can legitimately be empty needs to
+assert the set is non-empty too.** This one survived a full green run before anyone noticed.
 
 Neither aim phase exercises the extrapolation, because a still target has no velocity to extrapolate and
 `crossfire` has no stretch long enough to hold a constant one. That check is manual: join the server,
@@ -224,14 +250,102 @@ deaths, 43 weapon switches, 22 reloads, and all four suspicion sources. The `rea
 most useful line in the output — `off-target` and `blocked` both appearing is what shows the fire ray
 is actually rejecting shots rather than waving everything through.
 
-**The projectile phases need `crossbot_fire_pin`, and equipping instead does not work.** A bot keeps
-any weapon that still has a usable mode, so handing a roaming bot a crossbow puts it in the inventory
-and nothing else ever happens — a first attempt gave 288 crossbows and hornetguns away across two
-minutes and recorded zero projectiles fired. The pin makes every other weapon unusable, which is the
-only lever that reaches selection. Each weapon runs its own pass so `aim=lead` and `aim=homing` are
-attributable, and both must appear: they can only come from different weapons, so one label covering
-both would mean `WPN_Q_HOMING` never reached the tolerance box. `off-target` must appear here too — a
-lead solve that never withholds a shot is a lead solve that is not running.
+There are **seven** weapon phases now and the whole `-Full` run takes comfortably over ten minutes, so
+run it in the background rather than waiting on it. `-ProjectileSeconds` defaults to 420, which is a
+minute each; the floor is 15s per phase and a phase that short measures nothing.
+
+A passing 6-bot run with `-DuelSeconds 120 -ProjectileSeconds 420 -Full`, again as a reference and not
+a threshold: duel 420 shots / 193 burned / 21 deaths with all four suspicion sources; crossbow 81
+shots and 21 zoomed polls; hornetgun 378 shots with 72 led; snark 122 shots and `uphill=40`; gauss 60
+charged shots with no timeout; 9mmAR 60 arc shots, `uphill=0`, `selfveto=14`; handgrenade 62 throws,
+`uphill=59`, `selfveto=44`, `primed=5`; RPG 52 shots against 52 guides and `capped=0` everywhere.
+
+`guides` matching `shots` exactly is the healthiest single number in that output, because the two are
+independent observations — one counts a commit the plugin opened, the other counts the game DLL's
+attack timer moving.
+
+**The weapon phases need `crossbot_fire_pin`, and equipping instead does not work.** A bot keeps any
+weapon that still has a usable mode, so handing a roaming bot a crossbow puts it in the inventory and
+nothing else ever happens — a first attempt gave 288 crossbows and hornetguns away across two minutes
+and recorded zero projectiles fired. The pin makes every other weapon unusable, which is the only
+lever that reaches selection.
+
+**The gauss needs the mode argument as well, for the same reason one level down.** The random pick
+names a weapon *and* a mode but only the weapon survives the switch, so the frame after selecting, the
+mode order restarts at primary. Gauss primary is a hitscan that works at any range, so
+`FIRE_CHARGE` is unreachable without `crossbot_fire_pin weapon_gauss secondary`. The hornetgun escapes
+this only by accident: its primary's flight-time ceiling rejects targets past 900 units, which is the
+one gap in the table that lets a secondary win.
+
+Each weapon runs its own pass so the aim kinds are attributable to the weapon that produced them, and
+each pass asserts what only that weapon can show:
+
+| pin | what it proves |
+|---|---|
+| `weapon_crossbow` | `zoomed > 0` and `aim=target` — the zoom decision fired and `primaryZoomed` was actually selected, which is the only thing that reaches `FireSniperBolt` |
+| `weapon_hornetgun` | `aim=homing` present and `leadshots < shots` — equality would mean the cone never replaced the solve |
+| `weapon_snark` | `aim=homing`, `leadshots == 0` (a thrown monster is never led) and `uphill > 0` |
+| `weapon_gauss secondary` | `chargeshots > 0`, `why=charged` seen, and **no** `charge-timeout` — the bot reached a full charge and waited for a shot rather than releasing on a clock |
+| `weapon_9mmAR secondary` | `aim=arc`, `arcshots == shots`, a refusal, and `uphill == 0` — the contact grenade is the only *fixed-speed* parabola in the game, and the only weapon that must stay exempt from the uphill veto |
+| `weapon_handgrenade` | `throwshots > 0`, `aim=arc`, `why=primed` seen, and a refusal — the coupled solve's only witness, and `primed` is what proves `m_flStartThrow` is being read rather than the throw assumed |
+| `weapon_rpg` | `guides > 0`, `why=guiding` seen, **no** `capped`, and **no** `aim=arc` or `aim=lead` — a laser-guided rocket is aimed at the target, because leading it would steer the spot off them |
+
+The MP5 phase equips `ammo_ARgrenades` alongside the weapon and the RPG phase equips `ammo_rpgclip`;
+the MP5's own give is clip ammo only and the RPG's default give is one rocket, so without them the
+mode is never usable and the phase measures nothing. The handgrenade needs no ammo entity — its own
+give is five grenades, and re-equipping every poll refills them.
+
+The two new phases each have a failure mode worth naming before it is seen.
+
+The **handgrenade's reach is about 550 units**, far shorter than any other weapon here, so it is the
+phase most dependent on the bots wandering near each other. A phase that reports `throwshots=0` on
+crossfire is more likely to be an unlucky sixty seconds than a broken solve; check `nothing-usable`
+against `no-target` before believing anything else.
+
+The **RPG phase expects deaths**, and a lot of them. The splash rule is deliberately permissive — it
+fires whenever the blast lands nearer the enemy than the bot — so six bots pinned to rocket launchers
+in a small arena kill themselves regularly. That is the rule working, not failing; every counter is
+banked on death before it resets, so the tallies survive it.
+
+`capped == 0` is the assertion that matters there, and it has the same standing as the gauss's
+`charge-timeout`: every guide window must close on the rocket rather than on the six-second valve. It
+was first written as `guides <= shots` and that was the wrong diagnosis — the first run reported 56
+windows against 50 shots, which is not a leak at all but presses that launched nothing, because
+`CRpg::Reload` pushes the weapon's own attack timer forward while the reload button is held. A leak
+makes a bot *stop*, so it would show as too few shots, not too many windows.
+
+**Every weapon phase respawns its bots first, and that is not tidiness.** The pin reaches weapon
+*selection*, and selection alone does not isolate a phase: a bot carrying a gauss charge keeps its
+mode without ever consulting `ModeUsable`, deliberately, so a charge started in the gauss phase
+survives the pin change and discharges into the next phase's counters. The first run of the MP5 phase
+failed on exactly that — six charge shots in a phase where the gauss was unusable. `crossbot_kill`
+drops the inventory, the charge and every per-life counter at once.
+
+`off-target` must appear in the **crossbow** phase — an aim gate that never withholds a shot is an aim
+gate that is not running. It is asserted there and nowhere else, for two different reasons. The gauss
+cannot show it at all, because `ChargeButtons` overwrites `lastReason` with `charging`/`charged` on
+every frame the ray test fails. Everywhere else it is a reason string and therefore a sampled one — it
+survives on the crossbow only because a bolt's ray gate rejects on most frames a target exists, so a
+two-second poll cannot miss it. Do not copy the pattern to a new phase without checking that.
+
+**The two arc phases assert the refusal on `selfveto`, not on the reason string**, and that is a
+correction rather than a preference. `why=` is one frame sampled every two seconds, so `arc-self` and
+`arc-blocked` are usually true and almost never *observed*: the first run of the handgrenade phase
+showed `selfveto=22` and not one arc reason in the histogram, and the MP5 phase — whose assertion had
+been reason-only since it was written — would have failed the same run for the same reason. The
+counters are cumulative and survive the poll; the reason strings widen the test rather than carrying
+it.
+
+`uphill`, `selfveto` and `zoomed` are counted as poll-level witnesses rather than event counts:
+`uphill` and `selfveto` are per-frame-per-mode rejection tallies, `zoomed` is polls in which some bot
+was zoomed. All three answer "did this ever happen", which is all a stochastic phase can honestly ask.
+
+The snark's `uphill > 0` and the MP5's `uphill == 0` are the two halves of one guard on the uphill
+veto's scope. The veto exempts arcs that **detonate on impact** — the sim knows where those end up —
+and not arcs in general, because a handgrenade lands and then rolls for the rest of its fuse. So the
+snark, homing and never solved, must keep tripping it; the MP5's contact grenade must never trip it;
+and the handgrenade trips it freely, which is reported but not asserted because it depends on the
+terrain the bots happen to be standing on.
 
 `reloads` is counted in the plugin rather than scraped, because `why=reloading` is true for a single
 frame and no 2-second poll would ever see it. Reload is the behaviour the SDK reading says is easiest
@@ -241,7 +355,8 @@ witness that does not depend on sampling luck.
 ## scripts/test_aim_error.ps1
 
 Measures the intentional aim error by firing the same flick many times through `crossbot_aim_test` and
-reporting the spread of settle times at each `crossbot_aim_error` scale.
+reporting the spread of settle times at each `crossbot_aim_error` scale, plus the resting error left by the
+hand quantum at each `-Fovs` value.
 
 The point is the spread, not any single row. `brake` is sampled once per flick, so one flick is one draw
 from a distribution and proves nothing on its own — the same argument as the `~3s` poll grid under
@@ -263,6 +378,53 @@ leaks into a test, no flick settles and the log is empty rather than wrong.
 Settle is gated on hand speed as well as angle, so a view flying through the target on its way to an
 overshoot cannot report a false early settle. It is a threshold and not a proof: a small enough overshoot
 crosses slowly enough to slip under it, which is another reason to read the spread rather than a row.
+
+### The rest error row, and what zoom is supposed to do to it
+
+Each flick also reports a **rest error**: the miss still standing two seconds in, once everything has
+stopped. Settle time measures the motor model; rest error measures the hand's *resolution*, and they move
+independently — a change can leave settle untouched and still triple the resting miss.
+
+`-Quantum 0 -Impulse 0` is the regression form. With the hand resolution off the controller is exact again,
+so rest error must read **0.000 on both axes** and the settle rows must land back on the numbers above.
+Anything non-zero there means a quantum leaked outside its cvar.
+
+At the defaults the yaw rest error should spread across roughly zero to one quantum (0.448 degrees), because
+the hand dithers across the count it is nearest rather than parking. A row where every sample reads the same
+value means it *is* parking, which is the failure the speed floor exists to prevent.
+
+**The `-Fovs` sweep is the one that shows what zoom buys**, and it is the reason the whole hand-resolution
+model exists. Use a small flick with it — 40 degrees at fov 20 is the same 180 degrees of hand travel as a
+180 at fov 90, so anything larger runs past the two second rest sample:
+
+```powershell
+& .\scripts\test_aim_error.ps1 -Scales 1.0 -Fovs 90,20 -Shapes "40 0" -Flicks 10
+```
+
+Mean rest error should fall by roughly the FOV ratio: measured 0.299 degrees at fov 90 against 0.052 at fov
+20. Read the mean over the group and not a row — a single sample is one point on the tremor cycle. Two
+sanity checks come free in the same output: settle time must *rise* at fov 20 (the trade is real, about
+0.180s to 0.393s), and peak hand speed for a 40 at fov 20 must match peak hand speed for a 180 at fov 90,
+since those are the same physical hand movement.
+
+Read `-Scales 1.0` rather than 0 for this. At scale 0 the flick is deterministic, so every sample lands on
+the same phase of the tremor and the spread collapses to a single repeated number that says nothing.
+
+`test_fire.ps1` carries the same two overrides for the same reason. A DUEL result is only comparable
+against another DUEL run of the same length on the same build, so do not diff it against a number recorded
+before some other change — run the off case yourself:
+
+```powershell
+& .scripts	est_fire.ps1 -Full -Quantum 0 -Impulse 0
+```
+
+What should move is trigger discipline and nothing else. `targets` must hold roughly steady between the two
+(the quantum does not touch acquisition), while `shots` and `deaths` drop — measured about -26% and -29% on
+crossfire. `targets` falling with them would mean the change is suppressing engagements rather than shots.
+
+**The `0 90` shape cannot report a rest error and never could.** A 90 degree pitch flick from level clamps
+to `kPitchLimit`, and `BeginTest` clamps the target the same way, so the view and the target are both pinned
+at 89 and the error is identically zero. That row's settle time is still meaningful; its rest error is not.
 
 ## Sweeping a change
 

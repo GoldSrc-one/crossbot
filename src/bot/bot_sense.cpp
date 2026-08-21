@@ -189,9 +189,23 @@ namespace
 		return (decay - age) / decay;
 	}
 
-	size_t SlotAt(const BotSense::State &sense, size_t back)
+	BotSense::SuspicionKind KindOf(const edict_t *ent)
 	{
-		return (sense.head + BotSense::kSuspicionSlots - 1 - back) % BotSense::kSuspicionSlots;
+		if ((ent->v.flags & FL_CLIENT) != 0)
+			return BotSense::KIND_PLAYER;
+		if ((ent->v.flags & FL_MONSTER) != 0)
+			return BotSense::KIND_MONSTER;
+		return BotSense::KIND_OTHER;
+	}
+
+	float LiveWeight(const BotSense::Suspicion &entry, float decay)
+	{
+		edict_t *ent = entry.ent.Get();
+		if (!ent)
+			return 0.f;
+		if (entry.kind != BotSense::KIND_OTHER && g_pGameProfile && g_pGameProfile->IsDead(ent))
+			return 0.f;
+		return Weight(entry, decay);
 	}
 
 	void UpdateDamage(CBot &bot)
@@ -206,8 +220,7 @@ namespace
 		if (g_engfuncs.pfnIndexOfEdict(inflictor) == 0)
 			return;
 
-		BotSense::Push(bot, BotSense::EntitySoundOrigin(inflictor), BotSense::SUSP_DAMAGE,
-			g_engfuncs.pfnIndexOfEdict(inflictor));
+		BotSense::Push(bot, BotSense::EntitySoundOrigin(inflictor), BotSense::SUSP_DAMAGE, inflictor);
 	}
 
 	void UpdateVision(CBot &bot)
@@ -251,7 +264,7 @@ namespace
 			if (tr.flFraction < 1.f && tr.pHit != ent)
 				continue;
 
-			BotSense::Push(bot, point, BotSense::SUSP_SIGHT, i);
+			BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
 
 			if (best && dist >= bestDist)
 				continue;
@@ -294,11 +307,25 @@ namespace
 		BotAim::PushDelaySlot(bot, lead, best->v.velocity);
 	}
 
-	bool LookDirection(CBot &bot, Vector &dirOut, float &authorityOut, int &entriesOut)
+	bool LookDirection(CBot &bot, Vector &dirOut, float &authorityOut, int &entriesOut,
+		BotSense::SuspicionKind &kindOut)
 	{
 		const BotSense::State &sense = bot.sense;
 		float decay = BotSense::Decay();
 		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+
+		int tier = BotSense::KIND_COUNT;
+		for (size_t i = 0; i < sense.count; ++i)
+		{
+			const BotSense::Suspicion &entry = sense.slots[i];
+			if (LiveWeight(entry, decay) <= 0.f)
+				continue;
+			if (entry.kind < tier)
+				tier = entry.kind;
+		}
+
+		if (tier == BotSense::KIND_COUNT)
+			return false;
 
 		Vector sum(0.f, 0.f, 0.f);
 		float totalWeight = 0.f;
@@ -306,12 +333,15 @@ namespace
 		Vector bestDir(0.f, 0.f, 0.f);
 		int live = 0;
 
-		for (size_t back = 0; back < sense.count; ++back)
+		for (size_t i = 0; i < sense.count; ++i)
 		{
-			const BotSense::Suspicion &entry = sense.slots[SlotAt(sense, back)];
-			float w = Weight(entry, decay);
+			const BotSense::Suspicion &entry = sense.slots[i];
+			if (entry.kind != tier)
+				continue;
+
+			float w = LiveWeight(entry, decay);
 			if (w <= 0.f)
-				break;
+				continue;
 
 			Vector los = entry.pos - eye;
 			float dist = los.Length();
@@ -334,6 +364,7 @@ namespace
 			return false;
 
 		authorityOut = bestWeight;
+		kindOut = static_cast<BotSense::SuspicionKind>(tier);
 
 		float mean = sum.Length();
 		if (mean < kDegenerateMean * totalWeight)
@@ -356,12 +387,15 @@ namespace
 			Vector refined(0.f, 0.f, 0.f);
 			int inCone = 0;
 
-			for (size_t back = 0; back < sense.count; ++back)
+			for (size_t i = 0; i < sense.count; ++i)
 			{
-				const BotSense::Suspicion &entry = sense.slots[SlotAt(sense, back)];
-				float w = Weight(entry, decay);
+				const BotSense::Suspicion &entry = sense.slots[i];
+				if (entry.kind != tier)
+					continue;
+
+				float w = LiveWeight(entry, decay);
 				if (w <= 0.f)
-					break;
+					continue;
 
 				Vector los = entry.pos - eye;
 				float dist = los.Length();
@@ -427,40 +461,66 @@ const char *BotSense::SourceName(SuspicionSource source)
 	case SUSP_EVENT: return "EVENT";
 	case SUSP_DAMAGE: return "DAMAGE";
 	case SUSP_SIGHT: return "SIGHT";
+	case SUSP_COUNT: break;
 	}
 	return "?";
 }
 
-void BotSense::Push(CBot &bot, const Vector &pos, SuspicionSource source, int entIndex)
+const char *BotSense::KindName(SuspicionKind kind)
 {
+	switch (kind)
+	{
+	case KIND_PLAYER: return "PLAYER";
+	case KIND_MONSTER: return "MONSTER";
+	case KIND_OTHER: return "OTHER";
+	case KIND_COUNT: break;
+	}
+	return "?";
+}
+
+void BotSense::Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_t *ent)
+{
+	if (!ent || ent->free)
+		return;
+
 	State &sense = bot.sense;
 
-	if (source == SUSP_SIGHT && entIndex > 0)
-	{
-		float decay = Decay();
-		for (size_t back = 0; back < sense.count; ++back)
-		{
-			Suspicion &entry = sense.slots[SlotAt(sense, back)];
-			if (Weight(entry, decay) <= 0.f)
-				break;
-			if (entry.source != SUSP_SIGHT || entry.entIndex != entIndex)
-				continue;
+	if (source < SUSP_COUNT)
+		++sense.pushes[source];
 
-			entry.pos = pos;
-			entry.time = gpGlobals->time;
-			return;
+	size_t slot = kSuspicionSlots;
+	for (size_t i = 0; i < sense.count; ++i)
+	{
+		if (sense.slots[i].ent.Is(ent))
+		{
+			slot = i;
+			break;
 		}
 	}
 
-	Suspicion &slot = sense.slots[sense.head];
-	slot.pos = pos;
-	slot.time = gpGlobals->time;
-	slot.entIndex = entIndex;
-	slot.source = source;
+	if (slot == kSuspicionSlots)
+	{
+		if (sense.count < kSuspicionSlots)
+		{
+			slot = sense.count++;
+		}
+		else
+		{
+			slot = 0;
+			for (size_t i = 1; i < kSuspicionSlots; ++i)
+			{
+				if (sense.slots[i].time < sense.slots[slot].time)
+					slot = i;
+			}
+		}
+	}
 
-	sense.head = (sense.head + 1) % kSuspicionSlots;
-	if (sense.count < kSuspicionSlots)
-		++sense.count;
+	Suspicion &entry = sense.slots[slot];
+	entry.pos = pos;
+	entry.time = gpGlobals->time;
+	entry.ent.Set(ent);
+	entry.source = source;
+	entry.kind = KindOf(ent);
 }
 
 void BotSense::Hear(CBot &bot, const edict_t *src, const Vector &pos, float volume,
@@ -473,40 +533,57 @@ void BotSense::Hear(CBot &bot, const edict_t *src, const Vector &pos, float volu
 			return;
 	}
 
-	Push(bot, pos, SUSP_SOUND, src ? g_engfuncs.pfnIndexOfEdict(const_cast<edict_t *>(src)) : 0);
+	Push(bot, pos, SUSP_SOUND, const_cast<edict_t *>(src));
 }
 
 void BotSense::Notice(CBot &bot, const edict_t *invoker)
 {
 	edict_t *ent = const_cast<edict_t *>(invoker);
-	Push(bot, EntitySoundOrigin(ent), SUSP_EVENT, g_engfuncs.pfnIndexOfEdict(ent));
+	Push(bot, EntitySoundOrigin(ent), SUSP_EVENT, ent);
 }
 
-int BotSense::LiveCount(const CBot &bot)
+int BotSense::LiveCounts(const CBot &bot, int counts[KIND_COUNT])
 {
 	const State &sense = bot.sense;
 	float decay = Decay();
 
+	for (int i = 0; i < KIND_COUNT; ++i)
+		counts[i] = 0;
+
 	int live = 0;
-	for (size_t back = 0; back < sense.count; ++back)
+	for (size_t i = 0; i < sense.count; ++i)
 	{
-		if (Weight(sense.slots[SlotAt(sense, back)], decay) <= 0.f)
-			break;
+		const Suspicion &entry = sense.slots[i];
+		if (LiveWeight(entry, decay) <= 0.f)
+			continue;
+
+		++counts[entry.kind];
 		++live;
 	}
 	return live;
 }
 
+int BotSense::LiveCount(const CBot &bot)
+{
+	int counts[KIND_COUNT];
+	return LiveCounts(bot, counts);
+}
+
 const BotSense::Suspicion *BotSense::Freshest(const CBot &bot)
 {
 	const State &sense = bot.sense;
-	if (sense.count == 0)
-		return nullptr;
+	float decay = Decay();
 
-	const Suspicion &entry = sense.slots[SlotAt(sense, 0)];
-	if (Weight(entry, Decay()) <= 0.f)
-		return nullptr;
-	return &entry;
+	const Suspicion *best = nullptr;
+	for (size_t i = 0; i < sense.count; ++i)
+	{
+		const Suspicion &entry = sense.slots[i];
+		if (LiveWeight(entry, decay) <= 0.f)
+			continue;
+		if (!best || entry.time > best->time)
+			best = &entry;
+	}
+	return best;
 }
 
 void BotSense::Update(CBot &bot)
@@ -516,6 +593,7 @@ void BotSense::Update(CBot &bot)
 	sense.lookValid = false;
 	sense.lookAuthority = 0.f;
 	sense.lookEntries = 0;
+	sense.lookKind = KIND_OTHER;
 
 	if (!Enabled())
 	{
@@ -534,12 +612,14 @@ void BotSense::Update(CBot &bot)
 	Vector dir;
 	float authority = 0.f;
 	int entries = 0;
-	if (LookDirection(bot, dir, authority, entries))
+	SuspicionKind kind = KIND_OTHER;
+	if (LookDirection(bot, dir, authority, entries, kind))
 	{
 		sense.lookValid = true;
 		sense.lookDir = dir;
 		sense.lookAuthority = authority;
 		sense.lookEntries = entries;
+		sense.lookKind = kind;
 	}
 }
 

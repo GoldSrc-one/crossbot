@@ -10,6 +10,7 @@
 #include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
+#include "../nav/pm_sim.h"
 
 namespace
 {
@@ -23,9 +24,43 @@ namespace
 
 	constexpr int kLeadPasses = 4;
 
+	constexpr float kHomingCone = 20.f;
+
+	constexpr float kUphillSlack = 16.f;
+
+	constexpr float kChargeSafety = 0.5f;
+
+	constexpr float kChargeBurn = 0.1f;
+
+	constexpr float kZoomIn = 500.f;
+
+	constexpr float kZoomOut = 300.f;
+
+	constexpr float kArcStep = 0.1f;
+
+	constexpr int kArcMaxSteps = 24;
+
+	constexpr float kArcMuzzleFwd = 16.f;
+
+	constexpr float kSplashAccept = 0.5f;
+
+	constexpr float kThrowPitchMin = -89.f;
+
+	constexpr float kThrowPitchMax = 60.f;
+
+	constexpr int kThrowScan = 48;
+
+	constexpr int kThrowBisect = 10;
+
+	constexpr float kTapTimeout = 1.5f;
+
+	constexpr float kGuideMax = 6.f;
+
 	constexpr int kMaxChoices = 64;
 
 	char g_pin[32] = "";
+
+	int g_pinMode = 0;
 
 	struct Choice
 	{
@@ -93,6 +128,44 @@ namespace
 		return inv.ammo[type];
 	}
 
+	bool IsHoming(const WeaponMode &m)
+	{
+		return (m.quirks & WPN_Q_HOMING) != 0;
+	}
+
+	bool IsArc(const WeaponMode &m)
+	{
+		return m.gravity > 0.f && m.splash > 0.f && !IsHoming(m);
+	}
+
+	bool IsThrow(const WeaponMode &m)
+	{
+		return (m.quirks & WPN_Q_THROW_ARC) != 0;
+	}
+
+	bool ArcDetonates(const WeaponMode &m)
+	{
+		return IsArc(m) && !IsThrow(m);
+	}
+
+	bool IsGuided(const WeaponMode &m)
+	{
+		return (m.quirks & WPN_Q_KEEP_AIMING) != 0;
+	}
+
+	float ArcGravity(const WeaponMode &m)
+	{
+		return PmSim::kGravity * m.gravity;
+	}
+
+	int ShotCost(const WeaponMode &m)
+	{
+		int per = (m.ammoPerShot > 0) ? m.ammoPerShot : 1;
+		if (m.fire != FIRE_CHARGE || m.chargeFull <= 0.f)
+			return per;
+		return per * (1 + static_cast<int>(m.chargeFull / kChargeBurn));
+	}
+
 	float ModeSpeed(const CBot &bot, const WeaponMode &m)
 	{
 		float speed = m.speed;
@@ -124,6 +197,266 @@ namespace
 		return true;
 	}
 
+	bool SolveArc(const Vector &eye, const Vector &target, float speed, float gravity,
+		Vector &dir, float &flight)
+	{
+		if (speed <= 0.f || gravity <= 0.f)
+			return false;
+
+		Vector flat(target.x - eye.x, target.y - eye.y, 0.f);
+		float d = flat.Length();
+		float h = target.z - eye.z;
+
+		if (d < 1.f)
+			return false;
+
+		float vv = speed * speed;
+		float disc = vv * vv - gravity * (gravity * d * d + 2.f * h * vv);
+		if (disc < 0.f)
+			return false;
+
+		float tangent = (vv - sqrtf(disc)) / (gravity * d);
+		float pitch = atanf(tangent);
+
+		float cosine = cosf(pitch);
+		if (cosine < 0.001f)
+			return false;
+
+		flight = d / (speed * cosine);
+		if (flight > kMaxFlightTime)
+			return false;
+
+		flat = flat * (1.f / d);
+		dir.x = flat.x * cosine;
+		dir.y = flat.y * cosine;
+		dir.z = sinf(pitch);
+		return true;
+	}
+
+	bool SolveArcLead(const Vector &eye, const Vector &base, const Vector &vel, float speed,
+		float gravity, Vector &dir, Vector &point, float &flight)
+	{
+		Vector p = base;
+		float t = 0.f;
+
+		for (int i = 0; i < kLeadPasses; ++i)
+		{
+			if (!SolveArc(eye, p, speed, gravity, dir, t))
+				return false;
+			if (i + 1 < kLeadPasses)
+				p = base + vel * t;
+		}
+
+		point = p;
+		flight = t;
+		return true;
+	}
+
+	struct ThrowShot
+	{
+		Vector dir;
+		float speed;
+		float pitch;
+		float flight;
+		float error;
+	};
+
+	bool SolveThrowAt(const WeaponMode &m, float pitch, const Vector &src, const Vector &target,
+		const Vector &pvel, float gravity, ThrowShot &out)
+	{
+		float elevation = 0.f;
+		float speed = 0.f;
+		if (!g_pGameProfile->ThrowLaunch(m, pitch, elevation, speed))
+			return false;
+
+		float rise = elevation * kPiF / 180.f;
+		float flatSpeed = speed * cosf(rise);
+		if (flatSpeed < 1.f)
+			return false;
+
+		Vector flat(target.x - src.x, target.y - src.y, 0.f);
+		Vector drift(pvel.x, pvel.y, 0.f);
+
+		float a = DotProduct(flat, flat);
+		if (a < 1.f)
+			return false;
+
+		float b = DotProduct(flat, drift);
+		float c = DotProduct(drift, drift) - flatSpeed * flatSpeed;
+
+		float disc = b * b - a * c;
+		if (disc < 0.f)
+			return false;
+
+		float inverse = (b + sqrtf(disc)) / a;
+		if (inverse <= 0.f)
+			return false;
+
+		float flight = 1.f / inverse;
+		if (flight > kMaxFlightTime)
+			return false;
+
+		Vector course = (flat * inverse - drift) * (1.f / flatSpeed);
+
+		float cosine = cosf(rise);
+		out.dir.x = course.x * cosine;
+		out.dir.y = course.y * cosine;
+		out.dir.z = sinf(rise);
+		out.speed = speed;
+		out.pitch = pitch;
+		out.flight = flight;
+		out.error = (speed * sinf(rise) + pvel.z) * flight -
+			0.5f * gravity * flight * flight - (target.z - src.z);
+		return true;
+	}
+
+	bool SolveThrow(const WeaponMode &m, const Vector &src, const Vector &target,
+		const Vector &pvel, float gravity, ThrowShot &out)
+	{
+		float step = (kThrowPitchMax - kThrowPitchMin) / static_cast<float>(kThrowScan);
+		float under = 0.f;
+		bool bracket = false;
+
+		ThrowShot shot;
+		ThrowShot last;
+		bool haveLast = false;
+
+		for (int i = 0; i <= kThrowScan; ++i)
+		{
+			float pitch = kThrowPitchMax - step * static_cast<float>(i);
+			if (!SolveThrowAt(m, pitch, src, target, pvel, gravity, shot))
+				continue;
+
+			if (shot.error >= 0.f)
+			{
+				if (!haveLast)
+					return false;
+				out = shot;
+				under = last.pitch;
+				bracket = true;
+				break;
+			}
+
+			last = shot;
+			haveLast = true;
+		}
+
+		if (!bracket)
+			return false;
+
+		float over = out.pitch;
+		for (int i = 0; i < kThrowBisect; ++i)
+		{
+			float mid = (under + over) * 0.5f;
+			if (!SolveThrowAt(m, mid, src, target, pvel, gravity, shot))
+				break;
+
+			if (shot.error >= 0.f)
+			{
+				out = shot;
+				over = mid;
+			}
+			else
+			{
+				under = mid;
+			}
+		}
+
+		return true;
+	}
+
+	bool SolveThrowLead(const WeaponMode &m, const Vector &eye, const Vector &base,
+		const Vector &vel, const Vector &pvel, float gravity, ThrowShot &out, Vector &point)
+	{
+		Vector src = eye;
+		Vector p = base;
+
+		for (int i = 0; i < kLeadPasses; ++i)
+		{
+			if (!SolveThrow(m, src, p, pvel, gravity, out))
+				return false;
+			if (i + 1 < kLeadPasses)
+			{
+				src = eye + out.dir * kArcMuzzleFwd;
+				p = base + vel * out.flight;
+			}
+		}
+
+		point = p;
+		return true;
+	}
+
+	Vector SimulateArc(edict_t *pEdict, const Vector &start, const Vector &launch, float gravity,
+		bool &hit)
+	{
+		Vector pos = start;
+		Vector vel = launch;
+
+		for (int i = 0; i < kArcMaxSteps; ++i)
+		{
+			vel.z -= gravity * kArcStep;
+			Vector next = pos + vel * kArcStep;
+
+			TraceResult tr;
+			TRACE_LINE(pos, next, dont_ignore_monsters, pEdict, &tr);
+			if (tr.flFraction < 1.f)
+			{
+				hit = true;
+				return tr.vecEndPos;
+			}
+
+			pos = next;
+		}
+
+		hit = false;
+		return pos;
+	}
+
+	float AxisGap(float point, float centre, float half)
+	{
+		float off = fabsf(point - centre) - half;
+		return (off > 0.f) ? off : 0.f;
+	}
+
+	float DistanceToBox(const Vector &point, const Vector &centre, const Vector &half)
+	{
+		Vector d(AxisGap(point.x, centre.x, half.x),
+			AxisGap(point.y, centre.y, half.y),
+			AxisGap(point.z, centre.z, half.z));
+
+		return d.Length();
+	}
+
+	bool SplashSafe(BotFire::State &fire, const Vector &eye, const Vector &impact)
+	{
+		if ((impact - fire.targetPoint).Length() < (impact - eye).Length())
+			return true;
+
+		++fire.selfVetoes;
+		return false;
+	}
+
+	void PublishAim(BotFire::State &fire, const WeaponMode &m, const Vector &point,
+		const Vector &target, float flight)
+	{
+		fire.aimPoint = point;
+		fire.targetPoint = target;
+		fire.flightTime = flight;
+		fire.aimValid = true;
+		fire.aimArc = IsArc(m);
+		fire.aimHoming = IsHoming(m);
+		fire.aimLead = m.aim == AIM_LEAD && !fire.aimHoming && !fire.aimArc;
+	}
+
+	void ClearAim(BotFire::State &fire)
+	{
+		fire.aimValid = false;
+		fire.aimLead = false;
+		fire.aimHoming = false;
+		fire.aimArc = false;
+		fire.flightTime = 0.f;
+	}
+
 	void CountShots(CBot &bot)
 	{
 		BotFire::State &fire = bot.fire;
@@ -131,8 +464,10 @@ namespace
 
 		bool pressed = fire.pressed;
 		bool pressedLead = fire.pressedLead;
+		bool pressedArc = fire.pressedArc;
 		fire.pressed = false;
 		fire.pressedLead = false;
+		fire.pressedArc = false;
 
 		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
 		{
@@ -142,22 +477,41 @@ namespace
 
 		const BotWeapon &w = inv.weapons[inv.activeIndex];
 
-		if (pressed && fire.lastTimerId == w.id)
+		if (fire.lastTimerId == w.id)
 		{
-			bool fired = (fire.lastPrimaryTimer <= 0.f && w.nextPrimaryAttack > 0.f) ||
-				(fire.lastSecondaryTimer <= 0.f && w.nextSecondaryAttack > 0.f);
+			if (pressed)
+			{
+				bool fired = (fire.lastPrimaryTimer <= 0.f && w.nextPrimaryAttack > 0.f) ||
+					(fire.lastSecondaryTimer <= 0.f && w.nextSecondaryAttack > 0.f);
 
-			if (fired)
+				if (fired)
+				{
+					++fire.shots;
+					if (pressedLead)
+						++fire.leadShots;
+					if (pressedArc)
+						++fire.arcShots;
+				}
+			}
+
+			if (fire.lastChargeState != 0 && w.chargeState == 0)
 			{
 				++fire.shots;
-				if (pressedLead)
-					++fire.leadShots;
+				++fire.chargeShots;
+			}
+
+			if (fire.lastThrowStart != 0.f && w.throwStart == 0.f)
+			{
+				++fire.shots;
+				++fire.throwShots;
 			}
 		}
 
 		fire.lastTimerId = w.id;
 		fire.lastPrimaryTimer = w.nextPrimaryAttack;
 		fire.lastSecondaryTimer = w.nextSecondaryAttack;
+		fire.lastChargeState = w.chargeState;
+		fire.lastThrowStart = w.throwStart;
 	}
 
 	void Idle(BotFire::State &fire, const char *reason)
@@ -165,11 +519,214 @@ namespace
 		fire.mode = BotFire::MODE_NONE;
 		fire.weaponId = 0;
 		fire.wantReload = false;
-		fire.aimValid = false;
-		fire.aimLead = false;
-		fire.aimHoming = false;
-		fire.flightTime = 0.f;
+		fire.commit = BotFire::COMMIT_NONE;
+		ClearAim(fire);
 		fire.lastReason = reason;
+	}
+
+	bool RayOnTarget(CBot &bot, const Vector &angles, const WeaponMode &m, const Vector &eye)
+	{
+		BotFire::State &fire = bot.fire;
+		edict_t *pEdict = bot.pEdict;
+
+		MAKE_VECTORS(angles + pEdict->v.punchangle);
+		Vector dir = gpGlobals->v_forward;
+
+		Vector centre = fire.aimPoint;
+		Vector los = centre - eye;
+		float dist = los.Length();
+
+		Vector half = fire.targetSize * 0.5f;
+
+		if (fire.aimHoming)
+		{
+			float wide = dist * tanf(kHomingCone * kPiF / 180.f);
+			if (wide > half.x)
+				half.x = wide;
+			if (wide > half.y)
+				half.y = wide;
+			if (wide > half.z)
+				half.z = wide;
+		}
+
+		if (dist > 0.001f)
+		{
+			float dot = DotProduct(dir, los * (1.f / dist));
+			if (dot > 1.f)
+				dot = 1.f;
+			else if (dot < -1.f)
+				dot = -1.f;
+
+			fire.lastMiss = acosf(dot) * (180.f / kPiF);
+
+			float big = std::max(half.x, std::max(half.y, half.z));
+			fire.lastTol = atanf(big / dist) * (180.f / kPiF);
+		}
+
+		float range = (m.range > 0.f) ? m.range : kHitscanRange;
+
+		float entry = 0.f;
+		if (!RayHitsBox(eye, dir, centre, half, range, entry))
+		{
+			fire.lastReason = "off-target";
+			return false;
+		}
+
+		TraceResult tr;
+		TRACE_LINE(eye, eye + dir * range, ignore_monsters, pEdict, &tr);
+		float reach = tr.flFraction * range;
+		if (reach < entry)
+		{
+			fire.lastReason = "blocked";
+			return false;
+		}
+
+		if (m.splash > 0.f && !SplashSafe(fire, eye, eye + dir * entry))
+		{
+			fire.lastReason = "splash-self";
+			return false;
+		}
+
+		return true;
+	}
+
+	bool ArcImpactHits(CBot &bot, const WeaponMode &m, const Vector &eye, const Vector &impact,
+		bool hit)
+	{
+		BotFire::State &fire = bot.fire;
+
+		Vector half = fire.targetSize * 0.5f;
+		float gap = DistanceToBox(impact, fire.targetPoint, half);
+		float allow = m.splash * kSplashAccept;
+
+		fire.lastMiss = gap;
+		fire.lastTol = allow;
+
+		if (gap > allow)
+		{
+			fire.lastReason = hit ? "arc-blocked" : "arc-wide";
+			return false;
+		}
+
+		if (!SplashSafe(fire, eye, impact))
+		{
+			fire.lastReason = "arc-self";
+			return false;
+		}
+
+		return true;
+	}
+
+	bool ArcOnTarget(CBot &bot, const Vector &angles, const WeaponMode &m, const Vector &eye)
+	{
+		Vector view = angles + bot.pEdict->v.punchangle;
+		float speed = ModeSpeed(bot, m);
+		Vector drift(0.f, 0.f, 0.f);
+
+		if (IsThrow(m))
+		{
+			float elevation = 0.f;
+			if (!g_pGameProfile->ThrowLaunch(m, view.x, elevation, speed))
+			{
+				bot.fire.lastReason = "arc-wide";
+				return false;
+			}
+
+			view.x = -elevation;
+			drift = bot.pEdict->v.velocity;
+		}
+
+		MAKE_VECTORS(view);
+		Vector dir = gpGlobals->v_forward;
+
+		bool hit = false;
+		Vector impact = SimulateArc(bot.pEdict, eye + dir * kArcMuzzleFwd, dir * speed + drift,
+			ArcGravity(m), hit);
+
+		return ArcImpactHits(bot, m, eye, impact, hit);
+	}
+
+	unsigned short ZoomButtons(CBot &bot, const WeaponSpec &spec, const BotWeapon &w, const Vector &eye)
+	{
+		BotFire::State &fire = bot.fire;
+
+		if (spec.primaryZoomed.fire == FIRE_NONE || spec.secondary.toggle != TOGGLE_ZOOM)
+			return 0;
+		if (!fire.aimValid || w.nextSecondaryAttack > 0.f)
+			return 0;
+
+		float dist = (fire.aimPoint - eye).Length();
+		bool want = fire.zoomed ? (dist >= kZoomOut) : (dist > kZoomIn);
+		if (want == fire.zoomed)
+			return 0;
+
+		return IN_ATTACK2;
+	}
+
+	unsigned short AttackButton(BotFire::Mode mode)
+	{
+		return (mode == BotFire::MODE_SECONDARY) ? IN_ATTACK2 : IN_ATTACK;
+	}
+
+	void StartCommit(BotFire::State &fire, BotFire::Commit kind)
+	{
+		fire.commit = kind;
+		fire.commitStart = gpGlobals->time;
+		fire.commitSeen = false;
+	}
+
+	unsigned short ChargeButtons(BotFire::State &fire, const WeaponMode &m, bool onTarget)
+	{
+		unsigned short button = AttackButton(fire.mode);
+		float now = gpGlobals->time;
+
+		if (fire.commit != BotFire::COMMIT_CHARGE)
+		{
+			StartCommit(fire, BotFire::COMMIT_CHARGE);
+			fire.lastReason = "charging";
+			return button;
+		}
+
+		float held = now - fire.commitStart;
+
+		if (m.chargeMax > 0.f && held >= m.chargeMax - kChargeSafety)
+		{
+			fire.commit = BotFire::COMMIT_NONE;
+			fire.lastReason = "charge-timeout";
+			return 0;
+		}
+
+		if (held < m.chargeFull)
+		{
+			fire.lastReason = "charging";
+			return button;
+		}
+
+		if (!onTarget)
+		{
+			fire.lastReason = "charged";
+			return button;
+		}
+
+		fire.commit = BotFire::COMMIT_NONE;
+		fire.lastReason = "firing";
+		return 0;
+	}
+
+	unsigned short TapButtons(BotFire::State &fire, const BotWeapon &w, bool onTarget)
+	{
+		if (fire.commit == BotFire::COMMIT_THROW || w.throwStart != 0.f)
+		{
+			fire.lastReason = "primed";
+			return 0;
+		}
+
+		if (!onTarget)
+			return 0;
+
+		StartCommit(fire, BotFire::COMMIT_THROW);
+		fire.lastReason = "firing";
+		return AttackButton(fire.mode);
 	}
 }
 
@@ -182,11 +739,14 @@ bool Enabled()
 	return cvar && cvar->value != 0.f;
 }
 
-void Pin(const char *classname)
+void Pin(const char *classname, int mode)
 {
+	g_pinMode = mode;
+
 	if (!classname || !classname[0])
 	{
 		g_pin[0] = 0;
+		g_pinMode = 0;
 		return;
 	}
 
@@ -196,6 +756,15 @@ void Pin(const char *classname)
 const char *Pinned()
 {
 	return g_pin[0] ? g_pin : nullptr;
+}
+
+const char *PinnedMode()
+{
+	if (g_pinMode == 1)
+		return "primary";
+	if (g_pinMode == 2)
+		return "secondary";
+	return "any";
 }
 
 const char *ModeName(Mode mode)
@@ -209,30 +778,55 @@ const char *ModeName(Mode mode)
 	return "?";
 }
 
+const char *CommitName(Commit commit)
+{
+	switch (commit)
+	{
+	case COMMIT_NONE: return "none";
+	case COMMIT_CHARGE: return "charge";
+	case COMMIT_THROW: return "throw";
+	case COMMIT_GUIDE: return "guide";
+	}
+	return "?";
+}
+
 bool Supported(const WeaponMode &mode)
 {
-	if (mode.fire != FIRE_HOLD || mode.toggle != TOGGLE_NONE)
+	if (mode.fire != FIRE_HOLD && mode.fire != FIRE_CHARGE && mode.fire != FIRE_TAP)
+		return false;
+	if (mode.toggle != TOGGLE_NONE)
 		return false;
 	if (mode.aim != AIM_TARGET && mode.aim != AIM_LEAD)
 		return false;
 	if (mode.aim == AIM_LEAD && mode.speed <= 0.f)
 		return false;
-	if (mode.gravity != 0.f || mode.splash != 0.f)
+
+	bool homing = IsHoming(mode);
+	bool arc = IsArc(mode);
+	bool thrown = IsThrow(mode);
+
+	if (mode.gravity != 0.f && !homing && !arc)
 		return false;
-	return (mode.quirks & (WPN_Q_HIDDEN_STATE | WPN_Q_KEEP_AIMING |
-		WPN_Q_THROW_ARC | WPN_Q_INHERIT_VEL)) == 0;
+	if (thrown && !arc)
+		return false;
+
+	unsigned int reject = WPN_Q_HIDDEN_STATE;
+	if (!homing && !thrown && !IsGuided(mode))
+		reject |= WPN_Q_INHERIT_VEL;
+
+	return (mode.quirks & reject) == 0;
 }
 
-const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode)
+const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed)
 {
 	if (mode == MODE_PRIMARY)
-		return &spec.primary;
+		return (zoomed && spec.primaryZoomed.fire != FIRE_NONE) ? &spec.primaryZoomed : &spec.primary;
 	if (mode == MODE_SECONDARY)
 		return &spec.secondary;
 	return nullptr;
 }
 
-bool ModeUsable(const CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist)
+bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, float rise)
 {
 	if (!Supported(m))
 		return false;
@@ -242,10 +836,20 @@ bool ModeUsable(const CBot &bot, const BotWeapon &w, const WeaponMode &m, float 
 		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
 		if (!spec || !spec->classname || strcmp(spec->classname, g_pin) != 0)
 			return false;
+		if (g_pinMode == 1 && &m != &spec->primary && &m != &spec->primaryZoomed)
+			return false;
+		if (g_pinMode == 2 && &m != &spec->secondary)
+			return false;
 	}
 
 	if ((m.quirks & WPN_Q_NO_UNDERWATER) != 0 && bot.pEdict->v.waterlevel == 3)
 		return false;
+
+	if (m.gravity > 0.f && !ArcDetonates(m) && rise > kUphillSlack)
+	{
+		++bot.fire.uphillVetoes;
+		return false;
+	}
 
 	float range = (m.range > 0.f) ? m.range : kHitscanRange;
 	if (dist > range)
@@ -259,7 +863,7 @@ bool ModeUsable(const CBot &bot, const BotWeapon &w, const WeaponMode &m, float 
 	}
 
 	const BotInventory &inv = bot.inventory;
-	int need = (m.ammoPerShot > 0) ? m.ammoPerShot : 1;
+	int need = ShotCost(m);
 
 	switch (m.ammo)
 	{
@@ -300,6 +904,39 @@ void Think(CBot &bot)
 
 	SeedFire(bot);
 
+	const BotInventory &inv = bot.inventory;
+	const BotWeapon *active = (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
+		? &inv.weapons[inv.activeIndex] : nullptr;
+
+	fire.zoomed = bot.pEdict->v.fov != 0.f;
+
+	bool holding = fire.commit != COMMIT_NONE && active && active->id == fire.weaponId;
+	if (!holding)
+	{
+		fire.commit = COMMIT_NONE;
+	}
+	else if (fire.commit == COMMIT_THROW || fire.commit == COMMIT_GUIDE)
+	{
+		bool live = (fire.commit == COMMIT_THROW)
+			? (active->throwStart != 0.f) : (active->guidedCount > 0);
+		float cap = (fire.commit == COMMIT_THROW) ? kTapTimeout : kGuideMax;
+
+		if (live)
+			fire.commitSeen = true;
+
+		if (gpGlobals->time - fire.commitStart > cap)
+		{
+			++fire.commitCaps;
+			fire.commit = COMMIT_NONE;
+			holding = false;
+		}
+		else if (fire.commitSeen && !live)
+		{
+			fire.commit = COMMIT_NONE;
+			holding = false;
+		}
+	}
+
 	edict_t *target = bot.sense.target.Get();
 	if (target)
 	{
@@ -309,59 +946,118 @@ void Think(CBot &bot)
 
 	Vector basePoint;
 	Vector baseVel(0.f, 0.f, 0.f);
-	if (!fire.haveSize || !BotAim::ReadDelayed(bot, BotAim::Delay(), basePoint, &baseVel))
+	bool haveTarget = fire.haveSize &&
+		BotAim::ReadDelayed(bot, BotAim::Delay(), basePoint, &baseVel);
+
+	if (!haveTarget)
 	{
-		Idle(fire, "no-target");
+		if (!holding)
+		{
+			ClearAim(fire);
+			Idle(fire, "no-target");
+			return;
+		}
+
+		if (fire.commit != COMMIT_GUIDE)
+			ClearAim(fire);
+
+		fire.lastReason = (fire.commit == COMMIT_GUIDE) ? "guiding" : "carrying";
 		return;
 	}
 
-	fire.basePoint = basePoint;
-
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
 	float dist = (basePoint - eye).Length();
+	float rise = basePoint.z - eye.z;
 
-	const BotInventory &inv = bot.inventory;
-
-	if (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
+	if (active)
 	{
-		const BotWeapon &active = inv.weapons[inv.activeIndex];
-		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active.id);
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active->id);
 		if (spec)
 		{
 			Mode order[2] = { MODE_PRIMARY, MODE_SECONDARY };
-			if (fire.weaponId == active.id && fire.mode == MODE_SECONDARY)
+			int tries = 2;
+
+			if (holding)
+			{
+				order[0] = fire.mode;
+				tries = 1;
+			}
+			else if (fire.weaponId == active->id && fire.mode == MODE_SECONDARY)
 			{
 				order[0] = MODE_SECONDARY;
 				order[1] = MODE_PRIMARY;
 			}
 
-			for (Mode candidate : order)
+			for (int i = 0; i < tries; ++i)
 			{
-				const WeaponMode *m = ModeOf(*spec, candidate);
-				if (!m || !ModeUsable(bot, active, *m, dist))
+				const WeaponMode *m = ModeOf(*spec, order[i], fire.zoomed);
+				if (!m)
+					continue;
+				if (!holding && !ModeUsable(bot, *active, *m, dist, rise))
 					continue;
 
 				Vector point = basePoint;
+				Vector look = basePoint;
 				float flight = 0.f;
-				if (m->aim == AIM_LEAD &&
-					!SolveLead(eye, basePoint, baseVel, ModeSpeed(bot, *m), point, flight))
-					continue;
 
-				int need = (m->ammoPerShot > 0) ? m->ammoPerShot : 1;
+				if (IsArc(*m))
+				{
+					Vector dir;
+					Vector launch;
+
+					if (IsThrow(*m))
+					{
+						ThrowShot shot;
+						if (!SolveThrowLead(*m, eye, basePoint, baseVel,
+							bot.pEdict->v.velocity, ArcGravity(*m), shot, point))
+							continue;
+
+						dir = shot.dir;
+						flight = shot.flight;
+						launch = dir * shot.speed + bot.pEdict->v.velocity;
+
+						MAKE_VECTORS(Vector(shot.pitch,
+							atan2f(dir.y, dir.x) * (180.f / kPiF), 0.f));
+						look = eye + gpGlobals->v_forward * (point - eye).Length();
+					}
+					else
+					{
+						if (!SolveArcLead(eye, basePoint, baseVel, ModeSpeed(bot, *m),
+							ArcGravity(*m), dir, point, flight))
+							continue;
+
+						launch = dir * ModeSpeed(bot, *m);
+						look = eye + dir * (point - eye).Length();
+					}
+
+					fire.targetPoint = point;
+
+					bool hit = false;
+					Vector impact = SimulateArc(bot.pEdict, eye + dir * kArcMuzzleFwd,
+						launch, ArcGravity(*m), hit);
+					if (!ArcImpactHits(bot, *m, eye, impact, hit))
+						continue;
+				}
+				else
+				{
+					if (m->aim == AIM_LEAD && !IsHoming(*m) &&
+						!SolveLead(eye, basePoint, baseVel, ModeSpeed(bot, *m), point, flight))
+						continue;
+
+					look = point;
+				}
 
 				bool wasReload = fire.wantReload;
 
-				fire.aimPoint = point;
-				fire.flightTime = flight;
-				fire.aimValid = true;
-				fire.aimLead = m->aim == AIM_LEAD;
-				fire.aimHoming = (m->quirks & WPN_Q_HOMING) != 0;
+				PublishAim(fire, *m, look, point, flight);
 
-				fire.mode = candidate;
-				fire.weaponId = active.id;
-				fire.wantReload = m->ammo == AMMO_CLIP && active.clip >= 0 && active.clip < need &&
-					!active.reloading && AmmoCount(inv, active.primaryAmmoType) > 0;
-				fire.lastReason = fire.wantReload ? "reloading" : "ready";
+				fire.mode = order[i];
+				fire.weaponId = active->id;
+				fire.wantReload = !holding && m->ammo == AMMO_CLIP && active->clip >= 0 &&
+					active->clip < ShotCost(*m) && !active->reloading &&
+					AmmoCount(inv, active->primaryAmmoType) > 0;
+				fire.lastReason = holding ? CommitName(fire.commit)
+						: (fire.wantReload ? "reloading" : "ready");
 
 				if (fire.wantReload && !wasReload)
 					++fire.reloads;
@@ -387,13 +1083,13 @@ void Think(CBot &bot)
 		if (!spec)
 			continue;
 
-		if (count < kMaxChoices && ModeUsable(bot, w, spec->primary, dist))
+		if (count < kMaxChoices && ModeUsable(bot, w, spec->primary, dist, rise))
 		{
 			choices[count].index = i;
 			choices[count].mode = MODE_PRIMARY;
 			++count;
 		}
-		if (count < kMaxChoices && ModeUsable(bot, w, spec->secondary, dist))
+		if (count < kMaxChoices && ModeUsable(bot, w, spec->secondary, dist, rise))
 		{
 			choices[count].index = i;
 			choices[count].mode = MODE_SECONDARY;
@@ -448,86 +1144,71 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	if (w.id != fire.weaponId)
 		return 0;
 
+	if (fire.commit == COMMIT_GUIDE)
+	{
+		fire.lastReason = "guiding";
+		return 0;
+	}
+
 	if (fire.wantReload)
 		return IN_RELOAD;
-
-	if (w.reloading || inv.nextAttack > 0.f)
-		return 0;
 
 	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
 	if (!spec)
 		return 0;
 
-	const WeaponMode *m = ModeOf(*spec, fire.mode);
+	const WeaponMode *m = ModeOf(*spec, fire.mode, fire.zoomed);
 	if (!m)
 		return 0;
 
-	int need = (m->ammoPerShot > 0) ? m->ammoPerShot : 1;
-	if (m->ammo == AMMO_CLIP && w.clip >= 0 && w.clip < need)
+	bool charge = m->fire == FIRE_CHARGE;
+	bool tap = m->fire == FIRE_TAP;
+
+	if (!charge && (w.reloading || inv.nextAttack > 0.f))
+		return 0;
+
+	if (!charge && m->ammo == AMMO_CLIP && w.clip >= 0 && w.clip < ShotCost(*m))
 	{
 		fire.lastReason = "empty";
 		return 0;
 	}
 
-	if (!fire.aimValid)
-		return 0;
-
 	edict_t *pEdict = bot.pEdict;
 	Vector eye = pEdict->v.origin + pEdict->v.view_ofs;
 
-	MAKE_VECTORS(angles + pEdict->v.punchangle);
-	Vector dir = gpGlobals->v_forward;
-
-	Vector half = fire.targetSize * 0.5f;
-	Vector centre = fire.aimPoint;
-
-	if (fire.aimHoming)
+	if (!charge)
 	{
-		Vector span = fire.aimPoint - fire.basePoint;
-		centre = fire.basePoint + span * 0.5f;
-		half.x += fabsf(span.x) * 0.5f;
-		half.y += fabsf(span.y) * 0.5f;
-		half.z += fabsf(span.z) * 0.5f;
+		unsigned short toggle = ZoomButtons(bot, *spec, w, eye);
+		if (toggle != 0)
+		{
+			fire.lastReason = "zooming";
+			return toggle;
+		}
 	}
 
-	Vector los = centre - eye;
-	float dist = los.Length();
+	bool onTarget = fire.aimValid &&
+		(IsArc(*m) ? ArcOnTarget(bot, angles, *m, eye) : RayOnTarget(bot, angles, *m, eye));
 
-	if (dist > 0.001f)
-	{
-		float dot = DotProduct(dir, los * (1.f / dist));
-		if (dot > 1.f)
-			dot = 1.f;
-		else if (dot < -1.f)
-			dot = -1.f;
+	if (charge)
+		return ChargeButtons(fire, *m, onTarget);
 
-		fire.lastMiss = acosf(dot) * (180.f / kPiF);
+	if (tap)
+		return TapButtons(fire, w, onTarget);
 
-		float big = std::max(half.x, std::max(half.y, half.z));
-		fire.lastTol = atanf(big / dist) * (180.f / kPiF);
-	}
-
-	float range = (m->range > 0.f) ? m->range : kHitscanRange;
-
-	float entry = 0.f;
-	if (!RayHitsBox(eye, dir, centre, half, range, entry))
-	{
-		fire.lastReason = "off-target";
+	if (!onTarget)
 		return 0;
-	}
 
-	TraceResult tr;
-	TRACE_LINE(eye, eye + dir * range, ignore_monsters, pEdict, &tr);
-	if (tr.flFraction * range < entry)
+	if (IsGuided(*m) && w.nextPrimaryAttack <= 0.f)
 	{
-		fire.lastReason = "blocked";
-		return 0;
+		StartCommit(fire, COMMIT_GUIDE);
+		++fire.guides;
 	}
 
 	fire.lastReason = "firing";
 	fire.pressed = true;
 	fire.pressedLead = fire.aimLead;
-	return (fire.mode == MODE_SECONDARY) ? IN_ATTACK2 : IN_ATTACK;
+	fire.pressedArc = fire.aimArc;
+	return AttackButton(fire.mode);
 }
 
 }

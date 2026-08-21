@@ -208,14 +208,90 @@ converges *faster* despite braking earlier (0.617s to 0.467s for a 180 at 60fps,
 is spent recovering from an overshoot. This matters beyond tidiness: deliberate over/undershoot is a planned
 feature, and it has to be the only source of overshoot or it cannot be tuned.
 
-The `|e| / dt` term is a dead-beat clamp and it is not optional. A bang-bang controller sampled at a finite
-frame rate limit-cycles near zero at roughly `aMax * dt^2`, which is about 0.8 degrees at 60fps -- clearly
-visible jitter. Capping the target velocity at "the speed that lands exactly this frame" makes any error
-small enough to close in one step close in one step, and the limit cycle disappears.
+The `|e| / dt` term is a dead-beat clamp. Capping the target velocity at "the speed that lands exactly this
+frame" makes any error small enough to close in one step close in one step.
+
+It is worth being precise about what it buys, because the obvious way to make the bot less surgical is to
+delete it and that turns out not to work. The "bang-bang limit-cycles at roughly `aMax * dt^2`" claim
+applies to the **plain** `sqrt(2 a |e|)` envelope. With the discrete correction above, the envelope
+linearises near zero to `2e/dt` -- exactly twice the dead-beat speed -- so a step lands on `-e` and no
+further. Squaring out `sqrt(2ae + s^2/4) - s/2 <= 2e/dt` with `s = a*dt` reduces to `0 <= 4e^2/dt^2`, which
+holds for every `e > 0`, with equality only in the limit. So there is no limit cycle at all: dropping the
+clamp gives a ring-down that decays quickly at first and stalls around `aMax * dt^2 / 8` -- 0.056 degrees at
+100fps, 0.156 at 60, 1.41 at the `kMaxFrameTime` clamp. That is an order of magnitude finer than the hand
+quantum at normal tick rates and three times coarser at 10 Hz: wrong in both directions, and frame-rate
+coupled in a controller whose entire envelope design exists to not be. Coarseness comes from the quantum
+below instead, and the clamp stays.
 
 `kMaxHandSpeed` is a hand speed ceiling. It is near-inert at the current constants, since the largest
 reachable error is 180 degrees and that only peaks at 720 deg/s, but it is the knob for a bot whose hand
 should be slower than its acceleration allows.
+
+### The hand has a resolution, and that is what zoom buys
+
+A real hand on a real mouse cannot move an arbitrarily small amount, and cannot change speed by an
+arbitrarily small amount. Two quantisations model that, both in hand space, both applied at the bottom of
+`StepAxis`:
+
+    velOut   = round(vel / impulse) * impulse       // commanded speed lives on a grid
+    pending += velOut * dt
+    counts   = trunc(pending / quantum)             // whole mouse counts only
+    pending -= counts * quantum
+    angle   += counts * quantum * s
+
+`crossbot_aim_quantum` is degrees of hand travel per mouse count and `crossbot_aim_impulse` is the smallest
+non-zero hand speed, in hand deg/s. Both cvars hold the value itself rather than a multiplier, and either at
+0 switches its own quantisation off; both at 0 is the exact pre-quantum controller, which is what the
+regression run in `test_aim_error.ps1` uses.
+
+The default quantum is `atan(1/128)` = 0.4476 degrees: one unit of miss per 128 units of range. That is
+deliberately chosen for its consequence at distance. Because both quantisations are in hand space, `s`
+scales them the same way it scales `kMaxAccelYaw`:
+
+| fov | angular quantum | 1 unit per | miss at 4096 units |
+|---|---|---|---|
+| 90 | 0.448 deg | 128u | +/- 32u, and a player is 32 wide |
+| 20 (crossbow) | 0.0995 deg | 576u | +/- 7u |
+
+**This is the reason zoom is worth anything to a bot.** Before it existed, `FovScale` priced zoom as pure
+cost -- see "Zoom is a range decision" below -- and a bot that zoomed simply turned 4.5x slower for a mode
+swap. Now the same 4.5x buys 4.5x finer placement. Measured on a 40 degree flick, ten samples each: mean
+resting error 0.299 degrees at fov 90 against 0.052 at fov 20, for settle times of 0.180s and 0.393s. Peak
+hand speed came out 414 and 891 deg/s -- the fov 20 figure matching the 890 of a 180 at fov 90, because a 40
+degree turn through a 20 degree scope is the same 180 degrees of hand travel.
+
+**Why the speed grid is applied to the output and not to the change in speed.** Quantising `dv` and keeping
+`vel` itself on the grid is the tidier-looking form and it deadlocks. `dv` is clamped to `maxAccel * dt`
+first, so as soon as `maxAccel * dt` drops below half an impulse every `dv` rounds to zero and the velocity
+can never change again -- the view freezes solid. That threshold is `dt < impulse / (2 * maxAccel)`, i.e.
+600fps on yaw and 480 on pitch at the defaults, and `sys_ticrate` goes to 1000. Leaving `vel` continuous and
+snapping only the value that gets integrated has no such threshold.
+
+**Why the commanded speed is floored and not merely snapped.** `round(vel / impulse)` returns zero whenever
+`|vel| < impulse / 2`, and the dead-beat term turns a small error into a small velocity -- so without a
+floor any error under `impulse * dt / 2` is invisible and the hand parks early. Measured, that put the
+resting error at 0.065 degrees at 100fps: three times finer than the quantum intends and frame-rate coupled,
+which is both of the things this design is trying to avoid. So the control law floors `limit` at `impulse`,
+capped at `quantum / dt` so the floor can never demand more than one count per frame at a low tick rate.
+The hand therefore never comes fully to rest: it dithers across the count it is nearest, roughly 20 Hz at
+100fps, which is about where physiological hand tremor sits. `crossbot_aim_status` shows this as a hand
+speed that idles at 21 deg/s rather than 0 -- `sqrt(15^2 + 15^2)`, both axes at the floor.
+
+The tremor is not cosmetic. It is what makes long range *probabilistic*: `RayOnTarget` gates the trigger on
+the ray actually entering the bounding box, so a wandering ray produces intermittent potshots at a distant
+target rather than a clean yes or no that holds for the whole engagement.
+
+**`kMaxQuantum` and `kMaxImpulse` are cvar clamp bounds, not physics.** They belong with `kMaxDrift`,
+`kMaxDelay` and `kMaxErrorScale`, not with `kMaxAccelYaw` in the same block: acceleration keeps its ceiling
+and the impulse adds a floor, opposite ends of one axis and both needed. `kMaxQuantum` is 5 degrees because
+that is under `kLadderAimTolerance`, so no cvar value can leave a nav gate unlatchable; `kMaxImpulse` is 100
+deg/s because past that the slowest possible tracking speed outruns most engagements.
+
+Resting error is bounded by whichever quantisation binds, `max(quantum, impulse * dt) / 2` in hand space:
+0.22 degrees at 100fps, 0.375 at the 20 Hz clamp. Both sit under `kTestSettleTolerance`, and the tremor
+speed sits far under `kTestSettleSpeed`, so `crossbot_aim_test` still reports a settle. The nav gates have
+more than 10x margin, and `crossbot_aim_drift` defaults to a degree of sine, comfortably above the quantum,
+so idle drift still moves the view -- in steps now.
 
 ### Where the constants come from
 
@@ -791,22 +867,60 @@ It flushes:
 
 Never on a timer and never per bot -- the set of bones a model has does not change while it is loaded.
 
-### The suspicion ring
+### One entry per entity, and why it stopped being a ring
 
-256 slots, which at the design rate of roughly 50 events per second is almost exactly the 5-second decay
-window, so entries fall out of the ring at about the same time they stop mattering. Nothing is ever
-removed. Every read walks backwards from `head` and stops at the first entry whose weight has reached zero,
-which bounds every scan by the decay window rather than by 256.
+The list used to append. Sound, event and damage entries each took a fresh slot, and only `SUSP_SIGHT` was
+deduplicated per entity. The reasoning was that an enemy firing while moving leaves a trail of positions,
+which is real information about their direction of travel -- and it is, but the price was that **the
+trail outvoted the head**. A visible enemy is one entry; the same enemy running away lays down a footstep
+entry every ~0.3s, so within the 5-second window they hold fifteen votes at fifteen different points and
+the weighted mean is dragged backwards along the way they came. An elevator cycling in a shaft did the
+same thing for free. Footsteps did not create this defect, but they made it constant.
 
-Sound, event and damage entries always append -- an enemy who keeps firing while moving leaves a trail of
-positions, which is real information about their direction of travel. A `SUSP_SIGHT` entry is the one
-exception: if the same entity already has a live sight entry, it is updated in place. Without that a
-continuously visible enemy would fill the entire ring in five seconds and crowd out everything heard.
+Now every entity gets exactly one slot. `Push` looks for a live handle matching the emitter, overwrites it
+in place if it finds one, appends if there is room, and otherwise reuses the entry with the smallest
+`time`. Nothing can vote twice no matter how much noise it makes, and the direction the bot faces stops
+being a function of emission rate.
+
+The dedup key is a `CBotEntHandle`, not an entity index. That matters at exactly one moment: a breakable
+is destroyed and something else is later allocated into the same edict slot. Under an index it would
+inherit the old entry and its stale position; the handle's serial number makes `Is` return false across
+that boundary, so the new entity gets a new slot and the orphan is unmatchable and ages out.
+
+`head` is gone, and that deletion is forced rather than tidy. Every read used to walk backwards from
+`head` and `break` at the first zero-weight entry, which was only ever valid because appending kept the
+ring in time order. Overwriting a slot's `time` in place destroys that order, so a `break` would silently
+truncate the list at the first stale entry -- the one failure mode here that looks like it works. Every
+scan now runs `[0, count)` and uses `continue`. With one entry per entity the live set is a handful, so
+scanning the array costs less than the ring ever did.
+
+`count` is a high-water mark of distinct entities seen, not a queue depth. Eviction only begins after 256
+distinct entities, and since decayed and orphaned entries are by definition the oldest, it reclaims those
+long before it touches anything live.
 
 ### Where the bot looks when it has no target
 
-The weight of an entry is `max(decay - age, 0) / decay`, and it does double duty: it is the averaging
-weight, and its maximum over the live entries is the *authority* of the whole result.
+Reading an entry goes through `LiveWeight`, and every scan in the file uses it -- tier selection,
+accumulation, both refine passes, `LiveCount`, `Freshest`. One choke point is the design: a second
+liveness test that disagreed with the first is how a tier gets selected and then contributes nothing.
+
+`LiveWeight` drops an entry whose entity is gone, drops a player or monster that is dead, and otherwise
+returns `max(decay - age, 0) / decay`. The handle check is what makes gibs and destroyed breakables stop
+steering the bot; the dead check is what stops it staring at a corpse for the five seconds after a kill.
+
+**The dead check is scoped to players and monsters on purpose.** `IsDead` is
+`deadflag != DEAD_NO || health <= 0`, and a `func_door` or `func_train` has `health == 0`. Applying it to
+`KIND_OTHER` would silently discard every piece of map machinery from the list and leave the fallback tier
+permanently empty -- and nothing in the test suite would say so, because the player tier would still work.
+
+Then the vote picks **one tier and ignores the rest**: players if any are live, else monsters, else
+everything else. The enum order is the priority order so this is a `min` and not a switch. The point is
+that a player entry decayed to weight 0.1 still beats a door at 1.0 -- the bot glances at the fading
+contact instead of snapping to the lift. That is why the tier filter runs before `bestWeight` rather than
+after it.
+
+Weight then does double duty within the winning tier: it is the averaging weight, and its maximum is the
+*authority* of the whole result.
 
 The direction is a weighted mean of unit vectors to each live entry, then refined twice by keeping only the
 entries inside the view cone of the current mean and re-averaging. That is a two-pass mean-shift, and it
@@ -871,19 +985,25 @@ aim at someone below.
 
 ### crossbot_sense_status
 
-Per bot: the aim target and the bone currently sampled, live suspicion count, the freshest entry with its
-source and age and position, and the look direction with its authority and how many entries survived the
-cone refinement.
+Per bot: the aim target and the bone currently sampled, live suspicion count broken out by kind, which
+tier won the vote, the freshest entry with its source and age and position, the look direction with its
+authority and how many entries survived the cone refinement, and cumulative push counts per source.
 
 `kept` versus `susp` is the interesting pair -- it is the mean-shift reporting how much of what the bot
 knows about it can actually face at once.
 
-All four sources are now observed at runtime. `EVENT` and `DAMAGE` were wired and filtered but
-unexercised for as long as nothing pulled a trigger; `scripts/test_fire.ps1` sees all four in a duel.
+`kinds` against `tier` is the second pair, and it is the one assertion worth automating: `tier` must read
+`PLAYER` whenever `kinds=p:` is nonzero. `test_sense.ps1` checks exactly that on every poll.
 
-The status line reports only the *freshest* entry, and footsteps make `SOUND` the freshest almost
-every frame, so a single poll is a poor witness for the other three. That is why `test_fire.ps1`
-samples this command several times per poll rather than once.
+`fresh=` is the freshest entry *overall*, not the freshest in the winning tier, so `tier=PLAYER` next to
+`fresh=SOUND ent=148` is correct and not a contradiction -- a door was heard more recently than the
+player, and lost anyway.
+
+`pushed=` exists because dedup destroyed the old way of proving a source fires. With one entry per entity
+an enemy's `DAMAGE` entry is overwritten by their own `SIGHT` entry inside the same `BotSense::Update`,
+so `fresh=` reads `SIGHT` almost always and `DAMAGE` essentially never. `test_fire.ps1` used to sample
+this command four times per poll to work around that; the counters are cumulative, so one poll cannot
+miss a source that fired between polls, and the sampling loop is gone.
 
 ## bot_fire.cpp
 
@@ -966,39 +1086,180 @@ A second trace, `ignore_monsters` from the eye out to `range`, rejects the shot 
 stops the ray before the box entry. Without it a bot happily fires through a wall at someone it can
 still hear.
 
+None of this applies to an arcing mode, which has no straight ray to test. That path is below.
+
 ### Supported is the incremental frontier
 
 ```cpp
-mode.fire == FIRE_HOLD && mode.toggle == TOGGLE_NONE &&
+(mode.fire == FIRE_HOLD || mode.fire == FIRE_CHARGE || mode.fire == FIRE_TAP) &&
+mode.toggle == TOGGLE_NONE &&
 (mode.aim == AIM_TARGET || (mode.aim == AIM_LEAD && mode.speed > 0)) &&
-mode.gravity == 0 && mode.splash == 0 &&
-(mode.quirks & (WPN_Q_HIDDEN_STATE | WPN_Q_KEEP_AIMING |
-                WPN_Q_THROW_ARC | WPN_Q_INHERIT_VEL)) == 0
+(homing || arc || mode.gravity == 0) &&
+(arc || !thrown) &&
+(mode.quirks & (WPN_Q_HIDDEN_STATE |
+                ((homing || thrown || guided) ? 0 : WPN_Q_INHERIT_VEL))) == 0
 ```
 
-A predicate over the spec, deliberately **not** a list of weapon ids. It admits the instant-hit set
-plus the three straight-flight projectiles — crossbow primary, both hornetgun modes — and rejects
-every arcing, charge, toggle and hidden-state mode without naming one of them. Turning the next group
-on is relaxing a clause here; it is not editing a table.
+A predicate over the spec, deliberately **not** a list of weapon ids. Turning the next group on is
+relaxing a clause here; it is not editing a table.
 
-`WPN_Q_THROW_ARC` and `WPN_Q_INHERIT_VEL` are named explicitly rather than left to the gravity
-clause. Neither is implied by it and both change the **launch vector**: an inherited-velocity
-projectile leaves at `speed * dir + ownerVelocity`, so pointing at the solved lead point is simply the
-wrong direction, and the fix is a vector triangle rather than a longer iteration.
+**The frontier is now three doors wide**, and all three are the same feature. What is left out is a
+`WeaponToggle` (the two zooms and the RPG laser), an aim of `AIM_NONE` or `AIM_SURFACE` (satchel
+primary, tripmine), and `WPN_Q_HIDDEN_STATE` (both satchel modes, RPG secondary). Between them that is
+the **deployables** and nothing else: things placed rather than fired, which need a path that runs
+with no target at all.
 
-Note what this buys on the crossbow: `primaryZoomed` is never consulted, because nothing zooms, so the
-`(zoomed && spec->primaryZoomed.fire) ? ... : spec->primary` one-liner in `doc/game.md` stays a
-one-liner and no weapon is special-cased in `bot/`.
+`arc` is `gravity > 0 && splash > 0 && !homing` — a mode whose flight the bot solves and then checks
+by simulating. `thrown` is `WPN_Q_THROW_ARC` and `guided` is `WPN_Q_KEEP_AIMING`. `arc` is a local
+predicate rather than a quirk because it is derivable, and `weapon_spec.h`'s one criterion for a field
+is that a consumer cannot recover it from the others; the other two are quirks because nothing else in
+the row implies them.
+
+`arc` admits two modes that need different solves. **MP5 secondary** is a fixed-speed parabola with a
+contact fuse. **Handgrenade primary** is a parabola whose speed and direction are one parameter and
+which inherits the thrower's velocity, and `thrown` is what routes it to the coupled solve below.
+`arc && !thrown` gets its own name, `ArcDetonates`, and it is the predicate the uphill veto turns on.
+
+**`WPN_Q_INHERIT_VEL` is now the only quirk in the reject mask that is conditional**, and the
+condition is "does anything account for it". Three things do. A `thrown` mode solves it exactly — the
+launch is a vector triangle, not a longer iteration. A `homing` mode performs no solve, so inherited
+velocity rotates a launch vector nobody aimed. A `guided` mode has the same exemption for a different
+reason: the RPG adds only `v_forward * dot(playerVel, v_forward)`, a change to launch *speed* rather
+than direction, and a rocket that steers at the crosshair does not care. What is left is the satchel,
+which `WPN_Q_HIDDEN_STATE` holds out anyway.
+
+`splash` no longer rejects anything. It used to reject any non-arc mode outright, which is what kept
+the RPG out, and it has been replaced by a gate that runs for every mode with `splash > 0` — see the
+self-damage rule below. Self-damage is still a decision rather than a tolerance; it is just decided
+per shot instead of per weapon.
 
 `ModeUsable` adds the conditions the spec exists to answer: `range` (which is what keeps the crowbar
 holstered past 32 units and the shotgun and egon past 2048), the `ammo` pool (the one field that
 genuinely cannot be derived at runtime — secondary fire does *not* imply secondary ammo),
-`WPN_Q_NO_UNDERWATER` against `waterlevel == 3`, and for `AIM_LEAD` a flight-time ceiling described
-below.
+`WPN_Q_NO_UNDERWATER` against `waterlevel == 3`, the uphill veto below, and for `AIM_LEAD` a
+flight-time ceiling.
+
+That ceiling applies to homing modes too, where it is really a **distance**: `dist / speed >
+kMaxFlightTime` with nothing solved is just `dist > speed * 1.5`, which parks the hornet past 900
+units and the snark past 300. Both are about right for weapons you throw rather than aim, and it costs
+no new field to say so.
+
+Ammo is judged by `ShotCost`, which is `ammoPerShot` for everything discrete and the **whole spin-up**
+for a `FIRE_CHARGE` mode: 16 uranium for a full gauss charge, not 1. A bot with less than that keeps
+gauss primary, which is the right fallback and needs no special case.
 
 Ammo is judged differently at the two levels, on purpose. For *selection*, a clip weapon with an empty
 clip but a non-empty reserve is still usable — otherwise the bot throws away a good gun the instant it
-needs reloading. For *firing*, the clip has to actually hold `ammoPerShot`.
+needs reloading. For *firing*, the clip has to actually hold `ShotCost`.
+
+### The ballistic solve, the sim, and the two gates
+
+An arcing mode gets a different treatment end to end. `RayOnTarget` is not used at all — a
+ray-versus-box test on a parabola is meaningless.
+
+`SolveArc` is closed form. For horizontal range `d`, height difference `h`, launch speed `v` and
+effective gravity `g`:
+
+```
+disc       = v^4 - g * (g*d*d + 2*h*v*v)
+tan(theta) = (v*v - sqrt(disc)) / (g*d)
+flight     = d / (v * cos(theta))
+```
+
+`disc < 0` is out of range, and it hands back a real ceiling instead of a guessed one: flat ground at
+800 u/s under `kGravity * 0.5` gives `v^2/g`, or 1600 units. The **low** arc is always taken; the high
+root is a mortar shot that spends three seconds in the air against a target that moves. `SolveArcLead`
+wraps it in the same four fixed passes as `SolveLead` — solve, take the flight time, re-predict.
+
+`SimulateArc` then steps that parabola at `kArcStep` with a traceline per segment. It exists for the
+one question the closed form cannot answer, **what does the shell hit first**, and it traces
+`dont_ignore_monsters` on purpose: `ExplodeTouch` fires on players too, so a shell that would hit the
+enemy in the chest has to register there rather than sailing through to the wall behind. At 0.1s and
+800 u/s each segment is 80 units, so a full flight is fifteen traces. The cost of that coarseness is
+that a chord can cut a corner the shell would really have clipped, and the shot is then wasted — the
+cheap failure of the two.
+
+Reproducing the engine's integration exactly is not worth it. `SV_Physics_Toss` subtracts a whole
+`g * frametime` before moving, so it is semi-implicit Euler and the parabola is out by `g*dt*t/2` —
+about two units over a second, against a 250-unit splash radius.
+
+Two gates decide the trigger, and both are in **units**, not degrees:
+
+- **Near enough to hurt.** The impact must be within `splash * kSplashAccept` of the target's box,
+  measured to the nearest point on it. Measuring to the box surface rather than its centre is what
+  sampling at `mins.z` means in practice — a shell landing at their feet scores zero, which is right,
+  because `RadiusDamage` falls off from the blast and a floor burst at the feet is a full hit.
+- **Closer to them than to me.** `|impact - targetPoint| < |impact - eye|`. It needs no constant, it
+  scales with the weapon, and it is the symmetric statement of "I win this exchange". It is also
+  deliberately a little suicidal, which was the call: a bot that lingers doing nothing is worse than
+  one that takes a graze.
+
+The second gate is `SplashSafe`, and it is **not** an arc feature. It runs for every mode with
+`splash > 0`, which is what let `Supported` stop rejecting splash outright and admit the RPG. For a
+direct-fire splash weapon the impact is the ray's, not the parabola's: `RayOnTarget` already computes
+both the box entry distance and the traced wall distance, so the impact is `eye + dir * entry` when
+the shot reaches the enemy and the wall when it does not. No extra trace, and the refusal reads
+`splash-self` rather than `arc-self` so the two paths stay tellable apart.
+
+At close range the rule is knowingly generous. A bot that rockets someone 200 units away takes about
+20 damage from a 100-damage, 250-radius blast and wins the exchange; that is the trade, and it is the
+same trade the arc gate makes.
+
+Both run twice per frame, in the two places for the two different reasons. `Think` runs them along the
+**ideal** launch direction and treats a failure as *mode unusable*, so the bot picks another weapon
+instead of standing in front of a wall holding a grenade launcher — the same reason `SolveLead`
+already lives there. `Buttons` runs them along the **live** view direction, which lags behind the
+solve by the reaction delay and by finite hand speed, and that is what decides the press.
+
+`fire.aimPoint` and `fire.targetPoint` part company here for the first time. `aimPoint` is where to
+*look* — `eye + launchDir * dist`, well above the enemy — and it reaches the view through
+`BotFire::AimPoint` with no extra plumbing. `targetPoint` is where the enemy actually is, and the
+splash gate needs it because the aim point is no longer a claim about them.
+
+`miss` and `tol` in `crossbot_fire_status` switch to units for an arc: the gap from the impact to the
+target box, against `splash * kSplashAccept`.
+
+### The uphill veto, and what it was a proxy for
+
+A mode with `gravity > 0` **that the bot does not solve an arc for** is rejected when the served point
+sits more than `kUphillSlack` above the bot's eye. Throwing something that falls at an enemy standing
+above you gets it back: a snark lands short and walks home, a grenade bounces down the step it failed
+to clear.
+
+`kUphillSlack` is 16 units, and the number comes from the hitbox rather than from taste. A standing
+player's eye is 28 above the origin and the top of the hull is 36, so the highest bone the sense system
+can serve on a *level* target is about 8 above the bot's own eye. 16 clears that with room and still
+vetoes anything standing on a step, which is 18.
+
+It lives in `ModeUsable`, not in `Buttons`, so the bot picks a different weapon rather than standing
+there holding a snark it will not throw. `uphillVetoes` counts rejections, not situations — the
+predicate runs per weapon per mode per frame — so read it as a witness that the rule fires at all,
+which is the only thing `test_fire.ps1` asks of it.
+
+**The exemption is for arcs that stop where they land, not for arcs.** Applied to a grenade launcher
+the veto would be backwards — elevating is exactly what the solve is for — so it was first narrowed to
+"anything the bot solves an arc for". That was too wide by one weapon, and the handgrenade is the
+weapon.
+
+The rule was always about projectiles that *persist after landing*, which is a property of the fuse
+rather than of gravity. `ShootContact` gives the MP5 grenade `ExplodeTouch`, so the simulated impact
+**is** the explosion and the sim genuinely knows where it ends up. `ShootTimed` gives the handgrenade
+`BounceTouch` and `friction 0.8`, so the impact is only where it *lands*; it then rolls for whatever
+remains of the 2.5-second fuse and explodes somewhere downhill. So the predicate is `ArcDetonates`,
+`arc && !thrown`, and it names the thing rather than approximating it:
+
+> The veto applies to projectiles whose resting place the sim does not predict — a snark that walks, a
+> grenade that rolls.
+
+Two weapons carry it now. The snark is the one that can never lose it, because it is homing and
+nothing is ever solved for it, which is why `uphillVetoes` must stay non-zero in the pinned snark
+phase: it is the only witness that narrowing the rule did not switch it off. The 9mmAR phase is the
+witness for the other side — `uphill` must stay **zero** there, or the narrowing caught the contact
+grenade it was written to exempt.
+
+The residual roll is not modelled and is not going to be. Simulating `BounceTouch`, the 0.8 friction
+and the ONGROUND damping is a bigger job than the whole solve, and 250 units of splash forgives more
+than it would buy. It is the honest cost of throwing immediately instead of cooking.
 
 ### The lead solve, and why four passes with no convergence test
 
@@ -1056,16 +1317,218 @@ already sitting between perception and aiming. No pass was added and nothing was
 For `AIM_TARGET` the published point *is* the served point, so hitscan aiming is unchanged by
 construction, which is what makes the existing duel phase a regression check on this.
 
-### WPN_Q_HOMING widens the box rather than bending the path
+### WPN_Q_HOMING replaces the solve with a cone
 
-For hornetgun primary the tolerance box is the AABB union of the box at the served point and the box
-at the lead point — "anywhere between where they are and where they will be". Since `RayHitsBox`
-takes a centre and half-extents, the union is four lines of arithmetic before the call, not a second
-code path.
+A hornet and a snark both steer themselves, so the bot's job is to point roughly at the enemy and let
+go. `SolveLead` is skipped entirely, the published aim point *is* the served point, and the tolerance
+becomes a fixed `kHomingCone` of 20 degrees.
 
-The launch is still solved as a straight shot. A hornet that has to turn hard pays for it in flight
-time it may not have (3.5s in multiplayer), so aiming into the middle of the turn is what keeps the
-correction cheap. The quirk buys permission to commit on a wider error, and nothing else.
+The cone is spent through the same `RayHitsBox` as everything else — the half-extents are raised to
+`dist * tan(20°)` on each axis, which is an angular cone written in the box the function already takes.
+No second code path, and `miss`/`tol` in `crossbot_fire_status` stay comparable across every weapon:
+`tol` simply reports 20 instead of whatever the target subtends.
+
+This is a **simplification**, not an extra feature, and it is worth being clear about what was
+discarded. The previous version solved the lead and then widened the box to the union of the present
+and predicted boxes. That was more code for a worse model: a RED hornet accelerates from 300 while
+turning, so the 600 in the table is a curve flattened to a float, and solving a lead against a number
+that fictional buys precision that was never there. Pointing at the target and trusting the hornet is
+both shorter and more honest.
+
+`flight=` reads zero for these modes for the same reason — nothing was solved, so there is no flight
+time to report, and printing the unsolved `dist / speed` would be inventing one.
+
+Hornetgun **secondary** keeps the solve. Its ORANGE dart flies straight at 1200 and never tracks, so
+one weapon exercises both paths, which is exactly what makes the pinned hornetgun phase a useful test.
+
+### The coupled throw solve
+
+A `WPN_Q_THROW_ARC` mode does not have a launch direction and a launch speed. It has **one**
+parameter, and `IGameProfile::ThrowLaunch` is the map from it: the pitch the bot is holding goes in,
+the elevation and speed the grenade leaves at come out. The five coefficients behind that live in
+`CHLDMProfile` (see `doc/game.md`), so nothing here knows a number that belongs to a weapon.
+
+Which means `SolveArc`'s closed form does not apply — it assumes a fixed `v` and solves for the angle,
+and here `v` is a function of the angle. What replaces it is a scan, and the scan is cheap because
+each sample is closed form in the *other* unknown.
+
+Fix a candidate pitch. `ThrowLaunch` gives `(e, s)`, so the horizontal launch speed is `sh = s cos e`.
+The grenade also inherits the thrower's velocity, so with `flat` the 2D vector to the target, `pvH` the
+thrower's horizontal velocity and `u = 1/t`, the horizontal problem is one equation:
+
+```
+|flat * u - pvH| = sh
+=>  A u^2 - 2 B u + C = 0,   A = |flat|^2,  B = flat . pvH,  C = |pvH|^2 - sh^2
+```
+
+A quadratic. Take the larger positive root — the shorter flight — and the rest falls out:
+
+```
+t     = 1/u
+dirH  = (flat * u - pvH) / sh          unit by construction
+err   = (sz + pvz) t - g t^2 / 2 - h
+```
+
+That is the **vector triangle** `WPN_Q_INHERIT_VEL` always needed, and it is solved rather than
+approximated. `dirH` is the yaw the bot must hold so that launch *plus drift* arrives on target, which
+for a bot strafing sideways is not the yaw pointing at the enemy. Its magnitude is `sh` by
+construction, so there is nothing to normalise and nothing to check.
+
+`err` is unimodal in elevation — it rises to the range envelope at `tan e = v^2 / (g d)` and falls
+after — so scanning **down** the pitch range (which is up the elevation range) and taking the first
+upward zero crossing finds the low arc. `kThrowScan` samples bracket it, `kThrowBisect` halvings
+refine it. Samples where the quadratic has no positive root are simply invalid and skipped; the
+crossing test runs between consecutive *valid* samples, which is what makes the far end of the range
+degrade into "no solution" rather than into a wrong one.
+
+The bracket ends are named `under` and `over` for the sign of `err`, not for their magnitude: pitch is
+down-positive, so the `over` end is numerically the *smaller* of the two. Reading them as an ordered
+interval is the one way to misread this function.
+
+The muzzle is `eye + launchDir * 16` and so depends on the answer, and the target moves during the
+flight. Both fold into the same four fixed passes `SolveArcLead` already used: re-predict the target,
+re-place the muzzle from the previous pass's launch direction, solve again. Measured against a static
+target the residual is under 0.03 units at every range it accepts.
+
+The published `aimPoint` is built from the **pre-remap** pitch, not the launch elevation. The bot is
+looking somewhere the grenade is not going, by design, because that is what the game's own remap does
+to a player. `ArcOnTarget` undoes nothing either: it reads the live pitch, runs it through
+`ThrowLaunch`, and builds the launch direction from `-elevation`. Nowhere is the remap inverted.
+
+Reach is about 550 units, and the ceiling is `kMaxFlightTime` rather than the law — the throw itself
+tops out near 625 on flat ground. `ModeUsable`'s `dist / speed > kMaxFlightTime` gate at the row's
+speed of 400 prunes at 600, so there is a 50-unit band where selection says yes and the solve says no
+and the bot idles half a second before re-picking. That is left alone rather than papered over with a
+`range` value copied out of a bot-side constant.
+
+### The three commits, and why they are one enum
+
+`fire.commit` is the answer to "I have started something I must not walk away from". It replaced a
+lone `charging` bool when a second and third weapon needed the same shape:
+
+| | act | latch | release | cap |
+|---|---|---|---|---|
+| `COMMIT_CHARGE` | press and hold | — | the shot, or the aim gate | `chargeMax - kChargeSafety` |
+| `COMMIT_THROW` | press one frame | `m_flStartThrow != 0` | it returns to 0 | `kTapTimeout` |
+| `COMMIT_GUIDE` | press **on a ready weapon** | `m_cActiveRockets > 0` | it returns to 0 | `kGuideMax` |
+
+The two new ones share a structure the charge does not need: the bot **cannot see its own action
+immediately**. `CHandGrenade::PrimaryAttack` pulls the pin and returns; the grenade leaves half a
+second later, from `WeaponIdle`. `CRpg::PrimaryAttack` creates the rocket inside
+`Bot_RunPlayerMove`, so the count only reads back on the next frame. So `commitSeen` latches the frame
+the game first shows the thing existing, and the release is `commitSeen && !live` — never `!live`
+alone, which would fire on the gap between the button and the effect.
+
+`COMMIT_THROW` also refuses on `m_flStartThrow` directly, not only on its own state, and that is not
+belt and braces. A primed grenade whose target walks out of the 550-unit reach makes the solve fail,
+which drops the mode and clears the commit — and a bot that then pressed again would skip
+`WeaponIdle` for that frame and **cook a grenade it has already pulled the pin on**. Reading the
+weapon's own flag closes it, and picks up the free case of a bot that inherits somebody else's primed
+grenade off the floor.
+
+`COMMIT_GUIDE` is entered only when `nextPrimaryAttack <= 0`, and that condition is load-bearing.
+`Buttons` presses a `FIRE_HOLD` weapon every frame it likes the shot, which is how the engine's
+level-triggered dispatcher is meant to be driven — the game fires when it is ready and ignores the
+rest. But `CRpg::Reload` pushes `m_flNextPrimaryAttack` half a second forward on **every** frame the
+reload button is held, so the moment the reload finishes there is a window where the clip is full, the
+player's own `m_flNextAttack` has expired and the weapon's has not. A press there launches nothing. It
+cost one phantom six-second window per reload before the gate went in, which showed up as `guides`
+running six ahead of `shots` on a pinned RPG.
+
+All three caps are valves rather than models. `kTapTimeout` covers a press that never took.
+`kGuideMax` is six seconds, about 12,000 units of rocket, and it exists because **the SDK leaks the
+counter**: `CRpgRocket::FollowThink` calls `Detonate()` directly on the self-detonation path without
+decrementing, and `RocketTouch` only decrements while `m_pLauncher` is alive. Without the cap a leak
+would pin a bot to an RPG it can neither fire nor reload, permanently.
+
+`commitCaps` counts the two new ones and **not** the charge, which releases inside `ChargeButtons`
+before the shared lifecycle sees it and reports itself as `why=charge-timeout` instead. That is an
+asymmetry rather than a design: the gauss assertion still reads a sampled reason string where the
+other two read a counter, and folding the charge into `commitCaps` would make all three uniform.
+
+Everything a commit does, `holding` already did for the charge: it bypasses `ModeUsable`, pins the
+mode order to one entry, and survives the no-target bail. Only the reason string and the release
+condition differ.
+
+### Guiding is press nothing, and that is the hard part
+
+`WPN_Q_KEEP_AIMING` looks like it should mean "keep the crosshair there". It also has to mean **press
+no button at all**, and that is the non-obvious half.
+
+`CRpg::UpdateSpot` traces the player's view 8192 units and moves the `laser_spot` to the endpoint, and
+the rocket steers at whichever spot it can see. But `UpdateSpot` is only called from `PrimaryAttack`
+and `WeaponIdle`, and `ItemPostFrame` reaches `WeaponIdle` solely through its "no fire buttons down"
+branch — which `IN_RELOAD` takes a different path around entirely. So a bot that reloads its
+just-emptied RPG **freezes the laser where it last was** and the rocket flies to a stale point.
+
+So `COMMIT_GUIDE` returns 0 from `Buttons` with `why=guiding` before the reload and empty-clip
+branches, and `Think` leaves `wantReload` false for as long as it lasts. The reload happens after,
+which is also what `CRpg::Reload` itself wants: it refuses outright while `m_cActiveRockets` and
+`m_fSpotActive` are both set.
+
+Guiding is also the only commit that keeps its aim through a lost target. `Think` skips `ClearAim` for
+it, so the crosshair holds the last known position and the rocket goes there. A charge that loses its
+target reports `why=carrying` and drops the aim, because a gauss shot at nothing is worth nothing; a
+rocket already in the air is worth steering at where they were.
+
+### The charge is carried, not timed
+
+`FIRE_CHARGE` is the gauss secondary: hold `IN_ATTACK2` to spin up, and **the release is the shot** —
+`CGauss::WeaponIdle` calls `StartFire()` once no fire button is down, which `ItemPostFrame` only
+reaches through its "no fire buttons" branch.
+
+The obvious implementation is a timer: press, wait `chargeFull`, release. It is wrong, and the SDK
+says so. `SecondaryAttack` sets `m_flNextAmmoBurn = 1000` the moment the charge fills, and the burn is
+gated on `!= 1000`, so **holding a charged gauss costs nothing**. A timer would throw away a paid-for
+charge every time the bot's aim was off at the wrong instant. So the machine releases on the *shot*:
+
+- not charging → press, unconditionally, before any aim test
+- `held < chargeFull` → hold; a partial release fires for `200 * held / 1.5` damage and is never worth
+  choosing
+- charged → hold until the ray passes the tolerance test, then release. `why=charged` is the bot
+  standing there with a full gauss waiting for a shot
+- `held >= chargeMax - kChargeSafety` → release regardless. Past 10s the SDK zaps the player for 50 and
+  costs a second, and `kChargeSafety` (0.5s) is the margin. `test_fire.ps1` **fails** if this ever
+  fires, because reaching it means the release logic stopped working, not that the bot was patient
+
+A held charge outranks everything else in the file. `Think` checks `fire.charging` **before** the
+no-target bail, so a bot that loses its target keeps the weapon, keeps the charge, reports
+`why=carrying` and walks around with it until someone reappears. It also bypasses `ModeUsable` while
+holding — the ammo was already spent, so "can you afford this shot" is no longer a question — and
+pins the mode order to one entry so selection cannot switch modes underneath it.
+
+`Buttons` treats "no aim point" as *hold*, never as release. That asymmetry is the whole feature.
+
+### Zoom is a range decision, because FovScale already prices it
+
+Zoomed crossbow primary in multiplayer is `FireSniperBolt()` — a hitscan trace for a flat 120 — so
+zooming does not sharpen the same shot, it swaps `AIM_LEAD` for `AIM_TARGET`. `ModeOf` gains a
+`zoomed` argument and the `(zoomed && spec->primaryZoomed.fire) ? ... : spec->primary` one-liner from
+`doc/game.md` is finally reachable instead of aspirational.
+
+**Zooming costs turn rate and buys precision, and `FovScale` prices both.** It divides hand speed by
+`fov / 90`, so at the crossbow's fov 20 the bot's peak turn rate falls from roughly 450°/s to 100°/s —
+and it divides the hand quantum by the same factor, so the bot places the crosshair 4.5x finer. See
+"The hand has a resolution" above for the measurements. That is a genuine trade rather than a pure
+cost, so it gets a real rule: zoom above `kZoomIn` (500 units), unzoom below `kZoomOut` (300). A 320
+u/s target crossing at 500 units sweeps about 37°/s and is comfortably trackable zoomed; at 200 units
+it is not. The band rather than a single threshold matters because each toggle costs a frame and 1.0s
+of `m_flNextSecondaryAttack`.
+
+The thresholds predate the quantum and were set purely on the tracking cost. They are now pricing a
+benefit as well, and have not been retuned for it — if a bot should be zooming further out than 500
+units, that is the number to move.
+
+Which weapons zoom is decided **by data, not by name**: only those with a populated `primaryZoomed`.
+That admits the crossbow and excludes the python, whose zoom changes no mode and would cost a bot a
+quarter of its turn rate for nothing.
+
+`FIRE_TAP` is the whole of the press rule — press only when the live state differs from the wanted
+one. `pev->fov` is read every frame, so a single press stops itself the frame after it lands; without
+that, holding the button would flip the zoom every 1.0s forever. Toggles are never *fire modes*:
+`Supported` still rejects them, and the press is a step before the fire decision that returns
+`IN_ATTACK2` alone and shoots nothing that frame. `IN_ATTACK2` short-circuits `IN_ATTACK` in
+`ItemPostFrame` anyway, so there was never a frame to share.
 
 ### Selection is random, and that is the placeholder
 
@@ -1093,6 +1556,18 @@ Giving it a crossbow changes nothing — the crossbow simply sits in the invento
 exists because of this: it makes every weapon but one unusable, which is the only lever that reaches
 selection from outside, and without it `test_fire.ps1` cannot get a projectile fired on purpose.
 
+**The stickiness has a second storey.** The random pick names a weapon *and* a mode, but only
+`pendingId` survives — the mode is thrown away, and the frame after the switch the active-weapon loop
+starts at `MODE_PRIMARY` again. So a weapon whose primary is usable never reaches its secondary by
+choice. Mode variety today is entirely an accident of range: the hornetgun's dart gets used past 900
+units because primary's flight-time ceiling rejects it there, and nothing else in the table produces
+that gap. The gauss never reaches `FIRE_CHARGE` on its own at all, since its primary works at any
+range. Hence `crossbot_fire_pin <classname> [primary|secondary]` — the mode argument exists for the
+same reason the classname does, and for the same one consumer.
+
+This is a property of the placeholder, not a separate bug, and the weighting layer that replaces
+uniform random should score pairs rather than weapons.
+
 ### Why the trigger lives inside Bot_RunPlayerMove
 
 `Bot_RunPlayerMove` is the one funnel every drive branch passes through, and it is the only place that
@@ -1114,26 +1589,75 @@ and `GetNextBestWeapon`'s empty-weapon switch both arm `m_flNextPrimaryAttack` t
 without it reads several shots per weapon pickup with firing disabled entirely. The observation is
 still the game's own timer — the gate only decides attribution.
 
-`leadShots` is the same observation gated on the press having been a projectile one, carried on the
+`leadShots` is the same observation gated on the press having been a *solved-lead* one, carried on the
 press flag rather than read back afterwards — by the time the timer moves, selection may already have
 chosen something else. It is separate from `shots` because a bot keeps its spawn glock throughout a
-test and would otherwise let a completely dead lead solve pass on hitscan alone.
+test and would otherwise let a completely dead lead solve pass on hitscan alone. Homing presses do not
+count toward it, which is what makes `leadshots < shots` a usable assertion on the pinned hornetgun:
+equality would mean the cone never replaced the solve.
+
+**The charged gauss needs a different witness entirely.** `CGauss::StartFire` moves no attack timer —
+not `m_flNextPrimaryAttack`, not `m_flNextSecondaryAttack`, not the player's `m_flNextAttack` — so the
+observation every other weapon relies on simply does not happen. `chargeShots` counts the falling edge
+of `BotWeapon::chargeState`, which is `m_fInAttack` read straight off the weapon object, and that is
+still the game DLL's own state rather than the plugin's intention. The 10-second overcharge would also
+register as a discharge that fired nothing; `kChargeSafety` is what keeps the bot from ever reaching
+it, and the test asserts the safety release never fires.
+
+`arcShots` rides the same press flag as `leadShots` and needs no special witness, because an arcing
+weapon does move its attack timer. It is worth counting separately anyway: `arcshots == shots` on the
+pinned MP5 is what proves nothing reached the trigger through the ordinary ray path, and the test says
+so — the first run of it caught a gauss charge carried in from the previous phase, which is
+`ModeUsable` being bypassed by design and not by accident.
+
+**The handgrenade needs a different witness for the same reason the gauss does.**
+`CHandGrenade::PrimaryAttack` moves no attack timer either — it only pulls the pin — and the throw
+happens half a second later inside `WeaponIdle`. So `throwShots` counts the falling edge of
+`BotWeapon::throwStart`, which is `m_flStartThrow` read straight off the weapon object, exactly as
+`chargeShots` reads `m_fInAttack`. The press frame deliberately sets no press flag at all, so there is
+no path by which one throw could be counted twice.
+
+`guides` counts the rising edge of `COMMIT_GUIDE`, so it is one per rocket launched. `commitCaps`
+counts commits released by their cap instead of by the game's own state, and it is the one to assert
+on: it has exactly the standing `charge-timeout` has on the gauss. Non-zero there means a pin was
+pulled that never reached the weapon, or `m_cActiveRockets` never came back to zero.
 
 `reloads` counts the rising edge of `wantReload`, because the state itself lasts one frame and is
-invisible to any poll.
+invisible to any poll. `selfVetoes` counts refusals to fire into a blast nearer the bot than the
+enemy, and like `uphillVetoes` it is a per-frame predicate, so read it as a yes/no. It is the only
+refusal witness that survives a two-second poll — the `why=` string samples one frame and misses
+almost everything it describes — which is why the arc phases assert on the counter and treat the
+reason strings as a bonus.
 
 Every counter is per life. `BotFire::Reset` runs on respawn from `BotManager::StartFrame`, so a drop
 in any of them is a death, which is how `test_fire.ps1` counts deaths without reading the scoreboard.
 
 ### What is not here
 
-Everything `Supported` still rejects: gravity and splash (the ballistic elevation solve, a coarse
-traced flight sim, splash sampling at the target's `mins.z`, and the minimum range splash forces so a
-bot stops gibbing itself), `FIRE_CHARGE`, `FIRE_TAP`, `WPN_Q_THROW_ARC` and `WPN_Q_INHERIT_VEL`,
-`AIM_SURFACE`, the zoom and laser toggles, and the two `WPN_Q_HIDDEN_STATE` modes — which also want
-`CSatchel::m_chargeReady` and `CRpg::m_fSpotActive` in `GameOffsets`.
+**One family is left, and it is the deployables.** Every quirk in `WeaponQuirks` now has an
+implementation; what `Supported` still rejects is a `WeaponToggle`, an aim of `AIM_NONE` or
+`AIM_SURFACE`, and `WPN_Q_HIDDEN_STATE`. Those three doors hold exactly two weapons.
 
-The aim override those all need does now exist, and none of them needs a second one.
+- **The tripmine** (`AIM_SURFACE`) needs a wall within 128 units, which is a placement rather than a
+  shot: `CTripmine::PrimaryAttack` traces 128 ahead and does nothing at all unless
+  `tr.flFraction < 1.0` on a non-conveyor entity.
+- **The satchel** (both modes, `WPN_Q_HIDDEN_STATE`) is a thrown **mine** detonated by a *later* radio
+  press, and both modes branch on `m_chargeReady`. Throwing without being able to detonate is worse
+  than not throwing, so the state and the throw are one feature.
+
+What they share is why neither is a small job: **both fire with no target at all**, and `Think`
+returns `no-target` several branches before any mode is considered. They want a decision layer that
+runs on the map rather than on an enemy, plus a memory of what the bot has already placed. That is a
+different feature from firing, which is why the frontier stops here rather than one door short.
+
+`CRpg::m_fSpotActive` also stays out of `GameOffsets`, and the reason is no longer the per-class rule
+— `rpg_cActiveRockets` broke that deliberately and safely, gated by the quirk. It stays out because
+nothing would read it: the laser is on from `CRpg::Spawn` and the bot is forbidden from pressing the
+button that turns it off. `m_chargeReady` is a `CBaseEntity` field and costs nothing whenever a
+consumer turns up.
+
+Also still absent: weapon preference weights, and recoil compensation. The aim override, the toggle
+step, the commit machine and both arc solves exist now, and none of the above needs a fifth one.
 
 ## bot_move.cpp
 

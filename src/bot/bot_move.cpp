@@ -120,9 +120,7 @@ PmSim::PmPhysics Bot_Physics(edict_t *pEdict)
 
 	float maxspeed = Bot_MaxSpeed(pEdict);
 
-	float gravity = g_engfuncs.pfnCVarGetFloat("sv_gravity");
-	if (gravity <= 1.f)
-		gravity = 800.f;
+	float gravity = PmSim::kGravity;
 	if (pEdict->v.gravity > 0.f)
 		gravity *= pEdict->v.gravity;
 

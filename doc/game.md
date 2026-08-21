@@ -15,6 +15,13 @@ describes is a table rather than a policy — see `weapon_spec.h` below. It take
 inventory walk produces, so the caller needs no weapon vocabulary of its own, and returns null for any
 id this game has no weapon for.
 
+`ThrowLaunch(mode, viewPitch, elevation, speed)` is here for the one thing a table of floats could not
+hold: a weapon whose launch direction and launch speed are the *same* parameter. It maps the pitch the
+bot is holding to what leaves the hand, and returns false for any mode without `WPN_Q_THROW_ARC`. It
+maps that way round rather than the reverse on purpose — the pitch is what the bot commands and what
+the fire gate re-measures, so nothing anywhere has to invert the game's own remap. See
+`WPN_Q_THROW_ARC` under `weapon_spec.h`.
+
 ### ItemKind
 The classification the gather goals key off. `ITEM_WEAPON`/`ITEM_AMMO`/`ITEM_PICKUP` are touched to
 collect; `ITEM_HEALTHCHARGER`/`ITEM_RECHARGE` are used with `IN_USE` and never touched at all, which
@@ -70,11 +77,43 @@ still reads it from the file and refuses to run if the file disagrees.
 
 ### Only fields common to every weapon
 
-The requested set stops at `CBasePlayerItem` / `CBasePlayerWeapon` / `CBasePlayer` / `CBaseMonster`.
-Per-weapon-class state — the Gauss charge, the Egon fire mode, the RPG's live rockets, `CShotgun`'s own
-`m_fInReload` shadowing the base one — is deliberately absent. Adding it means reading a field whose
-existence depends on which weapon the pointer happens to be, and none of it is needed to answer "what
-am I holding and can it shoot".
+The rule is that the requested set stops at `CBaseEntity` / `CBasePlayerItem` / `CBasePlayerWeapon` /
+`CBasePlayer` / `CBaseMonster`. Genuinely per-weapon-class state — `CShotgun`'s own `m_fInReload`
+shadowing the base one, for instance — is absent, because reading it means reading a field whose
+existence depends on which weapon the pointer happens to be.
+
+**Two entries look like they break it. One does not, and one does.**
+
+`ent_fInAttack` and `ent_flStartThrow` do not. The gauss charge state reads as `CGauss::m_fInAttack`
+everywhere in the SDK — `DEFINE_FIELD( CGauss, m_fInAttack, ... )` says so — and the handgrenade's pin
+timer reads as `CHandGrenade::m_flStartThrow`, but both declarations are on **`CBaseEntity`**
+(`dlls/cbase.h`), where the SDK parks the grenade, satchel and egon prediction state so the client can
+share the layout. Every weapon object has both slots; only a couple of weapons ever write them. So the
+offsets are valid on any item pointer the walk produces, and reading them needs no knowledge of which
+weapon it is.
+
+Both exist for the same reason: the thing they describe is invisible to every other counter.
+`CGauss::StartFire` moves no attack timer at all. `CHandGrenade::PrimaryAttack` moves no attack timer
+either — it only pulls the pin, and the grenade leaves half a second later from `WeaponIdle`, so
+`m_flStartThrow` falling back to zero is the only observation of the throw there is (see
+`doc/bot.md`, `bot_fire.cpp`).
+
+`rpg_cActiveRockets` genuinely breaks the rule. `CRpg::m_cActiveRockets` is at 196 and
+`CBasePlayerWeapon` ends at 188, so reading it off a crowbar is a heap over-read past the end of a
+smaller allocation. It is here because `WPN_Q_KEEP_AIMING` needs to know when the rocket is gone, and
+nothing on a base class knows.
+
+What makes it safe is that **the table gates the read**: `bot_weapons.cpp` consults
+`IGameProfile::GetWeaponSpec` and only peeks at the offset when the spec for that weapon id carries
+`WPN_Q_KEEP_AIMING`. The quirk is the assertion that this pointer is that weapon, which is the same
+discipline every other weapon decision uses. The standing cost is that two differently-keyed files
+have to agree about which weapon that is — the gamedata JSON is keyed by gamedir, the quirk by
+`IGameProfile::Detect` — so a profile that moves the quirk to another weapon has to move the offset
+with it.
+
+The rule is otherwise unchanged, and this is the only exception. `CRpg::m_fSpotActive` sits four bytes
+below the counter and is *not* requested: the same gate would make it safe, but see "The deployables"
+below for why nothing wants it.
 
 ### Every failure is fatal
 
@@ -189,14 +228,23 @@ weapon reads `m_afButtonPressed`, and `ITEM_FLAG_NOAUTOFIRE` does not exist in t
 dispatcher is level-triggered on `pev->button`, so **every Half-Life weapon is mechanically full
 auto** — the python only feels semi-auto because its cycle time is 0.75s.
 
-So `FIRE_TAP` never means "the weapon requires a release". It means the bot must not hold this button,
-and the reason is always the same: holding a toggle flips it again every cycle. Anyone comparing this
-table against the SDK will find no mechanism behind `FIRE_TAP` and be tempted to delete it. It is not
-redundant.
+So `FIRE_TAP` never means "the weapon requires a release". It means the bot must not hold this button.
+There are **two** reasons a bot must not, and the table uses the same value for both:
 
-`FIRE_CHARGE` is the inverse: releasing is what fires. `ItemPostFrame` only reaches `WeaponIdle()`
-through its "no fire buttons down" branch, and that is where the gauss discharges and the handgrenade
-leaves the hand. Both need the button held first and then released deliberately.
+- Holding a **toggle** flips it again every cycle. Python and crossbow secondary, RPG secondary.
+- Holding a **handgrenade** cooks it. `PrimaryAttack` pulls the pin and returns; the grenade only
+  leaves from `WeaponIdle`, which `ItemPostFrame` reaches solely through its "no fire buttons down"
+  branch. Hold the button and it never throws at all — and past three seconds `ShootTimed` gets a fuse
+  under 0.1s, **zeroes the velocity**, and drops it at your feet.
+
+Anyone comparing this table against the SDK will find no mechanism behind `FIRE_TAP` and be tempted to
+delete it. It is not redundant.
+
+`FIRE_CHARGE` is the inverse: releasing is what fires, deliberately, after a hold that is worth
+something. `ItemPostFrame` reaches `WeaponIdle()` the same way, but only the gauss has a charge that
+grows while held. The handgrenade *looks* like the same shape and is not, because its hold buys
+nothing and costs everything; it is `FIRE_TAP`, and the half-second between the press and the throw is
+the engine's, not the bot's.
 
 **`IN_ATTACK2` short-circuits `IN_ATTACK`** in that same dispatcher — the secondary test is an `if`
 and the primary is its `else if`. A bot that sets both bits fires only secondary, every time.
@@ -207,10 +255,10 @@ Not "what comes out of the muzzle". A crowbar, a shotgun and an egon beam all pr
 — point at the target — so melee, hitscan and beam are a single value. The crowbar's reach is `range`;
 the egon's continuous damage is `FIRE_HOLD`.
 
-Homing weapons are `AIM_LEAD`, not `AIM_TARGET`. A hornet crosses 300 units in about a second, a
-RED-type hornet has to slow down to turn, and an MP hornet expires after 3.5s — so the correction it
-makes for a lead the bot did not apply costs flight time it may not have. Homing makes the lead
-*forgiving*; it does not make it unnecessary, and a tolerance is not a different instruction.
+Homing weapons are `AIM_LEAD`, not `AIM_TARGET`, because the flight time is real and a consumer may
+want it. What they are *not* is led: `WPN_Q_HOMING` says the projectile steers itself, and
+`bot_fire.cpp` spends that by skipping the solve entirely (see below). The aim value records the
+physics; the quirk records what a consumer should do about it, and here they disagree on purpose.
 
 The RPG is the exception that stays `AIM_TARGET`. Its rocket chases the nearest visible `laser_spot`,
 which sits wherever the bot is pointing right now, so it is tracked rather than led. "Keep pointing
@@ -218,8 +266,48 @@ after you fire" is a duration, not a place, so it is `WPN_Q_KEEP_AIMING`.
 
 ### gravity is effective, not pev->gravity
 
-`pev->gravity` is a multiplier on `sv_gravity` — 0.5 is 400 u/s squared at the default 800 — and the
-table does not pre-multiply it, because `sv_gravity` is a cvar.
+`pev->gravity` is a multiplier on `sv_gravity` — 0.5 is 400 u/s squared at 800 — and the table does
+not pre-multiply it, because the multiplier is what belongs to the weapon.
+
+The 800 is now `PmSim::kGravity`, a constant. `sv_gravity` used to be read once, in `Bot_Physics`, and
+nothing reads it any more; `sv_stepsize` never was, and has always been the hardcoded 18 in
+`navgen::kStepHeight` and its siblings. Both are treated as settings nobody moves. Anyone who moves
+them gets a bot that jumps and lobs by the wrong numbers, which is a trade taken deliberately.
+
+**Two rows in this table are parabolas, and they are not the same parabola**, which matters because a
+consumer reading `gravity != 0` as "ballistic" would still get half of them wrong:
+
+- **MP5 secondary** is the real one. `CGrenade::ShootContact` at `forward * 800`, `pev->gravity = 0.5`,
+  `ExplodeTouch` on anything it meets, and explicitly *no* inherited velocity — the SDK comment says
+  so. An elevation solve describes it exactly, and `bot_fire.cpp` solves it.
+- **Handgrenade** is the other real one, but on a launch that is one parameter rather than two — see
+  `WPN_Q_THROW_ARC` below — and it **bounces** rather than detonating, on a fuse that started at the
+  pin pull. A solve finds where it lands; where it explodes is one to two seconds of rolling later.
+- **Satchel** is not a projectile. `CSatchel::Throw` spawns a `monster_satchel` that lands and waits;
+  the damage comes from a *later* radio press.
+- **RPG carries no gravity in this table at all any more**, and the row used to say `250 / 0.5`. Both
+  numbers were true for 0.4 seconds and misleading for the rest, so the row now reads `speed 2000,
+  gravity 0`. What the launch really does is worth writing down, because it is the reason no clearance
+  check follows from it:
+
+  `CRpgRocket::Spawn` tilts the launch 30 degrees above the aim and throws at 250 on `MOVETYPE_BOUNCE`
+  with `pev->gravity = 0.5`. For a level aim that is `vz = 250 sin 30 = 125` against `g = 400`, so the
+  hump is `125^2 / 800 ~= 19.5` units and it is over in 0.31s. The muzzle sits at
+  `GetGunPosition() + up * -8`, about `z + 20` on a 72-unit player, so **the whole excursion peaks
+  below head height**. A rocket cannot bury itself in a ceiling a player can stand under, which is why
+  `bot_fire.cpp` treats the RPG as plain guided direct fire and never simulates the lob.
+
+  Then `IgniteThink` switches to `MOVETYPE_FLY` and `FollowThink` accelerates it toward 2000 while
+  steering at the laser spot. **It does not then run out.** The doc used to claim it self-detonates
+  below 1500 u/s about 1500 units out; the decay is `velocity * 0.2 + target * speed * 0.798`, and
+  `0.2 + 0.798 = 0.998`, so an aligned rocket loses 0.2% per 0.1s tick and needs some fourteen seconds
+  — around 28,000 units — to fall under 1500. `SV_Physics_Bounce` skips `SV_AddGravity` for
+  `MOVETYPE_FLY` and applies no air friction, so nothing else slows it either. The rocket cruises
+  until it hits geometry, and `range 0` in the row is literal.
+
+Damage falls off linearly from the blast to zero at `splash`, and **the thrower is not excluded** —
+`CGrenade::Explode` clears `pev->owner` before calling `RadiusDamage`. That is why a bot needs a rule
+about where its own shell lands, not merely where the enemy is.
 
 **The table deliberately disagrees with the SDK in three rows.** The crossbow bolt sets
 `pev->gravity = 0.5` *and* `pev->movetype = MOVETYPE_FLY`; MOVETYPE_FLY does not apply gravity, so the
@@ -233,29 +321,55 @@ Three more shapes a single `speed` float cannot hold, all recorded as quirks:
   over a pitch remapped so that looking straight down still throws. Level aim gives the 400 in the
   table; `WPN_Q_THROW_ARC` says that number is only the level-aim case.
 - The crossbow bolt halves to 1000 underwater (`WPN_Q_SLOW_IN_WATER`).
-- The RPG launches at 250 on `MOVETYPE_BOUNCE` pitched up 30 degrees, lobs for 0.4s, then ignites and
-  accelerates toward a 2000 cap while homing. It is guided, so it is never led, and 250 is only ever
-  the muzzle figure.
+- The RPG's 2000 is a cap it reaches about 0.9s after leaving the tube, not a muzzle speed — see the
+  launch breakdown above. It is guided, so it is never led, and no consumer of `speed` needs the curve.
+
+**The throw law is five numbers and it is not in this table.** Direction and speed are one parameter:
+
+    angThrow.x = -10 + view.x * ((view.x < 0) ? 80 : 100) / 90
+    flVel      = min(500, (90 - angThrow.x) * 4)
+
+Five coefficients, one weapon. They live behind `IGameProfile::ThrowLaunch`, which maps the pitch the
+bot is holding to the elevation and speed the grenade leaves at, and `CHLDMProfile` implements it. The
+alternative was five floats on all 42 rows, or five magic numbers in `src/bot/`; the interface that
+already hides every other game-specific fact was the right shelf. `WPN_Q_THROW_ARC` is what selects
+it, so a mode without the quirk gets `false` and no consumer has to know which weapon it is.
 
 **Velocity inheritance is inconsistent** and changes the launch vector: the handgrenade, satchel,
 snark and RPG all add the player's own velocity, and the MP5 grenade explicitly does not. Hence
 `WPN_Q_INHERIT_VEL` rather than a blanket assumption either way.
 
-### WPN_Q_HOMING is a tolerance, not a trajectory
+### WPN_Q_HOMING means the thing aims itself
 
-Only hornetgun primary carries it. The RED hornet it fires launches at 300, accelerates, and steers
+Hornetgun primary and the snark carry it. The RED hornet launches at 300, accelerates, and steers
 toward its target every think — so the 600 in the `speed` column is an effective figure for a
 projectile whose real speed is a curve, and no single float could be more honest than that.
 
 The quirk exists because a consumer cannot recover "this thing corrects itself" from any other field,
-and the correction is worth a decision: a hornet forgives a lead the bot got wrong, so the bot may
-commit on a wider error than a bolt allows. `bot_fire.cpp` spends it as exactly that and nothing more
-— the tolerance box is stretched to span both the target's present and predicted positions. The
-launch is still solved as a straight shot at `speed`, because a hornet that has to turn hard pays for
-it in flight time, and aiming at the middle of the turn is what keeps that cheap.
+and what follows from it is not a wider tolerance but **no lead at all**. `bot_fire.cpp` skips the
+solve, aims at the target, and fires when the target is anywhere inside a wide cone. See a target,
+click, hope. That is what these weapons are for, and it is why `speed` and `gravity` stop mattering
+for them: no trajectory was computed, so nothing can bend one.
 
-Hornetgun **secondary** does not carry it: the ORANGE dart flies straight at 1200 and never tracks.
-The two modes of one weapon differing here is the reason this is a mode-level quirk.
+The **snark is not a projectile in the first place**. `CSqueak::PrimaryAttack` traces 20 to 64 units
+ahead, spawns a `monster_snark` at the trace endpoint, throws it at `forward * 200 + player velocity`,
+and the thing hunts on its own legs. The `200` and the `0.5` describe the toss, not a flight. Worse
+for anyone tempted to lead it: 200 u/s is *slower* than a 320 u/s player, so the usual lead iteration
+is not a contraction and diverges rather than merely erring. `WPN_Q_HOMING` is the only honest row
+for it.
+
+Hornetgun **secondary** does not carry it: the ORANGE dart flies straight at 1200 and never tracks,
+so it is led like a crossbow bolt. The two modes of one weapon differing here is the reason this is a
+mode-level quirk.
+
+What the quirk deliberately does **not** excuse is `gravity`, which still earns the uphill veto in
+`bot_fire.cpp`: a thrown snark aimed above the thrower's eye lands short and walks back, which is a
+fact about where you are standing rather than about the solve.
+
+`splash` used to reject a homing mode outright, and no longer rejects anything. Self-damage is now a
+gate rather than a category: every mode with `splash > 0` has its predicted impact tested against
+"closer to them than to me", so a weapon that steers itself is judged on where it lands like any
+other. The snark's splash is 0 regardless.
 
 ### Why ammo is a field when the inventory already has counts
 
@@ -284,19 +398,34 @@ Zoom state is free to read: both toggles write `m_pPlayer->pev->fov`, which is e
 gamedata offset is involved. `pev->fov != 0` is the whole test — which is also why the specific FOV
 values (20 crossbow, 40 python) are *not* stored.
 
-### The two weapons the bot cannot drive
+### The deployables, and the one toggle that needs no code
 
-`WPN_Q_HIDDEN_STATE` marks a mode whose behaviour depends on private state no offset exposes:
+`WPN_Q_HIDDEN_STATE` marks a mode whose behaviour depends on private state, and after the handgrenade
+and RPG work it is the last door in `BotFire::Supported` other than a `WeaponToggle` and an aim of
+`AIM_NONE` or `AIM_SURFACE`. Three modes carry it, for two different reasons.
 
-- **Satchel primary** is three different actions on `CSatchel::m_chargeReady` — throw at 0,
-  radio-detonate at 1, inert at 2.
-- **RPG secondary** toggles `CRpg::m_fSpotActive`, which also suppresses reloading while rockets are
-  in flight.
+**The satchel, both modes.** Primary is three different actions on `m_chargeReady` — throw at 0,
+radio-detonate at 1, inert at 2 — and *secondary branches on the same field*, which is why it carries
+the quirk too rather than being held out by luck. Every branch of primary ends in `CSatchel::Throw()`,
+and what that throws is a `monster_satchel`: a **mine** that lands, waits, and only hurts anyone when
+the radio is pressed later. Throwing without being able to press the radio is worse than not throwing,
+so the state and the throw are one feature and neither ships alone.
 
-Both classes are already described in `gamedata/valve-win.json`, so adding the two offsets is cheap —
-but `gamedata.cpp` excludes per-weapon-class state on purpose (see "Only fields common to every
-weapon" above), so that is a deliberate decision and not a thing to do in passing. Until then, a bot
-must treat these two modes as unpredictable rather than guess.
+`m_chargeReady` is **not** a `CSatchel` field. It is on `CBaseEntity` alongside `m_flStartThrow`,
+`m_fInAttack` and `m_fireState`, so reading it would cost the offset rule nothing. It is absent
+because there is no fire path behind it yet, not because it is expensive.
+
+**RPG secondary** toggles `CRpg::m_fSpotActive`, and here the quirk earns its keep by keeping the bot
+away from a button it must never press. `CRpg::Spawn` sets `m_fSpotActive = 1`, so **the laser is on
+for the whole life of every RPG a bot holds**, and secondary fire would only turn it off. `TOGGLE_LASER`
+is therefore handled entirely by never pressing it: `Supported` rejects `toggle != TOGGLE_NONE`, and
+`WPN_Q_HIDDEN_STATE` says the same thing a second way.
+
+That is why `m_fSpotActive` is not in `GameOffsets` even though `rpg_cActiveRockets` four bytes above
+it now is. The gate that makes the counter safe would make the flag safe. Knowing the flag would only
+let the bot press a button it is forbidden to press, to restore a state that was never lost. The one
+case it would help — a human toggles the spot off and a bot picks the weapon up — leaves the rocket
+flying along its launch aim, which mostly still arrives.
 
 ### Rejected fields
 
@@ -306,7 +435,7 @@ do not get re-proposed:
 | Rejected | Why |
 |---|---|
 | `MELEE` / `HITSCAN` / `BEAM` as separate aim values | One instruction between them. Reach is `range`, sustained fire is `FIRE_HOLD`. |
-| `HOMING` as its own aim value | Still has flight time, still wants leading. It is `AIM_LEAD` plus `WPN_Q_HOMING`, which widens the tolerance without changing the instruction. |
+| `HOMING` as its own aim value | The flight time is still real and still worth recording, so the aim value stays `AIM_LEAD`. What a homing weapon needs is a *handling* difference — do not solve, point and click — and that is `WPN_Q_HOMING`. |
 | `cycleTime` | The live `nextPrimaryAttack` on the weapon in hand is authoritative. A table value only helps rank guns you are *not* holding, which is selection. |
 | `zoomFov` | `pev->fov != 0` answers "am I zoomed". 20 vs 40 changes no handling decision. |
 | a `needsSurface` quirk | Redundant with `AIM_SURFACE`. |
@@ -314,6 +443,8 @@ do not get re-proposed:
 | a `regenAmmo` quirk | Same — the bot sees the hornet count climb. Whether to wait or switch is selection. |
 | a `selfDamage` quirk | Redundant with `splash > 0`. |
 | a `selfPush` quirk | The gauss jump is a movement capability, not a firing instruction. |
+| the throw-law coefficients | Five floats on every one of 42 rows to describe one weapon's pitch-to-speed curve. `WPN_Q_THROW_ARC` names the law and `IGameProfile::ThrowLaunch` implements it. |
+| a `guided` quirk | Redundant with `WPN_Q_KEEP_AIMING`. The reason you must keep pointing *is* that the projectile follows where you point. |
 
 Spread cones, pellet counts, damage values and projectile lifetimes are likewise not fields. Some are
 noted below because they were expensive to establish, but they belong to the accuracy and selection
@@ -341,9 +472,21 @@ The MP5 cone is worth care: the branch guarded by `if (!IsMultiplayer())` takes
 `VECTOR_CONE_6DEGREES`, so multiplayer gets the *narrower* 3 degrees. The comments inside that
 function are swapped relative to the code.
 
+The gauss spin-up has the same shape and is worth the same care. `CGauss::SecondaryAttack` burns one
+uranium every **0.1s in multiplayer** and 0.3s in single player, so a 1.5s full charge costs 16 — one
+to start the spin plus fifteen — and not the 6 the single-player figure implies. `ammoPerShot` is 1
+because that is the per-tick cost; a consumer that wants a full charge multiplies. Burning stops dead
+at full charge (`m_flNextAmmoBurn = 1000`), so **holding a charged gauss is free**, which is the whole
+reason a bot can carry one between fights.
+
 `splash` radii come from `RadiusDamage`, which uses `flDamage * 2.5`. With retail `skill.cfg` that is
 250 for the RPG, the M203 grenade and the handgrenade (100 damage each), and 375 for the satchel
 (150).
+
+MP5 **secondary** carries `WPN_Q_NO_UNDERWATER` even though primary does not. `CMP5::SecondaryAttack`
+tests `waterlevel == 3` before anything else and plays the empty sound; primary fires happily. The
+quirk was missing from the row until the mode became reachable, which is the usual way a table entry
+gets checked — nothing reads a field until something drives it.
 
 ### ammoPerShot means per press, except where there is no press
 

@@ -73,6 +73,18 @@ cvar_t g_aimDriftCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_aimQuantumCvar = {
+	"crossbot_aim_quantum",
+	"0.4476",
+	FCVAR_SERVER
+};
+
+cvar_t g_aimImpulseCvar = {
+	"crossbot_aim_impulse",
+	"15",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	GameData::Load();
@@ -87,6 +99,8 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimErrorCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDriftCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_aimQuantumCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_aimImpulseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_fireCvar);
 	RETURN_META(MRES_IGNORED);
 }

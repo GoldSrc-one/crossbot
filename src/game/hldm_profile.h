@@ -20,4 +20,7 @@ public:
 	float ChargerValue(ItemKind kind, edict_t *pEdict) const override;
 
 	const WeaponSpec *GetWeaponSpec(int id) const override;
+
+	bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
+		float &speed) const override;
 };

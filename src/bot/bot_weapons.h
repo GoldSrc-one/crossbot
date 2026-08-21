@@ -19,6 +19,9 @@ struct BotWeapon
 	float nextPrimaryAttack = 0.f;
 	float nextSecondaryAttack = 0.f;
 	bool reloading = false;
+	int chargeState = 0;
+	float throwStart = 0.f;
+	int guidedCount = 0;
 };
 
 struct BotInventory

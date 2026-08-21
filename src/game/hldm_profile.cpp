@@ -25,6 +25,11 @@ namespace
 	constexpr float kHLDMUnreachableTimeout = 30.f;
 	constexpr float kHLDMMaxNormal = 100.f;
 
+	constexpr float kHLDMThrowTilt = 10.f;
+	constexpr float kHLDMThrowRate = 4.f;
+	constexpr float kHLDMThrowSpeedMax = 500.f;
+	constexpr float kHLDMThrowPitchLimit = 89.f;
+
 	bool HasPrefix(const char *s, const char *prefix)
 	{
 		return strncmp(s, prefix, strlen(prefix)) == 0;
@@ -129,6 +134,28 @@ float CHLDMProfile::ChargerValue(ItemKind kind, edict_t *pEdict) const
 const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
 {
 	return HLDM_WeaponSpec(id);
+}
+
+bool CHLDMProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
+	float &speed) const
+{
+	if ((mode.quirks & WPN_Q_THROW_ARC) == 0)
+		return false;
+	if (viewPitch < -kHLDMThrowPitchLimit || viewPitch > kHLDMThrowPitchLimit)
+		return false;
+
+	float slope = (viewPitch < 0.f) ? (90.f - kHLDMThrowTilt) : (90.f + kHLDMThrowTilt);
+	float pitch = -kHLDMThrowTilt + viewPitch * slope / 90.f;
+
+	float v = (90.f - pitch) * kHLDMThrowRate;
+	if (v > kHLDMThrowSpeedMax)
+		v = kHLDMThrowSpeedMax;
+	if (v <= 0.f)
+		return false;
+
+	elevation = -pitch;
+	speed = v;
+	return true;
 }
 
 IGameProfile *GameProfile_Detect()

@@ -23,27 +23,53 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   one way the id-keyed table can be wrong; see `doc/game.md`, `weapon_spec.h`
 - `crossbot_equip <classname> [name]` — spawn an item at the target's feet and touch them with it,
   which is what the game's own `give` does. Default target is every bot
-- `crossbot_aim_test <bot> <yawDelta> [pitchDelta]` — command a flick relative to the bot's current view
+- `crossbot_aim_test <bot> <yawDelta> [pitchDelta] [fov]` — command a flick relative to the bot's current view
   and print settle time and peak hand speed; the only check on the 180-in-0.4s derivation. Overrides
-  navigation aim for 3 seconds; see `doc/bot.md`, `bot_aim.cpp`
+  navigation aim for 3 seconds. Two seconds in it also prints a **rest error**: the miss still standing once
+  the view has stopped, which is the number the hand quantum sets and the one that should shrink with zoom.
+  The optional 4th argument writes `pev->fov` before the flick (0 meaning the engine default) so a script
+  can sweep that; see `doc/bot.md`, `bot_aim.cpp`
 - `crossbot_aim_status` — per bot: sense target, bone sampled, ring occupancy, delay served, hand speed,
   and `err`, the angle between the real view and the true present-time angles to the target. `err` is the
   one number that separates "correctly delayed" from "delayed and also wrong", but it no longer bottoms out
   at zero: it is measured against the target eye while the bot aims at a random hitbox bone, so a couple of
   degrees is the floor. Read its trend across delays, not its value; see `doc/bot.md`, `bot_aim.cpp`
-- `crossbot_sense_status` — per bot: aim target and bone, live suspicion count, the freshest entry with
-  source, age and position, and the look direction with its authority and how many entries survived the
-  cone refinement; see `doc/bot.md`, `bot_sense.cpp`
-- `crossbot_fire_status` — per bot: the weapon held, the fire mode chosen, why the bot is or is not
-  shooting, live clip and ammo, and `miss`/`tol` — the angle from the fire ray to the aim point
-  against the angle the target's own size subtends there, which is the whole tolerance model in two
-  numbers. `aim` is `target`, `lead` or `homing` and `flight` is the solved projectile flight time in
-  milliseconds, zero for hitscan. `shots`, `leadshots`, `switches` and `reloads` are **per life**:
-  respawn zeroes them, so a drop is a death; see `doc/bot.md`, `bot_fire.cpp`
-- `crossbot_fire_pin <classname|off>` — restrict weapon selection to one classname, making every other
-  weapon unusable. Only useful for testing, and necessary there: a bot keeps any weapon that still has
-  a usable mode, so a bot that spawned with a glock never voluntarily picks up anything else and the
-  projectile path is otherwise unreachable from the console. With no argument it reports the pin
+- `crossbot_sense_status` — per bot: aim target and bone, live suspicion count with a `kinds` breakdown
+  by player/monster/other, the `tier` that won the look vote, the freshest entry with source, age and
+  position, the look direction with its authority and how many entries survived the cone refinement, and
+  `pushed` — cumulative per-source push counts. `tier` must read `PLAYER` whenever `kinds=p:` is nonzero.
+  `fresh` is the freshest entry overall rather than within the winning tier, so it can name an entity the
+  vote ignored; see `doc/bot.md`, `bot_sense.cpp`
+- `crossbot_fire_status` — per bot: the weapon held, whether it is `zoom`ed, the fire mode chosen, why
+  the bot is or is not shooting, live clip and ammo, and `miss`/`tol` — the angle from the fire ray to
+  the aim point against the tolerance allowed there, which is the whole aim gate in two numbers. `aim`
+  is `target`, `lead`, `homing` or `arc`; for `homing`, `tol` is the fixed 20 degree cone rather than
+  anything the target subtends. **For `arc` both `miss` and `tol` are units, not degrees** — the gap
+  from the simulated impact point to the target's box, against the splash radius allowed there — so
+  do not compare them against the other three. `flight` is the solved projectile flight time in
+  milliseconds, zero for hitscan **and for homing**, which solves nothing.
+
+  `commit` is what the bot has started and will not walk away from — `none`, `charge` (gauss spinning
+  up), `throw` (handgrenade pin pulled, waiting for the engine to let go of it) or `guide` (rocket in
+  the air) — and `for` is how many seconds it has been in it, or -1. `why=primed` and `why=guiding`
+  are the two commits seen from the trigger's side, and `why=splash-self` is the direct-fire twin of
+`arc-self` — the same rule, refusing a rocket rather than a shell.
+
+  `shots`, `leadshots`, `chargeshots`, `arcshots`, `throwshots`, `guides`, `uphill`, `selfveto`,
+  `switches` and `reloads` are **per life**: respawn zeroes them, so a drop is a death. `throwshots`
+  and `chargeshots` are counted from the game DLL's own state rather than from an attack timer,
+  because neither weapon moves one when the bot presses. `guides` is one per rocket launched, and
+  `capped` counts commits released by their safety valve rather than by the game's own state —
+  non-zero is a fault, with the same standing `charge-timeout` has on the gauss. `uphill` and `selfveto` count rejections rather than
+  situations — both predicates run per weapon per mode per frame — so read them as a yes/no; see
+  `doc/bot.md`, `bot_fire.cpp`
+- `crossbot_fire_pin <classname|off> [primary|secondary]` — restrict weapon selection to one
+  classname, and optionally one mode, making everything else unusable. Only useful for testing, and
+  necessary there for two layers of the same reason. A bot keeps any weapon that still has a usable
+  mode, so one that spawned with a glock never voluntarily picks up anything else; and the random pick
+  discards the mode it chose, so a weapon whose primary works never reaches its secondary. Without the
+  classname the projectile path is unreachable from the console; without the mode the gauss charge is.
+  With no argument it reports both
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
@@ -84,6 +110,13 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 - `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
   `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean
   the test never settles at all
+- `crossbot_aim_quantum` — degrees of hand travel per mouse count, clamped [0, 5]. Default 0.4476, which is
+  `atan(1/128)`: one unit of miss per 128 units of range at fov 90, so 32 units at 4096. This is the value
+  itself, not a scale. It is in **hand** space, so the angular quantum is `value * fov / 90` and zooming
+  buys precision — that is the whole point of it. 0 disables
+- `crossbot_aim_impulse` — smallest non-zero hand speed in deg/s, clamped [0, 100]. Default 15. The hand
+  cannot creep more slowly than this, so it never fully stops: it dithers across the nearest mouse count and
+  `crossbot_aim_status` shows an idle hand speed of 21 rather than 0. 0 disables
 
 Output from all of these is `SERVER_PRINT`, so it goes to the HLDS console and `hlds/qconsole.log` —
 **not** to the stdout of whatever script sent the command over RCON.

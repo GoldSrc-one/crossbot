@@ -29,6 +29,8 @@ struct Request
 
 const Request kRequests[] = {
 	{ "CBaseEntity",       "pev",                     CB_OFF(pev) },
+	{ "CBaseEntity",       "m_fInAttack",             CB_OFF(ent_fInAttack) },
+	{ "CBaseEntity",       "m_flStartThrow",          CB_OFF(ent_flStartThrow) },
 
 	{ "CBasePlayerItem",   "m_pPlayer",               CB_OFF(item_pPlayer) },
 	{ "CBasePlayerItem",   "m_pNext",                 CB_OFF(item_pNext) },
@@ -41,6 +43,8 @@ const Request kRequests[] = {
 	{ "CBasePlayerWeapon", "m_flNextPrimaryAttack",   CB_OFF(wpn_flNextPrimaryAttack) },
 	{ "CBasePlayerWeapon", "m_flNextSecondaryAttack", CB_OFF(wpn_flNextSecondaryAttack) },
 	{ "CBasePlayerWeapon", "m_flTimeWeaponIdle",      CB_OFF(wpn_flTimeWeaponIdle) },
+
+	{ "CRpg",              "m_cActiveRockets",        CB_OFF(rpg_cActiveRockets) },
 
 	{ "CBaseMonster",      "m_flNextAttack",          CB_OFF(mon_flNextAttack) },
 

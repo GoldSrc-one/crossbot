@@ -56,7 +56,11 @@ param(
     # Forwarded to each child's -ServerArgs. -ServerArgs "+sys_ticrate","10" runs the whole
     # suite at a 10 Hz server framerate, which catches follower logic that only works because
     # a 100 Hz frame is too short for the engine to re-simulate anything mid-command.
-    [string[]]$ServerArgs = @()
+    [string[]]$ServerArgs = @(),
+    # Forwarded to each child's -BootCommands, run once the level is active. This is the only
+    # way to set a plugin cvar for a sweep: -ServerArgs "+crossbot_sense","0" is parsed before
+    # GameDLLInit registers the cvar, so the default overwrites it and the run silently uses 1.
+    [string[]]$BootCommands = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -152,6 +156,11 @@ for ($i = 0; $i -lt $mapFiles.Count; $i++) {
     if ($ServerArgs.Count -gt 0) {
         $childArgs += "-ServerArgs"
         $childArgs += ($ServerArgs -join ',')
+    }
+
+    if ($BootCommands.Count -gt 0) {
+        $childArgs += "-BootCommands"
+        $childArgs += ($BootCommands -join ',')
     }
 
     $proc = Start-Process -FilePath $psExe -ArgumentList $childArgs `

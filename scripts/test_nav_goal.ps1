@@ -85,6 +85,12 @@ param(
     # is frame-rate independent rather than accidentally tuned to 100 Hz frames.
     [string[]]$ServerArgs = @(),
 
+    # Extra console commands run after the boot commands, once the level is active.
+    # Plugin cvars must be set this way and not through -ServerArgs: they are registered
+    # in GameDLLInit, after the engine has parsed the command line, so a "+crossbot_sense 0"
+    # is overwritten by the cvar's own default and silently does nothing.
+    [string[]]$BootCommands = @(),
+
     # How close the bot must end up for hasGoal=0 to count as arrival rather than giving up.
     # Legitimate arrivals land 24-50 units out (the follower stops at finalRadius, and the goal is
     # clamped into its area, so it never coincides with the raw entity origin).
@@ -201,7 +207,7 @@ $bootCommands = @(
     "crossbot_add TestBot",
     "crossbot_list_spawns",
     "crossbot_list_targets"
-)
+) + $BootCommands
 
 Write-Host "Starting HLDS on port $Port..."
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands $bootCommands `

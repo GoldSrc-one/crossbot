@@ -27,6 +27,7 @@ namespace
 	constexpr float kTestSettleTolerance = 0.5f;
 	constexpr float kTestSettleSpeed = 150.f;
 	constexpr float kTestTimeout = 3.f;
+	constexpr float kTestRestDelay = 2.f;
 
 	constexpr float kBrakeSpread = 0.06f;
 	constexpr float kFlickMinError = 3.f;
@@ -39,6 +40,11 @@ namespace
 	constexpr float kDriftYawRate = 1.7f;
 	constexpr float kDriftPitchRate = 1.19f;
 	constexpr float kDriftPitchScale = 0.6f;
+
+	constexpr float kDefaultQuantum = 0.4476f;
+	constexpr float kMaxQuantum = 5.f;
+	constexpr float kDefaultImpulse = 15.f;
+	constexpr float kMaxImpulse = 100.f;
 
 	constexpr float kDefaultDelay = 0.25f;
 
@@ -97,7 +103,8 @@ namespace
 		aim.flickMag = mag;
 	}
 
-	float StepAxis(float errAngle, float fovScale, float maxAccel, float brake, float dt, float &vel)
+	float StepAxis(float errAngle, float fovScale, float maxAccel, float brake, float dt,
+		float quantum, float impulse, float &vel, float &pending)
 	{
 		float errHand = errAngle / fovScale;
 		float mag = fabsf(errHand);
@@ -111,6 +118,15 @@ namespace
 		if (limit > kMaxHandSpeed)
 			limit = kMaxHandSpeed;
 
+		if (impulse > 0.f)
+		{
+			float floorSpeed = impulse;
+			if (quantum > 0.f && floorSpeed * dt > quantum)
+				floorSpeed = quantum / dt;
+			if (limit < floorSpeed)
+				limit = floorSpeed;
+		}
+
 		float target = (errHand < 0.f) ? -limit : limit;
 
 		float accel = (target - vel) / dt;
@@ -120,7 +136,18 @@ namespace
 			accel = -maxAccel;
 
 		vel += accel * dt;
-		return vel * fovScale * dt;
+
+		float velOut = (impulse > 0.f) ? roundf(vel / impulse) * impulse : vel;
+
+		if (quantum <= 0.f)
+			return velOut * fovScale * dt;
+
+		pending += velOut * dt;
+
+		float counts = truncf(pending / quantum);
+		pending -= counts * quantum;
+
+		return counts * quantum * fovScale;
 	}
 
 	void UpdateTest(CBot &bot, const Vector &angles)
@@ -131,21 +158,33 @@ namespace
 		if (speed > aim.testPeakSpeed)
 			aim.testPeakSpeed = speed;
 
+		float yawErr = Bot_NormalizeAngle(aim.testAngles.y - angles.y);
+		float pitchErr = Bot_NormalizeAngle(aim.testAngles.x - angles.x);
+
+		float fov = bot.pEdict->v.fov;
+		if (fov <= 0.f)
+			fov = kReferenceFov;
+
+		if (!aim.testRested && gpGlobals->time - aim.testStart >= kTestRestDelay)
+		{
+			aim.testRested = true;
+
+			char msg[192];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: %s aim test rest err %.3f deg (yaw %+.3f pitch %+.3f), fov %.0f\n",
+				bot.name, sqrtf(yawErr * yawErr + pitchErr * pitchErr), yawErr, pitchErr, fov);
+			SERVER_PRINT(msg);
+		}
+
 		if (aim.testSettled)
 			return;
 
-		float yawErr = fabsf(Bot_NormalizeAngle(aim.testAngles.y - angles.y));
-		float pitchErr = fabsf(Bot_NormalizeAngle(aim.testAngles.x - angles.x));
-		if (yawErr > kTestSettleTolerance || pitchErr > kTestSettleTolerance)
+		if (fabsf(yawErr) > kTestSettleTolerance || fabsf(pitchErr) > kTestSettleTolerance)
 			return;
 		if (speed > kTestSettleSpeed)
 			return;
 
 		aim.testSettled = true;
-
-		float fov = bot.pEdict->v.fov;
-		if (fov <= 0.f)
-			fov = kReferenceFov;
 
 		char msg[192];
 		snprintf(msg, sizeof(msg),
@@ -264,7 +303,30 @@ float BotAim::DriftAmplitude()
 	return amp;
 }
 
+float BotAim::Quantum()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_quantum");
+	float q = cvar ? cvar->value : kDefaultQuantum;
+	if (q < 0.f)
+		q = 0.f;
+	else if (q > kMaxQuantum)
+		q = kMaxQuantum;
+	return q;
+}
+
+float BotAim::Impulse()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_impulse");
+	float imp = cvar ? cvar->value : kDefaultImpulse;
+	if (imp < 0.f)
+		imp = 0.f;
+	else if (imp > kMaxImpulse)
+		imp = kMaxImpulse;
+	return imp;
+}
+
 void BotAim::ClearDelayQueue(CBot &bot)
+
 {
 	bot.aim.delayHead = 0;
 	bot.aim.delayCount = 0;
@@ -303,6 +365,7 @@ void BotAim::BeginTest(CBot &bot, float yawDelta, float pitchDelta)
 	aim.testAngles = Vector(pitch, Bot_NormalizeAngle(current.y + yawDelta), 0.f);
 	aim.testActive = true;
 	aim.testSettled = false;
+	aim.testRested = false;
 	aim.testStart = gpGlobals->time;
 	aim.testUntil = gpGlobals->time + kTestTimeout;
 	aim.testPeakSpeed = 0.f;
@@ -345,20 +408,27 @@ Vector Bot_UpdateFacing(CBot &bot)
 
 	UpdateBrake(bot, yawErr, pitchErr);
 
+	float quantum = BotAim::Quantum();
+	float impulse = BotAim::Impulse();
+
 	float yaw = Bot_NormalizeAngle(current.y +
-		StepAxis(yawErr, fovScale, kMaxAccelYaw, aim.brakeYaw, dt, aim.yawVel));
+		StepAxis(yawErr, fovScale, kMaxAccelYaw, aim.brakeYaw, dt, quantum, impulse,
+			aim.yawVel, aim.yawPending));
 	float pitch = current.x +
-		StepAxis(pitchErr, fovScale, kMaxAccelPitch, aim.brakePitch, dt, aim.pitchVel);
+		StepAxis(pitchErr, fovScale, kMaxAccelPitch, aim.brakePitch, dt, quantum, impulse,
+			aim.pitchVel, aim.pitchPending);
 
 	if (pitch > kPitchLimit)
 	{
 		pitch = kPitchLimit;
 		aim.pitchVel = 0.f;
+		aim.pitchPending = 0.f;
 	}
 	else if (pitch < -kPitchLimit)
 	{
 		pitch = -kPitchLimit;
 		aim.pitchVel = 0.f;
+		aim.pitchPending = 0.f;
 	}
 
 	Vector smoothed(pitch, yaw, 0.f);

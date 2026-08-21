@@ -154,7 +154,7 @@ namespace
 	{
 		if (CMD_ARGC() < 3)
 		{
-			SERVER_PRINT("CrossBot: usage: crossbot_aim_test <bot> <yawDelta> [pitchDelta]\n");
+			SERVER_PRINT("CrossBot: usage: crossbot_aim_test <bot> <yawDelta> [pitchDelta] [fov]\n");
 			return;
 		}
 
@@ -171,11 +171,16 @@ namespace
 		float yawDelta = static_cast<float>(atof(CMD_ARGV(2)));
 		float pitchDelta = (CMD_ARGC() > 3) ? static_cast<float>(atof(CMD_ARGV(3))) : 0.f;
 
+		if (CMD_ARGC() > 4)
+			ent->v.fov = static_cast<float>(atof(CMD_ARGV(4)));
+
 		BotAim::BeginTest(*bot, yawDelta, pitchDelta);
 
 		char msg[192];
-		snprintf(msg, sizeof(msg), "CrossBot: %s aim test yaw %+.1f pitch %+.1f from (%.1f, %.1f)\n",
-			bot->name, yawDelta, pitchDelta, bot->pEdict->v.v_angle.x, bot->pEdict->v.v_angle.y);
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s aim test yaw %+.1f pitch %+.1f from (%.1f, %.1f), fov %.0f\n",
+			bot->name, yawDelta, pitchDelta, bot->pEdict->v.v_angle.x, bot->pEdict->v.v_angle.y,
+			ent->v.fov > 0.f ? ent->v.fov : 90.f);
 		SERVER_PRINT(msg);
 	}
 
@@ -200,19 +205,36 @@ namespace
 		{
 			const char *pin = BotFire::Pinned();
 			char msg[128];
-			snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s\n", pin ? pin : "off");
+			snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s %s\n", pin ? pin : "off",
+				BotFire::PinnedMode());
 			SERVER_PRINT(msg);
-			SERVER_PRINT("usage: crossbot_fire_pin <classname|off>\n");
+			SERVER_PRINT("usage: crossbot_fire_pin <classname|off> [primary|secondary]\n");
 			return;
 		}
 
 		const char *arg = CMD_ARGV(1);
 		bool off = strcmp(arg, "off") == 0;
 
-		BotFire::Pin(off ? nullptr : arg);
+		int mode = 0;
+		if (CMD_ARGC() >= 3)
+		{
+			const char *want = CMD_ARGV(2);
+			if (strcmp(want, "primary") == 0)
+				mode = 1;
+			else if (strcmp(want, "secondary") == 0)
+				mode = 2;
+			else
+			{
+				SERVER_PRINT("usage: crossbot_fire_pin <classname|off> [primary|secondary]\n");
+				return;
+			}
+		}
+
+		BotFire::Pin(off ? nullptr : arg, mode);
 
 		char msg[128];
-		snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s\n", off ? "off" : arg);
+		snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s %s\n", off ? "off" : arg,
+			BotFire::PinnedMode());
 		SERVER_PRINT(msg);
 	}
 

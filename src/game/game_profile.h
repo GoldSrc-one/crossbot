@@ -53,6 +53,9 @@ public:
 	virtual float ChargerValue(ItemKind kind, edict_t *pEdict) const = 0;
 
 	virtual const WeaponSpec *GetWeaponSpec(int id) const = 0;
+
+	virtual bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
+		float &speed) const = 0;
 };
 
 IGameProfile *GameProfile_Detect();

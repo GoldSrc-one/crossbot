@@ -27,6 +27,9 @@ struct State
 	float yawVel = 0.f;
 	float pitchVel = 0.f;
 
+	float yawPending = 0.f;
+	float pitchPending = 0.f;
+
 	float brakeYaw = 1.f;
 	float brakePitch = 1.f;
 	float flickMag = 0.f;
@@ -44,6 +47,7 @@ struct State
 
 	bool testActive = false;
 	bool testSettled = false;
+	bool testRested = false;
 	float testStart = 0.f;
 	float testUntil = 0.f;
 	float testPeakSpeed = 0.f;
@@ -59,6 +63,10 @@ float Delay();
 float ErrorScale();
 
 float DriftAmplitude();
+
+float Quantum();
+
+float Impulse();
 
 void ClearDelayQueue(CBot &bot);
 

@@ -21,17 +21,42 @@
     crossbot_aim_drift is left at its default: micro-drift is suppressed while a
     test is active, and this run is what proves it.
 
+    Each flick also reports a rest error: the angular miss still standing two seconds
+    after the flick began, once everything has stopped moving. That is the number the
+    hand quantum sets, and it is the one that should scale with FOV -- a zoomed bot
+    turns 4.5x slower but places the crosshair 4.5x finer. Sweep -Fovs to see it.
+
 .PARAMETER Scales
     crossbot_aim_error values to test (default: 0, 1).
 
+.PARAMETER Fovs
+    pev->fov values to force for each flick. 0 leaves the bot's fov alone (default).
+    Use -Fovs 90,20 with a small -Shapes to measure what zoom buys.
+
+.PARAMETER Shapes
+    "<yaw> <pitch>" flick deltas (default: "180 0", "0 90"). At fov 20 a 40 degree yaw
+    flick is the same 180 degrees of hand travel as a 180 at fov 90, so use "40 0"
+    there rather than letting a 180 run past the two second rest sample.
+
 .PARAMETER Flicks
-    Flicks fired per scale per shape (default: 8).
+    Flicks fired per scale per fov per shape (default: 8).
+
+.PARAMETER Quantum
+.PARAMETER Impulse
+    Override crossbot_aim_quantum / crossbot_aim_impulse. Negative leaves the shipped
+    default alone. Pass -Quantum 0 -Impulse 0 for the phase-4 regression check: with the
+    hand resolution off the settle distribution must collapse back onto 0.349s / 895 deg/s
+    for a 180 and 0.266s / 563 for 90 of pitch.
 #>
 param(
     [string]$Map = "crossfire",
     [int]$Port = 0,
     [float[]]$Scales = @(0.0, 1.0),
+    [float[]]$Fovs = @(0.0),
+    [string[]]$Shapes = @("180 0", "0 90"),
     [int]$Flicks = 8,
+    [float]$Quantum = -1,
+    [float]$Impulse = -1,
     [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
 )
 
@@ -73,20 +98,26 @@ Write-Host "Server PID=$serverPid"
 try {
     Invoke-Rcon "crossbot_gather 0" | Out-Null
     Invoke-Rcon "crossbot_sense 0" | Out-Null
+    if ($Quantum -ge 0) { Invoke-Rcon "crossbot_aim_quantum $Quantum" | Out-Null }
+    if ($Impulse -ge 0) { Invoke-Rcon "crossbot_aim_impulse $Impulse" | Out-Null }
     Invoke-Rcon "crossbot_add Flicker" | Out-Null
     Start-Sleep -Seconds 3
 
     foreach ($scale in $Scales) {
         Invoke-Rcon "crossbot_aim_error $scale" | Out-Null
 
-        foreach ($shape in @("180 0", "0 90")) {
-            Write-Host "`n--- error=$scale flick=($shape) ---"
-            $delta = ($shape -split " ")[0]
-            $pitch = ($shape -split " ")[1]
-            for ($i = 0; $i -lt $Flicks; $i++) {
-                $sign = if ($i % 2 -eq 0) { "" } else { "-" }
-                Invoke-Rcon "crossbot_aim_test Flicker $sign$delta $sign$pitch" | Out-Null
-                Start-Sleep -Milliseconds 2000
+        foreach ($fov in $Fovs) {
+            foreach ($shape in $Shapes) {
+                Write-Host "`n--- error=$scale fov=$fov flick=($shape) ---"
+                $delta = ($shape -split " ")[0]
+                $pitch = ($shape -split " ")[1]
+                for ($i = 0; $i -lt $Flicks; $i++) {
+                    $sign = if ($i % 2 -eq 0) { "" } else { "-" }
+                    $cmd = "crossbot_aim_test Flicker $sign$delta $sign$pitch"
+                    if ($fov -gt 0) { $cmd = "$cmd $fov" }
+                    Invoke-Rcon $cmd | Out-Null
+                    Start-Sleep -Milliseconds 2500
+                }
             }
         }
     }
@@ -97,36 +128,67 @@ finally {
     Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "`n===== settle times from $logFile ====="
+Write-Host "`n===== settle and rest error from $logFile ====="
 if (-not (Test-Path $logFile)) { Write-Host "FAIL: no server log"; exit 1 }
 
-$lines = Get-Content $logFile | Where-Object { $_ -match 'aim test settled in ([\d.]+)s, peak ([\d.]+)' }
-if (-not $lines) { Write-Host "FAIL: no settle lines in the log -- did the bot spawn?"; exit 1 }
+# Group by the announce line rather than by slicing the settle lines: a flick that never
+# settles prints no settle line, and slicing would then silently shift every later group.
+$flicksSeen = @()
+$cur = $null
+foreach ($line in Get-Content $logFile) {
+    if ($line -match 'aim test yaw') {
+        if ($cur) { $flicksSeen += ,$cur }
+        $cur = @{ settle = $null; peak = $null; rest = $null }
+        continue
+    }
+    if (-not $cur) { continue }
+    if ($line -match 'settled in ([\d.]+)s, peak ([\d.]+)') {
+        $cur.settle = [double]$Matches[1]
+        $cur.peak = [double]$Matches[2]
+    }
+    elseif ($line -match 'rest err ([\d.]+) deg') {
+        $cur.rest = [double]$Matches[1]
+    }
+}
+if ($cur) { $flicksSeen += ,$cur }
+
+if (-not $flicksSeen) { Write-Host "FAIL: no flicks in the log -- did the bot spawn?"; exit 1 }
 
 $idx = 0
-$perGroup = $Flicks
 foreach ($scale in $Scales) {
-    foreach ($shape in @("180 0", "0 90")) {
-        $group = $lines | Select-Object -Skip $idx -First $perGroup
-        $idx += $perGroup
-        if (-not $group) { continue }
+    foreach ($fov in $Fovs) {
+        foreach ($shape in $Shapes) {
+            $group = @($flicksSeen | Select-Object -Skip $idx -First $Flicks)
+            $idx += $Flicks
+            if (-not $group) { continue }
 
-        $settle = @()
-        $peak = @()
-        foreach ($line in $group) {
-            if ($line -match 'settled in ([\d.]+)s, peak ([\d.]+)') {
-                $settle += [double]$Matches[1]
-                $peak += [double]$Matches[2]
+            $settle = @($group | Where-Object { $null -ne $_.settle } | ForEach-Object { $_.settle })
+            $peak = @($group | Where-Object { $null -ne $_.peak } | ForEach-Object { $_.peak })
+            $rest = @($group | Where-Object { $null -ne $_.rest } | ForEach-Object { $_.rest })
+
+            $fovLabel = if ($fov -gt 0) { "$fov" } else { "-" }
+
+            if ($settle) {
+                $min = ($settle | Measure-Object -Minimum).Minimum
+                $max = ($settle | Measure-Object -Maximum).Maximum
+                $avg = ($settle | Measure-Object -Average).Average
+                $pavg = ($peak | Measure-Object -Average).Average
+                Write-Host ("error={0,-4} fov={1,-4} flick=({2,-6}) n={3}/{4}  settle min {5:F3} avg {6:F3} max {7:F3}  spread {8:F3}s  peak avg {9:F0} deg/s" -f `
+                    $scale, $fovLabel, $shape, $settle.Count, $group.Count, $min, $avg, $max, ($max - $min), $pavg)
+            }
+            else {
+                Write-Host ("error={0,-4} fov={1,-4} flick=({2,-6}) n=0/{3}  NO SETTLE -- the view never came within tolerance" -f `
+                    $scale, $fovLabel, $shape, $group.Count)
+            }
+
+            if ($rest) {
+                $rmin = ($rest | Measure-Object -Minimum).Minimum
+                $rmax = ($rest | Measure-Object -Maximum).Maximum
+                $ravg = ($rest | Measure-Object -Average).Average
+                Write-Host ("                                   rest err min {0:F3} avg {1:F3} max {2:F3} deg" -f `
+                    $rmin, $ravg, $rmax)
             }
         }
-        if (-not $settle) { continue }
-
-        $min = ($settle | Measure-Object -Minimum).Minimum
-        $max = ($settle | Measure-Object -Maximum).Maximum
-        $avg = ($settle | Measure-Object -Average).Average
-        $pavg = ($peak | Measure-Object -Average).Average
-        Write-Host ("error={0,-4} flick=({1,-5}) n={2}  settle min {3:F3} avg {4:F3} max {5:F3}  spread {6:F3}s  peak avg {7:F0} deg/s" -f `
-            $scale, $shape, $settle.Count, $min, $avg, $max, ($max - $min), $pavg)
     }
 }
 

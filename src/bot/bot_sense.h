@@ -19,21 +19,32 @@ enum SuspicionSource : unsigned char
 	SUSP_EVENT,
 	SUSP_DAMAGE,
 	SUSP_SIGHT,
+	SUSP_COUNT,
+};
+
+enum SuspicionKind : unsigned char
+{
+	KIND_PLAYER = 0,
+	KIND_MONSTER,
+	KIND_OTHER,
+	KIND_COUNT,
 };
 
 struct Suspicion
 {
 	Vector pos;
 	float time = 0.f;
-	int entIndex = 0;
+	CBotEntHandle ent;
 	SuspicionSource source = SUSP_SOUND;
+	SuspicionKind kind = KIND_OTHER;
 };
 
 struct State
 {
 	Suspicion slots[kSuspicionSlots];
-	size_t head = 0;
 	size_t count = 0;
+
+	unsigned int pushes[SUSP_COUNT] = {};
 
 	CBotEntHandle target;
 	float targetTime = 0.f;
@@ -47,6 +58,7 @@ struct State
 	float lookAuthority = 0.f;
 	Vector lookDir;
 	int lookEntries = 0;
+	SuspicionKind lookKind = KIND_OTHER;
 	bool lookValid = false;
 };
 
@@ -56,7 +68,7 @@ float Decay();
 
 Vector EntitySoundOrigin(const edict_t *ent);
 
-void Push(CBot &bot, const Vector &pos, SuspicionSource source, int entIndex);
+void Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_t *ent);
 
 void Hear(CBot &bot, const edict_t *src, const Vector &pos, float volume, float attenuation);
 
@@ -70,8 +82,12 @@ bool ApplyLook(CBot &bot);
 
 int LiveCount(const CBot &bot);
 
+int LiveCounts(const CBot &bot, int counts[KIND_COUNT]);
+
 const Suspicion *Freshest(const CBot &bot);
 
 const char *SourceName(SuspicionSource source);
+
+const char *KindName(SuspicionKind kind);
 
 }

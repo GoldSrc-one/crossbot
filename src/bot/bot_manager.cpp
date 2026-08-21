@@ -264,6 +264,8 @@ bool TeleportAllBots(const Vector &point)
 		bot.pEdict->v.angles = Vector(0.f, 0.f, 0.f);
 		bot.aim.yawVel = 0.f;
 		bot.aim.pitchVel = 0.f;
+		bot.aim.yawPending = 0.f;
+		bot.aim.pitchPending = 0.f;
 		BotAim::ClearDelayQueue(bot);
 		Bot_ResetNavPath(bot);
 		any = true;
@@ -327,22 +329,27 @@ void PrintAimStatus()
 				sqrtf(dYaw * dYaw + dPitch * dPitch), dYaw, dPitch);
 		}
 
-		char line[448];
+		float fov = bot.pEdict->v.fov;
+		if (fov <= 0.f)
+			fov = 90.f;
+
+		char line[512];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s target=%s bone=%d leadblk=%d queue=%zu/%zu hist=%.2fs served=%.3fs "
-			"hand=%.0f deg/s brake=(%.3f,%.3f) view=(%.1f,%.1f) err=%s\n",
+			"hand=%.0f deg/s brake=(%.3f,%.3f) fov=%.0f quant=%.4f view=(%.1f,%.1f) err=%s\n",
 			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
 			bot.sense.leadVetoes, bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot),
 			bot.aim.servedDelay, BotAim::ViewSpeed(bot), bot.aim.brakeYaw, bot.aim.brakePitch,
-			view.x, view.y, errBuf);
+			fov, BotAim::Quantum() * fov / 90.f, view.x, view.y, errBuf);
 		SERVER_PRINT(line);
 	}
 
-	char summary[192];
+	char summary[256];
 	snprintf(summary, sizeof(summary),
-		"CrossBot: %d bot(s), sense=%d aim_delay=%.3f aim_error=%.2f aim_drift=%.2f\n", shown,
+		"CrossBot: %d bot(s), sense=%d aim_delay=%.3f aim_error=%.2f aim_drift=%.2f "
+		"aim_quantum=%.4f aim_impulse=%.1f\n", shown,
 		BotSense::Enabled() ? 1 : 0, BotAim::Delay(), BotAim::ErrorScale(),
-		BotAim::DriftAmplitude());
+		BotAim::DriftAmplitude(), BotAim::Quantum(), BotAim::Impulse());
 	SERVER_PRINT(summary);
 }
 
@@ -363,7 +370,8 @@ void PrintSenseStatus()
 		if (fresh)
 			snprintf(freshBuf, sizeof(freshBuf), "%s age=%.2fs ent=%d (%.0f,%.0f,%.0f)",
 				BotSense::SourceName(fresh->source), gpGlobals->time - fresh->time,
-				fresh->entIndex, fresh->pos.x, fresh->pos.y, fresh->pos.z);
+				g_engfuncs.pfnIndexOfEdict(fresh->ent.Get()), fresh->pos.x, fresh->pos.y,
+				fresh->pos.z);
 
 		char lookBuf[96] = "-";
 		if (bot.sense.lookValid)
@@ -371,12 +379,22 @@ void PrintSenseStatus()
 				bot.sense.lookDir.x, bot.sense.lookDir.y, bot.sense.lookDir.z,
 				bot.sense.lookAuthority, bot.sense.lookEntries);
 
-		char line[448];
+		int kinds[BotSense::KIND_COUNT];
+		int live = BotSense::LiveCounts(bot, kinds);
+
+		const unsigned int *pushes = bot.sense.pushes;
+
+		char line[640];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s target=%s bone=%d leadblk=%d susp=%d/%zu fresh=%s look=%s\n",
+			"CrossBot: %s target=%s bone=%d leadblk=%d susp=%d/%zu kinds=p:%d,m:%d,o:%d "
+			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u\n",
 			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
-			bot.sense.leadVetoes, BotSense::LiveCount(bot), BotSense::kSuspicionSlots, freshBuf,
-			lookBuf);
+			bot.sense.leadVetoes, live, BotSense::kSuspicionSlots,
+			kinds[BotSense::KIND_PLAYER], kinds[BotSense::KIND_MONSTER],
+			kinds[BotSense::KIND_OTHER],
+			bot.sense.lookValid ? BotSense::KindName(bot.sense.lookKind) : "-", freshBuf, lookBuf,
+			pushes[BotSense::SUSP_SIGHT], pushes[BotSense::SUSP_SOUND],
+			pushes[BotSense::SUSP_EVENT], pushes[BotSense::SUSP_DAMAGE]);
 		SERVER_PRINT(line);
 	}
 
@@ -416,20 +434,34 @@ void PrintFireStatus()
 				w.reloading ? 1 : 0);
 		}
 
+		const char *aimKind = "target";
+		if (fire.aimArc)
+			aimKind = "arc";
+		else if (fire.aimHoming)
+			aimKind = "homing";
+		else if (fire.aimLead)
+			aimKind = "lead";
+
 		char aimBuf[96] = "-";
 		if (fire.lastMiss >= 0.f)
 			snprintf(aimBuf, sizeof(aimBuf), "aim=%s flight=%.0f miss=%.2f tol=%.2f",
-				fire.aimLead ? (fire.aimHoming ? "homing" : "lead") : "target",
-				fire.flightTime * 1000.f, fire.lastMiss, fire.lastTol);
+				aimKind, fire.flightTime * 1000.f, fire.lastMiss, fire.lastTol);
+
+		float held = (fire.commit != BotFire::COMMIT_NONE)
+			? (gpGlobals->time - fire.commitStart) : -1.f;
 
 		edict_t *target = bot.sense.target.Get();
 
-		char line[416];
+		char line[640];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s held=%s mode=%s why=%s %s %s shots=%d leadshots=%d switches=%d "
-			"reloads=%d target=%s\n",
-			bot.name, heldBuf, BotFire::ModeName(fire.mode), fire.lastReason, ammoBuf, aimBuf,
-			fire.shots, fire.leadShots, fire.switches, fire.reloads,
+			"CrossBot: %s held=%s zoom=%d mode=%s why=%s %s %s commit=%s for=%.2f shots=%d "
+			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d uphill=%d "
+			"selfveto=%d switches=%d reloads=%d target=%s\n",
+			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
+			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
+			fire.leadShots, fire.chargeShots, fire.arcShots, fire.throwShots, fire.guides,
+			fire.commitCaps,
+			fire.uphillVetoes, fire.selfVetoes, fire.switches, fire.reloads,
 			target ? CBotPlayerNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}

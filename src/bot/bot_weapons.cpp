@@ -3,6 +3,7 @@
 
 #include "bot.h"
 #include "bot_weapons.h"
+#include "../game/game_profile.h"
 #include "../game/gamedata.h"
 
 namespace
@@ -85,6 +86,12 @@ void Read(edict_t *player, BotInventory &out)
 			w.nextPrimaryAttack = Peek<float>(item, g_offsets.wpn_flNextPrimaryAttack);
 			w.nextSecondaryAttack = Peek<float>(item, g_offsets.wpn_flNextSecondaryAttack);
 			w.reloading = Peek<int>(item, g_offsets.wpn_fInReload) != 0;
+			w.chargeState = Peek<int>(item, g_offsets.ent_fInAttack);
+			w.throwStart = Peek<float>(item, g_offsets.ent_flStartThrow);
+
+			const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(w.id) : nullptr;
+			if (spec && (spec->primary.quirks & WPN_Q_KEEP_AIMING) != 0)
+				w.guidedCount = Peek<int>(item, g_offsets.rpg_cActiveRockets);
 
 			if (item == active)
 				out.activeIndex = out.count;

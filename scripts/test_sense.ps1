@@ -27,12 +27,16 @@
     target acceleration, which is the whole point -- but the queue should be full
     and served should equal the requested delay whenever a target is held.
 
-    SUSPICION: which senses actually fire, and whether heard entries age out.
-    Only SIGHT and SOUND are reachable here. SOUND is dominated by footsteps,
-    which pmove emits through pmove->PM_PlaySound rather than pfnEmitSound and
-    which the plugin picks up by hooking pfnPM_Move; item pickups, doors and
-    chargers make up the rest. EVENT and DAMAGE both need weapon fire, which no
-    bot does yet.
+    SUSPICION: which senses actually fire, which tier wins the vote, and whether
+    heard entries age out. Only SIGHT and SOUND are reachable here. SOUND is
+    dominated by footsteps, which pmove emits through pmove->PM_PlaySound rather
+    than pfnEmitSound and which the plugin picks up by hooking pfnPM_Move; item
+    pickups, doors and chargers make up the rest. EVENT and DAMAGE both need
+    weapon fire, which no bot does yet.
+
+    Sources are read from the pushed= counters, not by sampling fresh=. The list
+    holds one entry per entity, so a player's SIGHT entry overwrites their own
+    SOUND entry within the same frame and fresh= would miss most of what fired.
 
 .PARAMETER Delays
     crossbot_aim_delay values to walk through in the static phase (default: 0, 0.25, 0.5).
@@ -91,6 +95,7 @@ $serverPid = [int]($startResult -replace "PID=", "")
 Write-Host "Server PID=$serverPid"
 
 try {
+    $failed = $false
     Invoke-Rcon "crossbot_gather 0" | Out-Null
     for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add Sense$i" | Out-Null }
     Invoke-Rcon "crossbot_sense 1" | Out-Null
@@ -147,47 +152,76 @@ try {
         }
     }
 
-    Write-Host "`n===== SUSPICION: which senses actually fired, and does the list decay ====="
+    Write-Host "`n===== SUSPICION: which senses actually fired, which tier wins, and does the list decay ====="
     Write-Host "SOUND here is dominated by footsteps. They never reach pfnEmitSound -- pmove emits them"
     Write-Host "through pmove->PM_PlaySound, which the plugin swaps out inside its pfnPM_Move hook."
     Write-Host "Item pickups, doors and chargers make up the rest. Note a bot moving at 220 units/s or"
     Write-Host "slower emits no steps at all, and sv_footsteps 0 turns the whole sense off."
     Write-Host "EVENT and DAMAGE need weapon fire, which no bot does yet, so expect them to stay absent."
+    Write-Host "tier= must read PLAYER whenever kinds=p: is nonzero: the other bot outranks every door"
+    Write-Host "and lift in the map, no matter how recently they made a noise."
 
     Invoke-Rcon "crossbot_gather 1" | Out-Null
-    $sources = @{}
+    $lastPushed = @{}
+    $tierViolations = 0
+    $tierChecks = 0
     $deadline = (Get-Date).AddSeconds($SuspicionSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 3
         $out = Invoke-Rcon "crossbot_sense_status"
-        foreach ($m in [regex]::Matches($out, 'fresh=(\w+)')) { $sources[$m.Groups[1].Value] = $true }
+        foreach ($m in [regex]::Matches($out, 'pushed=sgt:(\d+),snd:(\d+),evt:(\d+),dmg:(\d+)')) {
+            foreach ($p in @(@('SIGHT', 1), @('SOUND', 2), @('EVENT', 3), @('DAMAGE', 4))) {
+                $n = [int]$m.Groups[$p[1]].Value
+                if ($n -gt [int]$lastPushed[$p[0]]) { $lastPushed[$p[0]] = $n }
+            }
+        }
+        foreach ($m in [regex]::Matches($out, 'kinds=p:(\d+),m:\d+,o:\d+ tier=(\w+)')) {
+            if ([int]$m.Groups[1].Value -le 0) { continue }
+            $tierChecks++
+            if ($m.Groups[2].Value -ne 'PLAYER') { $tierViolations++ }
+        }
         ($out -split "`r?`n") |
             Where-Object { $_ -match 'susp=|bot\(s\)' } |
             ForEach-Object { Write-Host ("  " + ($_ -replace '^CrossBot: ', '')) }
     }
-    Write-Host "sources observed: $((($sources.Keys | Sort-Object) -join ', '))"
+
+    $fired = @($lastPushed.Keys | Where-Object { [int]$lastPushed[$_] -gt 0 } | Sort-Object)
+    Write-Host "sources observed: $(($fired) -join ', ')"
+    Write-Host ("tier=PLAYER held on {0} of {1} polls that had a live player entry" -f ($tierChecks - $tierViolations), $tierChecks)
+
+    if ($tierChecks -gt 0 -and $tierViolations -gt 0) {
+        Write-Host "FAIL: a live player entry lost the vote to a lower tier -- check LookDirection's tier pass"
+        $failed = $true
+    }
+    if ($fired -notcontains 'SIGHT' -or $fired -notcontains 'SOUND') {
+        Write-Host "FAIL: SIGHT and SOUND must both fire during roam"
+        $failed = $true
+    }
 
     Write-Host "`n--- the decay window actually bounds entry age ---"
-    Write-Host "Do not assert 'no SOUND entries remain' after a quiet period. Gather off does not make"
-    Write-Host "the map silent -- doors and chargers keep emitting, and any bot still walking keeps making"
-    Write-Host "footsteps -- so a fresh SOUND entry is correct and that assertion fails for the wrong"
-    Write-Host "reason. Do not use crossbot_kill to force quiet either: respawn resets the bot with"
-    Write-Host "CBot(), which empties the list whether or not the decay works, so it would pass"
-    Write-Host "unconditionally."
-    Write-Host "The invariant that does hold regardless of background noise: no live entry may ever be"
-    Write-Host "older than crossbot_sense_decay. Shrink the window to 1s and check the age column."
+    Write-Host "Do not assert 'no entries remain' after a quiet period, and do not use crossbot_kill to"
+    Write-Host "force quiet: respawn resets the bot with CBot(), which empties the list whether or not"
+    Write-Host "the decay works, so it would pass unconditionally."
+    Write-Host "Gathering stays ON here. It used to be turned off, but one entry per entity means an"
+    Write-Host "idle map really does go silent -- susp= sits at 0 and the age assertion then passes"
+    Write-Host "against an empty list, which is worse than not running it. Moving bots keep emitting"
+    Write-Host "footsteps, so there is always something live to measure."
+    Write-Host "The invariant: no live entry may ever be older than crossbot_sense_decay. Shrink the"
+    Write-Host "window to 1s and check the age column."
 
-    Invoke-Rcon "crossbot_gather 0" | Out-Null
+    Invoke-Rcon "crossbot_gather 1" | Out-Null
     Invoke-Rcon "crossbot_sense_decay 1" | Out-Null
     Start-Sleep -Seconds 5
 
     $worst = 0.0
+    $sampled = 0
     for ($i = 0; $i -lt 5; $i++) {
         $out = Invoke-Rcon "crossbot_sense_status"
         ($out -split "`r?`n") |
             Where-Object { $_ -match 'susp=|bot\(s\)' } |
             ForEach-Object { Write-Host ("  " + ($_ -replace '^CrossBot: ', '')) }
         foreach ($m in [regex]::Matches($out, 'age=([\d.]+)s')) {
+            $sampled++
             $a = [double]$m.Groups[1].Value
             if ($a -gt $worst) { $worst = $a }
         }
@@ -195,12 +229,19 @@ try {
     }
     Invoke-Rcon "crossbot_sense_decay 5" | Out-Null
 
-    Write-Host ("oldest live entry seen at decay=1: {0:N2}s" -f $worst)
-    if ($worst -gt 1.05) {
+    Write-Host ("oldest live entry seen at decay=1: {0:N2}s over {1} sample(s)" -f $worst, $sampled)
+    if ($sampled -eq 0) {
+        Write-Host "FAIL: no live entry was ever observed -- the age assertion proved nothing"
+        $failed = $true
+    } elseif ($worst -gt 1.05) {
         Write-Host "FAIL: an entry outlived the decay window -- check the weight function"
-        exit 1
+        $failed = $true
+    } else {
+        Write-Host "PASS: the decay window bounds entry age"
     }
-    Write-Host "PASS: the decay window bounds entry age"
+
+    if ($failed) { exit 1 }
+    Write-Host "PASS: sense system"
 }
 finally {
     Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
