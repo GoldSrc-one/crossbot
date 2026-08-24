@@ -726,7 +726,11 @@ Opening time, from the real SDK (`external/hlsdk-full`; the vendored `external/h
   `travel = Σ|movedir.k · (size.k − 2)| − lip`, speed defaulting to 100. The −2 per axis is
   `CBaseDoor::Spawn` compensating for the engine expanding bboxes by 1 each way.
 - `func_door_rotating` — `distance / speed`, defaults 90° and 100°/s.
-- `func_breakable` — `health * 0.1`, a guess at how long the bot spends shooting it; health defaults to 1.
+- `func_breakable` — `health * 0.1`, a guess at how long the bot spends breaking it; health defaults to 1.
+  This is a plan-time estimate only. navgen splits out every breakable, including ones the bot cannot
+  actually destroy: `takedamage` is set in `CBreakable::Spawn` and `matUnbreakableGlass` is private data,
+  so neither is visible in the entity lump. The runtime engages only at `health <= 100` and gives up on
+  anything that takes no damage, penalizing the connection so the planner routes around it next time.
 
 ### Which passes see a passable as solid
 - **Floor support** does — a door brush still holds up whatever rests on it.

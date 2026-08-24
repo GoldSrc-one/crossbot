@@ -144,6 +144,7 @@ void StartFrame()
 			bot.wasDead = false;
 			BotItems::OnRespawn(bot);
 			BotFire::Reset(bot);
+			bot.brk = BotBreak::State();
 		}
 
 		BotWeapons::Refresh(bot);
@@ -561,6 +562,14 @@ void PrintNavStatus()
 			goalItem ? CBotClassOf(goalItem) : "-", static_cast<int>(bot.goalItemKind),
 			bot.goalItemArea, bot.itemMemo.size(), bot.fullMemo.size());
 		msg += line;
+
+		if (bot.brk.active)
+		{
+			snprintf(line, sizeof(line), " breaking=%s health=%.0f swings=%d for=%.1fs",
+				bot.brk.targetName, bot.brk.lastHealth, bot.brk.swings,
+				gpGlobals->time - bot.brk.startTime);
+			msg += line;
+		}
 
 		if (bot.chargerActive)
 		{

@@ -24,7 +24,8 @@ enum Kind
 	AVOID_JUMP,
 	AVOID_SIDE,
 	AVOID_FOLLOW,
-	AVOID_BLOCKED
+	AVOID_BLOCKED,
+	AVOID_BREAK
 };
 
 constexpr float kDetourClearance = 4.f;
@@ -59,6 +60,8 @@ struct Decision
 	size_t detourReplaceUntil = 0;
 	bool searchFailed = false;
 	bool hitRecedes = false;
+
+	edict_t *breakTarget = nullptr;
 };
 
 Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,

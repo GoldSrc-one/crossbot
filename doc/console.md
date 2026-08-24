@@ -98,6 +98,8 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 
 - `crossbot_trace_path` — where `WriteTraceLog` puts the bot trajectory
 - `crossbot_nav_avoid` — obstacle avoidance layer, 0 to A/B a suspected regression without rebuilding
+- `crossbot_nav_break` — breaking `func_breakable` out of the way. Default 1. With it off the bot falls
+  back to the pre-`BotBreak` behaviour: it avoids the breakable, or gives up on the goal behind it
 - `crossbot_gather` — item gathering goals. Default 1. `test_nav_goal.ps1` sets it to 0, because a bot
   that picks a new goal a frame after arriving never shows the harness the `hasGoal=0` it polls for
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the

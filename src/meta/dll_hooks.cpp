@@ -19,6 +19,12 @@ cvar_t g_navAvoidCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_navBreakCvar = {
+	"crossbot_nav_break",
+	"1",
+	FCVAR_SERVER
+};
+
 cvar_t g_gatherCvar = {
 	"crossbot_gather",
 	"1",
@@ -107,6 +113,7 @@ void GameDLLInit()
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_navBreakCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);

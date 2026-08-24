@@ -4,6 +4,8 @@
 
 constexpr int kHLDMWeaponSlots = 16;
 
+constexpr int kHLDMMelee = 1;
+
 const WeaponSpec *HLDM_WeaponSpec(int id);
 
 const WeaponSpec *HLDM_WeaponSlot(int slot);

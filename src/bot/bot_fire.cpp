@@ -6,6 +6,7 @@
 #include "bot_fire.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_break.h"
 #include "bot_dps.h"
 #include "bot_weapons.h"
 #include "../game/fake_cmd.h"
@@ -973,6 +974,12 @@ void Think(CBot &bot)
 	if (!Enabled() || !g_pGameProfile)
 	{
 		Idle(fire, "off");
+		return;
+	}
+
+	if (BotBreak::Active(bot))
+	{
+		Idle(fire, "breaking");
 		return;
 	}
 

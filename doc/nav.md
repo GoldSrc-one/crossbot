@@ -754,7 +754,9 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
 - `activatorCenter` is the activator brush model centre, copied from the detour. The bot aims at it to press:
   GoldSrc `PlayerUse` picks the entity whose centre gives the largest forward dot above `VIEW_FIELD_NARROW`,
   so the runtime cannot press without knowing where the brush is
-- `requiresBreak` is recorded and plumbed but the bot does not act on it yet — it never shoots the breakable
+- `requiresBreak` is serviced at runtime by `BotBreak` — the bot stops, draws its melee weapon and hits the
+  brush until it dies. The plan's `openSeconds` (`health * 0.1`) is only the ETA estimate; the runtime
+  decides for itself whether the entity is breakable at all, from `takedamage` and `health`. See `doc/bot.md`
 
 ### Activation at runtime
 `src/bot/bot_move_nav.cpp` services activation waypoints; see `doc/navgen.md` for how the detour is built.

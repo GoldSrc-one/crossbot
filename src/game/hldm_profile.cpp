@@ -136,6 +136,11 @@ const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
 	return HLDM_WeaponSpec(id);
 }
 
+int CHLDMProfile::MeleeWeapon() const
+{
+	return kHLDMMelee;
+}
+
 const char *CHLDMProfile::AmmoEntity(int weaponId, WeaponAmmo pool) const
 {
 	const WeaponSpec *spec = HLDM_WeaponSpec(weaponId);

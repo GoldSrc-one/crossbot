@@ -11,6 +11,7 @@
 #include "bot_fire.h"
 #include "bot_sense.h"
 #include "bot_avoid.h"
+#include "bot_break.h"
 #include "bot_items.h"
 #include "bot_opportunist.h"
 #include "../game/game_profile.h"
@@ -90,14 +91,6 @@ namespace
 		g_engfuncs.pfnTraceHull(start, stop, dont_ignore_monsters, ducking ? kHullDuck : kHullHuman,
 			pEdict, &tr);
 		return tr.flFraction == 1.f;
-	}
-
-	PmSim::PmPhysics BotDrivePhysics(edict_t *pEdict)
-	{
-		PmSim::PmPhysics physics = Bot_Physics(pEdict);
-		if (AtFrictionEdge(pEdict))
-			physics.groundFriction *= physics.edgeFriction;
-		return physics;
 	}
 
 	NavPlan::PlanTraceContext MakePlanTraces(edict_t *pEdict)
@@ -352,18 +345,18 @@ namespace
 	}
 
 	void RunAirmoveDrive(CBot &bot, const Vector &moveDir, float drive, float aimYaw, bool crouch, bool jump,
-		bool allowLongJump = false)
+		bool allowLongJump = false, const Vector *aimAngles = nullptr, unsigned short extraButtons = 0)
 	{
 		edict_t *pEdict = bot.pEdict;
 
-		bot.desiredAngles = Vector(0.f, aimYaw, 0.f);
+		bot.desiredAngles = aimAngles ? *aimAngles : Vector(0.f, aimYaw, 0.f);
 		Vector angles = Bot_UpdateFacing(bot);
 
 		Vector wishDir = moveDir;
 		if ((pEdict->v.flags & FL_ONGROUND) != 0)
 		{
 			NavFollow::Drive solved =
-				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, BotDrivePhysics(pEdict));
+				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, Bot_DrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				wishDir = solved.wishDir;
@@ -389,6 +382,7 @@ namespace
 		else if (smove < -1.f) buttons |= IN_MOVELEFT;
 		if (crouch) buttons |= IN_DUCK;
 		if (jump && !OnLadder(pEdict)) buttons |= IN_JUMP;
+		buttons |= extraButtons;
 
 		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons, allowLongJump);
 	}
@@ -475,6 +469,52 @@ namespace
 		RunAirmoveDrive(bot, moveDir, drive, wp.launchYaw, wp.requiresCrouch && !wp.requiresJump, false);
 	}
 
+	edict_t *BreakablePlugging(const Nav::Area &area)
+	{
+		for (int i = 1; i < gpGlobals->maxEntities; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!BotBreak::IsTarget(ent))
+				continue;
+			if (ent->v.absmax.x < area.mins.x || ent->v.absmin.x > area.maxs.x)
+				continue;
+			if (ent->v.absmax.y < area.mins.y || ent->v.absmin.y > area.maxs.y)
+				continue;
+			if (ent->v.absmax.z < area.mins.z || ent->v.absmin.z > area.maxs.z)
+				continue;
+			return ent;
+		}
+
+		return NULL;
+	}
+
+	edict_t *AirmovePlug(CBot &bot, const Nav::NavMesh &mesh)
+	{
+		if (!BotBreak::Enabled() || bot.airmoveTargetArea < 0)
+			return NULL;
+
+		const Nav::Area *area = Nav::FindAreaById(mesh, static_cast<uint32_t>(bot.airmoveTargetArea));
+		if (!area || (area->areaFlags & crossbot_nav::NAV_AREA_BREAKABLE) == 0)
+			return NULL;
+
+		return BreakablePlugging(*area);
+	}
+
+	bool BreakBlockedAirmove(CBot &bot, const Nav::NavMesh &mesh)
+	{
+		edict_t *plug = AirmovePlug(bot, mesh);
+		if (!plug || !BotBreak::Engage(bot, plug))
+			return false;
+
+		char msg[288];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s cannot land in area %d, it is plugged by %s\n", bot.name,
+			bot.airmoveTargetArea, CBotClassOf(plug));
+		SERVER_PRINT(msg);
+
+		return true;
+	}
+
 	bool RunAirmoveFlight(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		edict_t *pEdict = bot.pEdict;
@@ -525,6 +565,9 @@ namespace
 				decided ? "" : " undecided");
 			SERVER_PRINT(msg);
 
+			if (failed && BreakBlockedAirmove(bot, mesh))
+				return false;
+
 			if (oppo || failed || !decided)
 				bot.nextRepathTime = gpGlobals->time;
 
@@ -551,8 +594,31 @@ namespace
 			SERVER_PRINT(msg);
 		}
 
+		Vector breakAngles;
+		unsigned short breakButtons = 0;
+		const Vector *breakAim = nullptr;
+
+		if (edict_t *plug = AirmovePlug(bot, mesh))
+		{
+			bool swing = false;
+			if (BotBreak::AimSwing(bot, plug, breakAngles, swing))
+			{
+				breakAim = &breakAngles;
+				if (swing)
+				{
+					breakButtons |= IN_ATTACK;
+
+					char msg[288];
+					snprintf(msg, sizeof(msg),
+						"CrossBot: %s swings at %s mid-flight, it plugs area %d\n", bot.name,
+						CBotClassOf(plug), bot.airmoveTargetArea);
+					SERVER_PRINT(msg);
+				}
+			}
+		}
+
 		RunAirmoveDrive(bot, Bot_YawDir(bot.airmoveYaw), bot.airmoveSpeed, bot.airmoveYaw, bot.airmoveCrouch,
-			false);
+			false, false, breakAim, breakButtons);
 		return true;
 	}
 
@@ -578,7 +644,7 @@ namespace
 			if ((pEdict->v.flags & FL_ONGROUND) != 0)
 			{
 				NavFollow::Drive solved =
-					NavFollow::SolveDrive(wishDir * drive, pEdict->v.velocity, BotDrivePhysics(pEdict));
+					NavFollow::SolveDrive(wishDir * drive, pEdict->v.velocity, Bot_DrivePhysics(pEdict));
 				if (solved.wishSpeed > 0.f)
 				{
 					wishDir = solved.wishDir;
@@ -1079,7 +1145,7 @@ namespace
 		if (drive > 0.f && (pEdict->v.flags & FL_ONGROUND) != 0)
 		{
 			NavFollow::Drive solved =
-				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, BotDrivePhysics(pEdict));
+				NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity, Bot_DrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				wishDir = solved.wishDir;
@@ -1398,7 +1464,7 @@ namespace
 			drive = Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
 
 			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
-				BotDrivePhysics(pEdict));
+				Bot_DrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				moveDir = solved.wishDir;
@@ -1526,7 +1592,7 @@ namespace
 			drive = Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
 
 			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
-				BotDrivePhysics(pEdict));
+				Bot_DrivePhysics(pEdict));
 			if (solved.wishSpeed > 0.f)
 			{
 				moveDir = solved.wishDir;
@@ -1661,33 +1727,6 @@ namespace
 			bot.estimatedArrivalTime += extra / physics.maxSpeed;
 	}
 
-	bool PenalizeCurrentConnection(CBot &bot)
-	{
-		if (bot.currentAreaId < 0)
-			return false;
-
-		uint32_t cur = static_cast<uint32_t>(bot.currentAreaId);
-		size_t areaSteps = bot.plannedAreaPath.empty() ? 0 : bot.plannedAreaPath.size() - 1;
-		size_t count = std::min(bot.plannedConnPath.size(), areaSteps);
-		for (size_t i = 0; i < count; ++i)
-		{
-			if (bot.plannedAreaPath[i] != cur)
-				continue;
-
-			Nav::PenalizeConnection(bot.plannedConnPath[i]);
-
-			char msg[192];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s penalizing conn %u (area %u->%u) after a blocked detour, penalty %.1f\n",
-				bot.name, bot.plannedConnPath[i], cur, bot.plannedAreaPath[i + 1],
-				Nav::ConnectionPenalty(bot.plannedConnPath[i]));
-			SERVER_PRINT(msg);
-			return true;
-		}
-
-		return false;
-	}
-
 	void RewardEnteredConnection(CBot &bot, uint32_t enteredId)
 	{
 		if (bot.visitedAreaPath.empty())
@@ -1733,6 +1772,8 @@ namespace
 		clampedGoal.y = std::max(goalArea->mins.y, std::min(goalArea->maxs.y, clampedGoal.y));
 		clampedGoal.z = std::max(goalArea->mins.z, std::min(goalArea->maxs.z, clampedGoal.z));
 
+		BotBreak::PhaseThrough phaseBreakables;
+
 		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
 		NavPlan::PlanStats planStats;
 		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
@@ -1741,7 +1782,17 @@ namespace
 		float planMs = std::chrono::duration<float, std::milli>(
 			std::chrono::steady_clock::now() - planBegin).count();
 		if (!path.found)
+		{
+			char failMsg[288];
+			snprintf(failMsg, sizeof(failMsg),
+				"CrossBot: %s found no route area %u -> %u from (%.1f,%.1f,%.1f) to (%.1f,%.1f,%.1f) | "
+				"search %zu areas/%zu sims, %zu air moves rejected\n",
+				bot.name, startArea->id, goalArea->id, pEdict->v.origin.x, pEdict->v.origin.y,
+				pEdict->v.origin.z, clampedGoal.x, clampedGoal.y, clampedGoal.z, path.expansions,
+				path.airmovesTried, path.airmovesRejected);
+			SERVER_PRINT(failMsg);
 			return false;
+		}
 
 		bot.waypoints = std::move(path.waypoints);
 		bot.waypointIndex = 0;
@@ -1881,6 +1932,41 @@ namespace
 	}
 }
 
+PmSim::PmPhysics Bot_DrivePhysics(edict_t *pEdict)
+{
+	PmSim::PmPhysics physics = Bot_Physics(pEdict);
+	if (AtFrictionEdge(pEdict))
+		physics.groundFriction *= physics.edgeFriction;
+	return physics;
+}
+
+bool Bot_PenalizeCurrentConnection(CBot &bot)
+{
+	if (bot.currentAreaId < 0)
+		return false;
+
+	uint32_t cur = static_cast<uint32_t>(bot.currentAreaId);
+	size_t areaSteps = bot.plannedAreaPath.empty() ? 0 : bot.plannedAreaPath.size() - 1;
+	size_t count = std::min(bot.plannedConnPath.size(), areaSteps);
+	for (size_t i = 0; i < count; ++i)
+	{
+		if (bot.plannedAreaPath[i] != cur)
+			continue;
+
+		Nav::PenalizeConnection(bot.plannedConnPath[i]);
+
+		char msg[192];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s penalizing conn %u (area %u->%u) after a blocked detour, penalty %.1f\n",
+			bot.name, bot.plannedConnPath[i], cur, bot.plannedAreaPath[i + 1],
+			Nav::ConnectionPenalty(bot.plannedConnPath[i]));
+		SERVER_PRINT(msg);
+		return true;
+	}
+
+	return false;
+}
+
 void Bot_ResetNavPath(CBot &bot)
 {
 	ResetPath(bot);
@@ -1906,6 +1992,9 @@ void Bot_MoveNav(CBot &bot)
 	BotFire::Think(bot);
 
 	BotItems::RefreshMemos(bot);
+
+	if (BotBreak::Run(bot))
+		return;
 
 	if (BotItems::UpdateGoalItem(bot))
 	{
@@ -1989,7 +2078,7 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	PmSim::PmPhysics physics = BotDrivePhysics(pEdict);
+	PmSim::PmPhysics physics = Bot_DrivePhysics(pEdict);
 
 	size_t activationWp = NextActivation(bot);
 	while (activationWp < bot.waypoints.size() && TriggerTouched(bot, bot.waypoints[activationWp]))
@@ -2168,7 +2257,13 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	if (avoid.searchFailed && !avoid.hitRecedes && PenalizeCurrentConnection(bot))
+	if (avoid.breakTarget && BotBreak::Engage(bot, avoid.breakTarget))
+	{
+		RunIdleMove(bot, angles);
+		return;
+	}
+
+	if (avoid.searchFailed && !avoid.hitRecedes && Bot_PenalizeCurrentConnection(bot))
 		bot.nextRepathTime = gpGlobals->time;
 
 	bool planCrouch = wp->requiresCrouch

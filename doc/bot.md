@@ -2424,8 +2424,9 @@ Reactive obstacle handling, layered between the follower's steering decision and
 nav mesh only knows world geometry and the brush entities navgen carves, so anything else solid — a
 `cycler`, a monster, another player, a door that has swung out of its own doorway — is invisible to
 the planner: it routes straight through and the follower drives into it and stalls. `BotAvoid::Update`
-traces forward along the planned path each frame and answers with one of three moves: crouch-jump onto
-the obstacle, duck under it, or go around it.
+traces forward along the planned path each frame and answers with one of four moves: crouch-jump onto
+the obstacle, duck under it, go around it, or — when none of those work and the thing can be destroyed
+— break it. `BotAvoid` only ever *decides* to break; `bot_break.cpp` does it.
 
 ### Which entities get avoided
 
@@ -2469,6 +2470,28 @@ Note the carve set and the `FL_WORLDBRUSH` set are close but not identical. `fun
 sets it — so the mesh routes around them while a trace still sees them. That asymmetry is deliberate:
 the plan keeps its 16 units of clearance, and a bot that has drifted off the plan into one still gets
 the detour search rather than pushing at it.
+
+### Breaking through
+
+Breaking is decided in two places, and they answer different questions.
+
+**On the route.** The plan deliberately goes through the breakable: navgen split it into its own
+`NAV_AREA_BREAKABLE` and the planner emitted a `requiresBreak` waypoint and charged `openSeconds` for
+it. That is exactly the case `RouteExemptsHit` already skipped, so the avoid chain never ran at all and
+the bot simply walked into the brush and stalled. `RouteExemptsHit` now reports *why* it matched
+through a `wantsBreak` out-param, and a hit exempted for `requiresBreak` goes straight to
+`BotBreak::Engage`. No duck, no jump, no side search — the planner has already decided and already paid.
+
+**Off the route.** An unplanned breakable in the way, which is the ordinary avoidance path. Here
+breaking is the *last* resort, after `canJump`, `canDuck` and `RunSideSearch` have all failed:
+`TakeBreakTarget` sits on both non-receding failure paths in `RunSideSearch`, ahead of the
+`searchFailed` / `blockedUntil` assignment. That ordering matters in both directions. A crate the bot
+can hop onto gets hopped onto rather than smashed; and a breakable it genuinely cannot get past no
+longer reaches `PenalizeCurrentConnection` and `BotItems::OnBlocked`, because it is about to stop being
+in the way. A receding mover never gets here at all — `!recedes` guards both call sites.
+
+Neither path sets `searchFailed`, so `avoid=break` is the only kind that survives the end-of-frame
+stickiness test on its own terms rather than through `detourExpire` / `nextSearchTime`.
 
 ### The three maneuvers
 
@@ -2703,6 +2726,79 @@ The root cause of that particular loop was upstream, in navgen — the charger w
 all, so the goal point was inside it. `doc/navgen.md` has that half. This section is about why the
 runtime could not save itself from a bad goal, which is a property worth keeping fixed independently.
 
+## bot_break.cpp
+
+Owns the frame while the bot is destroying something, the same way `RunElevatorRide` and
+`RunChargerUse` do: aim, drive, buttons and `Bot_RunPlayerMove` all come from here, and `Bot_MoveNav`
+returns. It is called *before* the progress/stall/repath block so a repath can never interrupt a swing,
+and it refreshes `lastProgressTime` every frame so the 2 s stall detector and `BotItems::OnBlocked`
+stay off its back — without that the bot would throw away the goal it is two swings from reaching.
+
+### What counts as breakable
+
+`IsTarget` is `SOLID_BSP` or `SOLID_BBOX`, `MOVETYPE_PUSH` or `MOVETYPE_PUSHSTEP`, not a player or
+monster, `takedamage != DAMAGE_NO`, and `0 < health <= kBreakMaxHealth`. There is deliberately no
+classname test: `takedamage` and `health` are the properties that actually decide it, and dropping the
+classname picks up mod breakables for free. Nothing that is meant to be avoided qualifies — `func_wall`,
+the chargers and the doors are all `DAMAGE_NO`.
+
+`takedamage` is the exact inverse of `SF_BREAK_TRIGGER_ONLY`: `CBreakable::Spawn` sets `DAMAGE_NO` for
+that flag and `DAMAGE_YES` otherwise, which is the same distinction navgen makes with
+`kSfBreakTriggerOnly`.
+
+**The movetype test is what makes `SOLID_BBOX` safe, and `SOLID_BBOX` is not optional.**
+`func_pushable` spawns `SOLID_BBOX`, and with `SF_PUSH_BREAKABLE` (128) it runs `CBreakable::Spawn`
+first, so it is `DAMAGE_YES` and the map author has explicitly said it may be smashed. Excluding it
+wedges the bot: `test13_break` has two, and a bot that has just broken through the wall in front of
+them meets them with `no clear rejoin point closing 0 traces 0` — the padded box contains the bot's own
+position, exactly the shape of the charger livelock. But `SOLID_BBOX` alone would also admit live
+satchel charges, which spawn `DAMAGE_YES` with `health` 1. `MOVETYPE_PUSH`/`MOVETYPE_PUSHSTEP` is the
+line between a brush entity and a thrown prop: grenades and satchels are `MOVETYPE_BOUNCE`, tripmines
+`MOVETYPE_FLY`, monsters `MOVETYPE_STEP`.
+
+`health <= 100` is the request, and the numbers back it: `CBreakable::TakeDamage` doubles `DMG_CLUB`,
+so a crowbar lands `2 * plrDmgCrowbar` = 50 per swing, always the full-damage branch under
+`IsMultiplayer()`. A qualifying target dies in at most two swings, which is why no interaction with
+combat is needed — the whole engagement is under a second.
+
+**`takedamage != DAMAGE_NO` is necessary but not sufficient, and nothing can make it sufficient.**
+`TakeDamage` early-returns on `!IsBreakable()`, so `matUnbreakableGlass` keeps `DAMAGE_YES` and
+silently absorbs everything. `m_Material` is private data with no gamedata offset, so this cannot be
+tested up front. It is caught instead by watching `pev->health` fail to drop: after the first swing,
+`kBreakNoDamageGrace` seconds without the health moving aborts the attempt.
+
+### Giving up
+
+`Abort` fires on the no-damage grace or on `kBreakTimeout`, and does three things beyond restoring the
+weapon. It records the entity in `refused` for `kBreakRefuseTime` so the next frame does not re-engage
+the same brush. It calls `Bot_PenalizeCurrentConnection`, so the connection through the breakable gets
+more expensive and the planner routes around it. And it forces a repath to spend that penalty
+immediately. This is the whole answer to breakables navgen cannot classify offline — unbreakable glass
+and anything over 100 health are discovered once, at runtime, and then avoided.
+
+### The weapon
+
+`IGameProfile::MeleeWeapon()` names it; HLDM returns the crowbar. If the bot is not carrying it the
+active weapon is used instead and the bot shoots the thing, which is worse for ammo but never wrong.
+The switch is `FakeCmd::Run(pEdict, spec->classname)` rate-limited to `kBreakSelectInterval`, the same
+mechanism and the same interval `BotFire::Think` uses. `prevWeaponId` is captured at `Engage` and
+redrawn on both `Finish` and `Abort`; if the weapon is gone by then nothing happens and `BotFire`
+re-picks within half a second anyway.
+
+**`BotFire::Think` early-outs while a break is active**, and it has to. `Bot_RunPlayerMove`
+unconditionally ORs in `BotFire::Buttons`, and `Think` re-rolls a weapon at random every half second
+whenever it has a target — it would fight the melee switch for as long as the bot could see anyone.
+Idling it leaves `fire.mode == MODE_NONE`, so `Buttons` returns 0 and `BotBreak` is the only source of
+`IN_ATTACK`.
+
+### Aim and reach
+
+`CCrowbar::Swing` traces from `GetGunPosition()` along `v_forward` for 32 units, so reach is measured
+**eye to surface**, not eye to centre. The aim point is the eye clamped into the entity's
+`absmin`/`absmax` and then nudged `kBreakNudge` toward the centre, so the traceline ends inside the
+brush rather than grazing its face. A bot whose eye is already inside the box — which happens, the
+hull overlaps before the trace does — falls back to aiming at the centre.
+
 ## bot_manager.cpp
 
 ### Death and respawn
@@ -2768,7 +2864,10 @@ The pairs that carry the diagnosis:
   area it resolved to, and how many entries are in each memo. `item=-` with `hasGoal=1` is a
   commanded `crossbot_nav_goal`, not a gathered one. `charging=` appears only while the charger
   runner owns the frame, and carries the value it is watching.
-- `avoid=` with `hit=` — the last obstacle decision (`duck`, `jump`, `side`, `blocked`) and the
+- `breaking=` with `health=`, `swings=` and `for=` — present only while `BotBreak` owns the frame.
+  `health` not falling across two samples while `swings` climbs is the unbreakable-glass signature; the
+  no-damage grace will abort it a moment later.
+- `avoid=` with `hit=` — the last obstacle decision (`duck`, `jump`, `side`, `blocked`, `break`) and the
   classname it was made against, plus `duckLeft` on the crawl latch, the `gap`/`top` the decision was
   made from, and `detour=` for how many spliced detour waypoints are still ahead. `avoid=none hit=-`
   on a bot stalled against something means the trace never qualified a hit, which is a different bug

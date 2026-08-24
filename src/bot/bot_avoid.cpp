@@ -8,6 +8,7 @@
 
 #include "bot_avoid.h"
 #include "bot.h"
+#include "bot_break.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_query.h"
 #include "../nav/waypoint_plan.h"
@@ -125,7 +126,8 @@ namespace
 		return (PmSim::kJumpImpulse - sqrtf(disc)) / gravity;
 	}
 
-	bool RouteExemptsHit(const CBot &bot, const Nav::NavMesh &mesh, edict_t *hit, int solid)
+	bool RouteExemptsHit(const CBot &bot, const Nav::NavMesh &mesh, edict_t *hit, int solid,
+		bool *wantsBreak)
 	{
 		if (bot.goalItem.Is(hit))
 			return true;
@@ -151,13 +153,17 @@ namespace
 			const Nav::Area *area = Nav::FindAreaById(mesh, static_cast<uint32_t>(wp.targetAreaId));
 			if (!area)
 				continue;
-			if (AabbOverlap(area->mins, area->maxs, hit->v.absmin, hit->v.absmax))
-				return true;
+			if (!AabbOverlap(area->mins, area->maxs, hit->v.absmin, hit->v.absmax))
+				continue;
+
+			if (wantsBreak && wp.requiresBreak)
+				*wantsBreak = true;
+			return true;
 		}
 		return false;
 	}
 
-	bool HitQualifies(const CBot &bot, const Nav::NavMesh &mesh, edict_t *hit)
+	bool HitQualifies(const CBot &bot, const Nav::NavMesh &mesh, edict_t *hit, bool *wantsBreak = nullptr)
 	{
 		if (!hit)
 			return false;
@@ -170,7 +176,7 @@ namespace
 		if (solid == SOLID_BSP && (hit->v.flags & FL_WORLDBRUSH) != 0)
 			return false;
 
-		return !RouteExemptsHit(bot, mesh, hit, solid);
+		return !RouteExemptsHit(bot, mesh, hit, solid, wantsBreak);
 	}
 
 	bool WaypointIsFlagged(const Nav::Waypoint &wp)
@@ -482,6 +488,25 @@ namespace
 		return false;
 	}
 
+	bool TakeBreakTarget(CBot &bot, BotAvoid::Decision &out, edict_t *hit, const char *why)
+	{
+		if (!BotBreak::IsTarget(hit))
+			return false;
+
+		out.breakTarget = hit;
+		bot.avoid.lastKind = BotAvoid::AVOID_BREAK;
+
+		const Vector &origin = bot.pEdict->v.origin;
+
+		char msg[288];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s avoid breaking %s at (%.1f,%.1f,%.1f), %s, health %.0f\n",
+			bot.name, ClassOf(hit), origin.x, origin.y, origin.z, why, hit->v.health);
+		SERVER_PRINT(msg);
+
+		return true;
+	}
+
 	void RunSideSearch(CBot &bot, const Nav::NavMesh &mesh, BotAvoid::Decision &out, edict_t *hit,
 		const Vector &contact, const Vector &pathDir, float gap, float top, int hull, float hullHalf,
 		float now)
@@ -520,6 +545,9 @@ namespace
 		size_t d = bot.waypointIndex;
 		if (!PickDestination(bot, ctx, hit, origin, hullHalf, dest, d))
 		{
+			if (!recedes && TakeBreakTarget(bot, out, hit, "no clear rejoin point"))
+				return;
+
 			out.searchFailed = true;
 			out.hitRecedes = recedes;
 			state.lastKind = recedes ? BotAvoid::AVOID_FOLLOW : BotAvoid::AVOID_BLOCKED;
@@ -563,6 +591,9 @@ namespace
 			return;
 		}
 
+		if (!recedes && TakeBreakTarget(bot, out, hit, ok ? "too long" : "no way around"))
+			return;
+
 		out.searchFailed = true;
 		out.hitRecedes = recedes;
 		state.lastKind = recedes ? BotAvoid::AVOID_FOLLOW : BotAvoid::AVOID_BLOCKED;
@@ -590,6 +621,7 @@ const char *KindName(Kind kind)
 	case AVOID_SIDE: return "side";
 	case AVOID_FOLLOW: return "follow";
 	case AVOID_BLOCKED: return "blocked";
+	case AVOID_BREAK: return "break";
 	default: return "none";
 	}
 }
@@ -637,7 +669,17 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 		Vector end = origin + pathDir * lookahead;
 		g_engfuncs.pfnTraceHull(origin, end, dont_ignore_monsters, hull, pEdict, &tr);
 
-		if (tr.flFraction < 1.f && HitQualifies(bot, mesh, tr.pHit))
+		bool wantsBreak = false;
+		bool qualifies = tr.flFraction < 1.f && HitQualifies(bot, mesh, tr.pHit, &wantsBreak);
+
+		if (tr.flFraction < 1.f && !qualifies && wantsBreak && BotBreak::IsTarget(tr.pHit))
+		{
+			edict_t *hit = tr.pHit;
+			out.breakTarget = hit;
+			Record(state, AVOID_BREAK, hit, hit->v.absmin.z - feetZ, hit->v.absmax.z - feetZ);
+		}
+
+		if (qualifies)
 		{
 			edict_t *hit = tr.pHit;
 			float dist = Length2D(tr.vecEndPos - origin);
@@ -722,6 +764,9 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 	bool sideSticky = (state.lastKind == AVOID_SIDE || state.lastKind == AVOID_FOLLOW
 			|| state.lastKind == AVOID_BLOCKED)
 		&& (now < state.detourExpire || now < state.nextSearchTime);
+
+	if (state.lastKind == AVOID_BREAK && out.breakTarget)
+		sideSticky = true;
 
 	if (!out.duck && !out.jump && !out.suppressPlanCrouch && !state.jumpArmed && !sideSticky)
 	{

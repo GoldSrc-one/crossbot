@@ -23,6 +23,8 @@ public:
 
 	const char *AmmoEntity(int weaponId, WeaponAmmo pool) const override;
 
+	int MeleeWeapon() const override;
+
 	bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const override;
 };

@@ -56,6 +56,8 @@ public:
 
 	virtual const char *AmmoEntity(int weaponId, WeaponAmmo pool) const = 0;
 
+	virtual int MeleeWeapon() const = 0;
+
 	virtual bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const = 0;
 };
