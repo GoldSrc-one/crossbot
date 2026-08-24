@@ -37,6 +37,7 @@ struct State
 	Vector aimPoint;
 	Vector targetPoint;
 	float flightTime = 0.f;
+	float lastRange = -1.f;
 	bool aimValid = false;
 	bool aimLead = false;
 	bool aimHoming = false;
@@ -50,6 +51,7 @@ struct State
 
 	int pendingId = 0;
 	float nextSelectTime = 0.f;
+	float nextEquipTime = 0.f;
 
 	unsigned int rngState = 0;
 	bool rngSeeded = false;

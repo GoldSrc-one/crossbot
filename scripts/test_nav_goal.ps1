@@ -255,7 +255,7 @@ function Parse-SpawnsAndTargetsFromRcon {
 
 try {
     # --- 2. Wait for the boot cfg to have run, then read spawns/targets over RCON ---
-    # The cfg is 40 engine "wait"s then the commands; poll for its observable effect
+    # The cfg is exec'd over rcon at readiness; poll for its observable effect
     # rather than sleeping a fixed amount, which under parallel load was both too
     # long on small maps and too short on big ones (0 spawns parsed -> bogus FAIL).
     # An RCON reply can arrive split across UDP packets, and a loaded box can drop

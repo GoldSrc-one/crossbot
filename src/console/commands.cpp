@@ -4,16 +4,16 @@
 #include "commands.h"
 #include "../bot/bot.h"
 #include "../bot/bot_aim.h"
+#include "../bot/bot_dps.h"
 #include "../bot/bot_fire.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
 #include "../bot/bot_weapons.h"
 #include "../game/ent_handle.h"
 #include "../game/game_profile.h"
+#include "../game/give_item.h"
 #include "../game/hldm_weapons.h"
 #include "../nav/nav.h"
-
-#define SF_NORESPAWN (1 << 30)
 
 #if defined(_WIN32)
 #define CB_STRICMP _stricmp
@@ -129,22 +129,15 @@ namespace
 
 	bool EquipPlayer(edict_t *player, const char *classname)
 	{
-		edict_t *pent = g_engfuncs.pfnCreateNamedEntity(g_engfuncs.pfnAllocString(classname));
-		if (!pent || g_engfuncs.pfnIndexOfEdict(pent) == 0)
+		char msg[192];
+
+		if (!GiveItem::Give(player, classname))
 		{
-			char msg[160];
 			snprintf(msg, sizeof(msg), "CrossBot: the engine would not create '%s'\n", classname);
 			SERVER_PRINT(msg);
 			return false;
 		}
 
-		pent->v.origin = player->v.origin;
-		pent->v.spawnflags |= SF_NORESPAWN;
-
-		gpGamedllFuncs->dllapi_table->pfnSpawn(pent);
-		gpGamedllFuncs->dllapi_table->pfnTouch(pent, player);
-
-		char msg[192];
 		snprintf(msg, sizeof(msg), "CrossBot: gave %s to %s\n", classname, PlayerNameOf(player));
 		SERVER_PRINT(msg);
 		return true;
@@ -198,6 +191,13 @@ namespace
 	{
 		BotManager::PrintFireStatus();
 	}
+
+#ifdef CROSSBOT_DPS
+	void Cmd_CrossBotDpsStatus()
+	{
+		BotDps::PrintStatus();
+	}
+#endif
 
 	void Cmd_CrossBotFirePin()
 	{
@@ -576,6 +576,9 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
+#ifdef CROSSBOT_DPS
+	ADD_SERVER_COMMAND("crossbot_dps_status", Cmd_CrossBotDpsStatus);
+#endif
 }
 
 }

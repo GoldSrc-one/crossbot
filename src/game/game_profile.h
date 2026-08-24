@@ -54,6 +54,8 @@ public:
 
 	virtual const WeaponSpec *GetWeaponSpec(int id) const = 0;
 
+	virtual const char *AmmoEntity(int weaponId, WeaponAmmo pool) const = 0;
+
 	virtual bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const = 0;
 };

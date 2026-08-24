@@ -6,9 +6,11 @@
 #include "bot_fire.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_dps.h"
 #include "bot_weapons.h"
 #include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
+#include "../game/give_item.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
 
@@ -19,6 +21,7 @@ namespace
 	constexpr float kHitscanRange = 8192.f;
 
 	constexpr float kSelectInterval = 0.5f;
+	constexpr float kEquipInterval = 0.5f;
 
 	constexpr float kMaxFlightTime = 1.5f;
 
@@ -164,6 +167,27 @@ namespace
 		if (m.fire != FIRE_CHARGE || m.chargeFull <= 0.f)
 			return per;
 		return per * (1 + static_cast<int>(m.chargeFull / kChargeBurn));
+	}
+
+	bool AmmoReady(const BotInventory &inv, const BotWeapon &w, const WeaponMode &m)
+	{
+		int need = ShotCost(m);
+
+		switch (m.ammo)
+		{
+		case AMMO_NONE:
+			return true;
+		case AMMO_CLIP:
+			if (w.clip >= need)
+				return true;
+			return AmmoCount(inv, w.primaryAmmoType) > 0;
+		case AMMO_PRIMARY:
+			return AmmoCount(inv, w.primaryAmmoType) >= need;
+		case AMMO_SECONDARY:
+			return AmmoCount(inv, w.secondaryAmmoType) >= need;
+		}
+
+		return false;
 	}
 
 	float ModeSpeed(const CBot &bot, const WeaponMode &m)
@@ -487,6 +511,7 @@ namespace
 				if (fired)
 				{
 					++fire.shots;
+				BotDps::NoteShot(bot, w.id, fire.mode);
 					if (pressedLead)
 						++fire.leadShots;
 					if (pressedArc)
@@ -497,12 +522,14 @@ namespace
 			if (fire.lastChargeState != 0 && w.chargeState == 0)
 			{
 				++fire.shots;
+				BotDps::NoteShot(bot, w.id, fire.mode);
 				++fire.chargeShots;
 			}
 
 			if (fire.lastThrowStart != 0.f && w.throwStart == 0.f)
 			{
 				++fire.shots;
+				BotDps::NoteShot(bot, w.id, fire.mode);
 				++fire.throwShots;
 			}
 		}
@@ -741,6 +768,8 @@ bool Enabled()
 
 void Pin(const char *classname, int mode)
 {
+	BotDps::PinChange();
+
 	g_pinMode = mode;
 
 	if (!classname || !classname[0])
@@ -862,29 +891,74 @@ bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, 
 			return false;
 	}
 
-	const BotInventory &inv = bot.inventory;
-	int need = ShotCost(m);
-
-	switch (m.ammo)
-	{
-	case AMMO_NONE:
-		return true;
-	case AMMO_CLIP:
-		if (w.clip >= need)
-			return true;
-		return AmmoCount(inv, w.primaryAmmoType) > 0;
-	case AMMO_PRIMARY:
-		return AmmoCount(inv, w.primaryAmmoType) >= need;
-	case AMMO_SECONDARY:
-		return AmmoCount(inv, w.secondaryAmmoType) >= need;
-	}
-
-	return false;
+	return AmmoReady(bot.inventory, w, m);
 }
 
 void Reset(CBot &bot)
 {
 	bot.fire = State();
+}
+
+static void PinEquip(CBot &bot)
+{
+	if (!g_pin[0] || !g_pGameProfile)
+		return;
+
+	State &fire = bot.fire;
+	if (gpGlobals->time < fire.nextEquipTime)
+		return;
+	fire.nextEquipTime = gpGlobals->time + kEquipInterval;
+
+	if (g_pGameProfile->IsDead(bot.pEdict))
+		return;
+
+	const BotInventory &inv = bot.inventory;
+	const BotWeapon *held = nullptr;
+	const WeaponSpec *spec = nullptr;
+
+	for (int i = 0; i < inv.count; ++i)
+	{
+		const WeaponSpec *s = g_pGameProfile->GetWeaponSpec(inv.weapons[i].id);
+		if (!s || !s->classname || strcmp(s->classname, g_pin) != 0)
+			continue;
+		held = &inv.weapons[i];
+		spec = s;
+		break;
+	}
+
+	if (!held)
+	{
+		GiveItem::Give(bot.pEdict, g_pin);
+		return;
+	}
+
+	Mode order[2] = { MODE_PRIMARY, MODE_SECONDARY };
+	int tries = 2;
+
+	if (g_pinMode == 1)
+	{
+		tries = 1;
+	}
+	else if (g_pinMode == 2)
+	{
+		order[0] = MODE_SECONDARY;
+		tries = 1;
+	}
+
+	bool zoomed = bot.pEdict->v.fov != 0.f;
+
+	for (int i = 0; i < tries; ++i)
+	{
+		const WeaponMode *m = ModeOf(*spec, order[i], zoomed);
+		if (!m || !Supported(*m))
+			continue;
+		if (AmmoReady(inv, *held, *m))
+			return;
+
+		const char *give = g_pGameProfile->AmmoEntity(held->id, m->ammo);
+		GiveItem::Give(bot.pEdict, give ? give : g_pin);
+		return;
+	}
 }
 
 void Think(CBot &bot)
@@ -903,6 +977,8 @@ void Think(CBot &bot)
 	}
 
 	SeedFire(bot);
+
+	PinEquip(bot);
 
 	const BotInventory &inv = bot.inventory;
 	const BotWeapon *active = (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
@@ -967,6 +1043,7 @@ void Think(CBot &bot)
 
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
 	float dist = (basePoint - eye).Length();
+	fire.lastRange = dist;
 	float rise = basePoint.z - eye.z;
 
 	if (active)
@@ -1190,10 +1267,20 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 		(IsArc(*m) ? ArcOnTarget(bot, angles, *m, eye) : RayOnTarget(bot, angles, *m, eye));
 
 	if (charge)
-		return ChargeButtons(fire, *m, onTarget);
+	{
+		unsigned short buttons = ChargeButtons(fire, *m, onTarget);
+		if (buttons != 0)
+			BotDps::NotePress(bot);
+		return buttons;
+	}
 
 	if (tap)
-		return TapButtons(fire, w, onTarget);
+	{
+		unsigned short buttons = TapButtons(fire, w, onTarget);
+		if (buttons != 0)
+			BotDps::NotePress(bot);
+		return buttons;
+	}
 
 	if (!onTarget)
 		return 0;
@@ -1208,6 +1295,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	fire.pressed = true;
 	fire.pressedLead = fire.aimLead;
 	fire.pressedArc = fire.aimArc;
+	BotDps::NotePress(bot);
 	return AttackButton(fire.mode);
 }
 

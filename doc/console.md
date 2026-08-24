@@ -69,7 +69,17 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   mode, so one that spawned with a glock never voluntarily picks up anything else; and the random pick
   discards the mode it chose, so a weapon whose primary works never reaches its secondary. Without the
   classname the projectile path is unreachable from the console; without the mode the gauss charge is.
-  With no argument it reports both
+  With no argument it reports both.
+
+  **The pin also equips.** While one is set, a bot that does not carry the pinned weapon is given it,
+  and one that carries it with the pinned mode out of ammo is given ammo for that mode
+  (`IGameProfile::AmmoEntity`, see `doc/game.md`). It gives only when the mode is *unusable*, never on
+  a timer, so reloading and clip depletion stay real and only permanent starvation is removed — which
+  is what a DPS measurement needs. Before this, an RPG phase measured one rocket per bot per life.
+
+- `crossbot_dps_status` — rows written to the DPS log so far, split by kind, plus the running gaze
+  and damage totals. The one line `scripts/measure_dps.ps1` polls between phases. Exists only in a
+  `CROSSBOT_DPS` build; see `doc/bot.md`, `bot_dps.cpp`
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
@@ -110,6 +120,15 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 - `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
   `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean
   the test never settles at all
+- `crossbot_dps` — the DPS measurement layer: gaze clocks, shot records and the damage rows the
+  `CBasePlayer::TakeDamage` hook feeds. Default **0**, because it writes a file. Turning it on
+  mid-map is fine; the gaze counters start from that moment. Both this and `crossbot_dps_log` exist
+  only in a build configured with `-DCROSSBOT_DPS=ON` — a normal build has no such cvars, and no
+  hook
+- `crossbot_dps_log` — where the raw CSV goes, resolved against the HLDS working directory like
+  `crossbot_trace_path`. Opened in **append** mode, so re-running a sweep accumulates samples rather
+  than replacing them. Every parallel server needs its own path
+
 - `crossbot_aim_quantum` — degrees of hand travel per mouse count, clamped [0, 5]. Default 0.4476, which is
   `atan(1/128)`: one unit of miss per 128 units of range at fov 90, so 32 units at 4096. This is the value
   itself, not a scale. It is in **hand** space, so the angular quantum is `value * fov / 90` and zooming

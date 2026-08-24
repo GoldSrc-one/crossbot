@@ -136,6 +136,47 @@ const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
 	return HLDM_WeaponSpec(id);
 }
 
+const char *CHLDMProfile::AmmoEntity(int weaponId, WeaponAmmo pool) const
+{
+	const WeaponSpec *spec = HLDM_WeaponSpec(weaponId);
+	if (!spec || !spec->classname || pool == AMMO_NONE)
+		return NULL;
+
+	static const struct
+	{
+		const char *weapon;
+		const char *clip;
+		const char *primary;
+		const char *secondary;
+	} kAmmo[] = {
+		{ "weapon_9mmhandgun",  "ammo_9mmclip",   NULL,               NULL },
+		{ "weapon_357",         "ammo_357",       NULL,               NULL },
+		{ "weapon_9mmAR",       "ammo_9mmAR",     NULL,               "ammo_ARgrenades" },
+		{ "weapon_crossbow",    "ammo_crossbow",  NULL,               NULL },
+		{ "weapon_shotgun",     "ammo_buckshot",  NULL,               NULL },
+		{ "weapon_rpg",         "ammo_rpgclip",   NULL,               NULL },
+		{ "weapon_gauss",       NULL,             "ammo_gaussclip",   NULL },
+		{ "weapon_egon",        NULL,             "ammo_egonclip",    NULL },
+		{ "weapon_handgrenade", NULL,             "weapon_handgrenade", NULL },
+		{ "weapon_snark",       NULL,             "weapon_snark",     NULL },
+		{ "weapon_tripmine",    NULL,             "weapon_tripmine",  NULL },
+		{ "weapon_satchel",     NULL,             "weapon_satchel",   "weapon_satchel" },
+	};
+
+	for (size_t i = 0; i < sizeof(kAmmo) / sizeof(kAmmo[0]); ++i)
+	{
+		if (strcmp(kAmmo[i].weapon, spec->classname) != 0)
+			continue;
+		if (pool == AMMO_CLIP)
+			return kAmmo[i].clip;
+		if (pool == AMMO_PRIMARY)
+			return kAmmo[i].primary;
+		return kAmmo[i].secondary;
+	}
+
+	return NULL;
+}
+
 bool CHLDMProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 	float &speed) const
 {

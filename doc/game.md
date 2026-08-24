@@ -22,6 +22,19 @@ maps that way round rather than the reverse on purpose — the pitch is what the
 the fire gate re-measures, so nothing anywhere has to invert the game's own remap. See
 `WPN_Q_THROW_ARC` under `weapon_spec.h`.
 
+
+`AmmoEntity(weaponId, pool)` is the mapping from a weapon and one of its ammo pools to the entity
+classname that refills it, and it is here for the same reason `ThrowLaunch` is: `src/bot/` must not
+name `ammo_ARgrenades`. It exists because the pin now equips (see `bot_fire.cpp` in `doc/bot.md`), and
+"give this bot ammo for the mode it is pinned to" cannot be answered from `WeaponSpec` — the table
+records which *pool* a mode spends, not which pickup fills it, and the two are not one-to-one. It
+returns null where no entity fills that pool, which is the crowbar and the hornetgun's self-regenerating
+hive.
+
+Three rows in `CHLDMProfile`'s table are the reason it is a table and not a prefix rule: MP5 secondary
+takes `ammo_ARgrenades` while its clip takes `ammo_9mmAR`; the gauss and the egon share uranium under
+two different classnames; and the handgrenade, snark, tripmine and satchel are their own ammo, so the
+mapping returns the weapon classname back.
 ### ItemKind
 The classification the gather goals key off. `ITEM_WEAPON`/`ITEM_AMMO`/`ITEM_PICKUP` are touched to
 collect; `ITEM_HEALTHCHARGER`/`ITEM_RECHARGE` are used with `IN_USE` and never touched at all, which
@@ -115,6 +128,21 @@ The rule is otherwise unchanged, and this is the only exception. `CRpg::m_fSpotA
 below the counter and is *not* requested: the same gate would make it safe, but see "The deployables"
 below for why nothing wants it.
 
+
+### Vtable indices come from the same file, through a second table
+
+`virtualFunctions` sits alongside `fields` in every class of the JSON, mapping a full C++ signature to
+a slot number. `kVirtuals` requests from it exactly as `kRequests` requests from `fields`, with the
+one difference that the value is a bare integer rather than an `{ "offset": N }` object, and with the
+same `Fatal`-on-missing contract. Today it has a single entry, behind `#ifdef CROSSBOT_DPS`:
+`CBaseEntity::"TakeDamage(entvars_t *, entvars_t *, float, int)"`, index **11**.
+
+It is requested from `CBaseEntity` and used to patch **`CBasePlayer`**'s vtable, which is correct
+rather than sloppy. A derived class lists only the virtuals it introduces — `CBasePlayer`'s own start
+at 125 — because an override replaces the base class's slot instead of appending a new one. The chain
+`CBasePlayer -> CBaseMonster -> CBaseToggle -> CBaseAnimating -> CBaseDelay -> CBaseEntity` is single
+and non-virtual throughout, so slot 11 holds `TakeDamage` for every one of them.
+
 ### Every failure is fatal
 
 A wrong offset is a wild read into another object's memory, which corrupts silently and crashes
@@ -181,6 +209,83 @@ it: a truncated classname is indistinguishable from a working one at the call si
 
 `Run` returns whether it dispatched, not whether the game did anything. Nothing downstream should
 trust it as confirmation — `BotFire` watches `BotInventory::activeIndex` change instead.
+
+## take_damage_hook.cpp
+
+The one detour in the codebase, and the only one that has ever been justified. Everything else reads
+the game DLL's state through gamedata offsets; this patches a function pointer. It exists entirely
+behind `#ifdef CROSSBOT_DPS`, so a normal build does not contain it at all, and its Windows body is
+further guarded by `#if defined(_WIN32)` — elsewhere `Install` prints a line and returns false.
+
+### Why a hook here and nowhere else
+
+`bot_dps.cpp` needs the attacker, the inflictor, the damage type and the exact pre-armor damage of
+every hit. All four are arguments of `CBasePlayer::TakeDamage`, and none of them survives intact
+anywhere a poller can reach: `pev->dmg_take` is post-armor, `dmg_inflictor` is last-writer-wins within
+a frame and cleared by `UpdateClientData`, and `CGrenade::Explode` nulls `pev->owner` before it does
+any damage at all. Reconstructing them from outside took a projectile registry, a raw-damage offset
+and three rounds of debugging, and it still under-reported. Reading the arguments takes none of that.
+
+### Getting at the vtable without a player
+
+`Install` creates a throwaway entity: `pfnCreateNamedEntity(pfnAllocString("player"))`. The engine
+looks up the exported `player` function that `LINK_ENTITY_TO_CLASS(player, CBasePlayer)` generates,
+which is `GetClassPtr((CBasePlayer *)pev)` — that allocates private data and placement-news a real
+`CBasePlayer` into it, so the vptr is set. `Spawn` is never called, the entity touches nothing, and
+`pfnRemoveEntity` frees it immediately after the vtable pointer has been read.
+
+Two facts make this safe rather than clever. `ED_Alloc` searches from `maxclients + 1`, so the probe
+can never land in a client slot. And `GameData::Load` already asserts `CBaseEntity::pev == 4`, which
+is exactly the evidence that the vptr occupies object offset 0.
+
+Hooking at `ServerActivate` rather than waiting for a real player means the hook is in place before
+anything can take damage. It is idempotent: the vtable belongs to `hl.dll`, which stays mapped across
+map changes, so a second `Install` is a no-op.
+
+### The calling convention
+
+MSVC `__thiscall` passes `this` in ECX and everything else on the stack, callee-cleaned. `__fastcall`
+passes the first two integer arguments in ECX and EDX and the rest on the stack, callee-cleaned. So a
+free `__fastcall` function whose second parameter is an unused placeholder is byte-for-byte
+compatible, and that is what the detour is. `float` is stack-passed under both, so `flDamage` needs no
+special handling.
+
+```cpp
+typedef int (__fastcall *TakeDamageFn)(void *self, void *edx, entvars_t *pevInflictor,
+    entvars_t *pevAttacker, float flDamage, int bitsDamageType);
+```
+
+The vtable lives in a read-only section of `hl.dll`, so writing the slot means `VirtualProtect` to
+`PAGE_READWRITE`, swap, and `VirtualProtect` back to the original protection. `Remove` restores the
+saved pointer the same way and runs from `ServerDeactivate`.
+
+### The original is called first
+
+The detour calls through to `CBasePlayer::TakeDamage` and reports **only when it returns nonzero**.
+The function returns 0 for godmode, for `takedamage == DAMAGE_NO` and for a `FPlayerCanTakeDamage`
+veto, and reporting before the call would log damage that was never dealt. `flDamage` as passed in is
+untouched by that call — the armor block operates on the callee's own copy — so the reported figure
+is the raw pre-armor number.
+
+Edicts come back through `pev->pContainingEntity`, with the victim's `pev` read from the object at
+`g_offsets.pev`. A null attacker edict is normal and means world damage.
+
+## give_item.cpp
+
+`GiveItem::Give(player, classname)` is the game's own `give`, four calls long: `pfnCreateNamedEntity`,
+origin set to the player's, `SF_NORESPAWN` raised, `pfnSpawn`, `pfnTouch`. There is no
+`GiveNamedItem` anywhere in the plugin and there should not be — that is a `CBasePlayer` method behind
+`pvPrivateData` with no offset for it, whereas spawn-and-touch goes through the DLL API Metamod
+already hands us and works for any classname the mod defines, ammo boxes included.
+
+It lives in its own file rather than in `commands.cpp` because it now has two callers with opposite
+needs: `crossbot_equip` announces every give on the console, and the pin's auto-equip fires every half
+second for six bots and must announce nothing. So `Give` returns a bool and prints nothing, and the
+console command keeps its own message at the call site.
+
+`SF_NORESPAWN` is `1 << 30` and is set so the spawned pickup does not become a permanent extra item on
+the map. It is defined locally rather than pulled from the SDK header because the plugin does not
+include `weapons.h`.
 
 ## ent_handle.h
 

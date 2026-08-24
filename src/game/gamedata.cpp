@@ -55,6 +55,14 @@ const Request kRequests[] = {
 
 constexpr size_t kRequestCount = sizeof(kRequests) / sizeof(kRequests[0]);
 
+#ifdef CROSSBOT_DPS
+const Request kVirtuals[] = {
+	{ "CBaseEntity", "TakeDamage(entvars_t *, entvars_t *, float, int)", CB_OFF(vt_TakeDamage) },
+};
+
+constexpr size_t kVirtualCount = sizeof(kVirtuals) / sizeof(kVirtuals[0]);
+#endif
+
 int *SlotPtr(size_t slot)
 {
 	return reinterpret_cast<int *>(reinterpret_cast<char *>(&g_offsets) + slot);
@@ -167,6 +175,11 @@ void Load()
 	for (size_t r = 0; r < kRequestCount; ++r)
 		*SlotPtr(kRequests[r].slot) = -1;
 
+#ifdef CROSSBOT_DPS
+	for (size_t r = 0; r < kVirtualCount; ++r)
+		*SlotPtr(kVirtuals[r].slot) = -1;
+#endif
+
 	char gamedir[256] = { 0 };
 	g_engfuncs.pfnGetGameDir(gamedir);
 
@@ -230,6 +243,29 @@ void Load()
 
 			*SlotPtr(kRequests[r].slot) = value;
 		}
+
+#ifdef CROSSBOT_DPS
+		int virtuals = -1;
+		for (size_t r = 0; r < kVirtualCount; ++r)
+		{
+			if (!TokEq(base, toks[key], kVirtuals[r].cls))
+				continue;
+
+			if (virtuals < 0)
+			{
+				virtuals = FindMember(toks, base, key + 1, "virtualFunctions");
+				if (virtuals < 0)
+					break;
+			}
+
+			int entry = FindMember(toks, base, virtuals, kVirtuals[r].field);
+			int value = 0;
+			if (entry < 0 || !TokInt(base, toks[entry], value))
+				continue;
+
+			*SlotPtr(kVirtuals[r].slot) = value;
+		}
+#endif
 	}
 
 	for (size_t r = 0; r < kRequestCount; ++r)
@@ -238,11 +274,26 @@ void Load()
 			Fatal("%s has no offset for %s::%s", path, kRequests[r].cls, kRequests[r].field);
 	}
 
+#ifdef CROSSBOT_DPS
+	for (size_t r = 0; r < kVirtualCount; ++r)
+	{
+		if (*SlotPtr(kVirtuals[r].slot) < 0)
+			Fatal("%s has no vtable index for %s::%s", path, kVirtuals[r].cls, kVirtuals[r].field);
+	}
+#endif
+
 	if (g_offsets.pev != 4)
 		Fatal("%s says CBaseEntity::pev is at %d, but the plugin assumes 4", path, g_offsets.pev);
 
+#ifdef CROSSBOT_DPS
+	const int virtualCount = static_cast<int>(kVirtualCount);
+#else
+	const int virtualCount = 0;
+#endif
+
 	char msg[600];
-	snprintf(msg, sizeof(msg), "CrossBot: loaded gamedata %s (%d fields).\n", path, static_cast<int>(kRequestCount));
+	snprintf(msg, sizeof(msg), "CrossBot: loaded gamedata %s (%d fields, %d vtable indices).\n",
+		path, static_cast<int>(kRequestCount), virtualCount);
 	SERVER_PRINT(msg);
 }
 

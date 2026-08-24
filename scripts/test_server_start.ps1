@@ -4,10 +4,9 @@ param(
     # Non-default port -- avoids colliding with any other HLDS instance
     # that might already be running on the machine's default 27015.
     [int]$Port = 29015,
-    # Console commands to run once the map has finished loading. Implemented
-    # via a generated cfg file exec'd after +map, with a "wait" buffer first
-    # -- game.cfg/server.cfg run too early (before the level is active), and
-    # a per-map cfg wasn't observed to run at all on this dedicated server.
+    # Console commands to run once the map has finished loading. Written to a
+    # generated cfg and exec'd over rcon after readiness -- never from the
+    # command line, and never behind "wait". See the note below.
     [string[]]$Commands = @(),
     # Unique config filename (default: _crossbot_autotest.cfg). Use map-specific
     # name to avoid collisions when running parallel tests on different maps.
@@ -52,9 +51,7 @@ $launchArgs += @("+map", $Map)
 
 if ($Commands.Count -gt 0) {
     $cfgPath = Join-Path $HLDSDir "valve\$ConfigName"
-    $waits = (@("wait") * 40) -join "`n"
-    ($waits + "`n" + ($Commands -join "`n") + "`n") | Set-Content -Path $cfgPath -NoNewline
-    $launchArgs += @("+exec", $ConfigName)
+    (($Commands -join "`n") + "`n") | Set-Content -Path $cfgPath -NoNewline
 }
 
 # -NoNewWindow plus redirection is what keeps the server off the screen entirely.
@@ -76,6 +73,10 @@ while ((Get-Date) -lt $deadline) {
         if ($head -match "player server started") { $ready = $true; break }
     }
     Start-Sleep -Milliseconds 200
+}
+
+if ($ready -and $Commands.Count -gt 0) {
+    & "$PSScriptRoot\rcon.ps1" -Port $Port -Command "exec $ConfigName" | Out-Null
 }
 
 $proc.Refresh()

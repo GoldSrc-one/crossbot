@@ -426,6 +426,129 @@ crossfire. `targets` falling with them would mean the change is suppressing enga
 to `kPitchLimit`, and `BeginTest` clamps the target the same way, so the view and the target are both pinned
 at 89 and the error is identically zero. That row's settle time is still meaningful; its rest error is not.
 
+## scripts/measure_dps.ps1 / measure_dps_all.ps1
+
+Gathers the raw material for `getDPS(weapon, distance)`. `measure_dps.ps1` boots one server on one
+map and walks the whole weapon table a pin at a time; `measure_dps_all.ps1` generates the meshes and
+fans the children out. Neither asserts anything about a weapon — the plugin writes the rows, the
+scripts sequence the phases, and the fit happens offline once there is enough data to fit.
+
+**The plugin must be built with `-DCROSSBOT_DPS=ON`.** The whole measurement layer, the
+`CBasePlayer::TakeDamage` hook included, is behind that `#ifdef`; a normal build does not even
+register `crossbot_dps`, and a sweep against one gathers nothing. The option is cached in
+`build/CMakeCache.txt`, so it survives until explicitly set OFF, and a measurement build announces
+itself at load.
+
+**Nav generation is stage one and not optional.** Only `crossfire.nav` was ever deployed; the other
+eighteen stock DM maps have no mesh at all, and a bot that cannot move measures nothing. Every map is
+generated and every map is kept regardless of what navgen reports about it, but the manifest records
+areas, connections, gateless connections and ill-formed areas per map, so a map whose ranges look
+suspiciously short can be checked against its mesh rather than guessed at.
+
+**One server per map, not one per (map, weapon).** The matrix is the same either way. A phase is sixty
+seconds and an HLDS boot is nearly a third of that, so cycling seventeen pins inside one server pays
+the boot nineteen times rather than three hundred and twenty-three.
+
+**Seventeen phases, eighteen modes.** The phase list is every mode `BotFire::Supported` accepts, which
+leaves out the tripmine, the satchel and the three toggle modes. The crossbow is one phase producing
+two modes: `primaryZoomed` is a hitscan with a different aim requirement and no pin reaches it
+separately, so the phases cannot split it and the `zoomed` column on each `shot` row does.
+
+**Every phase kills its bots first.** The pin reaches selection, and selection alone does not isolate a
+phase: a commit — a gauss charge, a thrown grenade, a rocket in the air — bypasses `ModeUsable` by
+design and would otherwise discharge into the next weapon's rows. Same reason `test_fire.ps1` does it.
+
+The phase sequence is `crossbot_fire_pin off` → `crossbot_kill` → settle → `crossbot_fire_pin <cls>
+[mode]`. The `off` matters as much as the kill: `BotFire::Pin` zeroes the gaze counters, so it is
+what closes
+the previous phase's denominator before the next weapon starts filling it.
+
+### MaxParallel 6, and why not 12
+
+Six is the measured ceiling recorded above and in `AGENTS.md`, past which box load alone changes bot
+behaviour. It matters more here than in the nav sweep: the aim model is frame-rate coupled — the hand
+quantum, the impulse floor and the accel clamp all step per frame — so a starved server measures a
+*worse weapon*, not a slower test. That failure would look exactly like a real result.
+
+Every `meta` row carries the server's achieved average frame time for that window, so the distortion is
+visible in the data rather than inferred. An idle six-way run reads about 7-8 ms.
+
+### Sixty seconds is a coarse sample, deliberately
+
+A 6-bot 30s phase on crossfire produces on the order of 130-200 shots and 50-130 damage events, so a
+60s phase over nineteen maps gives a few thousand samples per weapon — enough for a coarse range
+histogram, not enough to fit a confident curve in the long-range bins where events are rarest.
+
+The log is opened in **append** mode and the sweep is resumable for exactly this reason. Running the
+whole thing again accumulates rather than replaces, and `-Force` is what re-does a map that already
+carries a full set of phase `meta` rows.
+
+Three weapons are sparse or awkward by nature, and none of them is a bug:
+
+- **Crowbar** has `range 32`. Expect a handful of samples per map.
+- **Handgrenade** reaches about 550 units, so it depends entirely on bots wandering close.
+- **Snark and RPG smear in range.** Damage is credited at the distance where it *lands* while the
+  decision was made at the distance it was thrown from, and a snark can bite fifteen seconds and a
+  thousand units later.
+
+### The `wait` trap that zeroed every skill value
+
+Worth knowing because it silently falsified results for a long time and left no failure anywhere.
+
+`test_server_start.ps1` used to deliver its boot commands by writing them into a cfg preceded by
+forty `wait` commands and exec'ing it from the command line. The waits were there because the
+commands need the level active, and a cfg exec'd at `+exec` time runs before `GameDLLInit` has even
+registered the cvars.
+
+But `wait` stalls the **whole** engine command buffer for a frame, not just the rest of that cfg.
+`GameDLLInit` queues `exec skill.cfg` into that same buffer, so forty waits pushed it forty frames
+down — past the map spawn, and therefore past
+`CHalfLifeMultiplay::RefreshSkillData`, which snapshots every `sk_*` cvar into `gSkillData` once and
+never runs again. Every value it reads was still at its registered default of `"0"`.
+
+The server says so plainly, and grepping any run for it is the check:
+
+```
+GAME SKILL LEVEL:1
+** GetSkillCVar Got a zero for sk_snark_dmg_bite1 **      (and 68 more)
+...four hundred lines later...
+execing skill.cfg
+```
+
+A healthy boot has `execing skill.cfg` **above** `Spawn Server`, and no `Got a zero` lines at all.
+
+It only reached two weapons, because `CHalfLifeMultiplay::RefreshSkillData` hardcodes a multiplayer
+override for every other one — crowbar 25, 9mm 12, .357 40, MP5 12, M203 100, buckshot 20, crossbow
+20, RPG 120, egon 20/10, handgrenade 100, satchel 120, tripmine 150, hornet 10. The two it forgets
+are the **snark** (`snarkDmgBite`, `snarkDmgPop`, `snarkHealth`) and **gauss primary**
+(`plrDmgGauss`; the charged secondary computes `200 * charge` in code and was never affected). Both
+measured a flat zero while every other weapon measured correctly, which is exactly the shape of
+result that gets believed.
+
+The fix is that the cfg is no longer exec'd from the command line at all: it is written without
+waits and exec'd over rcon once the log reports `player server started`. Nothing else stalls the
+buffer, so skill.cfg keeps its normal slot. A plain `hlds +map crossfire` never had the problem.
+
+### Reading the raw rows
+
+Row formats are in `doc/bot.md` under `bot_dps.cpp`. The file is opened in **append** mode, so a
+schema change means deleting the old CSVs on **both** sides — `nav_debug/dps/` and
+`hlds/valve/addons/crossbot/dps/` — or the two layouts interleave in one file and nothing complains.
+
+Three things to do before computing any ratio:
+
+- **Drop rows whose attacker is `?`.** Those are falls and other world damage, and they carry
+  `seconds` 0.
+- **Drop rows whose attacker equals its victim.** That is the splash rule working, and it is real
+  damage, but it is not damage delivered to an enemy.
+- **Remember `dist` is the range at impact, not at the press.** For hitscan the two are the same; for
+  a rocket or a snark they are not, and the `shot` rows carry the press range if that is what a
+  selection layer should be keyed on.
+
+A `dmg` row with `seconds` 0 and a real attacker is damage delivered without the attacker ever having
+had the victim in its sights — a grenade around a corner, or splash. It is real damage with no
+denominator, so it belongs in the numerator of a pooled ratio but cannot form a per-row DPS.
+
 ## Sweeping a change
 
 Three different things can move, and each needs its own sweep. Running the wrong one is how a change

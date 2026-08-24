@@ -26,12 +26,22 @@ struct GameOffsets
 	int plr_pActiveItem;
 	int plr_rgpPlayerItems;
 	int plr_rgAmmo;
+
+#ifdef CROSSBOT_DPS
+	int vt_TakeDamage;
+#endif
 };
 
 extern GameOffsets g_offsets;
 
 namespace GameData
 {
+	template <typename T>
+	inline T Peek(void *base, int offset)
+	{
+		return *reinterpret_cast<T *>(reinterpret_cast<char *>(base) + offset);
+	}
+
 	void Load();
 
 	void Fatal(const char *fmt, ...);

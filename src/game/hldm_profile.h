@@ -21,6 +21,8 @@ public:
 
 	const WeaponSpec *GetWeaponSpec(int id) const override;
 
+	const char *AmmoEntity(int weaponId, WeaponAmmo pool) const override;
+
 	bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const override;
 };

@@ -85,6 +85,22 @@ cvar_t g_aimImpulseCvar = {
 	FCVAR_SERVER
 };
 
+#ifdef CROSSBOT_DPS
+
+cvar_t g_dpsCvar = {
+	"crossbot_dps",
+	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_dpsLogCvar = {
+	"crossbot_dps_log",
+	"valve/addons/crossbot/dps/dps.csv",
+	FCVAR_SERVER
+};
+
+#endif
+
 void GameDLLInit()
 {
 	GameData::Load();
@@ -102,6 +118,11 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimQuantumCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimImpulseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_fireCvar);
+#ifdef CROSSBOT_DPS
+	g_engfuncs.pfnCvar_RegisterVariable(&g_dpsCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_dpsLogCvar);
+	SERVER_PRINT("CrossBot: this is a CROSSBOT_DPS measurement build.\n");
+#endif
 	RETURN_META(MRES_IGNORED);
 }
 
