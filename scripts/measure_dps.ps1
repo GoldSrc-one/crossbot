@@ -27,6 +27,9 @@
 .PARAMETER Weapons
     Restrict to a subset, matched against the pin classname. Useful for
     checking one mechanism without paying for the whole table.
+
+.PARAMETER Modes
+    Restrict to primary or secondary. Combines with -Weapons.
 #>
 param(
     [string]$Map = "crossfire",
@@ -35,6 +38,7 @@ param(
     [int]$Seconds = 60,
     [int]$SettleSeconds = 3,
     [string[]]$Weapons = @(),
+    [string[]]$Modes = @(),
     [string]$OutputDir = "nav_debug\dps",
     [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
 )
@@ -49,17 +53,23 @@ $mapName = [System.IO.Path]::GetFileNameWithoutExtension($Map)
 
 # Every mode BotFire::Supported accepts. It rejects a WeaponToggle, AIM_NONE,
 # AIM_SURFACE and WPN_Q_HIDDEN_STATE, which removes the tripmine, the satchel
-# and the three toggle modes. The crossbow phase yields both the bolt and the
-# zoomed sniper hitscan -- no pin separates them, and the shot rows carry the
-# zoom flag that does.
+# and the three toggle modes.
+#
+# The two zoom weapons get a phase per zoom state. Left to itself ZoomButtons
+# picks by range and crossfire is short, so an unforced crossbow phase zoomed on
+# 12 shots of 65 and landed none of them -- the 120 damage sniper bolt had no
+# samples at all. The third pin argument forces the state instead of measuring
+# whatever the map happened to produce.
 $phases = @(
     @{ Pin = "weapon_crowbar";     Mode = "primary" },
     @{ Pin = "weapon_9mmhandgun";  Mode = "primary" },
     @{ Pin = "weapon_9mmhandgun";  Mode = "secondary" },
-    @{ Pin = "weapon_357";         Mode = "primary" },
+    @{ Pin = "weapon_357";         Mode = "primary"; Zoom = "nozoom" },
+    @{ Pin = "weapon_357";         Mode = "primary"; Zoom = "zoom" },
     @{ Pin = "weapon_9mmAR";       Mode = "primary" },
     @{ Pin = "weapon_9mmAR";       Mode = "secondary" },
-    @{ Pin = "weapon_crossbow";    Mode = "primary" },
+    @{ Pin = "weapon_crossbow";    Mode = "primary"; Zoom = "nozoom" },
+    @{ Pin = "weapon_crossbow";    Mode = "primary"; Zoom = "zoom" },
     @{ Pin = "weapon_shotgun";     Mode = "primary" },
     @{ Pin = "weapon_shotgun";     Mode = "secondary" },
     @{ Pin = "weapon_rpg";         Mode = "primary" },
@@ -74,10 +84,13 @@ $phases = @(
 
 if ($Weapons.Count -gt 0) {
     $phases = @($phases | Where-Object { $Weapons -contains $_.Pin })
-    if ($phases.Count -eq 0) {
-        Write-Host "measure_dps: no phase matches -Weapons"
-        exit 1
-    }
+}
+if ($Modes.Count -gt 0) {
+    $phases = @($phases | Where-Object { $Modes -contains $_.Mode })
+}
+if ($phases.Count -eq 0) {
+    Write-Host "measure_dps: no phase matches -Weapons/-Modes"
+    exit 1
 }
 
 function Invoke-Rcon {
@@ -126,7 +139,8 @@ try {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     foreach ($phase in $phases) {
-        $label = "$($phase.Pin) $($phase.Mode)"
+        $zoom = if ($phase.Zoom) { $phase.Zoom } else { "any" }
+        $label = "$($phase.Pin) $($phase.Mode) $zoom"
 
         # Order matters. The pin flush closes the previous phase's exposure
         # bins, then crossbot_kill drops any commit that would otherwise fire
@@ -134,17 +148,19 @@ try {
         Invoke-Rcon "crossbot_fire_pin off" | Out-Null
         Invoke-Rcon "crossbot_kill" | Out-Null
         Start-Sleep -Seconds $SettleSeconds
-        Invoke-Rcon "crossbot_fire_pin $($phase.Pin) $($phase.Mode)" | Out-Null
+        Invoke-Rcon "crossbot_fire_pin $($phase.Pin) $($phase.Mode) $zoom" | Out-Null
 
         Start-Sleep -Seconds $Seconds
 
         $status = Invoke-Rcon "crossbot_dps_status"
-        $rows = 0; $shots = 0; $dmg = 0
+        $rows = 0; $shots = 0; $dmg = 0; $kills = 0
         if ($status -match 'rows=(\d+)') { $rows = [int]$Matches[1] }
         if ($status -match 'shots=(\d+)') { $shots = [int]$Matches[1] }
         if ($status -match ' dmg=(\d+)') { $dmg = [int]$Matches[1] }
+        if ($status -match 'kills=(\d+)') { $kills = [int]$Matches[1] }
 
-        Write-Host ("  {0,-32} rows={1,-7} shots={2,-6} dmg={3}" -f $label, $rows, $shots, $dmg)
+        Write-Host ("  {0,-40} rows={1,-7} shots={2,-6} dmg={3,-6} kills={4}" -f `
+            $label, $rows, $shots, $dmg, $kills)
     }
 
     # Close the last phase's bins while the server is still up.

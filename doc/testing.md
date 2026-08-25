@@ -549,6 +549,111 @@ A `dmg` row with `seconds` 0 and a real attacker is damage delivered without the
 had the victim in its sights — a grenade around a corner, or splash. It is real damage with no
 denominator, so it belongs in the numerator of a pooled ratio but cannot form a per-row DPS.
 
+
+## scripts/analyze_dps.ps1
+
+Turns the raw rows into a table. Attribution is by time, because a `dmg` or `shot` row carries no
+weapon: `BotFire::Pin` calls `BotDps::PinChange` *before* it stores the new pin, so the `meta` row a
+pin change emits names the phase that just **ended**, and the periodic 20s flush names the phase
+still running. Every event therefore belongs to the first `meta` row at or after its timestamp, and
+events whose next `meta` says `off` fall in the settle window and are dropped.
+
+The estimator is total damage over total gaze, never the mean of per-row ratios. Rows routinely carry
+a gaze of a few milliseconds — a second hit inside one engagement — and a per-row mean lets one of
+them own the phase.
+
+`-Ranges` adds the DPS-against-distance curve, `-PerMap` stops pooling maps together.
+
+A phase is keyed by pin, mode **and** pinned zoom state, all three read off the `meta` row. Rows are:
+
+```
+meta,<t>,<map>,<pin>,<pinmode>,<bots>,<span>,<avgframems>,<pinzoom>
+shot,<t>,<attacker>,<weaponid>,<mode>,<zoomed>,<aim>,<range>,<flight>,<shotid>,<why>,<held>
+dmg,<t>,<victim>,<attacker>,<damage>,<seconds>,<dist>,<bits>,<inflictor>,<fatal>
+```
+
+The trailing fields are all newer than `nav_debug/dps/archive/2026-08-24_crossfire_60s_6bots.csv`, and
+the analyzer defaults them, so that file still reads — as zero kills and `-` reasons, which is what it
+honestly contains. The live CSVs are opened in **append** mode, so a schema change means deleting both
+`nav_debug/dps/*.csv` and `hlds/valve/addons/crossbot/dps/*.csv` before the next run; `nav_debug/dps/`
+is gitignored, so archive into `nav_debug/dps/archive/` first and say in its README what the run was
+worth. The analyzer skips that subdirectory.
+
+`why` and `held` describe a charge release and are `fire`/`throw` and -1 for everything else. `firing`
+means `ChargeButtons` let go on target after a full charge, `timeout` means the safety valve did it,
+and `released` means the weapon discharged without the bot asking — the sentinel for a release path
+that does not run through `ChargeButtons` at all.
+
+### Every fatal hit was missing until 2026-08-24
+
+`CBaseMonster::TakeDamage` returns 0 on the killing blow, and the detour used to report only when the
+return value was nonzero. Every kill in every phase was therefore dropped. It reads as a plausible
+result rather than a broken one, which is why it survived a full sweep: weapons still rank, they just
+rank by their **non-lethal** hits. The bias is worst for whatever one-shots. See `doc/game.md`,
+`take_damage_hook.cpp`. Anything measured before that date is wrong low.
+
+The charged gauss is the clean example, because it one-shots almost every time it connects. Measured
+through the gate it was 74 shots, 10 hits, 292 damage, 6.7 DPS — and every one of those ten rows was
+`DMG_BLAST` from `weapon_gauss`, meaning the beam went through a wall rather than into anybody. It
+looked exactly like a bot that never lands its charge. Re-measured with the gate gone: 54 shots, 34
+hits, 26 kills, 64.2 DPS, and **thirteen rows of exactly 200.0 `DMG_BULLET` from `player`**, which is
+`200 * (held / GetFullChargeTime())` at a full charge. The direct hits had been there the whole time.
+The handling was never the problem — the release reasons read `firing` 48 times against `timeout` 6.
+
+Two numbers to distrust in the other direction now. `damage` is raw and pre-armor, so a 200 damage
+hit on a target with 40 health left still logs 200: any phase whose kill count approaches its hit
+count is reporting weapon output rather than damage delivered, and the zoomed crossbow at 12 kills in
+14 hits is almost entirely overkill. And `NoGaze` rows contribute damage with no denominator.
+
+### What one crossfire sweep can and cannot answer
+
+A 17-phase, 60-second, six-bot run on crossfire yields 1604 damage rows, which is between 10 and 205
+per phase. That is enough to rank weapons and nowhere near enough to fit a curve: split across eight
+range buckets the per-cell counts fall to single digits, and `weapon_gauss/secondary` reaches n=10
+for the whole phase.
+
+It also cannot answer the range question at all. On crossfire every bucket past 1500 units is empty
+except for snarks, which chase. The range axis needs the other eighteen maps, not a longer run on
+this one.
+
+Both of those observations are from the run that had the fatal-hit bug in it. The counts they are
+about are row counts, which the bug only ever reduced, so they still hold — a corrected sweep has more
+rows per phase, not fewer, and crossfire is still the wrong map for the range axis.
+
+### Weapons whose shot rows do not exist
+
+The shot detector at `bot_fire.cpp:509` looks for a rising edge on the attack timer —
+`lastTimer <= 0 && nextTimer > 0`. A weapon held down whose refire is short enough that the game DLL
+refreshes the timer before it expires never shows that edge, so it logs no `shot` rows at all. The
+gauss primary and the egon are both in that class: 0 shots against 93 and 196 damage rows
+respectively. The DPS figure is unaffected, since it is damage over gaze and never reads a shot row,
+but `DmgPerShot` is meaningless for those two and the aim/range/flight diagnostics are missing.
+
+### Damage kinds worth knowing before reading a phase
+
+- **The crossbow is not a sniper rifle in multiplayer.** `CCrossbowBolt::BoltTouch` arms
+  `ExplodeThink` on *every* touch when `IsMultiplayer()`, so each bolt detonates 0.1s later for
+  `DMG_BLAST | DMG_ALWAYSGIB` in a 128 radius. A measured phase is roughly 60% blast, 40% direct
+  bolt. The zoomed shot is a different weapon again — hitscan, 120 damage, inflictor
+  `weapon_crossbow` — and left to `ZoomButtons`' range rule a phase can contain a dozen zoomed
+  presses with no zoomed hit at all. Pin the zoom state instead; see `doc/console.md`,
+  `crossbot_fire_pin`.
+- **The charged gauss splashes far more often than it hits.** `CGauss::Fire` deals a direct hit with
+  `TraceAttack` for `DMG_BULLET`, inflictor `player`. Everything else it does — the reflection off a
+  steep surface, and the through-wall exit blast that only the secondary can produce — is
+  `RadiusDamage` for `DMG_BLAST` with the weapon entity as inflictor, so a `weapon_gauss` inflictor on
+  a gauss row means the beam went through geometry rather than into a player. The exit blast is also
+  much weaker than the shot that produced it: `flDamage` loses the wall thickness in units before
+  `RadiusDamage` applies its own falloff.
+- **The egon logs two rows per tick.** 20 direct with `energybeam|alwaysgib`, then 5 splash with
+  `blast` added, inflictor `weapon_egon` on both. The splash row lands in the same frame, so its
+  gaze reads 0 — correct, since the direct row already consumed it, and the pooled ratio still comes
+  out right.
+- **Fourteen of thirty-one handgrenade rows are worth 1 damage.** `CGrenade::BounceTouch` deals
+  `DMG_CLUB` 1 to a player a live grenade bounces off. They are hits by row count and noise by
+  damage.
+- **The gauss primary hits for 60, not 20, on a headshot.** It goes through `TraceAttack`, so
+  hitgroup multipliers apply before `TakeDamage` sees the number.
 ## Sweeping a change
 
 Three different things can move, and each needs its own sweep. Running the wrong one is how a change

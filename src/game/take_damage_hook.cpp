@@ -29,15 +29,18 @@ namespace
 	int __fastcall Detour(void *self, void *edx, entvars_t *pevInflictor, entvars_t *pevAttacker,
 		float flDamage, int bitsDamageType)
 	{
+		entvars_t *pev = self ? GameData::Peek<entvars_t *>(self, g_offsets.pev) : nullptr;
+		float before = pev ? pev->health : 0.f;
+
 		int result = g_original(self, edx, pevInflictor, pevAttacker, flDamage, bitsDamageType);
 
-		if (result != 0 && g_callback && self)
+		if (g_callback && pev)
 		{
-			entvars_t *pev = GameData::Peek<entvars_t *>(self, g_offsets.pev);
 			edict_t *victim = EdictOf(pev);
+			bool fatal = before > 0.f && pev->health <= 0.f;
 			if (victim)
 				g_callback(victim, EdictOf(pevAttacker), EdictOf(pevInflictor), flDamage,
-					bitsDamageType);
+					bitsDamageType, fatal);
 		}
 
 		return result;

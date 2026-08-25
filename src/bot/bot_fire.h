@@ -48,6 +48,8 @@ struct State
 	Commit commit = COMMIT_NONE;
 	float commitStart = 0.f;
 	bool commitSeen = false;
+	const char *chargeWhy = "-";
+	float chargeHeld = -1.f;
 
 	int pendingId = 0;
 	float nextSelectTime = 0.f;
@@ -82,11 +84,15 @@ struct State
 
 bool Enabled();
 
-void Pin(const char *classname, int mode);
+void Pin(const char *classname, int mode, int zoom);
 
 const char *Pinned();
 
 const char *PinnedMode();
+
+const char *PinnedZoom();
+
+int PinnedZoomState();
 
 bool Supported(const WeaponMode &mode);
 

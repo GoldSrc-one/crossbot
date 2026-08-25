@@ -259,13 +259,24 @@ The vtable lives in a read-only section of `hl.dll`, so writing the slot means `
 `PAGE_READWRITE`, swap, and `VirtualProtect` back to the original protection. `Remove` restores the
 saved pointer the same way and runs from `ServerDeactivate`.
 
-### The original is called first
+### The original is called first, and its return value is ignored
 
-The detour calls through to `CBasePlayer::TakeDamage` and reports **only when it returns nonzero**.
-The function returns 0 for godmode, for `takedamage == DAMAGE_NO` and for a `FPlayerCanTakeDamage`
-veto, and reporting before the call would log damage that was never dealt. `flDamage` as passed in is
-untouched by that call — the armor block operates on the callee's own copy — so the reported figure
-is the raw pre-armor number.
+The detour calls through to `CBasePlayer::TakeDamage` and then reports **unconditionally**. Reporting
+before the call would be wrong — `flDamage` as passed in is the raw pre-armor number and stays that
+way, since the armor block operates on the callee's own copy, but the outcome is only knowable
+afterwards.
+
+The return value is not the outcome. It looks like one: 0 for godmode, for `takedamage == DAMAGE_NO`,
+for an `FPlayerCanTakeDamage` veto. But `CBaseMonster::TakeDamage` also returns **0 on the killing
+blow** (`combat.cpp:923`, the `pev->health <= 0` branch that calls `Killed`), and `CBasePlayer` passes
+that straight back through `fTookDamage`. Gating on it therefore drops every fatal hit — silently, and
+biased hardest against exactly the weapons that one-shot, which are the ones a DPS table most needs to
+rank correctly. A whole crossfire sweep was measured through that gate before anyone noticed; the
+charged gauss came out at 6.7 DPS from ten survivors, all of them the weak through-wall splash.
+
+Whether the hit was fatal comes from `pev->health` instead, sampled before the call and after it: a
+hit is fatal when health was above zero and is not any more. That is unambiguous for the refusal cases
+too, since none of them touch health.
 
 Edicts come back through `pev->pContainingEntity`, with the victim's `pev` read from the object at
 `g_offsets.pev`. A null attacker edict is normal and means world damage.

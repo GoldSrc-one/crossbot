@@ -50,7 +50,7 @@ $allMaps = @(
 
 if ($Maps.Count -gt 0) { $allMaps = @($allMaps | Where-Object { $Maps -contains $_ }) }
 
-$phaseCount = 17
+$phaseCount = 19
 if ($Weapons.Count -gt 0) { $phaseCount = 0 }
 
 $outDir = Join-Path $repoRoot $OutputDir
@@ -135,7 +135,7 @@ if ($index -gt 60) {
 
 $tracked = @()
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$deadline = ($Seconds * 17 + 300)
+$deadline = (($Seconds + 8) * 19 + 300)
 
 Write-Host "measure_dps_all: $($queue.Count) map(s), MaxParallel $MaxParallel, ${Seconds}s per phase"
 

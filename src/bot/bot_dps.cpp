@@ -51,6 +51,7 @@ namespace
 	int g_rows = 0;
 	int g_shotRows = 0;
 	int g_dmgRows = 0;
+	int g_killRows = 0;
 	float g_damageTotal = 0.f;
 	float g_gazeTotal = 0.f;
 	float g_gazeSpent = 0.f;
@@ -146,7 +147,8 @@ namespace
 		return ent->v.origin + ent->v.view_ofs;
 	}
 
-	void OnDamage(edict_t *victim, edict_t *attacker, edict_t *inflictor, float damage, int bits)
+	void OnDamage(edict_t *victim, edict_t *attacker, edict_t *inflictor, float damage, int bits,
+		bool fatal)
 	{
 		if (!BotDps::Enabled())
 			return;
@@ -169,12 +171,14 @@ namespace
 		if (attacker && !attacker->free)
 			dist = (EyeOf(victim) - EyeOf(attacker)).Length();
 
-		Row("dmg,%.2f,%s,%s,%.1f,%.3f,%.1f,%d,%s\n", gpGlobals->time, NameOf(hurt),
+		Row("dmg,%.2f,%s,%s,%.1f,%.3f,%.1f,%d,%s,%d\n", gpGlobals->time, NameOf(hurt),
 			by ? NameOf(by) : "?", damage, seconds, dist, bits,
-			inflictor ? CBotClassOf(inflictor) : "?");
+			inflictor ? CBotClassOf(inflictor) : "?", fatal ? 1 : 0);
 
 		++g_dmgRows;
 		g_damageTotal += damage;
+		if (fatal)
+			++g_killRows;
 	}
 }
 
@@ -235,7 +239,7 @@ void NotePress(CBot &bot)
 	p.valid = true;
 }
 
-void NoteShot(CBot &bot, int weaponId, int mode)
+void NoteShot(CBot &bot, int weaponId, int mode, const char *why, float held)
 {
 	if (!Enabled())
 		return;
@@ -248,8 +252,9 @@ void NoteShot(CBot &bot, int weaponId, int mode)
 	if (!p.valid)
 		return;
 
-	Row("shot,%.2f,%s,%d,%d,%d,%s,%.1f,%.3f,%d\n", gpGlobals->time, NameOf(index),
-		weaponId, mode, p.zoomed, p.aim ? p.aim : "target", p.range, p.flight, p.shotId);
+	Row("shot,%.2f,%s,%d,%d,%d,%s,%.1f,%.3f,%d,%s,%.2f\n", gpGlobals->time, NameOf(index),
+		weaponId, mode, p.zoomed, p.aim ? p.aim : "target", p.range, p.flight, p.shotId,
+		why ? why : "-", held);
 	++g_shotRows;
 }
 
@@ -289,8 +294,8 @@ void Flush()
 
 	const char *pin = BotFire::Pinned();
 
-	Row("meta,%.2f,%s,%s,%s,%d,%.1f,%.2f\n", now, MapName(), pin ? pin : "off",
-		BotFire::PinnedMode(), bots, span, frameMs);
+	Row("meta,%.2f,%s,%s,%s,%d,%.1f,%.2f,%s\n", now, MapName(), pin ? pin : "off",
+		BotFire::PinnedMode(), bots, span, frameMs, BotFire::PinnedZoom());
 
 	g_flushTime = now;
 	g_frameSum = 0.f;
@@ -322,9 +327,9 @@ void PrintStatus()
 {
 	char msg[320];
 	snprintf(msg, sizeof(msg),
-		"CrossBot: dps=%d log=%s rows=%d shots=%d dmg=%d damage=%.0f gaze=%.1fs spent=%.1fs\n",
+		"CrossBot: dps=%d log=%s rows=%d shots=%d dmg=%d kills=%d damage=%.0f gaze=%.1fs spent=%.1fs\n",
 		Enabled() ? 1 : 0, g_path[0] ? g_path : LogPath(), g_rows, g_shotRows, g_dmgRows,
-		g_damageTotal, g_gazeTotal, g_gazeSpent);
+		g_killRows, g_damageTotal, g_gazeTotal, g_gazeSpent);
 	SERVER_PRINT(msg);
 }
 

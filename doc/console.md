@@ -63,13 +63,20 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   non-zero is a fault, with the same standing `charge-timeout` has on the gauss. `uphill` and `selfveto` count rejections rather than
   situations — both predicates run per weapon per mode per frame — so read them as a yes/no; see
   `doc/bot.md`, `bot_fire.cpp`
-- `crossbot_fire_pin <classname|off> [primary|secondary]` — restrict weapon selection to one
-  classname, and optionally one mode, making everything else unusable. Only useful for testing, and
+- `crossbot_fire_pin <classname|off> [primary|secondary] [zoom|nozoom]` — restrict weapon selection to
+  one classname, and optionally one mode, making everything else unusable. Only useful for testing, and
   necessary there for two layers of the same reason. A bot keeps any weapon that still has a usable
   mode, so one that spawned with a glock never voluntarily picks up anything else; and the random pick
   discards the mode it chose, so a weapon whose primary works never reaches its secondary. Without the
   classname the projectile path is unreachable from the console; without the mode the gauss charge is.
-  With no argument it reports both.
+  With no argument it reports all three.
+
+  The third argument overrides `ZoomButtons`, which otherwise picks the zoom state by range — in at
+  500 units, out at 300. On a map whose fights are shorter than that the bot barely zooms, so an
+  unforced crossbow phase measured 12 zoomed shots of 65 and hit with none of them, leaving the 120
+  damage sniper bolt with no samples at all. `zoom` and `nozoom` force the state so the two can be
+  measured as separate phases; `any` restores the range rule. The pinned zoom state also lands in the
+  `meta` row, which is what lets the analyzer keep the two apart.
 
   **The pin also equips.** While one is set, a bot that does not carry the pinned weapon is given it,
   and one that carries it with the pinned mode out of ammo is given ammo for that mode
@@ -77,8 +84,9 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   a timer, so reloading and clip depletion stay real and only permanent starvation is removed — which
   is what a DPS measurement needs. Before this, an RPG phase measured one rocket per bot per life.
 
-- `crossbot_dps_status` — rows written to the DPS log so far, split by kind, plus the running gaze
-  and damage totals. The one line `scripts/measure_dps.ps1` polls between phases. Exists only in a
+- `crossbot_dps_status` — rows written to the DPS log so far, split by kind, plus `kills` and the
+  running gaze and damage totals. `kills` counts damage rows that took a player from above zero health
+  to at or below it, which is the only kill count the harness has. The one line `scripts/measure_dps.ps1` polls between phases. Exists only in a
   `CROSSBOT_DPS` build; see `doc/bot.md`, `bot_dps.cpp`
 
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,

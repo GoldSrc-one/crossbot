@@ -205,10 +205,10 @@ namespace
 		{
 			const char *pin = BotFire::Pinned();
 			char msg[128];
-			snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s %s\n", pin ? pin : "off",
-				BotFire::PinnedMode());
+			snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s %s %s\n", pin ? pin : "off",
+				BotFire::PinnedMode(), BotFire::PinnedZoom());
 			SERVER_PRINT(msg);
-			SERVER_PRINT("usage: crossbot_fire_pin <classname|off> [primary|secondary]\n");
+			SERVER_PRINT("usage: crossbot_fire_pin <classname|off> [primary|secondary] [zoom|nozoom]\n");
 			return;
 		}
 
@@ -225,16 +225,31 @@ namespace
 				mode = 2;
 			else
 			{
-				SERVER_PRINT("usage: crossbot_fire_pin <classname|off> [primary|secondary]\n");
+				SERVER_PRINT("usage: crossbot_fire_pin <classname|off> [primary|secondary] [zoom|nozoom]\n");
 				return;
 			}
 		}
 
-		BotFire::Pin(off ? nullptr : arg, mode);
+		int zoom = -1;
+		if (CMD_ARGC() >= 4)
+		{
+			const char *want = CMD_ARGV(3);
+			if (strcmp(want, "zoom") == 0)
+				zoom = 1;
+			else if (strcmp(want, "nozoom") == 0)
+				zoom = 0;
+			else if (strcmp(want, "any") != 0)
+			{
+				SERVER_PRINT("usage: crossbot_fire_pin <classname|off> [primary|secondary] [zoom|nozoom]\n");
+				return;
+			}
+		}
+
+		BotFire::Pin(off ? nullptr : arg, mode, zoom);
 
 		char msg[128];
-		snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s %s\n", off ? "off" : arg,
-			BotFire::PinnedMode());
+		snprintf(msg, sizeof(msg), "CrossBot: fire pin is %s %s %s\n", off ? "off" : arg,
+			BotFire::PinnedMode(), BotFire::PinnedZoom());
 		SERVER_PRINT(msg);
 	}
 

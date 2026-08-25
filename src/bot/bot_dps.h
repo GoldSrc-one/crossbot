@@ -17,7 +17,7 @@ void Shutdown();
 
 void NotePress(CBot &bot);
 
-void NoteShot(CBot &bot, int weaponId, int mode);
+void NoteShot(CBot &bot, int weaponId, int mode, const char *why, float held);
 
 void NoteVisible(CBot &bot, edict_t *victim, float dist);
 
@@ -44,7 +44,7 @@ inline void Shutdown() {}
 
 inline void NotePress(CBot &) {}
 
-inline void NoteShot(CBot &, int, int) {}
+inline void NoteShot(CBot &, int, int, const char *, float) {}
 
 inline void NoteVisible(CBot &, edict_t *, float) {}
 

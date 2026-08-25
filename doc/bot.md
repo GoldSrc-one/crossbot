@@ -2977,9 +2977,11 @@ Three problems disappeared with it rather than being solved:
 - **Nothing depends on reading before `UpdateClientData` clears.** The old capture had to sit above
   the `IsDead` check in `BotManager::StartFrame`, or `Respawn` would erase the killing blow.
 
-The detour **calls the original first and reports only when it returns nonzero**. `TakeDamage`
-returns 0 for godmode, for `takedamage == DAMAGE_NO` and for a `FPlayerCanTakeDamage` veto; reporting
-before the call would log damage that was never dealt.
+The detour **calls the original first and then reports unconditionally**. It used to gate on a
+nonzero return value, on the reasoning that `TakeDamage` returns 0 for godmode, for
+`takedamage == DAMAGE_NO` and for an `FPlayerCanTakeDamage` veto. It also returns 0 for the killing
+blow, so that gate threw away every kill in the log. `fatal` is derived from the victim's health
+across the call instead. See `doc/game.md`, `take_damage_hook.cpp`.
 
 ### The denominator is a gaze accumulator, read and zeroed at the hit
 
@@ -3013,9 +3015,18 @@ One CSV, `kind` in the first column, path from `crossbot_dps_log`, opened in **a
 re-running a sweep accumulates rather than replaces. Because it appends, a schema change means the
 old files must be deleted or the two layouts interleave silently.
 
-    meta,<t>,<map>,<pin>,<pinmode>,<bots>,<span>,<avgframems>
-    shot,<t>,<attacker>,<weaponid>,<mode>,<zoomed>,<aim>,<range>,<flight>,<shotid>
-    dmg,<t>,<victim>,<attacker>,<damage>,<seconds>,<dist>,<bits>,<inflictor>
+    meta,<t>,<map>,<pin>,<pinmode>,<bots>,<span>,<avgframems>,<pinzoom>
+    shot,<t>,<attacker>,<weaponid>,<mode>,<zoomed>,<aim>,<range>,<flight>,<shotid>,<why>,<held>
+    dmg,<t>,<victim>,<attacker>,<damage>,<seconds>,<dist>,<bits>,<inflictor>,<fatal>
+
+`fatal` is 1 when the row took the victim from above zero health to at or below it, which is the only
+kill count anything here has. `damage` stays the raw pre-armor figure even then, so a 200 damage gauss
+hit on a target with 40 left still logs 200 — overkill is weapon output, not delivered damage, and
+telling the two apart is the analyzer's business.
+
+`why` and `held` describe a charge release: `firing` for a full charge let go on target, `timeout` for
+the safety valve, `released` for a discharge the bot never asked for. `held` is the seconds charged,
+or -1. Every non-charge shot carries `fire` or `throw` and -1.
 
 `dist` uses the same eye-to-centre formula the vision loop uses, so it is directly comparable to the
 range that accrued the gaze. It is the **live** distance at impact, not the distance at the press —

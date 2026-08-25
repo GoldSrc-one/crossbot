@@ -66,6 +66,8 @@ namespace
 
 	int g_pinMode = 0;
 
+	int g_pinZoom = -1;
+
 	struct Choice
 	{
 		int index;
@@ -512,7 +514,7 @@ namespace
 				if (fired)
 				{
 					++fire.shots;
-				BotDps::NoteShot(bot, w.id, fire.mode);
+					BotDps::NoteShot(bot, w.id, fire.mode, "fire", -1.f);
 					if (pressedLead)
 						++fire.leadShots;
 					if (pressedArc)
@@ -523,14 +525,14 @@ namespace
 			if (fire.lastChargeState != 0 && w.chargeState == 0)
 			{
 				++fire.shots;
-				BotDps::NoteShot(bot, w.id, fire.mode);
+				BotDps::NoteShot(bot, w.id, fire.mode, fire.chargeWhy, fire.chargeHeld);
 				++fire.chargeShots;
 			}
 
 			if (fire.lastThrowStart != 0.f && w.throwStart == 0.f)
 			{
 				++fire.shots;
-				BotDps::NoteShot(bot, w.id, fire.mode);
+				BotDps::NoteShot(bot, w.id, fire.mode, "throw", -1.f);
 				++fire.throwShots;
 			}
 		}
@@ -685,6 +687,8 @@ namespace
 
 		float dist = (fire.aimPoint - eye).Length();
 		bool want = fire.zoomed ? (dist >= kZoomOut) : (dist > kZoomIn);
+		if (g_pinZoom >= 0)
+			want = (g_pinZoom != 0);
 		if (want == fire.zoomed)
 			return 0;
 
@@ -711,6 +715,8 @@ namespace
 		if (fire.commit != BotFire::COMMIT_CHARGE)
 		{
 			StartCommit(fire, BotFire::COMMIT_CHARGE);
+			fire.chargeWhy = "released";
+			fire.chargeHeld = -1.f;
 			fire.lastReason = "charging";
 			return button;
 		}
@@ -720,6 +726,8 @@ namespace
 		if (m.chargeMax > 0.f && held >= m.chargeMax - kChargeSafety)
 		{
 			fire.commit = BotFire::COMMIT_NONE;
+			fire.chargeWhy = "timeout";
+			fire.chargeHeld = held;
 			fire.lastReason = "charge-timeout";
 			return 0;
 		}
@@ -737,6 +745,8 @@ namespace
 		}
 
 		fire.commit = BotFire::COMMIT_NONE;
+		fire.chargeWhy = "firing";
+		fire.chargeHeld = held;
 		fire.lastReason = "firing";
 		return 0;
 	}
@@ -767,16 +777,18 @@ bool Enabled()
 	return cvar && cvar->value != 0.f;
 }
 
-void Pin(const char *classname, int mode)
+void Pin(const char *classname, int mode, int zoom)
 {
 	BotDps::PinChange();
 
 	g_pinMode = mode;
+	g_pinZoom = zoom;
 
 	if (!classname || !classname[0])
 	{
 		g_pin[0] = 0;
 		g_pinMode = 0;
+		g_pinZoom = -1;
 		return;
 	}
 
@@ -795,6 +807,20 @@ const char *PinnedMode()
 	if (g_pinMode == 2)
 		return "secondary";
 	return "any";
+}
+
+const char *PinnedZoom()
+{
+	if (g_pinZoom == 1)
+		return "zoom";
+	if (g_pinZoom == 0)
+		return "nozoom";
+	return "any";
+}
+
+int PinnedZoomState()
+{
+	return g_pinZoom;
 }
 
 const char *ModeName(Mode mode)
