@@ -19,6 +19,8 @@ Vec3 Vec3::Normalized() const
 	return Vec3(x / len, y / len, z / len);
 }
 
+constexpr size_t kMinSolidFaces = 4;
+
 Winding BaseWindingForPlane(const Plane &plane, double mapRadius)
 {
 	const Vec3 &n = plane.normal;
@@ -395,6 +397,9 @@ Polytope ClipPolytope(const Polytope &poly, const Plane &plane, bool keepFront, 
 	}
 	if (cross.size() >= 3)
 		result.faces.push_back({facePlane, std::move(cross)});
+
+	if (result.faces.size() < kMinSolidFaces)
+		return Polytope();
 
 	return result;
 }

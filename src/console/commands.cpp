@@ -4,7 +4,6 @@
 #include "commands.h"
 #include "../bot/bot.h"
 #include "../bot/bot_aim.h"
-#include "../bot/bot_dps.h"
 #include "../bot/bot_fire.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
@@ -191,13 +190,6 @@ namespace
 	{
 		BotManager::PrintFireStatus();
 	}
-
-#ifdef CROSSBOT_DPS
-	void Cmd_CrossBotDpsStatus()
-	{
-		BotDps::PrintStatus();
-	}
-#endif
 
 	void Cmd_CrossBotFirePin()
 	{
@@ -591,9 +583,6 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
-#ifdef CROSSBOT_DPS
-	ADD_SERVER_COMMAND("crossbot_dps_status", Cmd_CrossBotDpsStatus);
-#endif
 }
 
 }

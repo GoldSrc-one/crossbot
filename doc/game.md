@@ -128,21 +128,6 @@ The rule is otherwise unchanged, and this is the only exception. `CRpg::m_fSpotA
 below the counter and is *not* requested: the same gate would make it safe, but see "The deployables"
 below for why nothing wants it.
 
-
-### Vtable indices come from the same file, through a second table
-
-`virtualFunctions` sits alongside `fields` in every class of the JSON, mapping a full C++ signature to
-a slot number. `kVirtuals` requests from it exactly as `kRequests` requests from `fields`, with the
-one difference that the value is a bare integer rather than an `{ "offset": N }` object, and with the
-same `Fatal`-on-missing contract. Today it has a single entry, behind `#ifdef CROSSBOT_DPS`:
-`CBaseEntity::"TakeDamage(entvars_t *, entvars_t *, float, int)"`, index **11**.
-
-It is requested from `CBaseEntity` and used to patch **`CBasePlayer`**'s vtable, which is correct
-rather than sloppy. A derived class lists only the virtuals it introduces — `CBasePlayer`'s own start
-at 125 — because an override replaces the base class's slot instead of appending a new one. The chain
-`CBasePlayer -> CBaseMonster -> CBaseToggle -> CBaseAnimating -> CBaseDelay -> CBaseEntity` is single
-and non-virtual throughout, so slot 11 holds `TakeDamage` for every one of them.
-
 ### Every failure is fatal
 
 A wrong offset is a wild read into another object's memory, which corrupts silently and crashes
@@ -209,77 +194,6 @@ it: a truncated classname is indistinguishable from a working one at the call si
 
 `Run` returns whether it dispatched, not whether the game did anything. Nothing downstream should
 trust it as confirmation — `BotFire` watches `BotInventory::activeIndex` change instead.
-
-## take_damage_hook.cpp
-
-The one detour in the codebase, and the only one that has ever been justified. Everything else reads
-the game DLL's state through gamedata offsets; this patches a function pointer. It exists entirely
-behind `#ifdef CROSSBOT_DPS`, so a normal build does not contain it at all, and its Windows body is
-further guarded by `#if defined(_WIN32)` — elsewhere `Install` prints a line and returns false.
-
-### Why a hook here and nowhere else
-
-`bot_dps.cpp` needs the attacker, the inflictor, the damage type and the exact pre-armor damage of
-every hit. All four are arguments of `CBasePlayer::TakeDamage`, and none of them survives intact
-anywhere a poller can reach: `pev->dmg_take` is post-armor, `dmg_inflictor` is last-writer-wins within
-a frame and cleared by `UpdateClientData`, and `CGrenade::Explode` nulls `pev->owner` before it does
-any damage at all. Reconstructing them from outside took a projectile registry, a raw-damage offset
-and three rounds of debugging, and it still under-reported. Reading the arguments takes none of that.
-
-### Getting at the vtable without a player
-
-`Install` creates a throwaway entity: `pfnCreateNamedEntity(pfnAllocString("player"))`. The engine
-looks up the exported `player` function that `LINK_ENTITY_TO_CLASS(player, CBasePlayer)` generates,
-which is `GetClassPtr((CBasePlayer *)pev)` — that allocates private data and placement-news a real
-`CBasePlayer` into it, so the vptr is set. `Spawn` is never called, the entity touches nothing, and
-`pfnRemoveEntity` frees it immediately after the vtable pointer has been read.
-
-Two facts make this safe rather than clever. `ED_Alloc` searches from `maxclients + 1`, so the probe
-can never land in a client slot. And `GameData::Load` already asserts `CBaseEntity::pev == 4`, which
-is exactly the evidence that the vptr occupies object offset 0.
-
-Hooking at `ServerActivate` rather than waiting for a real player means the hook is in place before
-anything can take damage. It is idempotent: the vtable belongs to `hl.dll`, which stays mapped across
-map changes, so a second `Install` is a no-op.
-
-### The calling convention
-
-MSVC `__thiscall` passes `this` in ECX and everything else on the stack, callee-cleaned. `__fastcall`
-passes the first two integer arguments in ECX and EDX and the rest on the stack, callee-cleaned. So a
-free `__fastcall` function whose second parameter is an unused placeholder is byte-for-byte
-compatible, and that is what the detour is. `float` is stack-passed under both, so `flDamage` needs no
-special handling.
-
-```cpp
-typedef int (__fastcall *TakeDamageFn)(void *self, void *edx, entvars_t *pevInflictor,
-    entvars_t *pevAttacker, float flDamage, int bitsDamageType);
-```
-
-The vtable lives in a read-only section of `hl.dll`, so writing the slot means `VirtualProtect` to
-`PAGE_READWRITE`, swap, and `VirtualProtect` back to the original protection. `Remove` restores the
-saved pointer the same way and runs from `ServerDeactivate`.
-
-### The original is called first, and its return value is ignored
-
-The detour calls through to `CBasePlayer::TakeDamage` and then reports **unconditionally**. Reporting
-before the call would be wrong — `flDamage` as passed in is the raw pre-armor number and stays that
-way, since the armor block operates on the callee's own copy, but the outcome is only knowable
-afterwards.
-
-The return value is not the outcome. It looks like one: 0 for godmode, for `takedamage == DAMAGE_NO`,
-for an `FPlayerCanTakeDamage` veto. But `CBaseMonster::TakeDamage` also returns **0 on the killing
-blow** (`combat.cpp:923`, the `pev->health <= 0` branch that calls `Killed`), and `CBasePlayer` passes
-that straight back through `fTookDamage`. Gating on it therefore drops every fatal hit — silently, and
-biased hardest against exactly the weapons that one-shot, which are the ones a DPS table most needs to
-rank correctly. A whole crossfire sweep was measured through that gate before anyone noticed; the
-charged gauss came out at 6.7 DPS from ten survivors, all of them the weak through-wall splash.
-
-Whether the hit was fatal comes from `pev->health` instead, sampled before the call and after it: a
-hit is fatal when health was above zero and is not any more. That is unambiguous for the refusal cases
-too, since none of them touch health.
-
-Edicts come back through `pev->pContainingEntity`, with the victim's `pev` read from the object at
-`g_offsets.pev`. A null attacker edict is normal and means world damage.
 
 ## give_item.cpp
 

@@ -17,6 +17,7 @@ struct BlockingVolume
 	Vec3 origin;
 	Vec3 mins;
 	Vec3 maxs;
+	int entityIndex = -1;
 };
 
 struct ActivatorVolume
@@ -42,6 +43,36 @@ struct PassableSet
 {
 	std::vector<PassableVolume> passable;
 	std::vector<BlockingVolume> impassable;
+};
+
+struct NullCarveEvent
+{
+	int entityIndex = -1;
+	size_t pieces = 0;
+	double volume = 0.0;
+	Vec3 centroid;
+	double after = 0.0;
+	size_t outFaces = 0;
+};
+
+struct CarveStats
+{
+	size_t inputs = 0;
+	size_t tests = 0;
+	size_t boundsHits = 0;
+	size_t carves = 0;
+	size_t nullCarves = 0;
+	size_t nullCarveExtraPieces = 0;
+	size_t inflatedCarves = 0;
+	double worstInflation = 0.0;
+	size_t solidCarves = 0;
+	size_t solidCarveExtraPieces = 0;
+	size_t piecesOut = 0;
+	size_t peakPieces = 0;
+	std::vector<size_t> perBlockerPieces;
+	std::vector<size_t> perBlockerNullCarves;
+	std::vector<size_t> perBlockerBoundsHits;
+	std::vector<NullCarveEvent> nullEvents;
 };
 
 double ParseDouble(const std::string &s, double def);
@@ -79,12 +110,14 @@ bool OverlapsAnyBlockingVolume(const ExtractedLeaf &leaf, const std::vector<Bloc
 bool OverlapsBlockingVolume(const Polytope &poly, const BlockingVolume &blocker);
 
 std::vector<Polytope> SubtractBlockingVolumes(const BspFile &bsp, const Polytope &leafPolytope,
-	const std::vector<BlockingVolume> &blockers, double mapRadius, double epsilon = 0.01);
+	const std::vector<BlockingVolume> &blockers, double mapRadius, double epsilon = 0.01,
+	CarveStats *stats = nullptr);
 
 std::vector<Polytope> SubtractBoxVolumes(const Polytope &leafPolytope,
 	const std::vector<BlockingVolume> &boxes, double mapRadius, double epsilon = 0.01);
 
 void SplitByPassableVolume(const BspFile &bsp, const Polytope &poly, const BlockingVolume &blocker,
-	double mapRadius, std::vector<Polytope> &inside, std::vector<Polytope> &outside, double epsilon = 0.01);
+	double mapRadius, std::vector<Polytope> &inside, std::vector<Polytope> &outside, double epsilon = 0.01,
+	CarveStats *stats = nullptr);
 
 }

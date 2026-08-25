@@ -48,8 +48,6 @@ struct State
 	Commit commit = COMMIT_NONE;
 	float commitStart = 0.f;
 	bool commitSeen = false;
-	const char *chargeWhy = "-";
-	float chargeHeld = -1.f;
 
 	int pendingId = 0;
 	float nextSelectTime = 0.f;

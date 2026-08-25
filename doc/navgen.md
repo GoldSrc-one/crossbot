@@ -56,6 +56,15 @@ Command-line tool with extensive debug flags:
   baked at 320 gives the same waypoints, launch speeds and counters the runtime produces on a
   `sv_maxspeed 270` server, without starting HLDS. The baked `.nav` is byte-identical with and
   without it.
+- `--dump-carve` - report what the blocker carve and the passable split do to the leaf set: leaf and
+  volume totals before and after each stage, per-leaf fragment counts over `kCarveDumpThreshold`, a
+  per-blocker table of carves/pieces/wasted carves, and every carve that came back with more volume
+  than it was given
+- `--no-blockers` - skip ExtractBlockingVolumes, so no func_wall/func_wall_toggle/func_conveyor/
+  func_healthcharger/func_recharge brush is carved out of the leaves (debug)
+- `--no-passables` - skip ExtractPassableVolumes, so no func_door/func_door_rotating/func_breakable
+  is split out as its own tagged leaf (debug). Doors already claimed as elevators are unaffected:
+  they never reach the passable path
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
 - `--max-merge-group <n>` - most leaf groups one merge may fuse (default 64). `1` blocks the first
   absorption, so nothing merges at all and each BSP hull-3 leaf becomes its own area — this replaces the
@@ -347,7 +356,9 @@ exact. `ClipPolytope` drops a face whose clipped winding falls under 3 vertices,
 plane from the polytope; the next clip rebuilds its cut face from `BaseWindingForPlane(plane, mapRadius)`
 against the remaining planes, so a lost bounding plane lets the piece escape to the map radius.
 Axis-aligned planes rarely trip this. test53_ladder4's slanted ladder did, catastrophically — total leaf
-volume 94,346,287,097 against 25,747,456 uncarved, with areas reaching `maxs 8192`. The box carve is
+volume 94,346,287,097 against 25,747,456 uncarved, with areas reaching `maxs 8192`. `ClipPolytope` now
+rejects a clip result with fewer than four faces, which closes that hole at the source (see
+"SubtractBlockingVolumes"), so the box carve here is belt and braces rather than the only defence. The box carve is
 conservative for a slanted ladder (it removes walkable floor under the slope) and exact for a vertical one.
 
 Because the mount now lands inside the carved hole, `FindStandArea` steps outward from it in 4-unit steps
@@ -742,6 +753,28 @@ For each overlapping blocker:
 - Translate leaf polytope to blocker local space
 - Carve against blocker's clip tree (remove CONTENTS_SOLID)
 - Translate pieces back
+- Keep the piece whole when the carve reports it removed nothing
+
+`CarvePolytopeAgainstTree` sets `removedAny` when a piece with real volume lands in a removed-contents
+subtree. Without that flag the carve still fragments a piece along every brush plane it straddles even when
+the brush takes nothing out of it, because the tree's node planes are unbounded and the bounds test only
+compares boxes. On `disposal` that was 655 of 905 carves and 1091 of the 1373 extra pieces; `test13_break`,
+with six `func_breakable` and no blockers at all, spent 22 of its 30 passable splits that way. The pieces
+are geometrically identical to their parent, so keeping the parent is exact and strictly coarser.
+
+**This is the carve that made the four 25th-anniversary maps unbuildable.** Unlike the ladder carve it uses
+the clipnode tree, so it hit the escape-to-map-radius bug described under "func_ladder" above: a piece whose
+faces degenerate below three vertices loses the plane that bounded it, and the next clip rebuilds its cut
+face from `BaseWindingForPlane(plane, mapRadius)`. On `disposal` 439 of 727 carves came back with **more**
+volume than they were given, the worst by 7.3e10x — one 8-face 3,090,431 cu.unit leaf carved into a
+**2-face** piece measuring 198,070,724,914. Two faces cannot bound a solid, but `Polytope::Empty()` only
+tests `faces.empty()` and the `Volume() > kMinPieceVolume` filter *keeps* such a piece precisely because its
+bogus volume is enormous. Its bounds then span the map, so it overlaps every blocker and every door, each of
+which splits it again: total leaf volume went 3.93e9 in to 3.70e12 out, and the passable split that followed
+climbed past 1.2M leaves until the 32-bit navgen ran out of address space. `ClipPolytope` now returns an
+empty polytope when a clip leaves fewer than `kMinSolidFaces` faces, which fixes the ladder case at its root
+too. With the guard `disposal` carves 340 leaves into 372 pieces (was 1658), worst leaf 4 pieces (was 247),
+and builds in 75s at 26MB.
 
 ### SplitByPassableVolume
 Same carve run twice against the passable's clip tree — `CONTENTS_SOLID` removed gives the pieces outside,
@@ -1058,7 +1091,9 @@ For each empty leaf from clipnode walk:
 - `IntersectCoplanarPolygons(subject, clip, planeNormal)` - clip by clip's edge half-planes
 - `Polytope::Volume()` - tetrahedra from centroid
 - `Polytope::Centroid()` - vertex average
-- `ClipPolytope(poly, plane, keepFront, radius, epsilon)` - clips faces, adds cross-section face
+- `ClipPolytope(poly, plane, keepFront, radius, epsilon)` - clips faces, adds cross-section face, returns
+  an empty polytope when fewer than `kMinSolidFaces` faces survive — a sub-4-face result cannot bound a
+  solid, and `Volume()` reports a huge bogus number for one instead of a small one
 - `TranslatePolytope(poly, offset)` - translates vertices, updates plane dists
 
 ## crc32.cpp

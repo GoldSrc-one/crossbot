@@ -7,7 +7,6 @@
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_break.h"
-#include "bot_dps.h"
 #include "bot_weapons.h"
 #include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
@@ -514,7 +513,6 @@ namespace
 				if (fired)
 				{
 					++fire.shots;
-					BotDps::NoteShot(bot, w.id, fire.mode, "fire", -1.f);
 					if (pressedLead)
 						++fire.leadShots;
 					if (pressedArc)
@@ -525,14 +523,12 @@ namespace
 			if (fire.lastChargeState != 0 && w.chargeState == 0)
 			{
 				++fire.shots;
-				BotDps::NoteShot(bot, w.id, fire.mode, fire.chargeWhy, fire.chargeHeld);
 				++fire.chargeShots;
 			}
 
 			if (fire.lastThrowStart != 0.f && w.throwStart == 0.f)
 			{
 				++fire.shots;
-				BotDps::NoteShot(bot, w.id, fire.mode, "throw", -1.f);
 				++fire.throwShots;
 			}
 		}
@@ -715,8 +711,6 @@ namespace
 		if (fire.commit != BotFire::COMMIT_CHARGE)
 		{
 			StartCommit(fire, BotFire::COMMIT_CHARGE);
-			fire.chargeWhy = "released";
-			fire.chargeHeld = -1.f;
 			fire.lastReason = "charging";
 			return button;
 		}
@@ -726,8 +720,6 @@ namespace
 		if (m.chargeMax > 0.f && held >= m.chargeMax - kChargeSafety)
 		{
 			fire.commit = BotFire::COMMIT_NONE;
-			fire.chargeWhy = "timeout";
-			fire.chargeHeld = held;
 			fire.lastReason = "charge-timeout";
 			return 0;
 		}
@@ -745,8 +737,6 @@ namespace
 		}
 
 		fire.commit = BotFire::COMMIT_NONE;
-		fire.chargeWhy = "firing";
-		fire.chargeHeld = held;
 		fire.lastReason = "firing";
 		return 0;
 	}
@@ -779,8 +769,6 @@ bool Enabled()
 
 void Pin(const char *classname, int mode, int zoom)
 {
-	BotDps::PinChange();
-
 	g_pinMode = mode;
 	g_pinZoom = zoom;
 
@@ -1301,18 +1289,12 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	if (charge)
 	{
-		unsigned short buttons = ChargeButtons(fire, *m, onTarget);
-		if (buttons != 0)
-			BotDps::NotePress(bot);
-		return buttons;
+		return ChargeButtons(fire, *m, onTarget);
 	}
 
 	if (tap)
 	{
-		unsigned short buttons = TapButtons(fire, w, onTarget);
-		if (buttons != 0)
-			BotDps::NotePress(bot);
-		return buttons;
+		return TapButtons(fire, w, onTarget);
 	}
 
 	if (!onTarget)
@@ -1328,7 +1310,6 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	fire.pressed = true;
 	fire.pressedLead = fire.aimLead;
 	fire.pressedArc = fire.aimArc;
-	BotDps::NotePress(bot);
 	return AttackButton(fire.mode);
 }
 

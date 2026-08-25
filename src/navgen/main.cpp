@@ -37,6 +37,63 @@ namespace
 {
 
 constexpr double kMapRadius = 8192.0;
+constexpr size_t kCarveDumpThreshold = 16;
+constexpr size_t kCarveTableRows = 15;
+
+void PrintNullCarveEvents(const std::vector<navgen::Entity> &entities, const navgen::CarveStats &stats)
+{
+	for (const navgen::NullCarveEvent &ev : stats.nullEvents)
+	{
+		std::string classname = "?";
+		std::string targetname;
+		if (ev.entityIndex >= 0 && static_cast<size_t>(ev.entityIndex) < entities.size())
+		{
+			classname = entities[static_cast<size_t>(ev.entityIndex)].Get("classname");
+			targetname = entities[static_cast<size_t>(ev.entityIndex)].Get("targetname");
+		}
+
+		std::printf("  carve event: %-18s %-16s in %zu faces vol %14.1f at (%.0f, %.0f, %.0f) "
+			"-> out vol %16.1f, first piece %zu faces\n",
+			classname.c_str(), targetname.c_str(), ev.pieces, ev.volume, ev.centroid.x, ev.centroid.y,
+			ev.centroid.z, ev.after, ev.outFaces);
+	}
+}
+
+
+void PrintCarveBlockerTable(const std::vector<navgen::Entity> &entities,
+	const std::vector<navgen::BlockingVolume> &blockers, const navgen::CarveStats &stats)
+{
+	std::vector<size_t> order;
+	for (size_t i = 0; i < blockers.size() && i < stats.perBlockerPieces.size(); ++i)
+		if (stats.perBlockerBoundsHits[i] > 0)
+			order.push_back(i);
+
+	std::sort(order.begin(), order.end(), [&](size_t a, size_t b)
+		{ return stats.perBlockerPieces[a] > stats.perBlockerPieces[b]; });
+
+	size_t shown = 0;
+	for (size_t i : order)
+	{
+		if (shown++ >= kCarveTableRows)
+			break;
+
+		const navgen::BlockingVolume &vol = blockers[i];
+		std::string classname = "?";
+		std::string targetname;
+		if (vol.entityIndex >= 0 && static_cast<size_t>(vol.entityIndex) < entities.size())
+		{
+			classname = entities[static_cast<size_t>(vol.entityIndex)].Get("classname");
+			targetname = entities[static_cast<size_t>(vol.entityIndex)].Get("targetname");
+		}
+
+		std::printf("  blocker %3zu %-18s %-16s size %5.0f x %5.0f x %5.0f: %6zu carves, %7zu pieces, "
+			"%6zu removed nothing\n",
+			i, classname.c_str(), targetname.c_str(), vol.maxs.x - vol.mins.x, vol.maxs.y - vol.mins.y,
+			vol.maxs.z - vol.mins.z, stats.perBlockerBoundsHits[i], stats.perBlockerPieces[i],
+			stats.perBlockerNullCarves[i]);
+	}
+}
+
 
 void PrintUsage(const char *argv0)
 {
@@ -87,6 +144,13 @@ void PrintUsage(const char *argv0)
 		"                    ladder)\n"
 		"  --max-merge-group <n> most leaf groups one merge may fuse (default %zu). 1 disables merging\n"
 		"                    entirely (debug: each BSP hull-3 leaf becomes its own area)\n"
+		"  --dump-carve      print what the blocker carve and the passable split do to the leaf set:\n"
+		"                    per-leaf fragment counts, and how many carves fragmented a piece\n"
+		"                    without removing any volume from it\n"
+		"  --no-blockers     ignore func_wall/func_wall_toggle/func_conveyor/charger brushes\n"
+		"                    (debug: isolate how much of the leaf explosion the blocker carve owns)\n"
+		"  --no-passables    ignore func_door/func_door_rotating/func_breakable brushes (debug:\n"
+		"                    same, for the passable split)\n"
 		"  --no-floor-split  keep leaves whose floor is not solid (debug: pre-floor-support behaviour)\n"
 		"  --no-prune        skip PruneUnreachableAreas (debug only): keep areas unreachable from any spawn\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
@@ -631,6 +695,9 @@ int main(int argc, char **argv)
 	bool dumpSupport = false;
 	bool dumpPath = false;
 	bool dumpAirmove = false;
+	bool dumpCarve = false;
+	bool noBlockers = false;
+	bool noPassables = false;
 	bool noFloorSplit = false;
 	bool noPrune = false;
 	size_t maxMergeGroup = navgen::kDefaultMaxMergeGroup;
@@ -690,6 +757,18 @@ int main(int argc, char **argv)
 		else if (arg == "--dump-elevators")
 		{
 			dumpElevators = true;
+		}
+		else if (arg == "--dump-carve")
+		{
+			dumpCarve = true;
+		}
+		else if (arg == "--no-blockers")
+		{
+			noBlockers = true;
+		}
+		else if (arg == "--no-passables")
+		{
+			noPassables = true;
 		}
 		else if (arg == "--no-floor-split")
 		{
@@ -882,22 +961,50 @@ int main(int argc, char **argv)
 		std::vector<navgen::ExtractedLeaf> leaves =
 			navgen::ExtractHullLeaves(bsp, worldModel, kMapRadius, navgen::kHullDuck);
 
+		if (dumpCarve)
+		{
+			double volume = 0.0;
+			double worst = 0.0;
+			size_t oversize = 0;
+			double boxVolume =
+				(static_cast<double>(worldModel.maxs[0]) - static_cast<double>(worldModel.mins[0])) *
+				(static_cast<double>(worldModel.maxs[1]) - static_cast<double>(worldModel.mins[1])) *
+				(static_cast<double>(worldModel.maxs[2]) - static_cast<double>(worldModel.mins[2]));
+			for (const navgen::ExtractedLeaf &leaf : leaves)
+			{
+				double v = leaf.polytope.Volume();
+				volume += v;
+				if (v > worst)
+					worst = v;
+				if (v > boxVolume)
+					++oversize;
+			}
+			std::printf("%s: hull-3 extraction: %zu leaves, total volume %.0f, biggest leaf %.0f, "
+				"%zu leaves bigger than the whole map (%.0f)\n",
+				bspPath.c_str(), leaves.size(), volume, worst, oversize, boxVolume);
+			std::fflush(stdout);
+		}
+
 		std::vector<navgen::Entity> entities = navgen::ParseEntities(bsp.EntityText());
 		navgen::ElevatorSet elevators = navgen::ExtractElevators(bsp, entities, kMapRadius, dumpElevators);
 
-		std::vector<navgen::BlockingVolume> blockers =
-			navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullDuck);
-		std::vector<navgen::BlockingVolume> standBlockers =
-			navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullHuman);
+		std::vector<navgen::BlockingVolume> blockers = noBlockers
+			? std::vector<navgen::BlockingVolume>()
+			: navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullDuck);
+		std::vector<navgen::BlockingVolume> standBlockers = noBlockers
+			? std::vector<navgen::BlockingVolume>()
+			: navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullHuman);
 		std::vector<navgen::BlockingVolume> duckLadders =
 			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullDuck);
 		std::vector<navgen::BlockingVolume> standLadders =
 			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullHuman);
 
-		navgen::PassableSet duckPassables =
-			navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck, elevators.claimedEntities);
-		navgen::PassableSet standPassables =
-			navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullHuman, elevators.claimedEntities);
+		navgen::PassableSet duckPassables = noPassables
+			? navgen::PassableSet()
+			: navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck, elevators.claimedEntities);
+		navgen::PassableSet standPassables = noPassables
+			? navgen::PassableSet()
+			: navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullHuman, elevators.claimedEntities);
 
 	blockers.insert(blockers.end(), duckPassables.impassable.begin(), duckPassables.impassable.end());
 	standBlockers.insert(standBlockers.end(), standPassables.impassable.begin(),
@@ -919,6 +1026,7 @@ int main(int argc, char **argv)
 		const std::vector<navgen::BlockingVolume> &carveBlockers = airmoveWorlds.baseDuck;
 
 		std::vector<navgen::ExtractedLeaf> navigableLeaves;
+		navgen::CarveStats blockerCarve;
 		navigableLeaves.reserve(leaves.size());
 		size_t affectedLeaves = 0;
 		size_t fullyRemovedLeaves = 0;
@@ -936,8 +1044,25 @@ int main(int argc, char **argv)
 
 			++affectedLeaves;
 			std::vector<navgen::Polytope> pieces = hitBlocker
-				? navgen::SubtractBlockingVolumes(bsp, leaf.polytope, carveBlockers, kMapRadius)
+				? navgen::SubtractBlockingVolumes(bsp, leaf.polytope, carveBlockers, kMapRadius, 0.01,
+					dumpCarve ? &blockerCarve : nullptr)
 				: std::vector<navgen::Polytope>{leaf.polytope};
+
+			if (dumpCarve && pieces.size() >= kCarveDumpThreshold)
+			{
+				navgen::Vec3 c = leaf.polytope.Centroid();
+				std::printf("  carve leaf %4d: %zu pieces, leaf volume %.0f, centroid (%.0f, %.0f, %.0f)\n",
+					leaf.id, pieces.size(), leaf.polytope.Volume(), c.x, c.y, c.z);
+				std::fflush(stdout);
+			}
+
+			if (dumpCarve && (affectedLeaves % 200) == 0)
+			{
+				std::printf("  carve progress: %zu leaves carved, %zu pieces out, %zu carves "
+					"(%zu removed no volume)\n",
+					affectedLeaves, blockerCarve.piecesOut, blockerCarve.carves, blockerCarve.nullCarves);
+				std::fflush(stdout);
+			}
 
 			if (hitLadder)
 			{
@@ -964,7 +1089,43 @@ int main(int argc, char **argv)
 		}
 		leaves = std::move(navigableLeaves);
 
+		if (dumpCarve)
+		{
+			double volume = 0.0;
+			double worst = 0.0;
+			for (const navgen::ExtractedLeaf &piece : leaves)
+			{
+				double v = piece.polytope.Volume();
+				volume += v;
+				if (v > worst)
+					worst = v;
+			}
+			std::printf("%s: after blocker+ladder carve: %zu leaves, total volume %.0f, biggest leaf %.0f\n",
+				bspPath.c_str(), leaves.size(), volume, worst);
+			std::fflush(stdout);
+		}
+
+		if (dumpCarve)
+		{
+			std::printf("%s: blocker carve: %zu leaves carved by %zu blockers -> %zu pieces, worst single "
+				"leaf %zu pieces\n",
+				bspPath.c_str(), blockerCarve.inputs, carveBlockers.size(), blockerCarve.piecesOut,
+				blockerCarve.peakPieces);
+			std::printf("%s: blocker carve: %zu piece/blocker bounds tests, %zu carves -- %zu removed "
+				"volume (+%zu pieces), %zu removed nothing (+%zu pieces)\n",
+				bspPath.c_str(), blockerCarve.tests, blockerCarve.carves, blockerCarve.solidCarves,
+				blockerCarve.solidCarveExtraPieces, blockerCarve.nullCarves,
+				blockerCarve.nullCarveExtraPieces);
+			std::printf("%s: blocker carve: %zu carves produced MORE volume than they were given "
+				"(worst %.0fx)\n",
+				bspPath.c_str(), blockerCarve.inflatedCarves, blockerCarve.worstInflation);
+			PrintCarveBlockerTable(entities, carveBlockers, blockerCarve);
+			PrintNullCarveEvents(entities, blockerCarve);
+			std::fflush(stdout);
+		}
+
 		size_t passableLeaves = 0;
+		navgen::CarveStats passableCarve;
 		for (size_t pi = 0; pi < duckPassables.passable.size(); ++pi)
 		{
 			const navgen::BlockingVolume &vol = duckPassables.passable[pi].volume;
@@ -981,7 +1142,8 @@ int main(int argc, char **argv)
 				}
 
 				std::vector<navgen::Polytope> inside, outside;
-				navgen::SplitByPassableVolume(bsp, leaf.polytope, vol, kMapRadius, inside, outside);
+				navgen::SplitByPassableVolume(bsp, leaf.polytope, vol, kMapRadius, inside, outside, 0.01,
+					dumpCarve ? &passableCarve : nullptr);
 
 				for (navgen::Polytope &piece : outside)
 				{
@@ -1004,6 +1166,43 @@ int main(int argc, char **argv)
 			}
 
 			leaves = std::move(next);
+
+			if (dumpCarve)
+			{
+				double volume = 0.0;
+				double worst = 0.0;
+				for (const navgen::ExtractedLeaf &piece : leaves)
+				{
+					double v = piece.polytope.Volume();
+					volume += v;
+					if (v > worst)
+						worst = v;
+				}
+				std::printf("  passable %zu/%zu: %zu leaves, total volume %.0f, biggest leaf %.0f\n",
+					pi + 1, duckPassables.passable.size(), leaves.size(), volume, worst);
+				std::fflush(stdout);
+			}
+		}
+
+		if (dumpCarve)
+		{
+			double carveVolume = 0.0;
+			for (const navgen::ExtractedLeaf &leaf : leaves)
+				carveVolume += leaf.polytope.Volume();
+			std::printf("%s: after carve + passable split: %zu leaves, total volume %.0f cu.units\n",
+				bspPath.c_str(), leaves.size(), carveVolume);
+			std::fflush(stdout);
+		}
+
+		if (dumpCarve && !duckPassables.passable.empty())
+		{
+			std::printf("%s: passable split: %zu leaf/volume bounds tests, %zu splits -- %zu found solid "
+				"(+%zu pieces), %zu found none (+%zu pieces)\n",
+				bspPath.c_str(), passableCarve.tests, passableCarve.boundsHits, passableCarve.solidCarves,
+				passableCarve.solidCarveExtraPieces, passableCarve.nullCarves,
+				passableCarve.nullCarveExtraPieces);
+			PrintNullCarveEvents(entities, passableCarve);
+			std::fflush(stdout);
 		}
 
 		size_t stopLeaves = 0;

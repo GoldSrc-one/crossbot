@@ -93,18 +93,6 @@ to change bot behaviour — see `doc/testing.md` before trading that for wall cl
 ```
 The nav sweep cannot see firing -- one bot per server means no target. `-Full` for the rarer cases.
 
-### Measure weapon DPS against range
-```powershell
-.\scripts\measure_dps_all.ps1
-```
-Generates nav for the 19 stock DM maps, then sweeps every weapon/firemode across them and writes raw
-CSV to `nav_debug\dps\`. Append-only and resumable, so re-running accumulates samples. `doc/testing.md`
-has what the rows mean and why `-MaxParallel` stays at 6.
-
-Needs `& .\build.bat -DCROSSBOT_DPS=ON`; without it the plugin has no `crossbot_dps` cvar and the
-sweep gathers nothing. CMake caches the option, so it stays on until set back OFF -- the plugin
-prints `this is a CROSSBOT_DPS measurement build` at load so the state is never silent.
-
 ### Sweep the mesh, then the routes
 ```powershell
 & .\.claude\skills\crossbot-navgen\scripts\sweep.ps1 -Out before.txt

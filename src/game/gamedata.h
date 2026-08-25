@@ -26,10 +26,6 @@ struct GameOffsets
 	int plr_pActiveItem;
 	int plr_rgpPlayerItems;
 	int plr_rgAmmo;
-
-#ifdef CROSSBOT_DPS
-	int vt_TakeDamage;
-#endif
 };
 
 extern GameOffsets g_offsets;

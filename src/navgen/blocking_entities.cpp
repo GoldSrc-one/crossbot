@@ -18,6 +18,9 @@ namespace
 
 constexpr double kOverlapEpsilon = 0.5;
 constexpr double kMinPieceVolume = 1.0;
+constexpr double kNullCarveTolerance = 1e-6;
+constexpr size_t kMaxNullEvents = 20;
+constexpr double kInflationReportRatio = 2.0;
 
 constexpr int kSfBreakTriggerOnly = 1;
 constexpr int kSfDoorStartOpen = 1;
@@ -268,8 +271,9 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 
 	std::vector<BlockingVolume> result;
 
-	for (const Entity &ent : entities)
+	for (size_t entIndex = 0; entIndex < entities.size(); ++entIndex)
 	{
+		const Entity &ent = entities[entIndex];
 		if (!IsBlockingEntity(ent))
 			continue;
 
@@ -288,6 +292,7 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 			model.mins[2] + hullMins.z) + vol.origin;
 		vol.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
 			model.maxs[2] + hullMaxs.z) + vol.origin;
+		vol.entityIndex = static_cast<int>(entIndex);
 		result.push_back(vol);
 	}
 
@@ -379,6 +384,7 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 			model.mins[2] + hullMins.z) + vol.origin;
 		vol.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
 			model.maxs[2] + hullMaxs.z) + vol.origin;
+		vol.entityIndex = static_cast<int>(entIndex);
 
 		PassableVolume pass;
 		pass.volume = vol;
@@ -458,8 +464,12 @@ bool OverlapsBlockingVolume(const Polytope &poly, const BlockingVolume &blocker)
 }
 
 void SplitByPassableVolume(const BspFile &bsp, const Polytope &poly, const BlockingVolume &blocker,
-	double mapRadius, std::vector<Polytope> &inside, std::vector<Polytope> &outside, double epsilon)
+	double mapRadius, std::vector<Polytope> &inside, std::vector<Polytope> &outside, double epsilon,
+	CarveStats *stats)
 {
+	if (stats)
+		++stats->tests;
+
 	if (!OverlapsBlockingVolume(poly, blocker))
 	{
 		outside.push_back(poly);
@@ -468,12 +478,55 @@ void SplitByPassableVolume(const BspFile &bsp, const Polytope &poly, const Block
 
 	Polytope local = TranslatePolytope(poly, blocker.origin * -1.0);
 
-	for (const Polytope &piece : CarvePolytopeAgainstTree(bsp, blocker.headnode, local, CONTENTS_SOLID,
-			mapRadius, kMinPieceVolume, epsilon))
+	std::vector<Polytope> insidePieces = CarvePolytopeAgainstTree(bsp, blocker.headnode, local,
+		CONTENTS_EMPTY, mapRadius, kMinPieceVolume, epsilon);
+
+	std::vector<Polytope> outsidePieces;
+	if (!insidePieces.empty() || stats)
+		outsidePieces = CarvePolytopeAgainstTree(bsp, blocker.headnode, local, CONTENTS_SOLID,
+			mapRadius, kMinPieceVolume, epsilon);
+
+	if (stats)
+	{
+		++stats->boundsHits;
+		stats->carves += 2;
+		stats->piecesOut += insidePieces.size() + outsidePieces.size();
+		if (insidePieces.empty())
+		{
+			++stats->nullCarves;
+			if (outsidePieces.size() > 1)
+			{
+				stats->nullCarveExtraPieces += outsidePieces.size() - 1;
+				if (stats->nullEvents.size() < kMaxNullEvents)
+				{
+					NullCarveEvent ev;
+					ev.entityIndex = blocker.entityIndex;
+					ev.pieces = outsidePieces.size();
+					ev.volume = poly.Volume();
+					ev.centroid = poly.Centroid();
+					stats->nullEvents.push_back(ev);
+				}
+			}
+		}
+		else
+		{
+			++stats->solidCarves;
+			size_t total = insidePieces.size() + outsidePieces.size();
+			if (total > 1)
+				stats->solidCarveExtraPieces += total - 1;
+		}
+	}
+
+	if (insidePieces.empty())
+	{
+		outside.push_back(poly);
+		return;
+	}
+
+	for (Polytope &piece : outsidePieces)
 		outside.push_back(TranslatePolytope(piece, blocker.origin));
 
-	for (const Polytope &piece : CarvePolytopeAgainstTree(bsp, blocker.headnode, local, CONTENTS_EMPTY,
-			mapRadius, kMinPieceVolume, epsilon))
+	for (Polytope &piece : insidePieces)
 		inside.push_back(TranslatePolytope(piece, blocker.origin));
 }
 
@@ -519,15 +572,27 @@ std::vector<Polytope> SubtractBoxVolumes(const Polytope &leafPolytope,
 }
 
 std::vector<Polytope> SubtractBlockingVolumes(const BspFile &bsp, const Polytope &leafPolytope,
-	const std::vector<BlockingVolume> &blockers, double mapRadius, double epsilon)
+	const std::vector<BlockingVolume> &blockers, double mapRadius, double epsilon, CarveStats *stats)
 {
 	std::vector<Polytope> pieces{leafPolytope};
 
-	for (const BlockingVolume &blocker : blockers)
+	if (stats)
 	{
+		++stats->inputs;
+		stats->perBlockerPieces.resize(blockers.size());
+		stats->perBlockerNullCarves.resize(blockers.size());
+		stats->perBlockerBoundsHits.resize(blockers.size());
+	}
+
+	for (size_t bi = 0; bi < blockers.size(); ++bi)
+	{
+		const BlockingVolume &blocker = blockers[bi];
 		std::vector<Polytope> next;
 		for (Polytope &piece : pieces)
 		{
+			if (stats)
+				++stats->tests;
+
 			Vec3 mins, maxs;
 			PolytopeBounds(piece, mins, maxs);
 			if (!BoundsOverlap(mins, maxs, blocker.mins, blocker.maxs, kOverlapEpsilon))
@@ -536,14 +601,74 @@ std::vector<Polytope> SubtractBlockingVolumes(const BspFile &bsp, const Polytope
 				continue;
 			}
 
+			double before = stats ? piece.Volume() : 0.0;
+
+			bool removedAny = false;
 			Polytope local = TranslatePolytope(piece, blocker.origin * -1.0);
 			std::vector<Polytope> carved = CarvePolytopeAgainstTree(bsp, blocker.headnode, local,
-				CONTENTS_SOLID, mapRadius, kMinPieceVolume, epsilon);
+				CONTENTS_SOLID, mapRadius, kMinPieceVolume, epsilon, &removedAny);
+
+			if (stats)
+			{
+				++stats->boundsHits;
+				++stats->carves;
+				++stats->perBlockerBoundsHits[bi];
+				stats->perBlockerPieces[bi] += carved.size();
+
+				double after = 0.0;
+				for (const Polytope &c : carved)
+					after += c.Volume();
+
+				if (after > before + kNullCarveTolerance * std::max(1.0, before))
+				{
+					++stats->inflatedCarves;
+					if (after / std::max(1.0, before) > stats->worstInflation)
+						stats->worstInflation = after / std::max(1.0, before);
+					if (after > before * kInflationReportRatio && stats->nullEvents.size() < kMaxNullEvents)
+					{
+						NullCarveEvent ev;
+						ev.entityIndex = blocker.entityIndex;
+						ev.pieces = piece.faces.size();
+						ev.volume = before;
+						ev.centroid = piece.Centroid();
+						ev.after = after;
+						ev.outFaces = carved.empty() ? 0 : carved[0].faces.size();
+						stats->nullEvents.push_back(ev);
+					}
+				}
+
+				if (after > before - kNullCarveTolerance * std::max(1.0, before))
+				{
+					++stats->nullCarves;
+					++stats->perBlockerNullCarves[bi];
+					if (carved.size() > 1)
+						stats->nullCarveExtraPieces += carved.size() - 1;
+				}
+				else
+				{
+					++stats->solidCarves;
+					if (carved.size() > 1)
+						stats->solidCarveExtraPieces += carved.size() - 1;
+				}
+			}
+
+			if (!removedAny)
+			{
+				next.push_back(std::move(piece));
+				continue;
+			}
+
 			for (const Polytope &c : carved)
 				next.push_back(TranslatePolytope(c, blocker.origin));
 		}
 		pieces = std::move(next);
+
+		if (stats && pieces.size() > stats->peakPieces)
+			stats->peakPieces = pieces.size();
 	}
+
+	if (stats)
+		stats->piecesOut += pieces.size();
 
 	return pieces;
 }

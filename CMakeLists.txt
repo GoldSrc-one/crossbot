@@ -82,12 +82,6 @@ if(CROSSBOT_LADDER_DEBUG)
     message(STATUS "crossbot: ladder state trace ENABLED")
 endif()
 
-option(CROSSBOT_DPS "Weapon DPS measurement harness (hooks CBasePlayer::TakeDamage)" OFF)
-if(CROSSBOT_DPS)
-    target_compile_definitions(crossbot_mm PRIVATE CROSSBOT_DPS)
-    message(STATUS "crossbot: DPS measurement ENABLED")
-endif()
-
 file(GLOB NAVGEN_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/navgen/*.cpp
 )

@@ -3,7 +3,6 @@
 
 #include "bot_manager.h"
 #include "bot.h"
-#include "bot_dps.h"
 #include "bot_fire.h"
 #include "bot_items.h"
 #include "bot_move.h"
@@ -80,7 +79,6 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 		bot = CBot();
 
 	BotSense::ResetBoneCache();
-	BotDps::Reset();
 
 	g_pGameProfile = GameProfile_Detect();
 
@@ -100,8 +98,6 @@ void ServerDeactivate()
 	for (auto &bot : g_bots)
 		bot = CBot();
 
-	BotDps::Flush();
-	BotDps::Shutdown();
 	BotSense::ResetBoneCache();
 
 	g_pGameProfile = nullptr;
@@ -151,8 +147,6 @@ void StartFrame()
 
 		Bot_MoveNav(bot);
 	}
-
-	BotDps::Frame();
 }
 
 void Touch(edict_t *pentTouched, edict_t *pentOther)

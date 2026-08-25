@@ -27,7 +27,8 @@ void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const
 int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point);
 
 std::vector<Polytope> CarvePolytopeAgainstTree(const BspFile &bsp, int headnode, const Polytope &poly,
-	int removeContents, double mapRadius, double minPieceVolume = 1.0, double epsilon = 0.01);
+	int removeContents, double mapRadius, double minPieceVolume = 1.0, double epsilon = 0.01,
+	bool *removedAny = nullptr);
 
 struct TraceResult
 {

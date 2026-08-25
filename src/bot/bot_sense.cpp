@@ -7,7 +7,6 @@
 #include "bot_sense.h"
 #include "bot.h"
 #include "bot_aim.h"
-#include "bot_dps.h"
 #include "bot_fire.h"
 #include "bot_move.h"
 #include "../game/game_profile.h"
@@ -265,7 +264,6 @@ namespace
 			if (tr.flFraction < 1.f && tr.pHit != ent)
 				continue;
 
-			BotDps::NoteVisible(bot, ent, dist);
 			BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
 
 			if (best && dist >= bestDist)

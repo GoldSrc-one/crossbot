@@ -66,14 +66,19 @@ int8_t ClassifySubtree(const BspFile &bsp, int nodeIndex, int removeContents, st
 }
 
 void CarveRecursive(const BspFile &bsp, int nodeIndex, Polytope poly, int removeContents, double mapRadius,
-	double minPieceVolume, double epsilon, std::vector<int8_t> &memo, std::vector<Polytope> &out)
+	double minPieceVolume, double epsilon, std::vector<int8_t> &memo, std::vector<Polytope> &out,
+	bool *removedAny)
 {
 	if (poly.Empty())
 		return;
 
 	int8_t classification = ClassifySubtree(bsp, nodeIndex, removeContents, memo);
 	if (classification == kAllRemoved)
+	{
+		if (removedAny && poly.Volume() > minPieceVolume)
+			*removedAny = true;
 		return;
+	}
 	if (classification == kAllKept)
 	{
 		if (poly.Volume() > minPieceVolume)
@@ -89,18 +94,19 @@ void CarveRecursive(const BspFile &bsp, int nodeIndex, Polytope poly, int remove
 
 	Polytope front = ClipPolytope(poly, plane, true, mapRadius, epsilon);
 	Polytope back = ClipPolytope(poly, plane, false, mapRadius, epsilon);
-	CarveRecursive(bsp, node.children[0], std::move(front), removeContents, mapRadius, minPieceVolume, epsilon, memo, out);
-	CarveRecursive(bsp, node.children[1], std::move(back), removeContents, mapRadius, minPieceVolume, epsilon, memo, out);
+	CarveRecursive(bsp, node.children[0], std::move(front), removeContents, mapRadius, minPieceVolume, epsilon, memo, out, removedAny);
+	CarveRecursive(bsp, node.children[1], std::move(back), removeContents, mapRadius, minPieceVolume, epsilon, memo, out, removedAny);
 }
 
 }
 
 std::vector<Polytope> CarvePolytopeAgainstTree(const BspFile &bsp, int headnode, const Polytope &poly,
-	int removeContents, double mapRadius, double minPieceVolume, double epsilon)
+	int removeContents, double mapRadius, double minPieceVolume, double epsilon, bool *removedAny)
 {
 	std::vector<int8_t> memo(bsp.Clipnodes().size(), kUnclassified);
 	std::vector<Polytope> out;
-	CarveRecursive(bsp, headnode, poly, removeContents, mapRadius, minPieceVolume, epsilon, memo, out);
+	CarveRecursive(bsp, headnode, poly, removeContents, mapRadius, minPieceVolume, epsilon, memo, out,
+		removedAny);
 	return out;
 }
 
