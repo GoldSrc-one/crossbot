@@ -1530,43 +1530,89 @@ that, holding the button would flip the zoom every 1.0s forever. Toggles are nev
 `IN_ATTACK2` alone and shoots nothing that frame. `IN_ATTACK2` short-circuits `IN_ATTACK` in
 `ItemPostFrame` anyway, so there was never a frame to share.
 
-### Selection is random, and that is the placeholder
+### Selection spends the weapon the bot has used least
 
-If the active weapon's current mode still works, keep it. If the other mode of the same weapon works,
-switch to that — free, no command, no deploy delay. Otherwise pick uniformly at random among every
-usable weapon+mode pair and select that weapon.
+Every `(weapon, mode)` pair carries an accumulator of seconds. It lives in `BotFire::Usage` on `CBot`
+rather than in `BotFire::State`, because `Reset` assigns a fresh `State` on every respawn and the whole
+point of the tally is that it outlives a life — a bot that spent the last three lives on the mp5 should
+still reach for something else after the fourth.
 
-Uniform random is the explicit stand-in for the weighting layer. When preferences arrive they replace
-this function body and nothing else moves.
+**It counts time on target, not shots.** `Buttons` adds `frametime` to the held pair the moment
+`onTarget` comes back true, which is downstream of every readiness gate — reloading, `nextAttack`, an
+empty clip and the zoom toggle have all already returned by then. So the number is "seconds this
+weapon spent pointed at somebody with the trigger available", which is what a weapon costs the bot in a
+fight; a slow weapon is not punished for firing fewer rounds and a fast one is not rewarded for spraying.
+Rounds fired would have measured the weapon's cycle time instead of the bot's attention.
 
-`kSelectInterval` throttles re-selection to 2 Hz so that a select the game refuses — a classname typo,
-a weapon dropped between the walk and the command — cannot become a per-frame command loop.
-Completion is never inferred from a timer: `BotWeapons::Refresh` reports `activeIndex` every frame, so
-the switch is observed rather than assumed, and the frame that issues the command simply reports
-`mode=none` and tries again next frame.
+Zoomed variants fold into primary. `BotFire::Mode` has no zoom member — zoom is a range decision made
+inside the mode, not a mode of its own — so `primaryZoomed` accrues where `primary` does.
 
-This runs more often than it looks like it should. Half-Life auto-switches to whatever it considers
-the best weapon on pickup, which for a roaming bot is regularly an RPG — a weapon this file cannot
-drive. Every one of those pickups costs a switch back.
+`Buttons` can run twice in one frame (the jump split in `Bot_RunPlayerMove`), so accrual is stamped
+with `gpGlobals->time` and the second call is skipped. Without the stamp a jumping bot would rate its
+weapon twice as expensive as a walking one.
 
-It also runs far **less** often than it looks like it should, and that is worth knowing before
-believing any measurement. Keeping a working weapon is sticky by definition: a bot that spawned with
-a glock and 68 rounds has a usable mode essentially forever, so it never rolls the dice at all.
-Giving it a crossbow changes nothing — the crossbow simply sits in the inventory. `crossbot_fire_pin`
-exists because of this: it makes every weapon but one unusable, which is the only lever that reaches
-selection from outside, and without it `test_fire.ps1` cannot get a projectile fired on purpose.
+### Three triggers, and only one of them is new to combat
 
-**The stickiness has a second storey.** The random pick names a weapon *and* a mode, but only
-`pendingId` survives — the mode is thrown away, and the frame after the switch the active-weapon loop
-starts at `MODE_PRIMARY` again. So a weapon whose primary is usable never reaches its secondary by
-choice. Mode variety today is entirely an accident of range: the hornetgun's dart gets used past 900
-units because primary's flight-time ceiling rejects it there, and nothing else in the table produces
-that gap. The gauss never reaches `FIRE_CHARGE` on its own at all, since its primary works at any
-range. Hence `crossbot_fire_pin <classname> [primary|secondary]` — the mode argument exists for the
-same reason the classname does, and for the same one consumer.
+1. **The held weapon has no usable mode.** Unchanged, and still the common case: Half-Life auto-switches
+   to whatever it considers best on pickup, which for a roaming bot is regularly an RPG.
+2. **The clip is dry, in combat.** `AmmoReady` grew a `strict` flag. The strict pass demands the rounds
+   be in the clip *now*; the loose pass keeps the old behaviour of counting reserve ammo, because a
+   weapon that can be reloaded is still a weapon. `Think` runs keep-strict, select-strict, keep-loose,
+   select-loose in that order, so a loaded weapon in the inventory always beats reloading the empty one
+   in hand, and reloading under fire only happens when nothing else is loaded. `why=empty-switch` is
+   that path.
+3. **Every 3 s out of combat.** Out of combat means no target this frame and none seen for
+   `kCombatMemory` (3 s, off `sense.targetTime`, which `UpdateVision` stamps every frame a target is
+   visible). The memory window is what stops a bot from fumbling with its inventory the instant an
+   enemy steps behind a pillar.
 
-This is a property of the placeholder, not a separate bug, and the weighting layer that replaces
-uniform random should score pairs rather than weapons.
+There is deliberately no in-combat rotation timer. Switching weapons mid-fight for variety's sake
+costs a deploy and reads as indecision; the two combat triggers are both "this weapon stopped working".
+
+### Out of combat the bot reloads first, then rotates
+
+`ItemPostFrame` auto-reloads only at `m_iClip == 0`, so every partial clip in the inventory stays
+partial until somebody presses the key — and it only runs for the active item, so the bot has to hold
+the weapon while the reload lands. Hence the idle pass picks the largest reloadable deficit, selects
+that weapon, and `Buttons` presses `IN_RELOAD` from a branch above the `mode == MODE_NONE` return
+(`fire.idleReloadId`). A weapon that still needs rounds wins the next tick outright, so an in-progress
+reload is never abandoned halfway.
+
+Only when nothing needs rounds does the least-used pair win, with a random tie-break through the
+existing per-bot RNG. **Melee is excluded from the ranking** and reachable only as the last resort when
+no other pair is usable — a crowbar with zero seconds on it would otherwise win every idle tick for
+free, since it never runs out of ammo.
+
+**Out of combat the held weapon wins ties.** The bot switches only when its best held pair has strictly
+more seconds than the best candidate. Usage accrues only in combat, so without that rule everything the
+bot could rotate to sits at zero forever and an idle bot cycles its whole inventory every three seconds.
+The exception is a held melee weapon, which loses ties on purpose: a bot idling with a crowbar and a
+loaded shotgun in the bag should be holding the shotgun.
+
+Out of combat there is no target, so range, uphill and flight time cannot be evaluated at all. That
+split is why `ModeUsable` became `ModeViable` (`Supported`, the pin, `WPN_Q_NO_UNDERWATER`, ammo) plus
+the geometry gates layered on top; the idle path calls the target-free half.
+
+### The mode survives the switch now
+
+`fire.pendingMode` rides along with `fire.pendingId`, and the keep-loop tries the pending mode first on
+the frame the switch lands. Previously the mode was thrown away and the loop restarted at
+`MODE_PRIMARY`, so a weapon whose primary worked never reached its secondary by choice: the gauss never
+charged, the glock never used its fast fire, and mode variety was entirely an accident of range.
+
+The active weapon is excluded from the choice list when the keep-loop already tried both of its modes.
+It failed for a reason — usually a blocked arc solve rather than ammo — and letting the ranking re-pick
+it would spend a 0.5 s `kSelectInterval` per frame to select the weapon already in hand.
+
+`kSelectInterval` still throttles combat re-selection to 2 Hz so that a select the game refuses cannot
+become a per-frame command loop, and completion is still observed rather than assumed:
+`BotWeapons::Refresh` reports `activeIndex` every frame, and the frame that issues the command reports
+`mode=none` and tries again next frame. Being throttled no longer blocks the loose keep, so a bot
+waiting out the interval keeps firing what it has instead of standing idle.
+
+`crossbot_weapon_usage` prints the table. `crossbot_fire_pin` is still the only lever that reaches
+selection deterministically, because in combat the rules above are all "the weapon stopped working" and
+a pinned weapon is the only way to make that happen on demand.
 
 ### Why the trigger lives inside Bot_RunPlayerMove
 

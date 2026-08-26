@@ -228,6 +228,20 @@ targets", never a count. `-Full` runs the whole duel window instead of stopping 
 engagement, which is what you want when the interesting numbers are deaths, reloads and the rarer
 suspicion sources.
 
+**The select phase runs first, with one bot and nothing to shoot at.** It is the only arrangement in
+the suite where the out-of-combat weapon decision runs unopposed — once four bots roam `crossfire`, a
+three-second gap without a sighting is the exception. What it measures is the *tie* rule rather than
+rotation: with no combat anywhere, every weapon+mode pair sits at zero seconds, the held weapon wins
+every tie, and the bot must stay put. A rotation that ignored ties would show up as one switch per 3 s
+tick, so the phase allows a small budget (a weapon picked up with an empty clip — the RPG always has
+one — is a legitimate idle switch to go and load it) and fails on churn above it. It also asserts zero
+shots, since a bot with no target that fires anything has a trigger running off the target path.
+
+Rotation itself cannot be proved there: ranking needs seconds on the clock, and seconds only accrue in
+a fight. Its witness is the duel, under `-Full`, alongside the two other paths that need real combat
+to appear — `idlereload` (a magazine topped up between fights) and a usage table with more than one
+pair on it. `crossbot_weapon_usage` is what the last of those reads.
+
 **The control phase is the load-bearing half.** With `crossbot_fire 0` nothing may fire, and it is
 checked two independent ways: the plugin's own shot counter, and ammo the bots actually spent, read
 from clip and reserve counts. Ammo is the honest witness — a clip only ever falls by firing, since
@@ -264,18 +278,20 @@ charged shots with no timeout; 9mmAR 60 arc shots, `uphill=0`, `selfveto=14`; ha
 independent observations — one counts a commit the plugin opened, the other counts the game DLL's
 attack timer moving.
 
-**The weapon phases need `crossbot_fire_pin`, and equipping instead does not work.** A bot keeps any
-weapon that still has a usable mode, so handing a roaming bot a crossbow puts it in the inventory and
-nothing else ever happens — a first attempt gave 288 crossbows and hornetguns away across two minutes
-and recorded zero projectiles fired. The pin makes every other weapon unusable, which is the only
-lever that reaches selection.
+**The weapon phases need `crossbot_fire_pin`, and equipping instead does not work.** In a fight a bot
+re-selects only when the weapon in its hands stops working, so handing a roaming bot a crossbow puts it
+in the inventory and nothing else happens while a target is up — a first attempt gave 288 crossbows and
+hornetguns away across two minutes and recorded zero projectiles fired. Least-used rotation loosened
+this but did not remove it: rotation runs out of combat, on a 3 s tick, and picks the pair with the
+fewest seconds on it, which is a fair coin among everything the bot is carrying rather than the weapon
+a phase wants. The pin makes every other weapon unusable, which is still the only lever that names one.
 
-**The gauss needs the mode argument as well, for the same reason one level down.** The random pick
-names a weapon *and* a mode but only the weapon survives the switch, so the frame after selecting, the
-mode order restarts at primary. Gauss primary is a hitscan that works at any range, so
-`FIRE_CHARGE` is unreachable without `crossbot_fire_pin weapon_gauss secondary`. The hornetgun escapes
-this only by accident: its primary's flight-time ceiling rejects targets past 900 units, which is the
-one gap in the table that lets a secondary win.
+**The gauss needs the mode argument as well, for the same reason one level down.** Selection now
+carries `pendingMode` through the switch, so a secondary *can* be chosen on merit — but only once the
+primary has accumulated more seconds than it, which inside a two-minute pinned phase it may never do.
+Gauss primary is a hitscan that works at any range, so `FIRE_CHARGE` stays effectively unreachable
+without `crossbot_fire_pin weapon_gauss secondary`. The hornetgun reaches its secondary without help,
+by range rather than by tally: its primary's flight-time ceiling rejects targets past 900 units.
 
 Each weapon runs its own pass so the aim kinds are attributable to the weapon that produced them, and
 each pass asserts what only that weapon can show:

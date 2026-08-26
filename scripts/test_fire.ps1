@@ -18,6 +18,14 @@
     Encounters are stochastic, so the duel phase is generous with time and the
     pass condition is "shots were fired at real targets", not a fixed count.
 
+    SELECT: one bot, alone on the map, handed four weapons. With no target the
+    only weapon decision left is the out-of-combat one, and with no combat
+    anywhere every weapon+mode pair is tied at zero seconds -- so the bot must
+    hold onto what it has instead of rotating on every 3s tick. Rotation needs
+    usage to rank and is therefore the duel's to prove. It runs before the other
+    bots join because once four of them roam crossfire, a three-second gap
+    without a sighting is the exception rather than the rule.
+
     CONTROL: crossbot_fire 0. Bots roam and must fire nothing at all. This is
     what separates "firing works" from "the shot counter is broken" -- the
     counter watches the game DLL's own attack timers, not the plugin's buttons,
@@ -29,10 +37,11 @@
 
     WEAPON: one pass per weapon that needs its own aim or trigger, each pinned
     with crossbot_fire_pin. Equipping alone is not enough and no amount of
-    patience fixes it -- a bot keeps a weapon for as long as it has one usable
-    mode, so a bot that spawned with a glock and 68 rounds will never choose
-    anything else. The pin makes every other weapon unusable, which is the only
-    lever that reaches selection. Separate passes are what make aim=lead,
+    patience fixes it -- in a fight a bot only re-selects when the weapon in its
+    hands stops working, and out of combat it rotates to whichever pair it has
+    used least, which is not the one a phase wants. The pin makes every other
+    weapon unusable, which is the only lever that names one. Separate passes
+    are what make aim=lead,
     aim=homing, the zoom decision and the charge each attributable to the
     weapon that produced them.
 
@@ -44,6 +53,7 @@ param(
     [string]$Map = "crossfire",
     [int]$Port = 0,
     [int]$Bots = 4,
+    [int]$SelectSeconds = 20,
     [int]$ControlSeconds = 20,
     [int]$DuelSeconds = 180,
     [int]$ProjectileSeconds = 420,
@@ -95,6 +105,12 @@ function Update-FireState {
         if ($line -match 'switches=(\d+)') { $switches = [int]$Matches[1] }
         $reloads = 0
         if ($line -match 'reloads=(\d+)') { $reloads = [int]$Matches[1] }
+        $emptySwitches = 0
+        if ($line -match 'emptyswitch=(\d+)') { $emptySwitches = [int]$Matches[1] }
+        $idleSwitches = 0
+        if ($line -match 'idleswitch=(\d+)') { $idleSwitches = [int]$Matches[1] }
+        $idleReloads = 0
+        if ($line -match 'idlereload=(\d+)') { $idleReloads = [int]$Matches[1] }
         $leadShots = 0
         if ($line -match 'leadshots=(\d+)') { $leadShots = [int]$Matches[1] }
         $chargeShots = 0
@@ -130,6 +146,10 @@ function Update-FireState {
                 Base = $shots; BaseSwitches = $switches; BaseReloads = $reloads; BaseLead = $leadShots
                 Total = 0; TotalSwitches = 0; TotalReloads = 0; TotalLead = 0; Deaths = 0
                 Held = '-'; Clip = -1; Prim = -1; Burned = 0
+                EmptySw = $emptySwitches; BaseEmptySw = $emptySwitches; TotalEmptySw = 0
+                IdleSw = $idleSwitches; BaseIdleSw = $idleSwitches; TotalIdleSw = 0
+                IdleRel = $idleReloads; BaseIdleRel = $idleReloads; TotalIdleRel = 0
+                HeldSeen = @{}
             }
         }
         $bot = $state.Bots[$name]
@@ -146,8 +166,12 @@ function Update-FireState {
             $bot.TotalArc += $bot.Arc - $bot.BaseArc
             $bot.TotalThrow += $bot.Throw - $bot.BaseThrow
             $bot.TotalGuides += $bot.Guides - $bot.BaseGuides
+            $bot.TotalEmptySw += $bot.EmptySw - $bot.BaseEmptySw
+            $bot.TotalIdleSw += $bot.IdleSw - $bot.BaseIdleSw
+            $bot.TotalIdleRel += $bot.IdleRel - $bot.BaseIdleRel
             $bot.Base = 0; $bot.BaseSwitches = 0; $bot.BaseReloads = 0; $bot.BaseLead = 0
             $bot.BaseCharge = 0; $bot.BaseArc = 0; $bot.BaseThrow = 0; $bot.BaseGuides = 0
+            $bot.BaseEmptySw = 0; $bot.BaseIdleSw = 0; $bot.BaseIdleRel = 0
             $bot.Deaths++
         }
         else {
@@ -159,7 +183,13 @@ function Update-FireState {
             $bot.TotalArc += $arcShots - $bot.Arc
             $bot.TotalThrow += $throwShots - $bot.Throw
             $bot.TotalGuides += $guides - $bot.Guides
+            $bot.TotalEmptySw += $emptySwitches - $bot.EmptySw
+            $bot.TotalIdleSw += $idleSwitches - $bot.IdleSw
+            $bot.TotalIdleRel += $idleReloads - $bot.IdleRel
         }
+        $bot.EmptySw = $emptySwitches
+        $bot.IdleSw = $idleSwitches
+        $bot.IdleRel = $idleReloads
         $bot.Shots = $shots
         $bot.Switches = $switches
         $bot.Reloads = $reloads
@@ -184,6 +214,7 @@ function Update-FireState {
         $bot.Held = $held
         $bot.Clip = $clip
         $bot.Prim = $prim
+        if ($held -ne '-') { $bot.HeldSeen[$held] = $true }
 
         if ($held -ne '-') { $state.Weapons[$held] = $true }
         if ($why -eq 'firing') { $state.Firing++ }
@@ -256,6 +287,44 @@ function Get-TotalBurned {
     return $sum
 }
 
+function Get-TotalEmptySwitch {
+    param([hashtable]$state)
+    $sum = 0
+    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalEmptySw + $bot.EmptySw - $bot.BaseEmptySw }
+    return $sum
+}
+
+function Get-TotalIdleSwitch {
+    param([hashtable]$state)
+    $sum = 0
+    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalIdleSw + $bot.IdleSw - $bot.BaseIdleSw }
+    return $sum
+}
+
+function Get-TotalIdleReload {
+    param([hashtable]$state)
+    $sum = 0
+    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalIdleRel + $bot.IdleRel - $bot.BaseIdleRel }
+    return $sum
+}
+
+# The usage table is the one thing the plugin reports that does not reset on
+# respawn, so it needs no banking -- the largest pair count any bot reaches is
+# the whole measurement.
+function Get-UsagePairs {
+    $best = 0
+    $detail = @()
+    foreach ($line in ((Invoke-Rcon "crossbot_weapon_usage") -split "`r?`n")) {
+        if ($line -notmatch '^CrossBot: (\S+) held=(\S+)') { continue }
+        $name = $Matches[1]
+        $pairs = 0
+        if ($line -match 'pairs=(\d+)') { $pairs = [int]$Matches[1] }
+        if ($pairs -gt $best) { $best = $pairs }
+        if ($pairs -gt 0) { $detail += "${name}:$pairs" }
+    }
+    return @{ Pairs = $best; Detail = ($detail -join ' ') }
+}
+
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
@@ -290,7 +359,59 @@ try {
     if ($Quantum -ge 0) { Invoke-Rcon "crossbot_aim_quantum $Quantum" | Out-Null }
     if ($Impulse -ge 0) { Invoke-Rcon "crossbot_aim_impulse $Impulse" | Out-Null }
 
-    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add Fire$i" | Out-Null }
+    Invoke-Rcon "crossbot_add Fire1" | Out-Null
+
+    # One bot, so there is never a target and every decision this phase sees is
+    # the out-of-combat one. It runs before the others join because that is the
+    # only cheap way to guarantee an empty combat memory for twenty seconds --
+    # once four bots are roaming crossfire, three-second gaps in sight are the
+    # exception rather than the rule.
+    #
+    # This measures the tie rule rather than rotation. With no combat anywhere,
+    # every weapon+mode pair sits at zero seconds, the held weapon wins every
+    # tie and the bot must therefore stay put -- a rotation that ignored ties
+    # would switch on every 3s tick and show up here as six or seven. Rotation
+    # itself needs usage to rank, so its witness is the duel.
+    Write-Host "`n===== SELECT: one bot, no targets, ${SelectSeconds}s ====="
+    Write-Host "Idle ticks must not churn the weapon when nothing has been used."
+
+    Invoke-Rcon "crossbot_fire 1" | Out-Null
+    foreach ($give in @('weapon_shotgun', 'weapon_crossbow', 'weapon_9mmAR', 'weapon_hornetgun')) {
+        Invoke-Rcon "crossbot_equip $give Fire1" | Out-Null
+    }
+
+    $select = New-FireState
+    Update-FireState $select
+    $deadline = (Get-Date).AddSeconds($SelectSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds $PollSeconds
+        Update-FireState $select
+    }
+
+    $selectHeld = @{}
+    foreach ($bot in $select.Bots.Values) {
+        foreach ($k in $bot.HeldSeen.Keys) { $selectHeld[$k] = $true }
+    }
+    $selectIdleSw = Get-TotalIdleSwitch $select
+    $selectIdleRel = Get-TotalIdleReload $select
+    $selectShots = Get-TotalShots $select
+
+    # A weapon picked up off the map can arrive with an empty clip -- the RPG
+    # always does -- and loading it is a legitimate idle switch, so the budget is
+    # a handful rather than zero. A tie rule that failed would produce one every
+    # 3s tick for the whole phase.
+    $churnBudget = [int]($SelectSeconds / 6)
+
+    Write-Host ("  idleswitch={0} idlereload={1} shots={2} held: {3}" -f $selectIdleSw, $selectIdleRel,
+        $selectShots, (($selectHeld.Keys | Sort-Object) -join ','))
+
+    if ($selectIdleSw -gt $churnBudget) {
+        $failures += "SELECT: $selectIdleSw out-of-combat switch(es) with nothing used yet, so the held weapon is losing ties"
+    }
+    if ($selectShots -ne 0) { $failures += "SELECT: $selectShots shot(s) fired with no target on the map" }
+
+    Invoke-Rcon "crossbot_fire 0" | Out-Null
+    for ($i = 2; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add Fire$i" | Out-Null }
 
     Write-Host "`n===== CONTROL: crossbot_fire 0, ${ControlSeconds}s ====="
     Write-Host "Bots roam and pick up guns. Nothing may fire."
@@ -350,8 +471,15 @@ try {
         $reloads += $bot.TotalReloads + $bot.Reloads - $bot.BaseReloads
     }
 
+    $duelEmptySw = Get-TotalEmptySwitch $duel
+    $duelIdleSw = Get-TotalIdleSwitch $duel
+    $duelIdleRel = Get-TotalIdleReload $duel
+    $usage = Get-UsagePairs
+
     Write-Host ("  shots={0} burned={1} firing={2} targets={3} deaths={4} switches={5} reloads={6}" -f `
         $duelShots, $duelBurned, $duel.Firing, $duel.Targets, $deaths, $switches, $reloads)
+    Write-Host ("  emptyswitch={0} idleswitch={1} idlereload={2} usage pairs: {3}" -f `
+        $duelEmptySw, $duelIdleSw, $duelIdleRel, $usage.Detail)
     Write-Host ("  weapons held: {0}" -f (($duel.Weapons.Keys | Sort-Object) -join ','))
     Write-Host ("  reasons: {0}" -f (($duel.Reasons.Keys | Sort-Object | ForEach-Object { "$_=$($duel.Reasons[$_])" }) -join ' '))
     Write-Host ("  suspicion sources seen: {0}" -f (($senseSeen.Keys | Sort-Object) -join ','))
@@ -363,6 +491,18 @@ try {
     if ($duel.Firing -eq 0) { $failures += "DUEL: no bot ever decided to fire" }
     if ($duelShots -eq 0) { $failures += "DUEL: no shot was observed leaving a weapon" }
     if ($duelBurned -eq 0) { $failures += "DUEL: no ammo was spent" }
+
+    # Only under -Full. Each of these needs a bot to run a clip dry with a loaded
+    # spare in the bag, or to survive three seconds unseen with a part-empty
+    # magazine, and which guns spawn near which bot decides whether that happens
+    # at all inside the short window.
+    if ($Full) {
+        if ($usage.Pairs -lt 2) {
+            $failures += "DUEL: no bot accumulated time on more than one weapon+mode pair"
+        }
+        if ($duelIdleRel -eq 0) { $failures += "DUEL: no bot ever reloaded out of combat" }
+        if ($duelIdleSw -eq 0) { $failures += "DUEL: no bot ever rotated weapons between fights" }
+    }
 
     $projFailures = @()
 

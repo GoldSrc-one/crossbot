@@ -136,6 +136,7 @@ struct CBot
 	BotBreak::State brk;
 	BotSense::State sense;
 	BotFire::State fire;
+	BotFire::Usage weaponUsage;
 
 	bool fallTelemetryLogged = false;
 

@@ -191,6 +191,11 @@ namespace
 		BotManager::PrintFireStatus();
 	}
 
+	void Cmd_CrossBotWeaponUsage()
+	{
+		BotManager::PrintWeaponUsage();
+	}
+
 	void Cmd_CrossBotFirePin()
 	{
 		if (CMD_ARGC() < 2)
@@ -583,6 +588,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
+	ADD_SERVER_COMMAND("crossbot_weapon_usage", Cmd_CrossBotWeaponUsage);
 }
 
 }

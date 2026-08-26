@@ -56,20 +56,31 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 `arc-self` — the same rule, refusing a rocket rather than a shell.
 
   `shots`, `leadshots`, `chargeshots`, `arcshots`, `throwshots`, `guides`, `uphill`, `selfveto`,
-  `switches` and `reloads` are **per life**: respawn zeroes them, so a drop is a death. `throwshots`
-  and `chargeshots` are counted from the game DLL's own state rather than from an attack timer,
+  `switches`, `reloads`, `emptyswitch`, `idleswitch` and `idlereload` are **per life**: respawn zeroes
+  them, so a drop is a death. The usage table that drives selection is the one thing that does *not*
+  reset — read it with `crossbot_weapon_usage`. `emptyswitch` counts fights the bot left a dry clip in
+  rather than reloading it, `idleswitch` counts out-of-combat rotations, and `idlereload` counts
+  `IN_RELOAD` presses issued with no target — several per shotgun refill, one per magazine elsewhere.
+  `throwshots` and `chargeshots` are counted from the game DLL's own state rather than from an attack timer,
   because neither weapon moves one when the bot presses. `guides` is one per rocket launched, and
   `capped` counts commits released by their safety valve rather than by the game's own state —
   non-zero is a fault, with the same standing `charge-timeout` has on the gauss. `uphill` and `selfveto` count rejections rather than
   situations — both predicates run per weapon per mode per frame — so read them as a yes/no; see
   `doc/bot.md`, `bot_fire.cpp`
+- `crossbot_weapon_usage [name]` — per bot: the weapon held, then `classname=primary/secondary` seconds
+  for every weapon+mode pair with time on it, and `pairs` — how many are non-zero. This is the table
+  selection ranks, so `pairs=1` after a long run means the bot has been camping one weapon and the
+  ranking is not reaching the rest. Seconds are time spent on target with the trigger available, not
+  shots, and zoomed variants fold into primary. Unlike the other counters it survives respawn, and
+  unlike `crossbot_weapons` it can only report bots; see `doc/bot.md`, `bot_fire.cpp`
 - `crossbot_fire_pin <classname|off> [primary|secondary] [zoom|nozoom]` — restrict weapon selection to
   one classname, and optionally one mode, making everything else unusable. Only useful for testing, and
-  necessary there for two layers of the same reason. A bot keeps any weapon that still has a usable
-  mode, so one that spawned with a glock never voluntarily picks up anything else; and the random pick
-  discards the mode it chose, so a weapon whose primary works never reaches its secondary. Without the
-  classname the projectile path is unreachable from the console; without the mode the gauss charge is.
-  With no argument it reports all three.
+  necessary there because in a fight a bot only re-selects when the weapon it holds stops working — it
+  keeps any weapon with a usable mode and a loaded clip, so one that spawned with a glock will not
+  reach for a crossbow while an enemy is in front of it. Out-of-combat rotation does move the held
+  weapon around, but on its own schedule and never onto the one a test wants. Without the classname the
+  projectile path is unreachable from the console; without the mode the gauss charge is. With no
+  argument it reports all three.
 
   The third argument overrides `ZoomButtons`, which otherwise picks the zoom state by range — in at
   500 units, out at 300. On a map whose fights are shorter than that the bot barely zooms, so the
@@ -119,7 +130,8 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   `scripts/test_aim_error.ps1` measures against. Above 1 is for seeing the effect, not for playing against
 - `crossbot_fire` — whether bots shoot at all. Default 1. Inert without `crossbot_sense`, since firing
   needs a target and an aim queue; and inert in the nav sweep either way, because a lone bot never
-  acquires one. Turning it off also stops weapon *switching*, which is the same decision; see
+  acquires one. Turning it off also stops weapon *switching* and the out-of-combat reload, which are
+  the same decision made without a target; see
   `doc/bot.md`, `bot_fire.cpp`
 - `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
   `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean

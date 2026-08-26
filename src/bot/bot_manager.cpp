@@ -453,16 +453,17 @@ void PrintFireStatus()
 
 		edict_t *target = bot.sense.target.Get();
 
-		char line[640];
+		char line[768];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s held=%s zoom=%d mode=%s why=%s %s %s commit=%s for=%.2f shots=%d "
 			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d uphill=%d "
-			"selfveto=%d switches=%d reloads=%d target=%s\n",
+			"selfveto=%d switches=%d reloads=%d emptyswitch=%d idleswitch=%d idlereload=%d target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
 			fire.leadShots, fire.chargeShots, fire.arcShots, fire.throwShots, fire.guides,
 			fire.commitCaps,
 			fire.uphillVetoes, fire.selfVetoes, fire.switches, fire.reloads,
+			fire.emptySwitches, fire.idleSwitches, fire.idleReloads,
 			target ? CBotPlayerNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}
@@ -470,6 +471,61 @@ void PrintFireStatus()
 	char summary[160];
 	snprintf(summary, sizeof(summary), "CrossBot: %d bot(s), fire=%d\n", shown,
 		BotFire::Enabled() ? 1 : 0);
+	SERVER_PRINT(summary);
+}
+
+void PrintWeaponUsage()
+{
+	int shown = 0;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		++shown;
+
+		const BotInventory &inv = bot.inventory;
+
+		char heldBuf[64] = "-";
+		if (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
+		{
+			const WeaponSpec *spec = g_pGameProfile
+				? g_pGameProfile->GetWeaponSpec(inv.weapons[inv.activeIndex].id) : nullptr;
+			snprintf(heldBuf, sizeof(heldBuf), "%s", spec && spec->classname ? spec->classname : "?");
+		}
+
+		char line[1024];
+		int used = snprintf(line, sizeof(line), "CrossBot: %s held=%s", bot.name, heldBuf);
+		int pairs = 0;
+
+		for (int id = 1; id < BotFire::kMaxWeaponIds; ++id)
+		{
+			float primary = BotFire::UsageOf(bot, id, BotFire::MODE_PRIMARY);
+			float secondary = BotFire::UsageOf(bot, id, BotFire::MODE_SECONDARY);
+			if (primary <= 0.f && secondary <= 0.f)
+				continue;
+
+			const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(id) : nullptr;
+			const char *name = (spec && spec->classname) ? spec->classname : "?";
+
+			if (primary > 0.f)
+				++pairs;
+			if (secondary > 0.f)
+				++pairs;
+
+			if (used < static_cast<int>(sizeof(line)) - 1)
+				used += snprintf(line + used, sizeof(line) - used, " %s=%.1f/%.1f", name,
+					primary, secondary);
+		}
+
+		if (used < static_cast<int>(sizeof(line)) - 1)
+			snprintf(line + used, sizeof(line) - used, " pairs=%d\n", pairs);
+
+		SERVER_PRINT(line);
+	}
+
+	char summary[160];
+	snprintf(summary, sizeof(summary), "CrossBot: %d bot(s)\n", shown);
 	SERVER_PRINT(summary);
 }
 

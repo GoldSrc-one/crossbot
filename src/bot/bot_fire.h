@@ -17,6 +17,13 @@ enum Mode
 	MODE_SECONDARY,
 };
 
+constexpr int kMaxWeaponIds = 32;
+
+struct Usage
+{
+	float seconds[kMaxWeaponIds][2] = {};
+};
+
 enum Commit
 {
 	COMMIT_NONE = 0,
@@ -50,8 +57,12 @@ struct State
 	bool commitSeen = false;
 
 	int pendingId = 0;
+	Mode pendingMode = MODE_NONE;
+	int idleReloadId = 0;
 	float nextSelectTime = 0.f;
+	float nextIdleTime = 0.f;
 	float nextEquipTime = 0.f;
+	float usageStamp = -1.f;
 
 	unsigned int rngState = 0;
 	bool rngSeeded = false;
@@ -78,6 +89,9 @@ struct State
 	int selfVetoes = 0;
 	int switches = 0;
 	int reloads = 0;
+	int emptySwitches = 0;
+	int idleSwitches = 0;
+	int idleReloads = 0;
 };
 
 bool Enabled();
@@ -96,7 +110,12 @@ bool Supported(const WeaponMode &mode);
 
 const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed);
 
-bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, float rise);
+bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict);
+
+bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, float rise,
+	bool strict);
+
+float UsageOf(const CBot &bot, int weaponId, Mode mode);
 
 void Reset(CBot &bot);
 

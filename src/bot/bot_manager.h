@@ -32,6 +32,8 @@ namespace BotManager
 
 	void PrintFireStatus();
 
+	void PrintWeaponUsage();
+
 	void OnSound(edict_t *src, int channel, const char *sample, float volume, float attenuation);
 
 	void OnEvent(int flags, const edict_t *pInvoker);

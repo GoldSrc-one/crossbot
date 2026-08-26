@@ -21,6 +21,9 @@ namespace
 	constexpr float kHitscanRange = 8192.f;
 
 	constexpr float kSelectInterval = 0.5f;
+	constexpr float kIdleSelectInterval = 3.f;
+	constexpr float kCombatMemory = 3.f;
+	constexpr float kUsageEpsilon = 0.05f;
 	constexpr float kEquipInterval = 0.5f;
 
 	constexpr float kMaxFlightTime = 1.5f;
@@ -171,7 +174,7 @@ namespace
 		return per * (1 + static_cast<int>(m.chargeFull / kChargeBurn));
 	}
 
-	bool AmmoReady(const BotInventory &inv, const BotWeapon &w, const WeaponMode &m)
+	bool AmmoReady(const BotInventory &inv, const BotWeapon &w, const WeaponMode &m, bool strict)
 	{
 		int need = ShotCost(m);
 
@@ -180,8 +183,10 @@ namespace
 		case AMMO_NONE:
 			return true;
 		case AMMO_CLIP:
-			if (w.clip >= need)
+			if (w.clip < 0 || w.clip >= need)
 				return true;
+			if (strict)
+				return false;
 			return AmmoCount(inv, w.primaryAmmoType) > 0;
 		case AMMO_PRIMARY:
 			return AmmoCount(inv, w.primaryAmmoType) >= need;
@@ -870,7 +875,7 @@ const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed)
 	return nullptr;
 }
 
-bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, float rise)
+bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict)
 {
 	if (!Supported(m))
 		return false;
@@ -887,6 +892,15 @@ bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, 
 	}
 
 	if ((m.quirks & WPN_Q_NO_UNDERWATER) != 0 && bot.pEdict->v.waterlevel == 3)
+		return false;
+
+	return AmmoReady(bot.inventory, w, m, strict);
+}
+
+bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, float rise,
+	bool strict)
+{
+	if (!ModeViable(bot, w, m, strict))
 		return false;
 
 	if (m.gravity > 0.f && !ArcDetonates(m) && rise > kUphillSlack)
@@ -906,7 +920,17 @@ bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, 
 			return false;
 	}
 
-	return AmmoReady(bot.inventory, w, m);
+	return true;
+}
+
+float UsageOf(const CBot &bot, int weaponId, Mode mode)
+{
+	if (weaponId <= 0 || weaponId >= kMaxWeaponIds)
+		return 0.f;
+	if (mode != MODE_PRIMARY && mode != MODE_SECONDARY)
+		return 0.f;
+
+	return bot.weaponUsage.seconds[weaponId][mode - 1];
 }
 
 void Reset(CBot &bot)
@@ -967,13 +991,392 @@ static void PinEquip(CBot &bot)
 		const WeaponMode *m = ModeOf(*spec, order[i], zoomed);
 		if (!m || !Supported(*m))
 			continue;
-		if (AmmoReady(inv, *held, *m))
+		if (AmmoReady(inv, *held, *m, false))
 			return;
 
 		const char *give = g_pGameProfile->AmmoEntity(held->id, m->ammo);
 		GiveItem::Give(bot.pEdict, give ? give : g_pin);
 		return;
 	}
+}
+
+static void AccrueUsage(CBot &bot, Mode mode)
+{
+	State &fire = bot.fire;
+
+	if (fire.usageStamp == gpGlobals->time)
+		return;
+	fire.usageStamp = gpGlobals->time;
+
+	if (fire.weaponId <= 0 || fire.weaponId >= kMaxWeaponIds)
+		return;
+	if (mode != MODE_PRIMARY && mode != MODE_SECONDARY)
+		return;
+
+	bot.weaponUsage.seconds[fire.weaponId][mode - 1] += gpGlobals->frametime;
+}
+
+static bool WeaponViable(CBot &bot, const BotWeapon &w)
+{
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+	if (!spec)
+		return false;
+
+	return ModeViable(bot, w, spec->primary, false) || ModeViable(bot, w, spec->secondary, false);
+}
+
+static int ReloadDeficit(CBot &bot, const BotWeapon &w)
+{
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+	if (!spec || spec->clipSize <= 0 || w.clip < 0 || w.clip >= spec->clipSize)
+		return 0;
+
+	if (!WeaponViable(bot, w))
+		return 0;
+
+	int deficit = spec->clipSize - w.clip;
+	int reserve = AmmoCount(bot.inventory, w.primaryAmmoType);
+
+	return (deficit < reserve) ? deficit : reserve;
+}
+
+static float WeaponUsage(const CBot &bot, int weaponId)
+{
+	float primary = UsageOf(bot, weaponId, MODE_PRIMARY);
+	float secondary = UsageOf(bot, weaponId, MODE_SECONDARY);
+
+	return (primary < secondary) ? primary : secondary;
+}
+
+static int BuildChoices(CBot &bot, bool strict, bool geometry, float dist, float rise, int skipId,
+	Choice *choices, int max)
+{
+	const BotInventory &inv = bot.inventory;
+	int count = 0;
+
+	for (int i = 0; i < inv.count && count < max; ++i)
+	{
+		const BotWeapon &w = inv.weapons[i];
+		if (skipId != 0 && w.id == skipId)
+			continue;
+
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+		if (!spec)
+			continue;
+
+		const Mode modes[2] = { MODE_PRIMARY, MODE_SECONDARY };
+
+		for (int j = 0; j < 2 && count < max; ++j)
+		{
+			const WeaponMode &m = (modes[j] == MODE_PRIMARY) ? spec->primary : spec->secondary;
+			bool ok = geometry ? ModeUsable(bot, w, m, dist, rise, strict)
+					: ModeViable(bot, w, m, strict);
+			if (!ok)
+				continue;
+
+			choices[count].index = i;
+			choices[count].mode = modes[j];
+			++count;
+		}
+	}
+
+	return count;
+}
+
+static int PickLeastUsed(CBot &bot, const Choice *choices, int count, bool skipMelee)
+{
+	const BotInventory &inv = bot.inventory;
+	int melee = g_pGameProfile->MeleeWeapon();
+
+	int best = -1;
+	float bestUsage = 0.f;
+	int ties = 0;
+
+	for (int i = 0; i < count; ++i)
+	{
+		int id = inv.weapons[choices[i].index].id;
+		if (skipMelee && id == melee)
+			continue;
+
+		float usage = UsageOf(bot, id, choices[i].mode);
+
+		if (best < 0 || usage < bestUsage - kUsageEpsilon)
+		{
+			best = i;
+			bestUsage = usage;
+			ties = 1;
+			continue;
+		}
+
+		if (usage > bestUsage + kUsageEpsilon)
+			continue;
+
+		++ties;
+		if (RandomUnit(bot.fire) * static_cast<float>(ties) < 1.f)
+			best = i;
+	}
+
+	return best;
+}
+
+static int PickChoice(CBot &bot, const Choice *choices, int count)
+{
+	if (count <= 0)
+		return -1;
+
+	int pick = PickLeastUsed(bot, choices, count, true);
+	if (pick < 0)
+		pick = PickLeastUsed(bot, choices, count, false);
+
+	return pick;
+}
+
+static bool SelectWeapon(CBot &bot, const Choice &choice, const char *reason)
+{
+	State &fire = bot.fire;
+	const BotWeapon &want = bot.inventory.weapons[choice.index];
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(want.id);
+
+	fire.nextSelectTime = gpGlobals->time + kSelectInterval;
+	fire.pendingId = want.id;
+	fire.pendingMode = choice.mode;
+
+	Idle(fire, reason);
+
+	if (!spec || !spec->classname || !FakeCmd::Run(bot.pEdict, spec->classname))
+		return false;
+
+	++fire.switches;
+	return true;
+}
+
+static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
+	const Vector &baseVel, const Vector &eye, float dist, float rise, bool holding, bool strict,
+	bool &triedBoth)
+{
+	State &fire = bot.fire;
+	triedBoth = false;
+
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active.id);
+	if (!spec)
+		return false;
+
+	Mode order[2] = { MODE_PRIMARY, MODE_SECONDARY };
+	int tries = 2;
+
+	if (holding)
+	{
+		order[0] = fire.mode;
+		tries = 1;
+	}
+	else if (fire.pendingId == active.id && fire.pendingMode != MODE_NONE)
+	{
+		order[0] = fire.pendingMode;
+		order[1] = (fire.pendingMode == MODE_PRIMARY) ? MODE_SECONDARY : MODE_PRIMARY;
+	}
+	else if (fire.weaponId == active.id && fire.mode == MODE_SECONDARY)
+	{
+		order[0] = MODE_SECONDARY;
+		order[1] = MODE_PRIMARY;
+	}
+
+	triedBoth = (tries == 2);
+
+	for (int i = 0; i < tries; ++i)
+	{
+		const WeaponMode *m = ModeOf(*spec, order[i], fire.zoomed);
+		if (!m)
+			continue;
+		if (!holding && !ModeUsable(bot, active, *m, dist, rise, strict))
+			continue;
+
+		Vector point = basePoint;
+		Vector look = basePoint;
+		float flight = 0.f;
+
+		if (IsArc(*m))
+		{
+			Vector dir;
+			Vector launch;
+
+			if (IsThrow(*m))
+			{
+				ThrowShot shot;
+				if (!SolveThrowLead(*m, eye, basePoint, baseVel,
+					bot.pEdict->v.velocity, ArcGravity(*m), shot, point))
+					continue;
+
+				dir = shot.dir;
+				flight = shot.flight;
+				launch = dir * shot.speed + bot.pEdict->v.velocity;
+
+				MAKE_VECTORS(Vector(shot.pitch,
+					atan2f(dir.y, dir.x) * (180.f / kPiF), 0.f));
+				look = eye + gpGlobals->v_forward * (point - eye).Length();
+			}
+			else
+			{
+				if (!SolveArcLead(eye, basePoint, baseVel, ModeSpeed(bot, *m),
+					ArcGravity(*m), dir, point, flight))
+					continue;
+
+				launch = dir * ModeSpeed(bot, *m);
+				look = eye + dir * (point - eye).Length();
+			}
+
+			fire.targetPoint = point;
+
+			bool hit = false;
+			Vector impact = SimulateArc(bot.pEdict, eye + dir * kArcMuzzleFwd,
+				launch, ArcGravity(*m), hit);
+			if (!ArcImpactHits(bot, *m, eye, impact, hit))
+				continue;
+		}
+		else
+		{
+			if (m->aim == AIM_LEAD && !IsHoming(*m) &&
+				!SolveLead(eye, basePoint, baseVel, ModeSpeed(bot, *m), point, flight))
+				continue;
+
+			look = point;
+		}
+
+		bool wasReload = fire.wantReload;
+
+		PublishAim(fire, *m, look, point, flight);
+
+		fire.mode = order[i];
+		fire.weaponId = active.id;
+		fire.wantReload = !holding && m->ammo == AMMO_CLIP && active.clip >= 0 &&
+			active.clip < ShotCost(*m) && !active.reloading &&
+			AmmoCount(bot.inventory, active.primaryAmmoType) > 0;
+		fire.lastReason = holding ? CommitName(fire.commit)
+				: (fire.wantReload ? "reloading" : "ready");
+
+		if (fire.wantReload && !wasReload)
+			++fire.reloads;
+
+		fire.pendingId = 0;
+		fire.pendingMode = MODE_NONE;
+
+		return true;
+	}
+
+	return false;
+}
+
+static bool HeldDry(CBot &bot, const BotWeapon &active, float dist, float rise)
+{
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active.id);
+	if (!spec)
+		return false;
+
+	const Mode modes[2] = { MODE_PRIMARY, MODE_SECONDARY };
+
+	for (int i = 0; i < 2; ++i)
+	{
+		const WeaponMode *m = ModeOf(*spec, modes[i], bot.fire.zoomed);
+		if (!m || !ModeUsable(bot, active, *m, dist, rise, false))
+			continue;
+		if (!ModeUsable(bot, active, *m, dist, rise, true))
+			return true;
+	}
+
+	return false;
+}
+
+static void IdleSelect(CBot &bot)
+{
+	State &fire = bot.fire;
+	const BotInventory &inv = bot.inventory;
+
+	if (gpGlobals->time < fire.nextIdleTime)
+		return;
+	fire.nextIdleTime = gpGlobals->time + kIdleSelectInterval;
+
+	if (g_pGameProfile->IsDead(bot.pEdict))
+		return;
+
+	const BotWeapon *active = (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
+		? &inv.weapons[inv.activeIndex] : nullptr;
+
+	int reloadPick = -1;
+	int bestDeficit = 0;
+
+	for (int i = 0; i < inv.count; ++i)
+	{
+		const BotWeapon &w = inv.weapons[i];
+		int deficit = ReloadDeficit(bot, w);
+		if (deficit <= 0)
+			continue;
+
+		if (active && w.id == active->id)
+		{
+			reloadPick = i;
+			break;
+		}
+
+		if (reloadPick >= 0 && deficit < bestDeficit)
+			continue;
+		if (reloadPick >= 0 && deficit == bestDeficit &&
+			WeaponUsage(bot, w.id) >= WeaponUsage(bot, inv.weapons[reloadPick].id))
+			continue;
+
+		reloadPick = i;
+		bestDeficit = deficit;
+	}
+
+	if (reloadPick >= 0)
+	{
+		const BotWeapon &want = inv.weapons[reloadPick];
+		fire.idleReloadId = want.id;
+
+		if (active && active->id == want.id)
+		{
+			Idle(fire, "idle-reload");
+			return;
+		}
+
+		Choice choice;
+		choice.index = reloadPick;
+		choice.mode = MODE_PRIMARY;
+
+		if (SelectWeapon(bot, choice, "idle-reload"))
+			++fire.idleSwitches;
+		return;
+	}
+
+	fire.idleReloadId = 0;
+
+	Choice choices[kMaxChoices];
+	int count = BuildChoices(bot, true, false, 0.f, 0.f, 0, choices, kMaxChoices);
+
+	int pick = PickLeastUsed(bot, choices, count, true);
+	if (pick < 0)
+		return;
+
+	float bestUsage = UsageOf(bot, inv.weapons[choices[pick].index].id, choices[pick].mode);
+
+	if (active && active->id != g_pGameProfile->MeleeWeapon())
+	{
+		float heldUsage = -1.f;
+
+		for (int i = 0; i < count; ++i)
+		{
+			if (inv.weapons[choices[i].index].id != active->id)
+				continue;
+
+			float usage = UsageOf(bot, active->id, choices[i].mode);
+			if (heldUsage < 0.f || usage < heldUsage)
+				heldUsage = usage;
+		}
+
+		if (heldUsage >= 0.f && heldUsage <= bestUsage + kUsageEpsilon)
+			return;
+	}
+
+	if (SelectWeapon(bot, choices[pick], "idle-switch"))
+		++fire.idleSwitches;
 }
 
 void Think(CBot &bot)
@@ -993,6 +1396,7 @@ void Think(CBot &bot)
 
 	if (BotBreak::Active(bot))
 	{
+		fire.idleReloadId = 0;
 		Idle(fire, "breaking");
 		return;
 	}
@@ -1052,6 +1456,9 @@ void Think(CBot &bot)
 		{
 			ClearAim(fire);
 			Idle(fire, "no-target");
+
+			if (gpGlobals->time - bot.sense.targetTime > kCombatMemory)
+				IdleSelect(bot);
 			return;
 		}
 
@@ -1062,159 +1469,58 @@ void Think(CBot &bot)
 		return;
 	}
 
+	fire.idleReloadId = 0;
+
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
 	float dist = (basePoint - eye).Length();
 	fire.lastRange = dist;
 	float rise = basePoint.z - eye.z;
 
-	if (active)
-	{
-		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active->id);
-		if (spec)
-		{
-			Mode order[2] = { MODE_PRIMARY, MODE_SECONDARY };
-			int tries = 2;
+	bool triedBoth = false;
+	bool dry = false;
 
-			if (holding)
-			{
-				order[0] = fire.mode;
-				tries = 1;
-			}
-			else if (fire.weaponId == active->id && fire.mode == MODE_SECONDARY)
-			{
-				order[0] = MODE_SECONDARY;
-				order[1] = MODE_PRIMARY;
-			}
-
-			for (int i = 0; i < tries; ++i)
-			{
-				const WeaponMode *m = ModeOf(*spec, order[i], fire.zoomed);
-				if (!m)
-					continue;
-				if (!holding && !ModeUsable(bot, *active, *m, dist, rise))
-					continue;
-
-				Vector point = basePoint;
-				Vector look = basePoint;
-				float flight = 0.f;
-
-				if (IsArc(*m))
-				{
-					Vector dir;
-					Vector launch;
-
-					if (IsThrow(*m))
-					{
-						ThrowShot shot;
-						if (!SolveThrowLead(*m, eye, basePoint, baseVel,
-							bot.pEdict->v.velocity, ArcGravity(*m), shot, point))
-							continue;
-
-						dir = shot.dir;
-						flight = shot.flight;
-						launch = dir * shot.speed + bot.pEdict->v.velocity;
-
-						MAKE_VECTORS(Vector(shot.pitch,
-							atan2f(dir.y, dir.x) * (180.f / kPiF), 0.f));
-						look = eye + gpGlobals->v_forward * (point - eye).Length();
-					}
-					else
-					{
-						if (!SolveArcLead(eye, basePoint, baseVel, ModeSpeed(bot, *m),
-							ArcGravity(*m), dir, point, flight))
-							continue;
-
-						launch = dir * ModeSpeed(bot, *m);
-						look = eye + dir * (point - eye).Length();
-					}
-
-					fire.targetPoint = point;
-
-					bool hit = false;
-					Vector impact = SimulateArc(bot.pEdict, eye + dir * kArcMuzzleFwd,
-						launch, ArcGravity(*m), hit);
-					if (!ArcImpactHits(bot, *m, eye, impact, hit))
-						continue;
-				}
-				else
-				{
-					if (m->aim == AIM_LEAD && !IsHoming(*m) &&
-						!SolveLead(eye, basePoint, baseVel, ModeSpeed(bot, *m), point, flight))
-						continue;
-
-					look = point;
-				}
-
-				bool wasReload = fire.wantReload;
-
-				PublishAim(fire, *m, look, point, flight);
-
-				fire.mode = order[i];
-				fire.weaponId = active->id;
-				fire.wantReload = !holding && m->ammo == AMMO_CLIP && active->clip >= 0 &&
-					active->clip < ShotCost(*m) && !active->reloading &&
-					AmmoCount(inv, active->primaryAmmoType) > 0;
-				fire.lastReason = holding ? CommitName(fire.commit)
-						: (fire.wantReload ? "reloading" : "ready");
-
-				if (fire.wantReload && !wasReload)
-					++fire.reloads;
-
-				return;
-			}
-		}
-	}
-
-	if (gpGlobals->time < fire.nextSelectTime)
-	{
-		Idle(fire, "switching");
+	if (active && TryKeep(bot, *active, basePoint, baseVel, eye, dist, rise, holding, true,
+		triedBoth))
 		return;
-	}
 
+	if (active && triedBoth)
+		dry = HeldDry(bot, *active, dist, rise);
+
+	bool throttled = gpGlobals->time < fire.nextSelectTime;
 	Choice choices[kMaxChoices];
-	int count = 0;
 
-	for (int i = 0; i < inv.count && count < kMaxChoices; ++i)
+	if (!throttled)
 	{
-		const BotWeapon &w = inv.weapons[i];
-		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
-		if (!spec)
-			continue;
+		int skipId = (active && triedBoth) ? active->id : 0;
+		int count = BuildChoices(bot, true, true, dist, rise, skipId, choices, kMaxChoices);
+		int pick = PickChoice(bot, choices, count);
 
-		if (count < kMaxChoices && ModeUsable(bot, w, spec->primary, dist, rise))
+		if (pick >= 0)
 		{
-			choices[count].index = i;
-			choices[count].mode = MODE_PRIMARY;
-			++count;
-		}
-		if (count < kMaxChoices && ModeUsable(bot, w, spec->secondary, dist, rise))
-		{
-			choices[count].index = i;
-			choices[count].mode = MODE_SECONDARY;
-			++count;
+			if (SelectWeapon(bot, choices[pick], dry ? "empty-switch" : "select") && dry)
+				++fire.emptySwitches;
+			return;
 		}
 	}
 
-	if (count == 0)
-	{
-		Idle(fire, "nothing-usable");
+	if (active && TryKeep(bot, *active, basePoint, baseVel, eye, dist, rise, holding, false,
+		triedBoth))
 		return;
+
+	if (!throttled)
+	{
+		int skipId = (active && triedBoth) ? active->id : 0;
+		int count = BuildChoices(bot, false, true, dist, rise, skipId, choices, kMaxChoices);
+		int pick = PickChoice(bot, choices, count);
+
+		if (pick >= 0)
+		{
+			SelectWeapon(bot, choices[pick], "select");
+			return;
+		}
 	}
 
-	int pick = static_cast<int>(RandomUnit(fire) * count);
-	if (pick >= count)
-		pick = count - 1;
-
-	const BotWeapon &want = inv.weapons[choices[pick].index];
-	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(want.id);
-
-	fire.nextSelectTime = gpGlobals->time + kSelectInterval;
-	fire.pendingId = want.id;
-
-	Idle(fire, "switching");
-
-	if (spec && spec->classname && FakeCmd::Run(bot.pEdict, spec->classname))
-		++fire.switches;
+	Idle(fire, throttled ? "switching" : "nothing-usable");
 }
 
 bool AimPoint(const CBot &bot, Vector &point)
@@ -1227,11 +1533,32 @@ bool AimPoint(const CBot &bot, Vector &point)
 	return true;
 }
 
+static unsigned short IdleReloadButton(CBot &bot, const BotWeapon &w)
+{
+	State &fire = bot.fire;
+
+	if (fire.idleReloadId == 0 || w.id != fire.idleReloadId)
+		return 0;
+
+	if (w.reloading || bot.inventory.nextAttack > 0.f || w.nextPrimaryAttack > 0.f)
+		return 0;
+
+	if (ReloadDeficit(bot, w) <= 0)
+	{
+		fire.idleReloadId = 0;
+		return 0;
+	}
+
+	++fire.idleReloads;
+	fire.lastReason = "idle-reload";
+	return IN_RELOAD;
+}
+
 unsigned short Buttons(CBot &bot, const Vector &angles)
 {
 	State &fire = bot.fire;
 
-	if (!Enabled() || fire.mode == MODE_NONE || !g_pGameProfile)
+	if (!Enabled() || !g_pGameProfile)
 		return 0;
 
 	const BotInventory &inv = bot.inventory;
@@ -1239,6 +1566,10 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 		return 0;
 
 	const BotWeapon &w = inv.weapons[inv.activeIndex];
+
+	if (fire.mode == MODE_NONE)
+		return IdleReloadButton(bot, w);
+
 	if (w.id != fire.weaponId)
 		return 0;
 
@@ -1286,6 +1617,9 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	bool onTarget = fire.aimValid &&
 		(IsArc(*m) ? ArcOnTarget(bot, angles, *m, eye) : RayOnTarget(bot, angles, *m, eye));
+
+	if (onTarget)
+		AccrueUsage(bot, fire.mode);
 
 	if (charge)
 	{
