@@ -2999,3 +2999,43 @@ that one answers "how is it operated".
 Splits a world-space direction into the forward/side speeds pfnRunPlayerMove takes, which the engine reads along the view axes -- so this is what lets the bot move somewhere other than where it is looking. viewYawDeg must be the yaw passed to pfnRunPlayerMove in that same call plus punchangle, because PM_CheckParamters builds the movement basis from exactly that.
 
 PM_CheckParamters clamps the pair down to maxspeed before anything reads it, so a driveLength well over maxspeed just means "full speed exactly this way", and one below it passes through untouched and becomes the actual speed.
+
+## Trigger Forces: gravity and push
+
+### trigger_gravity
+
+A brush entity (`CBaseTrigger`, classname `trigger_gravity`) that changes the player's gravity multiplier when touched. The bot's `pev->gravity` field stores this multiplier as of the last touch. It persists until the next respawn, and it decides which air moves in the mesh are usable.
+
+When the bot spawns, the game DLL resets `pev->gravity` to 0 (default). Any trigger_gravity has to be touched again to take effect. Because `trigger_gravity` sticks to whoever touches it, a bot only ever runs at one of these multipliers at a time — the default (gravity 800) plus one per distinct trigger_gravity on the map.
+
+This affects routing: `trigger_gravity` multipliers filter air moves the same way `PlanWalker::Cross` does during planning, so goal selection and route search agree about which jumps exist. Only default-gravity air moves count as an alternative route during pruning; a jump that exists solely at some `trigger_gravity` value is not a route the bot can generally rely on.
+
+During navgen sampling, a full air move set is sampled per multiplier found on the map. At plan time, only the air moves baked for the gravity we are currently at exist for us. This means the runtime's route search honors the gravity the bot is actually under.
+
+### trigger_push
+
+A brush entity (`CBaseTrigger`, classname `trigger_push`) that provides a base velocity to the player for as long as it is being touched. Unlike trigger_gravity, it does not persist after leaving the field.
+
+`trigger_push` hands the player a base velocity that gets added to the movement simulation. The bot snapshots the live fields once per plan; a plan runs long enough that a toggled field is caught by the next repath.
+
+In navigation, `trigger_push` is `SOLID_TRIGGER`: it never blocks, carves or supports the nav mesh. It only shows up in the movement simulation during air move sampling and as a launch seed.
+
+### Physics integration
+
+The base velocity contributed by trigger_push fields overlapping the bot's origin is added at plan time. In the physics simulation (`pm_sim.cpp`), `PM_AddCorrectGravity` folds the vertical push component into velocity as an acceleration and clears it from the base velocity, so only the horizontal remainder wraps `FlyMove`. The horizontal base velocity wraps the move the way `PM_AirMove` and `PM_WalkMove` do: added before the clip-and-slide loop, pulled back out once the ground check has seen it.
+
+During navgen air move sampling, the trigger touch test uses the same point-test of the player origin against trigger hull-expanded clipnodes that the engine uses in `SV_TouchLinks`.
+
+### START_OFF fields
+
+A trigger_push with the `START_OFF` spawnflag (1024) spawns as `SOLID_NOT`, so nothing touches it until something turns it on via trigger.
+
+### Push field seeding
+
+A push field sitting on flat floor has no perimeter edge with void ahead, so the perimeter sweep never launches there. For these fields, the bot's own footprint boundary is seeded instead, aimed inwards at the field. This accounts for a bot running into the shaft and jumping.
+
+Push-field seeds have to launch at the boundary: backing up first only spends the boost.
+
+### Preview path at lowest gravity
+
+A bot only ever holds one gravity multiplier. The lowest one the map hands out is the one that unlocks the most air moves. During offline path preview (`--dump-path`), navgen samples at the lowest gravity multiplier found, so a map whose route exists only under a trigger_gravity does not read as unroutable offline.

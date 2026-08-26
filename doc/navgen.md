@@ -1169,3 +1169,30 @@ Parses GoldSrc entity lump (nested "key" "value" pairs in braces) into vector<En
 
 ### WriteDebugSvg - Run-up Traces
 The plan-time run-up simulations, drawn over the route they were derived from so the two can be read against each other: where they diverge is where the mover could not hold the planned line.
+
+### Gravity multiplier visualization
+Air moves sampled under a trigger_gravity only exist for a bot at that gravity. The two sets (default and trigger_gravity multipliers) are drawn separately so they are tellable apart instead of overlapping on the SVG.
+
+## Trigger Forces in Sampling
+
+### trigger_gravity handling
+
+`trigger_gravity` copies its own `pev->gravity` onto whoever touches it, and that sticks, so the set of gravities a bot can ever be running at is the default plus one per distinct trigger. The sampler classifies each trigger and creates a separate gravity pass for each one.
+
+Air moves are sampled once per gravity a trigger_gravity can put the bot in. The ones baked for a gravity we are not currently at simply do not exist for us at plan time. Air moves from an earlier gravity pass must not block the current one: each gravity gets its own set.
+
+During the preview path (`--dump-path`), the planner samples at the lowest gravity multiplier the map hands out. The lowest gravity unlocks the most air moves, so sampling there ensures that a map whose route exists only under a trigger_gravity does not read as unroutable offline.
+
+### trigger_push handling
+
+`trigger_push` is `SOLID_TRIGGER`: it never blocks, carves or supports, it only shows up in the movement simulation and as a launch seed. The touch test uses the same point-content test of the player origin against the trigger's hull-expanded clipnodes that the engine uses in `SV_TouchLinks`, which is exactly what `OnLadder` does in the sampler.
+
+### Launch seeding near trigger_push
+
+A push field sitting on flat floor has no perimeter edge with void ahead, so the perimeter sweep never launches there. For such fields, the bot's own footprint boundary is seeded instead, aimed inwards at the field. This makes the seeding behave as if a bot were running into the shaft and jumping from the edge.
+
+Cyrus-Beck clipping is used to find the side segment against the face winding in plan view for seeding.
+
+### Height adjustment for gravity-modified jumps
+
+The `64`-unit default launch height is step height plus a plain jump at gravity 800. Under a trigger_gravity, the bot climbs back up a taller drop, so the seeding gate has to move with it. The adjusted height is `2 * kStandProbeLift + PlainJumpHeight(gravity)` where gravity is the current multiplier being sampled.

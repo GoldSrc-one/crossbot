@@ -999,8 +999,6 @@ int main(int argc, char **argv)
 		std::vector<navgen::BlockingVolume> standLadders =
 			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullHuman);
 
-		// trigger_push is SOLID_TRIGGER: it never blocks, carves or supports, it only shows up in the
-		// movement simulation and as a launch seed.
 		std::vector<navgen::PushVolume> duckPushes =
 			navgen::ExtractPushVolumes(bsp, entities, navgen::kHullDuck);
 		std::vector<navgen::PushVolume> standPushes =
@@ -1333,8 +1331,6 @@ int main(int argc, char **argv)
 		navgen::HullContext standHull{worldModel.headnode[navgen::kHullHuman], &standBlockers,
 			&standLadders, &standPushes};
 
-		// trigger_gravity sticks to whoever touches it, so a bot only ever runs at one of these
-		// multipliers. Sample a full air move set per multiplier and let the runtime pick.
 		std::vector<double> gravityMultipliers = navgen::CollectGravityMultipliers(entities);
 		if (gravityMultipliers.size() > 1)
 		{
@@ -1607,9 +1603,6 @@ int main(int argc, char **argv)
 		if (!objPath.empty() || !svgPath.empty() || dumpPath || dumpAirmove)
 		{
 
-			// A bot only ever holds one gravity multiplier, and the lowest one the map hands out is the
-			// one that unlocks the most air moves. Preview the path there, so a map whose route exists
-			// only under a trigger_gravity does not read as unroutable offline.
 			navgen::PhysicsParams planPhysics = physics;
 			if (!gravityMultipliers.empty() && gravityMultipliers.front() < 1.0)
 			{

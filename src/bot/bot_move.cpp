@@ -116,8 +116,6 @@ PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
 
 PmSim::PmPushFn Bot_PushFields(int hull)
 {
-	// trigger_push hands the player a base velocity for as long as it is being touched. Snapshot the
-	// live fields once per plan; a plan runs long enough that a toggled field is caught by the repath.
 	struct Field
 	{
 		Vector mins, maxs;
@@ -157,8 +155,6 @@ PmSim::PmPushFn Bot_PushFields(int hull)
 
 		for (const Field &field : fields)
 		{
-			// Cheap reject against the hull-expanded bounds, then the exact clipnode test the engine
-			// itself uses to decide a trigger touch.
 			if (origin.x < field.mins.x - hullMaxs.x || origin.x > field.maxs.x - hullMins.x ||
 				origin.y < field.mins.y - hullMaxs.y || origin.y > field.maxs.y - hullMins.y ||
 				origin.z < field.mins.z - hullMaxs.z || origin.z > field.maxs.z - hullMins.z)
@@ -178,7 +174,6 @@ PmSim::PmPushFn Bot_PushFields(int hull)
 
 float Bot_GravityMultiplier(edict_t *pEdict)
 {
-	// HL treats pev->gravity == 0 as "default", and trigger_gravity writes the multiplier here.
 	return (pEdict && pEdict->v.gravity > 0.f) ? pEdict->v.gravity : 1.f;
 }
 

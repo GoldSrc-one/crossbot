@@ -1272,3 +1272,23 @@ Reaching here with i == numplanes means the loop above found no single plane the
 
 ### AirAccelerate
 PM_AirAccelerate, wish speed capped at 30, so it can only ever nudge a trajectory in flight.
+
+## Trigger Forces at Runtime
+
+### Gravity multiplier in the nav format
+
+The nav format stores a `gravityMultiplier` on each connection (`Connection::gravityMultiplier` in nav_format.h). This is the `pev->gravity` multiplier this air move was sampled at. For all other connection types (walk, ladder, elevator), it is 1.0.
+
+Base velocity contributed by trigger_push fields overlapping the player origin is stored in units/sec.
+
+### Planning with gravity multipliers
+
+During planning, `gravityMultiplier` filters air moves the same way `PlanWalker::Cross` does, so goal selection and route search agree about which jumps exist. The filter is applied at the Dijkstra stage when selecting goals.
+
+When the bot is at a different gravity than an air move was sampled for, that air move simply does not exist in the planner's view of the graph. Only the air moves matching the bot's current gravity are available for planning.
+
+### Physics simulation with gravity
+
+In `pm_sim.cpp`, `PM_AddCorrectGravity` folds the vertical push component into velocity as an acceleration and clears it from the base velocity, so only the horizontal remainder wraps `FlyMove` below.
+
+The horizontal base velocity wraps the move the way `PM_AirMove` and `PM_WalkMove` do: it is added before the clip-and-slide loop, then pulled back out once the ground check has seen it. This ensures consistent handling across all movement types.

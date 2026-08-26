@@ -362,7 +362,6 @@ std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector
 		if (ent.Get("classname") != "trigger_push")
 			continue;
 
-		// A START_OFF field spawns SOLID_NOT, so nothing touches it until something turns it on.
 		if ((ParseInt(ent.Get("spawnflags"), 0) & kSfPushStartOff) != 0)
 			continue;
 
@@ -395,8 +394,6 @@ std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector
 
 std::vector<double> CollectGravityMultipliers(const std::vector<Entity> &entities)
 {
-	// trigger_gravity copies its own pev->gravity onto whoever touches it and that sticks, so the
-	// set of gravities a bot can ever be running at is the default plus one per distinct trigger.
 	std::vector<double> result{1.0};
 
 	for (const Entity &ent : entities)

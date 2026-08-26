@@ -160,7 +160,6 @@ struct NavConnectionRecord
 	float rideSecondsMax;
 	float rideWaitSeconds;
 
-	// pev->gravity multiplier this air move was sampled at. 1.0 for every other connection type.
 	float gravity;
 };
 

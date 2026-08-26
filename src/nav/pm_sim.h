@@ -19,7 +19,6 @@ struct PmTrace
 
 using PmTraceFn = std::function<PmTrace(const Vector &start, const Vector &end)>;
 
-// Base velocity contributed by trigger_push fields overlapping this origin, in units/sec.
 using PmPushFn = std::function<Vector(const Vector &origin)>;
 
 struct PmPhysics

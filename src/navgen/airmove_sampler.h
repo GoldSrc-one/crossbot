@@ -16,7 +16,6 @@ struct PhysicsParams
 	float maxSpeed = 320.0f;
 	float gravity = 800.0f;
 
-	// pev->gravity multiplier this sampling pass represents; gravity above is already scaled by it.
 	float gravityMultiplier = 1.0f;
 	float airAccelerate = 10.0f;
 	float friction = 1.0f;
@@ -70,7 +69,6 @@ struct LaunchEdge
 	float yawLo = 0.0f;
 	float yawHi = 0.0f;
 
-	// Push-field seeds have to launch at the boundary: backing up first only spends the boost.
 	bool noJumpBack = false;
 };
 

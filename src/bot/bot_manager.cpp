@@ -141,7 +141,6 @@ void StartFrame()
 		if (bot.wasDead)
 		{
 			bot.wasDead = false;
-			// The game DLL resets pev->gravity on spawn; any trigger_gravity has to be touched again.
 			bot.gravity = 1.f;
 			BotItems::OnRespawn(bot);
 			BotFire::Reset(bot);
@@ -156,8 +155,6 @@ void StartFrame()
 
 namespace
 {
-	// Runs from the post hook, so the game DLL's trigger_gravity touch has already landed. A changed
-	// gravity swaps which air moves the mesh offers, so the current plan has to be thrown away.
 	void NoteGravity(CBot &bot)
 	{
 		float gravity = Bot_GravityMultiplier(bot.pEdict);

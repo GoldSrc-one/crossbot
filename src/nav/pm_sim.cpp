@@ -124,8 +124,6 @@ void PmSimulator::AddCorrectGravity(float *velocity, float *baseVelocity) const
 {
 	velocity[2] -= m_physics.gravity * 0.5f * m_physics.frameTime;
 
-	// PM_AddCorrectGravity folds the vertical push into velocity as an acceleration and clears it
-	// from the base velocity, so only the horizontal remainder wraps FlyMove below.
 	velocity[2] += baseVelocity[2] * m_physics.frameTime;
 	baseVelocity[2] = 0.0f;
 
@@ -328,8 +326,6 @@ bool PmSimulator::Step()
 
 	AirAccelerate(wishdir, wishspeed, m_vel);
 
-	// The horizontal base velocity wraps the move the way PM_AirMove and PM_WalkMove do: added
-	// before the clip-and-slide, pulled back out once the ground check has seen it.
 	for (int i = 0; i < 3; ++i)
 		m_vel[i] += base[i];
 

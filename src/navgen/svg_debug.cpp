@@ -222,8 +222,6 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		if (oneWay)
 			std::fprintf(f, " marker-end=\"url(#arrow)\"");
 
-		// Air moves sampled under a trigger_gravity only exist for a bot at that gravity; make the
-		// two sets tellable apart instead of drawing them on top of each other.
 		if (c.connType == crossbot_nav::CONN_AIRMOVE && std::fabs(c.gravity - 1.0) > 0.005)
 		{
 			std::fprintf(f, " stroke-opacity=\"0.55\"><title>air move at gravity x%.2f</title></line>\n",

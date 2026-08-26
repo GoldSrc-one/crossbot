@@ -426,9 +426,6 @@ std::vector<LaunchEdge> PushLaunchEdges(const Area &area, const std::vector<Push
 
 	for (const PushVolume &vol : pushes)
 	{
-		// Four vertical sides of the footprint, each with the normal pointing into the field. Feeding
-		// that as LaunchEdge::outward makes runSweep set the launch back to just outside the field and
-		// aim the yaw fan inwards, which is a bot running into the shaft and jumping.
 		const Vec3 &mn = vol.volume.mins;
 		const Vec3 &mx = vol.volume.maxs;
 		struct Side { Vec3 a, b, inward; };
@@ -456,7 +453,6 @@ std::vector<LaunchEdge> PushLaunchEdges(const Area &area, const std::vector<Push
 
 			for (const Side &side : sides)
 			{
-				// Cyrus-Beck clip of the side segment against the face winding, in plan view.
 				double tEnter = 0.0, tExit = 1.0;
 				bool alive = true;
 
@@ -607,8 +603,6 @@ Vec3 PM_MoveSimulator::PushAt(const Vec3 &origin) const
 	if (!m_pushes)
 		return total;
 
-	// SV_TouchLinks decides a trigger touch with a point test of the player origin against the
-	// trigger's hull-expanded clipnodes, which is exactly what OnLadder does below.
 	for (const PushVolume &vol : *m_pushes)
 	{
 		if (origin.x < vol.volume.mins.x || origin.x > vol.volume.maxs.x ||
@@ -781,7 +775,6 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	std::unordered_set<long long> existingPairs;
 	for (const MergedConnection &c : conns)
 	{
-		// Air moves from an earlier gravity pass must not block this one: each gravity gets its own set.
 		if (c.connType == crossbot_nav::CONN_AIRMOVE)
 			continue;
 
@@ -1005,8 +998,6 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	for (const Area &area : areas)
 		sweepArea(area, nullptr);
 
-	// A push field sitting on flat floor has no perimeter edge with void ahead, so the perimeter sweep
-	// never launches there. Seed the field's own footprint boundary instead, aimed inwards.
 	size_t pushSeedAreas = 0;
 	size_t pushSeedEdges = 0;
 	for (const Area &area : areas)
@@ -1025,8 +1016,6 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		sweepArea(area, &seed);
 	}
 
-	// The 64-unit default is step height plus a plain jump at gravity 800; under a trigger_gravity the
-	// bot climbs back up a taller drop, so the seeding gate has to move with it.
 	double maxJumpHeight = static_cast<double>(params.maxJumpHeight) -
 		PmSim::PlainJumpHeight(PmSim::kGravity) + PmSim::PlainJumpHeight(physics.gravity);
 

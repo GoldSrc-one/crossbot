@@ -1115,8 +1115,6 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 
 	if (conn.connType == crossbot_nav::CONN_AIRMOVE)
 	{
-		// Air moves are sampled once per gravity a trigger_gravity can put the bot in. The ones baked
-		// for a gravity we are not currently at simply do not exist for us.
 		if (m_traces && std::fabs(conn.gravity - m_traces->gravityMultiplier) > kPlanGravityEpsilon)
 			return false;
 
