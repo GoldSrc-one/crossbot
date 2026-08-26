@@ -26,6 +26,8 @@ namespace BotItems
 
 	bool Enabled();
 
+	bool ChaseEnabled();
+
 	bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh);
 
 	bool UpdateGoalItem(CBot &bot);

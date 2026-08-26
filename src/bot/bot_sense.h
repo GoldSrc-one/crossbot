@@ -52,6 +52,13 @@ struct State
 	int targetBone = -1;
 	int leadVetoes = 0;
 
+	CBotEntHandle enemy;
+	Vector enemyPos;
+	float enemyTime = 0.f;
+	bool hadSight = false;
+	bool rescore = false;
+	float nextRescoreTime = 0.f;
+
 	unsigned int rngState = 0;
 	bool rngSeeded = false;
 
@@ -77,6 +84,10 @@ void Notice(CBot &bot, const edict_t *invoker);
 void ResetBoneCache();
 
 void Update(CBot &bot);
+
+void ForgetEnemy(CBot &bot);
+
+void OnRespawn(CBot &bot);
 
 bool ApplyLook(CBot &bot);
 

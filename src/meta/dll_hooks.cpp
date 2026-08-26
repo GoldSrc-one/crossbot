@@ -31,6 +31,12 @@ cvar_t g_gatherCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_chaseCvar = {
+	"crossbot_chase",
+	"1",
+	FCVAR_SERVER
+};
+
 cvar_t g_gatherDebugCvar = {
 	"crossbot_gather_debug",
 	"0",
@@ -99,6 +105,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navBreakCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_chaseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);

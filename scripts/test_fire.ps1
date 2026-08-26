@@ -530,6 +530,15 @@ try {
     $seconds = [int]($ProjectileSeconds / $pins.Count)
     if ($seconds -lt 15) { $seconds = 15 }
 
+    # Chasing off for the pinned phases, for the same reason test_nav_goal.ps1
+    # turns gathering off: a second goal source changes what is being measured.
+    # A bot that walks to where it last saw someone closes the range, and the
+    # crossbow only picks primaryZoomed at long range -- so with chasing on,
+    # "aim=target never appeared" fires on a bot that is working correctly and
+    # simply never took a long shot. DUEL keeps it on, since that phase wants
+    # the bots to find each other.
+    Invoke-Rcon "crossbot_chase 0" | Out-Null
+
     foreach ($entry in $pins) {
         $pin = $entry.Weapon
         $mode = $entry.Mode

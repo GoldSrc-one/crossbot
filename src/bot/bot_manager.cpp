@@ -143,6 +143,7 @@ void StartFrame()
 			bot.wasDead = false;
 			bot.gravity = 1.f;
 			BotItems::OnRespawn(bot);
+			BotSense::OnRespawn(bot);
 			BotFire::Reset(bot);
 			bot.brk = BotBreak::State();
 		}
@@ -392,6 +393,7 @@ void PrintSenseStatus()
 		++shown;
 
 		edict_t *target = bot.sense.target.Get();
+		edict_t *enemy = bot.sense.enemy.Get();
 		const BotSense::Suspicion *fresh = BotSense::Freshest(bot);
 
 		char freshBuf[96] = "-";
@@ -414,9 +416,12 @@ void PrintSenseStatus()
 
 		char line[640];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s target=%s bone=%d leadblk=%d susp=%d/%zu kinds=p:%d,m:%d,o:%d "
+			"CrossBot: %s target=%s enemy=%s enemyAge=%.1fs bone=%d leadblk=%d susp=%d/%zu "
+			"kinds=p:%d,m:%d,o:%d "
 			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u\n",
-			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
+			bot.name, target ? CBotPlayerNameOf(target) : "-",
+			enemy ? CBotPlayerNameOf(enemy) : "-",
+			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f, bot.sense.targetBone,
 			bot.sense.leadVetoes, live, BotSense::kSuspicionSlots,
 			kinds[BotSense::KIND_PLAYER], kinds[BotSense::KIND_MONSTER],
 			kinds[BotSense::KIND_OTHER],
@@ -638,6 +643,13 @@ void PrintNavStatus()
 		snprintf(line, sizeof(line), " item=%s itemKind=%d itemArea=%d memo=%zu full=%zu",
 			goalItem ? CBotClassOf(goalItem) : "-", static_cast<int>(bot.goalItemKind),
 			bot.goalItemArea, bot.itemMemo.size(), bot.fullMemo.size());
+		msg += line;
+
+		edict_t *enemy = bot.sense.enemy.Get();
+		snprintf(line, sizeof(line), " chase=%d enemy=%s enemyAge=%.1fs ready=%.2f",
+			bot.goalIsEnemy ? 1 : 0, enemy ? CBotPlayerNameOf(enemy) : "-",
+			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f,
+			g_pGameProfile ? g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory) : 0.f);
 		msg += line;
 
 		if (bot.brk.active)

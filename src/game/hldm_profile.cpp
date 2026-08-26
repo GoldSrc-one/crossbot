@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#include "../bot/bot_fire.h"
+#include "../bot/bot_weapons.h"
 #include "ent_handle.h"
 #include "hldm_profile.h"
 #include "hldm_weapons.h"
@@ -33,6 +35,13 @@ namespace
 	bool HasPrefix(const char *s, const char *prefix)
 	{
 		return strncmp(s, prefix, strlen(prefix)) == 0;
+	}
+
+	float Saturate(float v)
+	{
+		if (v < 0.f)
+			return 0.f;
+		return (v > 1.f) ? 1.f : v;
 	}
 }
 
@@ -67,6 +76,30 @@ bool CHLDMProfile::Detect() const
 bool CHLDMProfile::IsDead(edict_t *pEdict) const
 {
 	return pEdict->v.deadflag != DEAD_NO || pEdict->v.health <= 0.0f;
+}
+
+float CHLDMProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const
+{
+	if (!pEdict)
+		return 0.f;
+
+	float maxHealth = (pEdict->v.max_health > 0.f) ? pEdict->v.max_health : kHLDMMaxNormal;
+	float pool = maxHealth + kHLDMMaxNormal;
+	float survive = (pEdict->v.health + pEdict->v.armorvalue) / pool;
+	survive = Saturate(survive);
+
+	float arms = 0.f;
+	for (int i = 0; i < inv.count; ++i)
+	{
+		const BotWeapon &w = inv.weapons[i];
+		const WeaponSpec *spec = HLDM_WeaponSpec(w.id);
+		if (!spec || spec->value <= 0.f)
+			continue;
+		if (BotFire::WeaponArmed(inv, w))
+			arms += spec->value;
+	}
+
+	return survive * Saturate(arms);
 }
 
 void CHLDMProfile::Respawn(edict_t *pEdict) const

@@ -6,6 +6,7 @@
 
 struct CBot;
 struct BotWeapon;
+struct BotInventory;
 
 namespace BotFire
 {
@@ -109,6 +110,8 @@ int PinnedZoomState();
 bool Supported(const WeaponMode &mode);
 
 const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed);
+
+bool WeaponArmed(const BotInventory &inv, const BotWeapon &w);
 
 bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict);
 

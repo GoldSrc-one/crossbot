@@ -35,6 +35,30 @@ Three rows in `CHLDMProfile`'s table are the reason it is a table and not a pref
 takes `ammo_ARgrenades` while its clip takes `ammo_9mmAR`; the gauss and the egon share uranium under
 two different classnames; and the handgrenade, snark, tripmine and satchel are their own ammo, so the
 mapping returns the weapon classname back.
+`EvaluateCombat(pEdict, inv)` scores how ready a bot is to fight, in `[0,1]`, and is the only input
+that decides whether an enemy or an item wins a goal selection — see `doc/bot.md`, "Readiness is what
+makes the comparison mean anything". It is mod policy rather than geometry for the obvious reason: what
+counts as well-armed is entirely a property of the game's weapon set.
+
+It is the one profile method that takes a `BotInventory`. `game_profile.h` forward-declares the struct
+rather than including `bot_weapons.h`, so the header still names nothing from `src/bot/`; only the
+implementation does. Passing the inventory rather than re-reading it keeps the per-frame walk in
+`BotWeapons::Refresh` the single reader of the game DLL's private data.
+
+`CHLDMProfile::EvaluateCombat` is survivability times firepower, a product rather than a weighted sum,
+so a bot at death's door with a full arsenal and a healthy bot with nothing loaded both score near
+zero — either half alone is enough to make hunting a bad idea:
+
+    survive = (health + armorvalue) / (maxHealth + maxArmor)
+    arms    = sum of WeaponSpec::value over every armed weapon, clamped to 1
+    result  = survive * arms
+
+`maxHealth` reads `pev->max_health` and falls back to 100; there is no pev field for maximum armor, so
+it is a constant. "Armed" means holding a weapon with a mode that can actually deal damage and has the
+ammo to do it — `BotFire::WeaponArmed`, which reuses the existing `AmmoReady` rather than restating the
+clip and reserve rules. A mode with `AIM_NONE` is skipped there, which is what stops a dry python
+counting as armed on the strength of its zoom toggle.
+
 ### ItemKind
 The classification the gather goals key off. `ITEM_WEAPON`/`ITEM_AMMO`/`ITEM_PICKUP` are touched to
 collect; `ITEM_HEALTHCHARGER`/`ITEM_RECHARGE` are used with `IN_USE` and never touched at all, which
@@ -250,6 +274,29 @@ below is part of the design, not an oversight — several of those look obviousl
 Operating a gun decomposes into three independent questions, one enum each: how to drive the button
 (`WeaponFire`), where to point (`WeaponAim`), and what persistent state the press flips
 (`WeaponToggle`).
+
+### value is the one field that fails the criterion on purpose
+
+`value` says nothing about how to operate the gun. By the rule above it belongs nowhere near this
+struct, and `cycleTime` was rejected in as many words for being useful only to "rank guns you are
+*not* holding, which is selection".
+
+It is here anyway because the thing being ranked is not a gun. `EvaluateCombat` asks how dangerous the
+bot is *in total*, to decide whether to go looking for a fight — see `doc/game.md` above and
+`doc/bot.md`, "Readiness is what makes the comparison mean anything". That is a property of the whole
+inventory, and the only honest place to record what one weapon contributes to it is next to the weapon.
+The alternative is a second table keyed by `m_iId` sitting beside this one, which is the same data with
+an extra way to fall out of sync.
+
+The numbers are a coarse ladder, not damage figures: 0.5 for gauss, egon and crossbow, 0.3 for RPG and
+MP5, 0.2 for shotgun, hornetgun and python, 0.1 for everything else. They sum to 3.3 across the table,
+so `arms` saturates at two good weapons rather than requiring the full arsenal — deliberate, because a
+bot holding gauss and egon is already as willing to hunt as it will ever be, and a sum that only
+reached 1.0 with every weapon would mean bots essentially never chased.
+
+This does not reopen the rejected list. A per-weapon *selection* score still has no business here; the
+live inventory answers those questions. `value` is one number per weapon in service of one question
+about the bot.
 
 ### Why FIRE_TAP is bot intent, not an SDK requirement
 

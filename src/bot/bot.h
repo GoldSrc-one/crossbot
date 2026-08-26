@@ -44,6 +44,7 @@ struct CBot
 
 	bool hasGoal = false;
 	Vector goalPoint;
+	bool goalIsEnemy = false;
 
 	CBotEntHandle goalItem;
 	ItemKind goalItemKind = ITEM_NONE;

@@ -1906,6 +1906,12 @@ namespace
 		return true;
 	}
 
+	bool ManeuverActive(const CBot &bot)
+	{
+		return bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive ||
+			bot.chargerActive || bot.brk.active;
+	}
+
 	bool RepathDue(const CBot &bot)
 	{
 		return bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
@@ -1993,6 +1999,18 @@ void Bot_MoveNav(CBot &bot)
 
 	BotSense::Update(bot);
 	BotFire::Think(bot);
+
+	if (bot.sense.rescore)
+	{
+		if (!BotItems::ChaseEnabled())
+			bot.sense.rescore = false;
+		else if (!ManeuverActive(bot))
+		{
+			bot.sense.rescore = false;
+			BotItems::ClearGoalItem(bot);
+			bot.nextSelectTime = 0.f;
+		}
+	}
 
 	BotItems::RefreshMemos(bot);
 

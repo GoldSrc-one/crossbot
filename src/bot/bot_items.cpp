@@ -13,6 +13,7 @@
 #include "bot_items.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
+#include "bot_sense.h"
 
 extern IGameProfile *g_pGameProfile;
 
@@ -23,6 +24,7 @@ namespace
 	constexpr float kChargerSpotSearch = 96.f;
 	constexpr float kGoalItemSeenInterval = 0.25f;
 	constexpr float kSelectRetryInterval = 0.5f;
+	constexpr float kMinReadiness = 0.01f;
 
 	float AxisDistance(float value, float lo, float hi)
 	{
@@ -116,6 +118,7 @@ namespace
 		ItemKind kind = ITEM_NONE;
 		uint32_t areaId = 0;
 		bool hasArea = false;
+		bool isEnemy = false;
 		Vector point;
 		ScanReason reason = SCAN_OK;
 		float seconds = 0.f;
@@ -191,6 +194,38 @@ namespace
 		}
 	}
 
+	float Readiness(const CBot &bot)
+	{
+		if (!g_pGameProfile)
+			return 0.f;
+		return g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory);
+	}
+
+	void AppendEnemy(const CBot &bot, const Nav::NavMesh &mesh, std::vector<Candidate> &out)
+	{
+		if (!BotItems::ChaseEnabled())
+			return;
+
+		edict_t *enemy = bot.sense.enemy.Get();
+		if (!enemy)
+			return;
+
+		Candidate cand;
+		cand.ent = enemy;
+		cand.index = g_engfuncs.pfnIndexOfEdict(enemy);
+		cand.isEnemy = true;
+		cand.point = bot.sense.enemyPos;
+
+		const Nav::Area *area = ResolvePickupArea(mesh, bot.sense.enemyPos);
+		cand.hasArea = area != nullptr;
+		if (area)
+			cand.areaId = area->id;
+		else
+			cand.reason = SCAN_NO_AREA;
+
+		out.push_back(cand);
+	}
+
 	float ItemCost(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
 		const Candidate &cand)
 	{
@@ -200,7 +235,16 @@ namespace
 		Vector from = (static_cast<int>(cand.areaId) == bot.currentAreaId)
 			? bot.pEdict->v.origin : mesh.areas[cand.areaId].centroid;
 
-		return costs[cand.areaId] + (cand.point - from).Length() / NavAStar::kNavRunSpeed;
+		float cost = costs[cand.areaId] + (cand.point - from).Length() / NavAStar::kNavRunSpeed;
+
+		if (!cand.isEnemy)
+			return cost;
+
+		float readiness = Readiness(bot);
+		if (readiness < kMinReadiness)
+			return Nav::kUnreachableSeconds;
+
+		return cost / readiness;
 	}
 
 	bool DebugEnabled()
@@ -218,8 +262,9 @@ namespace
 				++open;
 
 		char msg[256];
-		snprintf(msg, sizeof(msg), "CrossBot: %s scanning from area %d: %zu items, %zu selectable\n",
-			bot.name, bot.currentAreaId, items.size(), open);
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s scanning from area %d: %zu items, %zu selectable, readiness %.2f\n",
+			bot.name, bot.currentAreaId, items.size(), open, Readiness(bot));
 		SERVER_PRINT(msg);
 
 		for (const Candidate &cand : items)
@@ -261,8 +306,9 @@ namespace
 			}
 			}
 
-			snprintf(msg, sizeof(msg), "CrossBot:   #%d %s at (%.0f,%.0f,%.0f) %s, %s\n", cand.index,
-				CBotClassOf(cand.ent), cand.point.x, cand.point.y, cand.point.z, where, why);
+			snprintf(msg, sizeof(msg), "CrossBot:   #%d %s%s at (%.0f,%.0f,%.0f) %s, %s\n", cand.index,
+				cand.isEnemy ? "ENEMY " : "", CBotClassOf(cand.ent), cand.point.x, cand.point.y,
+				cand.point.z, where, why);
 			SERVER_PRINT(msg);
 		}
 	}
@@ -382,6 +428,7 @@ void NoteFull(CBot &bot, const char *classname)
 
 void ForgetGoalItem(CBot &bot)
 {
+	bot.goalIsEnemy = false;
 	bot.goalItem.Clear();
 	bot.goalItemKind = ITEM_NONE;
 	bot.goalItemArea = -1;
@@ -405,6 +452,12 @@ bool Enabled()
 	return !cvar || cvar->value != 0.f;
 }
 
+bool ChaseEnabled()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_chase");
+	return !cvar || cvar->value != 0.f;
+}
+
 bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 {
 	if (!g_pGameProfile || bot.currentAreaId < 0 || !Enabled())
@@ -417,6 +470,7 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 
 	std::vector<Candidate> items;
 	ScanItems(bot, mesh, items);
+	AppendEnemy(bot, mesh, items);
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
@@ -449,14 +503,17 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 		return false;
 	}
 
-	bot.goalItem.Set(best->ent);
-	bot.goalItemKind = best->kind;
-	bot.goalItemArea = static_cast<int>(best->areaId);
-	bot.goalItemSelectTime = gpGlobals->time;
-	bot.goalItemSeenCheck = 0.f;
-	bot.goalItemTouched = false;
-	bot.chargerActive = false;
-	bot.chargerPressed = false;
+	ForgetGoalItem(bot);
+
+	if (!best->isEnemy)
+	{
+		bot.goalItem.Set(best->ent);
+		bot.goalItemKind = best->kind;
+		bot.goalItemArea = static_cast<int>(best->areaId);
+		bot.goalItemSelectTime = gpGlobals->time;
+	}
+
+	bot.goalIsEnemy = best->isEnemy;
 	bot.goalPoint = best->point;
 	bot.hasGoal = true;
 
@@ -467,9 +524,9 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 
 	char msg[224];
 	snprintf(msg, sizeof(msg),
-		"CrossBot: %s wants %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
-		bot.name, CBotClassOf(best->ent), best->point.x, best->point.y, best->point.z,
-		best->areaId, bestCost, open);
+		"CrossBot: %s wants %s%s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
+		bot.name, best->isEnemy ? "enemy " : "", CBotClassOf(best->ent), best->point.x,
+		best->point.y, best->point.z, best->areaId, bestCost, open);
 	SERVER_PRINT(msg);
 
 	return true;
@@ -564,6 +621,16 @@ void OnTouch(CBot &bot, edict_t *ent)
 
 void OnArrived(CBot &bot)
 {
+	if (bot.goalIsEnemy)
+	{
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot: %s reached where it last saw the enemy, resuming\n",
+			bot.name);
+		SERVER_PRINT(msg);
+		BotSense::ForgetEnemy(bot);
+		return;
+	}
+
 	edict_t *ent = bot.goalItem.Get();
 	if (!ent || ItemKindIsCharger(bot.goalItemKind))
 	{
@@ -597,6 +664,16 @@ void OnArrived(CBot &bot)
 
 void OnRepathFailed(CBot &bot)
 {
+	if (bot.goalIsEnemy)
+	{
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot: %s could not plan a route to the enemy, forgetting it\n",
+			bot.name);
+		SERVER_PRINT(msg);
+		BotSense::ForgetEnemy(bot);
+		return;
+	}
+
 	edict_t *ent = bot.goalItem.Get();
 	if (ent)
 	{
@@ -612,6 +689,16 @@ void OnRepathFailed(CBot &bot)
 
 void OnBlocked(CBot &bot, const char *what)
 {
+	if (bot.goalIsEnemy)
+	{
+		char msg[208];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s could not get past %s reaching the enemy, forgetting it\n", bot.name, what);
+		SERVER_PRINT(msg);
+		BotSense::ForgetEnemy(bot);
+		return;
+	}
+
 	edict_t *ent = bot.goalItem.Get();
 	if (ent)
 	{

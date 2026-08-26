@@ -64,6 +64,7 @@ struct WeaponSpec
 	int id;
 	const char *classname;
 	int clipSize;
+	float value;
 	WeaponMode primary;
 	WeaponMode primaryZoomed;
 	WeaponMode secondary;

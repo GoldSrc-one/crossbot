@@ -48,6 +48,46 @@ reference is the bot's own origin for its current area and the area centroid els
 area alone leaves ties between every item in the winning area, and the tie in the bot's *own* area
 is exactly the "it is right next to me" case that matters most.
 
+### The enemy is a candidate, not a mode
+
+There is no chase behaviour and no priority rule deciding between fighting and looting. The position
+where a bot last saw an enemy (`doc/bot.md`, "The enemy handle outlives the sight of it") is appended
+to the same scan as one more `Candidate`, resolved to an area by the same `ResolvePickupArea` used for
+pickups, and priced by the same `ItemCost`. Whether a bot goes after a distant enemy or the battery at
+its feet falls out of one comparison.
+
+That works because phase 1 is already a Dijkstra from the bot's own area over every area on the map.
+The enemy costs one extra row in a scan that was happening anyway -- no second search, no separate
+goal type, and every existing exit (arrival, repath failure, blocked detour) already routes through
+code that only had to learn one new branch.
+
+### Readiness is what makes the comparison mean anything
+
+Raw seconds would make the enemy win whenever it happened to be nearer, which is not how anyone plays.
+`IGameProfile::EvaluateCombat` scores the bot itself in `[0,1]` and the enemy's cost is divided by it:
+
+    enemyScore = seconds / readiness
+
+At `1.0` the enemy wins if it is even slightly closer than the nearest item. At `0.1` the bot prefers
+an item up to ten times further away. A bot that just spawned with a crowbar and a glock evaluates to
+`0.1` and goes shopping; one carrying gauss and egon at full health evaluates to `1.0` and hunts.
+
+**Reachability is decided before the division, not after.** A low readiness multiplies the cost by ten
+or more, and a perfectly routable enemy across a large map would cross `kUnreachableSeconds` and read
+as `no route` in the debug dump -- a reachability verdict invented by the scoring. The raw cost is
+tested first and only then scaled.
+
+Readiness of zero -- nothing the bot can fire -- is not a division, it is a skip: the candidate is
+dropped at `kMinReadiness`.
+
+`crossbot_chase` gates the enemy candidate alone. Note that it lives inside `SelectGoal`, so
+`crossbot_gather 0` disables it too, which is what keeps `test_nav_goal.ps1` measuring what it always
+measured.
+
+`crossbot_gather_debug` prints the bot's readiness in the scan header and marks the enemy row `ENEMY`.
+Those two numbers together are the only way to see why a bot chose what it chose: the same enemy at
+the same distance is picked or ignored purely on the health and guns the bot is holding.
+
 ### One ignore table, not two
 
 "Respawning until T" and "Repath could not reach it, retry after T" are the same fact — *do not
@@ -985,9 +1025,14 @@ aim at someone below.
 
 ### crossbot_sense_status
 
-Per bot: the aim target and the bone currently sampled, live suspicion count broken out by kind, which
-tier won the vote, the freshest entry with its source and age and position, the look direction with its
-authority and how many entries survived the cone refinement, and cumulative push counts per source.
+Per bot: the aim target and the bone currently sampled, the remembered enemy and how stale that
+sighting is, live suspicion count broken out by kind, which tier won the vote, the freshest entry with
+its source and age and position, the look direction with its authority and how many entries survived
+the cone refinement, and cumulative push counts per source.
+
+`target=` against `enemy=` is the pair that shows the memory doing its job. They agree while the bot
+can see someone; `target=- enemy=Sense2 enemyAge=1.8s` is the whole point of the feature, and
+`enemy=-` returning after `enemyAge` passes `crossbot_sense_decay` is the record expiring on schedule.
 
 `kept` versus `susp` is the interesting pair -- it is the mean-shift reporting how much of what the bot
 knows about it can actually face at once.
@@ -1004,6 +1049,54 @@ an enemy's `DAMAGE` entry is overwritten by their own `SIGHT` entry inside the s
 so `fresh=` reads `SIGHT` almost always and `DAMAGE` essentially never. `test_fire.ps1` used to sample
 this command four times per poll to work around that; the counters are cumulative, so one poll cannot
 miss a source that fired between polls, and the sampling loop is gone.
+
+### The enemy handle outlives the sight of it
+
+`sense.target` is not memory. `UpdateVision` writes `sense.target.Set(best)` unconditionally, `best`
+included when it is null, so the handle drops the frame line of sight breaks. That is correct for what
+it feeds -- aim and the trigger -- and useless for deciding where to walk.
+
+`sense.enemy` is the memory. It is written from the same site as `target` whenever a target is visible
+and survives the loss: handle, position, and the time it was recorded. It is dropped only when the
+entity is gone, when the entity is dead, or when the record is older than `crossbot_sense_decay` --
+the same three tests `LiveWeight` applies to a suspicion, because it is the same question.
+
+**The position stored is `v.origin`, not `bestPoint`.** `bestPoint` is a randomly chosen hitbox bone
+and can be a hand held out over a ledge; `v.origin` is at the feet, which is what `FindAreaExact` can
+resolve to a nav area. A bone-derived goal resolves to no area, or to the wrong one, in exactly the
+cases where the enemy is somewhere interesting.
+
+**It is deliberately refreshed only by sight.** Sound, gunfire and damage from that same enemy keep
+updating its `Suspicion` slot and keep steering the head, but they do not move the remembered
+position. So the bot walks to where it last *saw* someone rather than where it last heard a footstep,
+and the goal holds still while it walks there.
+
+### Losing sight arms one re-score, not a chase
+
+`BotItems::SelectGoal` only runs when `hasGoal` is false, so without a nudge a bot that spots someone
+while walking to a battery would not reconsider until it arrived. The sight-loss *edge* sets
+`sense.rescore`, and `Bot_MoveNav` consumes it by clearing the current goal and zeroing
+`nextSelectTime` so the throttle cannot swallow the re-selection. The scan then runs with the enemy in
+it and the cost decides -- frequently in favour of the battery, which is the point.
+
+Two guards, both load-bearing.
+
+**It defers while a maneuver owns the frame.** Clearing the path out from under an airmove, ladder,
+elevator ride, activation, charger or break leaves the runner mid-commitment with nothing to steer
+along. The flag is held until all of them are clear.
+
+**It is throttled to one re-score a second.** The edge fires on a transition, and sight transitions
+constantly in a real fight -- an enemy strafing behind a pillar breaks and restores line of sight
+several times a second, and each edge would otherwise force a full A* replan.
+
+The enemy is forgotten on arrival, and that is not tidiness. The remembered position would win the
+next scan from zero distance away, so the bot would re-select the spot it is standing on, arrive
+instantly, and spin at full framerate -- the same failure `bot_items.cpp` documents as outcome D.
+Forgetting also happens when the route cannot be planned or a detour is blocked, which is the give-up
+condition for a position that is simply not reachable.
+
+`bot.sense` is not covered by anything that resets on death, so `BotSense::OnRespawn` clears the enemy
+alongside `BotItems::OnRespawn` and `BotFire::Reset`.
 
 ## bot_fire.cpp
 
@@ -2917,6 +3010,12 @@ The pairs that carry the diagnosis:
   area it resolved to, and how many entries are in each memo. `item=-` with `hasGoal=1` is a
   commanded `crossbot_nav_goal`, not a gathered one. `charging=` appears only while the charger
   runner owns the frame, and carries the value it is watching.
+- `chase=` with `enemy=`, `enemyAge=` and `ready=` — whether the current goal is the enemy's last
+  known position, who that enemy is, how stale the sighting is, and the bot's `EvaluateCombat` score.
+  `chase=0` next to a live `enemy=` is the normal case and not a contradiction: the bot remembers
+  someone and the scan priced an item better. `ready=` is the number that explains that choice, and
+  it is the pair to watch — the same `enemy=` at the same distance flips to `chase=1` as `ready=`
+  climbs. `enemyAge=` above `crossbot_sense_decay` should never be seen; the record is dropped there.
 - `breaking=` with `health=`, `swings=` and `for=` — present only while `BotBreak` owns the frame.
   `health` not falling across two samples while `swings` climbs is the unbreakable-glass signature; the
   no-damage grace will abort it a moment later.

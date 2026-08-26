@@ -26,6 +26,8 @@ inline bool ItemKindIsCharger(ItemKind kind)
 	return kind == ITEM_HEALTHCHARGER || kind == ITEM_RECHARGE;
 }
 
+struct BotInventory;
+
 class IGameProfile
 {
 public:
@@ -37,6 +39,8 @@ public:
 	virtual bool Detect() const = 0;
 
 	virtual bool IsDead(edict_t *pEdict) const = 0;
+
+	virtual float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const = 0;
 
 	virtual void Respawn(edict_t *pEdict) const = 0;
 

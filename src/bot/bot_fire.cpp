@@ -875,6 +875,24 @@ const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed)
 	return nullptr;
 }
 
+bool WeaponArmed(const BotInventory &inv, const BotWeapon &w)
+{
+	const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(w.id) : nullptr;
+	if (!spec)
+		return false;
+
+	const WeaponMode *modes[2] = { &spec->primary, &spec->secondary };
+	for (const WeaponMode *m : modes)
+	{
+		if (m->fire == FIRE_NONE || m->aim == AIM_NONE)
+			continue;
+		if (AmmoReady(inv, w, *m, false))
+			return true;
+	}
+
+	return false;
+}
+
 bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict)
 {
 	if (!Supported(m))

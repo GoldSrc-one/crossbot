@@ -9,6 +9,7 @@
 #include "bot_aim.h"
 #include "bot_fire.h"
 #include "bot_move.h"
+#include "bot_move_nav.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
 
@@ -18,6 +19,7 @@ namespace
 
 	constexpr float kDefaultDecay = 5.f;
 	constexpr float kMaxDecay = 60.f;
+	constexpr float kRescoreInterval = 1.f;
 
 	constexpr float kViewCone = 90.f;
 	constexpr float kViewRange = 4096.f;
@@ -289,6 +291,10 @@ namespace
 		sense.targetTime = gpGlobals->time;
 		sense.targetPoint = bestPoint;
 
+		sense.enemy.Set(best);
+		sense.enemyPos = best->v.origin;
+		sense.enemyTime = gpGlobals->time;
+
 		float delay = BotAim::Delay();
 		Vector offset = best->v.velocity * delay;
 		Vector lead = bestPoint + offset;
@@ -305,6 +311,32 @@ namespace
 		}
 
 		BotAim::PushDelaySlot(bot, lead, best->v.velocity);
+	}
+
+	void UpdateEnemy(CBot &bot)
+	{
+		BotSense::State &sense = bot.sense;
+
+		edict_t *enemy = sense.enemy.Get();
+		if (enemy && (g_pGameProfile->IsDead(enemy) ||
+			gpGlobals->time - sense.enemyTime > BotSense::Decay()))
+		{
+			BotSense::ForgetEnemy(bot);
+			enemy = nullptr;
+		}
+		else if (!enemy && sense.enemyTime != 0.f)
+		{
+			BotSense::ForgetEnemy(bot);
+		}
+
+		bool sight = sense.target.Get() != nullptr;
+		if (sense.hadSight && !sight && sense.enemy.Get() &&
+			gpGlobals->time >= sense.nextRescoreTime)
+		{
+			sense.rescore = true;
+			sense.nextRescoreTime = gpGlobals->time + kRescoreInterval;
+		}
+		sense.hadSight = sight;
 	}
 
 	bool LookDirection(CBot &bot, Vector &dirOut, float &authorityOut, int &entriesOut,
@@ -601,6 +633,8 @@ void BotSense::Update(CBot &bot)
 			BotAim::ClearDelayQueue(bot);
 		sense.target.Clear();
 		sense.targetBone = -1;
+		sense.hadSight = false;
+		ForgetEnemy(bot);
 		return;
 	}
 
@@ -608,6 +642,7 @@ void BotSense::Update(CBot &bot)
 
 	UpdateDamage(bot);
 	UpdateVision(bot);
+	UpdateEnemy(bot);
 
 	Vector dir;
 	float authority = 0.f;
@@ -621,6 +656,28 @@ void BotSense::Update(CBot &bot)
 		sense.lookEntries = entries;
 		sense.lookKind = kind;
 	}
+}
+
+void BotSense::ForgetEnemy(CBot &bot)
+{
+	State &sense = bot.sense;
+	sense.enemy.Clear();
+	sense.enemyTime = 0.f;
+	sense.rescore = false;
+
+	if (bot.goalIsEnemy)
+	{
+		bot.goalIsEnemy = false;
+		bot.hasGoal = false;
+		Bot_ResetNavPath(bot);
+	}
+}
+
+void BotSense::OnRespawn(CBot &bot)
+{
+	State &sense = bot.sense;
+	sense.hadSight = false;
+	ForgetEnemy(bot);
 }
 
 bool BotSense::ApplyLook(CBot &bot)
