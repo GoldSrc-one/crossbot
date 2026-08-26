@@ -32,6 +32,9 @@ Command-line tool with extensive debug flags:
   walkable leaves, the tagged stop leaves and the ride connections built. Also, per non-default stop area,
   the air-move sweep run with the mover placed there: perimeter edges, how many of them are supported with
   the mover parked versus placed, and the launch edges and samples that came out
+- `--dump-teleports` - teleport discovery: every `trigger_teleport`, why it was skipped (`SF_TRIGGER_NOCLIENTS`,
+  a `master`, no brush model, an unresolvable `target`, a destination off the mesh), where its destination
+  lands with the drop and fall damage, and every area that can walk into it
 - `--dump-path` - per-waypoint clearance and per-segment arc/line/gap rows (radius, turn, length,
   entry/exit speed, cap, and the `reach` pair — the speed the bot can really carry, see `doc/nav.md`)
   for the debug route, plus the profile summary line
@@ -1043,6 +1046,63 @@ carrying `requiresElevatorRide` / `elevatorTravelTime`, then `PushWaypoint(arriv
   unreachable from below, which is what `topplat` (that map with a `targetname` patched in) shows: both stop
   areas and a ride-down edge exist, and nothing can call it. Modelling `CPlatTrigger` as an `ACT_TOUCH`
   activator over the mover's own column would close it.
+
+## teleport_connections.cpp
+
+### BuildTeleportConnections
+Runs after `BuildLadderConnections` and before the prune passes, so a teleport can rescue areas nothing
+else reaches and still be there when `PruneUnreachableAreas` runs. Emits one-way `CONN_TELEPORT`
+connections for every `trigger_teleport`.
+
+The runtime half of this predates the generator by a long way: `CONN_TELEPORT`, the connection record
+fields, `PlanWalker::Cross`'s teleport branch and the gate-baking skips were all already in place with
+nothing producing an edge. This file is the missing producer; it changed no format and bumped no version.
+
+### What is skipped, and why
+- **`SF_TRIGGER_NOCLIENTS` (spawnflag 2)** - `TeleportTouch` returns early for players, so no bot can ever
+  use it.
+- **A non-empty `master`** - `UTIL_IsMasterTriggered` gates the touch on a `multisource` whose state is
+  whatever the map's logic has done to it at run time, and navgen cannot know that statically. Emitting the
+  edge anyway would need runtime failure attribution to stop a bot walking repeatedly into a dead
+  teleporter; the teleport branch now stamps `connIndex` but nothing spends it yet.
+
+  **This is why `rustmill` gets zero teleport connections.** All 48 of its teleports are mastered — it
+  rotates which rooms are live — so the map is unchanged by this stage. `gasworks`, whose 3 teleports are
+  ungated, gets 12 connections (one per area that can reach a trigger).
+- **A `target` matching no entity, or a destination that lands off the mesh.**
+
+### The destination is found the way the engine finds it
+`FIND_ENTITY_BY_TARGETNAME` walks the edict list and takes the first `targetname` match *whatever its
+classname* — `info_teleport_destination` has no special standing, and `test21_teleport` in fact targets an
+`info_target`. The landing origin is `dest.origin` with the feet offset removed and one unit added
+(`tmp.z -= pOther->pev->mins.z; tmp.z++`), which is a **standing origin in world space**. Areas are hull-3
+geometry, so `kLandingLift` drops it by `kStandProbeLift` to put it in the same duck-origin space the areas
+live in. Getting that conversion wrong costs exactly 18 units and shows up as a plausible-looking wrong
+drop, not as a crash.
+
+### The drop is real and it is priced
+The engine clears `FL_ONGROUND` and zeroes velocity, so a destination hung above its floor is a fall.
+`ResolveLanding` first looks for an area whose `boundPlanes` contain the landing point, then falls back to
+the highest area floor directly beneath it — deliberately *not* `FindAreaContainingPoint`, whose
+nearest-centroid fallback (reachability.cpp) would happily invent an edge to an unrelated area. The drop
+feeds `flightTime` and `PmSim::FallDamageFor`, and `ConnectionCostSeconds` now includes `CONN_TELEPORT` in
+the same arm as air moves and ladders, so a lethal drop takes the `1e4` penalty and is never routed. A
+level destination costs 0, which is the ordinary case.
+
+### Source areas reuse FindServicePoints
+Finding "which areas can walk into this brush volume, and where would the bot stand" is exactly the problem
+`FindServicePoints` already solves for `trigger_multiple`/`trigger_once` activators, so a teleport builds an
+`ActivatorVolume` with `kind = ACT_TRIGGER` and hands over the **raw** brush bounds — that function does its
+own Minkowski expansion by each area's own hull. One connection per source area, deduped on the *ordered*
+`(from, to)` pair, keeping the lower fall damage.
+
+It inherits one limit from `ServiceableArea`: areas with `activation != ACT_NONE` (door, breakable) are never
+sources, so a teleport trigger sitting inside a doorway is missed.
+
+### What the pruners do with them
+Nothing. `PruneWalkableAirmoves` and `PruneRedundantLadders` neither judge teleports nor accept them as
+alternatives, so a teleport is never dropped and never makes an air move look redundant. Conservative: a
+free teleport arguably *should* retire a parallel air move, but that is a change to the prune, not here.
 
 ## activation_detours.cpp
 

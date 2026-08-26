@@ -1055,17 +1055,23 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 
 	if (conn.connType == crossbot_nav::CONN_TELEPORT)
 	{
-		bool tailCrouch = FlushFunnelTo(conn.launchPos);
+		Vector trigger = AtPlayerHeight(conn.launchPos, fromId);
+		Vector dest = AtPlayerHeight(conn.landingPos, toId);
+
+		bool tailCrouch = FlushFunnelTo(trigger);
 
 		PlanWaypoint triggerWp;
-		triggerWp.point = conn.launchPos;
+		triggerWp.point = trigger;
 		triggerWp.requiresTeleport = true;
-		triggerWp.teleportDest = conn.landingPos;
+		triggerWp.teleportDest = dest;
+		triggerWp.targetAreaId = static_cast<int>(toId);
+		triggerWp.connIndex = static_cast<int>(connIndex);
 		triggerWp.requiresCrouch = tailCrouch || fromArea.crouch;
 		PushWaypoint(triggerWp);
 
 		PlanWaypoint destWp;
-		destWp.point = conn.landingPos;
+		destWp.point = dest;
+		destWp.targetAreaId = static_cast<int>(toId);
 		destWp.requiresCrouch = toArea.crouch;
 		PushWaypoint(destWp, false);
 

@@ -20,7 +20,8 @@ float ConnectionCostSeconds(const MergedConnection &conn)
 {
 	float seconds = 0.0f;
 
-	if (conn.connType == crossbot_nav::CONN_AIRMOVE || conn.connType == crossbot_nav::CONN_LADDER)
+	if (conn.connType == crossbot_nav::CONN_AIRMOVE || conn.connType == crossbot_nav::CONN_LADDER ||
+		conn.connType == crossbot_nav::CONN_TELEPORT)
 	{
 		float damage = static_cast<float>(conn.fallDamage);
 		seconds += static_cast<float>(conn.flightTime);

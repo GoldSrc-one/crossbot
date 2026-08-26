@@ -31,8 +31,8 @@ Four properties are deliberate:
 
 Attribution runs launch waypoint → bot → mesh: `Cross` stamps `PlanWaypoint::connIndex` on the air-move
 launch waypoint, `RunAirmoveApproach` latches it into `CBot::airmoveConnIndex`, and `RunAirmoveFlight`
-spends it on landing. Only the air-move branch stamps it today; teleport and walk/door keep `-1` and
-are the extension points when those grow failure detection.
+spends it on landing. The teleport branch stamps it too, but nothing spends it yet: a teleport that
+does not fire is not detected. Walk/door keep `-1` and are the remaining extension points.
 
 ## nav_mesh.h
 
@@ -61,10 +61,13 @@ requested point to an area and clamps it into that area's bounds; `PlanWalker::F
 clamped point as the `goal` waypoint. When the requested point lies outside the mesh the plan
 therefore ends legitimately short of it, and the bot reports "reached goal" from there. This is not a
 planning failure and there is nothing to fix in the planner — but it looks exactly like one from
-outside, because the caller compares against the point it asked for. `test21_teleport`'s `info_target`
-sits 112 units past the last area, so `--dump-path` ends at `goal (448,336,32)` while the entity is at
-(448,448,32), and `test_nav_goal.ps1` calls that a failure. Read the plan's last waypoint before
-believing a "stopped short" report.
+outside, because the caller compares against the point it asked for. Read the plan's last waypoint
+before believing a "stopped short" report.
+
+`test21_teleport` used to be the standing example here: its `info_target` sits in a sealed pocket, so
+the plan stopped 112 units short at `goal (448,336,32)` and the harness called it a failure. It is not
+an example any more — navgen now builds the `trigger_teleport` edge into that pocket and the map
+passes.
 
 ## plan_search.cpp
 

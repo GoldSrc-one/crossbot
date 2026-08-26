@@ -30,6 +30,7 @@
 #include "reachability.h"
 #include "stand_classifier.h"
 #include "svg_debug.h"
+#include "teleport_connections.h"
 #include "path_profile.h"
 #include "waypoint_plan.h"
 
@@ -139,6 +140,8 @@ void PrintUsage(const char *argv0)
 		"                    footprint, whether it was reclassified as a rideable platform or left to the\n"
 		"                    door path, and for each accepted one its stop positions, ride and dwell times,\n"
 		"                    activation, shaft column and the boxes carved out of the walkable leaves\n"
+		"  --dump-teleports  print teleport discovery: every trigger_teleport, why it was skipped, where\n"
+		"                    its destination lands and which areas can walk into it\n"
 		"  --ladder-prune-ratio <n> drop a ladder connection when a walk+air-move route between the same\n"
 		"                    two areas costs less than n times the ladder (default %.1f; 0 keeps every\n"
 		"                    ladder)\n"
@@ -707,6 +710,7 @@ int main(int argc, char **argv)
 	bool dumpAirmovePrune = false;
 	bool dumpLadders = false;
 	bool dumpElevators = false;
+	bool dumpTeleports = false;
 	float maxSpeed = navgen::PhysicsParams().maxSpeed;
 	float planSpeed = 0.f;
 	int dumpPlanesAreaId = -1;
@@ -757,6 +761,10 @@ int main(int argc, char **argv)
 		else if (arg == "--dump-elevators")
 		{
 			dumpElevators = true;
+		}
+		else if (arg == "--dump-teleports")
+		{
+			dumpTeleports = true;
 		}
 		else if (arg == "--dump-carve")
 		{
@@ -1364,6 +1372,17 @@ int main(int argc, char **argv)
 				"%zu ladder connections\n",
 				bspPath.c_str(), ladders.entities, ladders.climbFaces, ladders.mounts, ladders.conns);
 
+		// Teleports come last so they can rescue areas nothing else reaches, and before the prune that
+		// would otherwise throw those areas away.
+		navgen::TeleportStats teleports = navgen::BuildTeleportConnections(bsp,
+			worldModel.headnode[navgen::kHullHuman], standBlockers, entities, merged.areas, merged.conns,
+			dumpTeleports);
+		if (teleports.entities > 0)
+			std::printf("%s: %zu trigger_teleport entities, %zu teleport connections (%zu mastered, "
+				"%zu no-clients, %zu with no reachable destination)\n",
+				bspPath.c_str(), teleports.entities, teleports.conns, teleports.mastered,
+				teleports.noClients, teleports.unresolvedDest);
+
 		if (airmoveWalkRatio > 0.0)
 		{
 			navgen::AirmovePruneStats pruned = navgen::PruneWalkableAirmoves(merged.areas, merged.conns,
@@ -1436,7 +1455,7 @@ int main(int argc, char **argv)
 				bspPath.c_str(), detourStats.gatedAreas, detourStats.activators,
 				detourStats.servicePoints, detourStats.areasWithoutService);
 
-		int walkConns = 0, airMoveConns = 0, ladderConns = 0;
+		int walkConns = 0, airMoveConns = 0, ladderConns = 0, teleportConns = 0;
 		for (const navgen::MergedConnection &c : merged.conns)
 		{
 			if (c.connType == crossbot_nav::CONN_WALK)
@@ -1445,11 +1464,14 @@ int main(int argc, char **argv)
 				++airMoveConns;
 			else if (c.connType == crossbot_nav::CONN_LADDER)
 				++ladderConns;
+			else if (c.connType == crossbot_nav::CONN_TELEPORT)
+				++teleportConns;
 		}
 
-		if (ladderConns > 0)
-			std::printf("%s: %d walk connections, %d air move connections, %d ladder connections\n",
-				bspPath.c_str(), walkConns, airMoveConns, ladderConns);
+		if (ladderConns > 0 || teleportConns > 0)
+			std::printf("%s: %d walk connections, %d air move connections, %d ladder connections, "
+				"%d teleport connections\n",
+				bspPath.c_str(), walkConns, airMoveConns, ladderConns, teleportConns);
 		else
 			std::printf("%s: %d walk connections, %d air move connections\n",
 				bspPath.c_str(), walkConns, airMoveConns);
@@ -1486,6 +1508,10 @@ int main(int argc, char **argv)
 
 				if (c.connType == crossbot_nav::CONN_ELEVATOR)
 					std::printf("  ride %.2fs wait %.2fs", c.rideSeconds, c.rideWaitSeconds);
+
+				if (c.connType == crossbot_nav::CONN_TELEPORT)
+					std::printf("  drop %.0f fallDamage %.1f flightTime %.2f",
+						0.5 * PmSim::kGravity * c.flightTime * c.flightTime, c.fallDamage, c.flightTime);
 
 				if (c.gateAValid)
 					std::printf("\n             gateA (%.1f, %.1f, %.1f)-(%.1f, %.1f, %.1f)",
