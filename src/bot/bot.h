@@ -64,6 +64,10 @@ struct CBot
 
 	bool wasDead = false;
 
+	// pev->gravity as of the last touch we saw. trigger_gravity writes it and it sticks until the
+	// next respawn, and it decides which air moves in the mesh are usable.
+	float gravity = 1.f;
+
 	BotInventory inventory;
 
 	std::vector<Nav::Waypoint> waypoints;

@@ -1,6 +1,10 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+#include <string.h>
+
+#include <vector>
+
 #include "bot_move.h"
 #include "bot_fire.h"
 #include "../nav/nav_math.h"
@@ -11,6 +15,12 @@ namespace
 	constexpr byte kMaxJumpCommandMsec = 50;
 
 	constexpr float kMoveSpeed = 250.f;
+
+	constexpr int kHullHuman = 1;
+	constexpr int kHullDuck = 3;
+
+	constexpr float kDefaultPushSpeed = 100.f;
+	constexpr float kDefaultMaxVelocity = 2000.f;
 
 	using NavMath::kPiF;
 }
@@ -104,6 +114,74 @@ PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
 	};
 }
 
+PmSim::PmPushFn Bot_PushFields(int hull)
+{
+	// trigger_push hands the player a base velocity for as long as it is being touched. Snapshot the
+	// live fields once per plan; a plan runs long enough that a toggled field is caught by the repath.
+	struct Field
+	{
+		Vector mins, maxs;
+		Vector push;
+		edict_t *ent;
+	};
+
+	std::vector<Field> fields;
+
+	for (int i = 1; i < gpGlobals->maxEntities; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!ent || ent->free || ent->v.solid == SOLID_NOT)
+			continue;
+
+		const char *classname = STRING(ent->v.classname);
+		if (!classname || strcmp(classname, "trigger_push") != 0)
+			continue;
+
+		Field field;
+		field.mins = ent->v.absmin;
+		field.maxs = ent->v.absmax;
+		field.push = ent->v.movedir * (ent->v.speed != 0.f ? ent->v.speed : kDefaultPushSpeed);
+		field.ent = ent;
+		fields.push_back(field);
+	}
+
+	if (fields.empty())
+		return nullptr;
+
+	Vector hullMins = (hull == kHullDuck) ? Vector(-16.f, -16.f, -18.f) : Vector(-16.f, -16.f, -36.f);
+	Vector hullMaxs = (hull == kHullDuck) ? Vector(16.f, 16.f, 18.f) : Vector(16.f, 16.f, 36.f);
+
+	return [fields, hull, hullMins, hullMaxs](const Vector &origin)
+	{
+		Vector total(0.f, 0.f, 0.f);
+
+		for (const Field &field : fields)
+		{
+			// Cheap reject against the hull-expanded bounds, then the exact clipnode test the engine
+			// itself uses to decide a trigger touch.
+			if (origin.x < field.mins.x - hullMaxs.x || origin.x > field.maxs.x - hullMins.x ||
+				origin.y < field.mins.y - hullMaxs.y || origin.y > field.maxs.y - hullMins.y ||
+				origin.z < field.mins.z - hullMaxs.z || origin.z > field.maxs.z - hullMins.z)
+				continue;
+
+			TraceResult tr;
+			g_engfuncs.pfnTraceModel(origin, origin, hull, field.ent, &tr);
+			if (!tr.fStartSolid && !tr.fAllSolid)
+				continue;
+
+			total = total + field.push;
+		}
+
+		return total;
+	};
+}
+
+float Bot_GravityMultiplier(edict_t *pEdict)
+{
+	// HL treats pev->gravity == 0 as "default", and trigger_gravity writes the multiplier here.
+	return (pEdict && pEdict->v.gravity > 0.f) ? pEdict->v.gravity : 1.f;
+}
+
 float Bot_MaxSpeed(edict_t *pEdict)
 {
 	float maxspeed = pEdict->v.maxspeed;
@@ -120,9 +198,7 @@ PmSim::PmPhysics Bot_Physics(edict_t *pEdict)
 
 	float maxspeed = Bot_MaxSpeed(pEdict);
 
-	float gravity = PmSim::kGravity;
-	if (pEdict->v.gravity > 0.f)
-		gravity *= pEdict->v.gravity;
+	float gravity = PmSim::kGravity * Bot_GravityMultiplier(pEdict);
 
 	float airAccel = g_engfuncs.pfnCVarGetFloat("sv_airaccelerate");
 	if (airAccel <= 0.f)
@@ -144,6 +220,10 @@ PmSim::PmPhysics Bot_Physics(edict_t *pEdict)
 	if (edgeFriction <= 0.f)
 		edgeFriction = 2.f;
 
+	float maxVelocity = g_engfuncs.pfnCVarGetFloat("sv_maxvelocity");
+	if (maxVelocity <= 0.f)
+		maxVelocity = kDefaultMaxVelocity;
+
 	float frameTime = gpGlobals->frametime;
 	if (frameTime < 1.f / 128.f || frameTime > 1.f / 20.f)
 		frameTime = 1.f / 60.f;
@@ -157,5 +237,6 @@ PmSim::PmPhysics Bot_Physics(edict_t *pEdict)
 	physics.edgeFriction = edgeFriction;
 	physics.friction = 1.f;
 	physics.frameTime = frameTime;
+	physics.maxVelocity = maxVelocity;
 	return physics;
 }

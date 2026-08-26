@@ -657,8 +657,14 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
   for the funnel to string-pull through; the mount is simply a hard waypoint, like a teleport trigger.
 
 **Air Move:**
+- Refuses the edge outright when `conn.gravity` does not match `PlanTraceContext::gravityMultiplier`.
+  Air moves are sampled once per gravity a `trigger_gravity` can put the bot in, and the ones baked for
+  a gravity the bot is not currently at simply do not exist for it. `Nav::AreaCosts` applies the same
+  filter so goal selection and route search agree about which jumps exist
 - Pushes arrival gate (entry side only)
-- If traces available: re-simulates from funnel's preferred launch point
+- If traces available: re-simulates from funnel's preferred launch point, through
+  `PlanTraceContext::standPush`/`duckPush` so a launch crossing a `trigger_push` field is simulated the
+  same way navgen sampled it
   - Computes funnel crossing on launch gate (exit side)
   - Interpolates yaw/speed from gateAYaw/gateASpeed
   - Re-simulates with PmSim; if lands in dest area, uses simulated params
@@ -1203,12 +1209,15 @@ larger change than this one.
 
 ## nav_format.h
 
-### Nav File Format (version 16)
+### Nav File Format (version 17)
 - Magic: "CBNV"
 - Header: magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex, areaPlanes,
   detours, detourPoints)
 - AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount
-- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds
+- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity
+- `gravity` is the `pev->gravity` multiplier the air move was sampled at (1.0 for every other
+  connection type). A map with `trigger_gravity` carries one air move set per distinct multiplier, and
+  the runtime uses only the set matching the bot's current gravity — see "Gravity" below
 - ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
 - DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
 

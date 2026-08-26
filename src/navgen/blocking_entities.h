@@ -20,6 +20,12 @@ struct BlockingVolume
 	int entityIndex = -1;
 };
 
+struct PushVolume
+{
+	BlockingVolume volume;
+	Vec3 push;
+};
+
 struct ActivatorVolume
 {
 	uint8_t kind = crossbot_nav::ACT_BUTTON;
@@ -101,6 +107,11 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 
 std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex);
+
+std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
+	int hullIndex);
+
+std::vector<double> CollectGravityMultipliers(const std::vector<Entity> &entities);
 
 PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity> &entities, int hullIndex,
 	const std::vector<int> &skipEntities = std::vector<int>());

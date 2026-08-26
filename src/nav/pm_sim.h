@@ -19,6 +19,9 @@ struct PmTrace
 
 using PmTraceFn = std::function<PmTrace(const Vector &start, const Vector &end)>;
 
+// Base velocity contributed by trigger_push fields overlapping this origin, in units/sec.
+using PmPushFn = std::function<Vector(const Vector &origin)>;
+
 struct PmPhysics
 {
 	float maxSpeed = 320.f;
@@ -30,6 +33,7 @@ struct PmPhysics
 	float edgeFriction = 2.f;
 	float friction = 1.f;
 	float frameTime = 1.f / 60.f;
+	float maxVelocity = 2000.f;
 };
 
 constexpr float kGravity = 800.f;
@@ -57,7 +61,7 @@ float PlainJumpHeight(float gravity);
 class PmSimulator
 {
 public:
-	PmSimulator(PmTraceFn trace, const PmPhysics &physics);
+	PmSimulator(PmTraceFn trace, const PmPhysics &physics, PmPushFn push = nullptr);
 
 	void Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump);
 	void BeginAirborne(const Vector &origin, const Vector &velocity, float yawDegrees, float commandedSpeed);
@@ -74,7 +78,8 @@ public:
 private:
 	void Reset(const Vector &origin, const Vector &velocity, float yawDegrees, float commandedSpeed,
 		bool onGround, bool jump);
-	void AddCorrectGravity(float *velocity) const;
+	void CheckVelocity(float *velocity) const;
+	void AddCorrectGravity(float *velocity, float *baseVelocity) const;
 	void FixupGravityVelocity(float *velocity) const;
 	void PreventMegaBunnyJumping(float *velocity) const;
 	void AirAccelerate(const float *wishdir, float wishspeed, float *velocity) const;
@@ -82,6 +87,7 @@ private:
 	bool CatagorizePosition(const float *origin, const float *velocity) const;
 
 	PmTraceFn m_trace;
+	PmPushFn m_push;
 	PmPhysics m_physics;
 
 	float m_pos[3] = {0.f, 0.f, 0.f};

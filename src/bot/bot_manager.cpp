@@ -13,6 +13,7 @@
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
 
+#include <cmath>
 #include <string>
 
 IGameProfile *g_pGameProfile = nullptr;
@@ -33,6 +34,8 @@ namespace
 		}
 		return nullptr;
 	}
+
+	constexpr float kGravityEpsilon = 0.01f;
 
 	bool TouchDebugEnabled()
 	{
@@ -138,6 +141,8 @@ void StartFrame()
 		if (bot.wasDead)
 		{
 			bot.wasDead = false;
+			// The game DLL resets pev->gravity on spawn; any trigger_gravity has to be touched again.
+			bot.gravity = 1.f;
 			BotItems::OnRespawn(bot);
 			BotFire::Reset(bot);
 			bot.brk = BotBreak::State();
@@ -146,6 +151,29 @@ void StartFrame()
 		BotWeapons::Refresh(bot);
 
 		Bot_MoveNav(bot);
+	}
+}
+
+namespace
+{
+	// Runs from the post hook, so the game DLL's trigger_gravity touch has already landed. A changed
+	// gravity swaps which air moves the mesh offers, so the current plan has to be thrown away.
+	void NoteGravity(CBot &bot)
+	{
+		float gravity = Bot_GravityMultiplier(bot.pEdict);
+		if (std::fabs(gravity - bot.gravity) <= kGravityEpsilon)
+			return;
+
+		if (TouchDebugEnabled())
+		{
+			char msg[160];
+			snprintf(msg, sizeof(msg), "CrossBot: %s gravity x%.2f -> x%.2f, repathing\n",
+				bot.name, bot.gravity, gravity);
+			SERVER_PRINT(msg);
+		}
+
+		bot.gravity = gravity;
+		bot.nextRepathTime = gpGlobals->time;
 	}
 }
 
@@ -161,12 +189,14 @@ void Touch(edict_t *pentTouched, edict_t *pentOther)
 		if (debug)
 			DumpTouch(*bot, pentTouched);
 		BotItems::OnTouch(*bot, pentTouched);
+		NoteGravity(*bot);
 	}
 	else if (CBot *other = FindBot(pentTouched))
 	{
 		if (debug)
 			DumpTouch(*other, pentOther);
 		BotItems::OnTouch(*other, pentOther);
+		NoteGravity(*other);
 	}
 }
 

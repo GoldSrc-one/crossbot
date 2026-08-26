@@ -15,6 +15,9 @@ struct PhysicsParams
 {
 	float maxSpeed = 320.0f;
 	float gravity = 800.0f;
+
+	// pev->gravity multiplier this sampling pass represents; gravity above is already scaled by it.
+	float gravityMultiplier = 1.0f;
 	float airAccelerate = 10.0f;
 	float friction = 1.0f;
 
@@ -66,6 +69,9 @@ struct LaunchEdge
 	bool yawRange = false;
 	float yawLo = 0.0f;
 	float yawHi = 0.0f;
+
+	// Push-field seeds have to launch at the boundary: backing up first only spends the boost.
+	bool noJumpBack = false;
 };
 
 struct HullContext
@@ -73,6 +79,7 @@ struct HullContext
 	int headnode = -1;
 	const std::vector<BlockingVolume> *blockers = nullptr;
 	const std::vector<BlockingVolume> *ladders = nullptr;
+	const std::vector<PushVolume> *pushes = nullptr;
 };
 
 struct AirmoveWorldStop
@@ -96,7 +103,8 @@ class PM_MoveSimulator
 public:
 	PM_MoveSimulator(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 		const AirmoveSampleParams &params, const PhysicsParams &physics,
-		const std::vector<BlockingVolume> *ladders = nullptr);
+		const std::vector<BlockingVolume> *ladders = nullptr,
+		const std::vector<PushVolume> *pushes = nullptr);
 
 	AirmoveTrajectory Simulate(const Vec3 &launchPos, float yawDegrees, float commandedSpeed, bool jump,
 		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust = 0.0) const;
@@ -110,9 +118,11 @@ public:
 	bool BlockedAhead(const Vec3 &origin, const Vec3 &dir) const;
 	bool GroundAhead(const Vec3 &origin, const Vec3 &dir) const;
 	bool OnLadder(const Vec3 &origin) const;
+	Vec3 PushAt(const Vec3 &origin) const;
 	TraceResult Trace(const Vec3 &start, const Vec3 &end) const;
 
 	PmSim::PmTraceFn TraceFn() const;
+	PmSim::PmPushFn PushFn() const;
 	const PmSim::PmPhysics &Physics() const { return m_pmPhysics; }
 
 private:
@@ -123,6 +133,7 @@ private:
 	int m_headnode;
 	const std::vector<BlockingVolume> &m_blockers;
 	const std::vector<BlockingVolume> *m_ladders;
+	const std::vector<PushVolume> *m_pushes;
 	AirmoveSampleParams m_params;
 	PmSim::PmPhysics m_pmPhysics;
 	Vec3 m_worldMins;
@@ -133,6 +144,8 @@ int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas);
 
 std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Area &area, double probeZ,
 	const AirmoveSampleParams &params);
+
+std::vector<LaunchEdge> PushLaunchEdges(const Area &area, const std::vector<PushVolume> &pushes);
 
 void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
 	const AirmoveWorlds &worlds, const std::vector<Area> &areas, std::vector<MergedConnection> &conns,

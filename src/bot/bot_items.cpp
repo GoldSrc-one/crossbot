@@ -11,6 +11,7 @@
 #include "../nav/nav_query.h"
 #include "bot.h"
 #include "bot_items.h"
+#include "bot_move.h"
 #include "bot_move_nav.h"
 
 extern IGameProfile *g_pGameProfile;
@@ -418,7 +419,8 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 	ScanItems(bot, mesh, items);
 
 	std::vector<float> costs;
-	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs);
+	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
+		Bot_GravityMultiplier(bot.pEdict));
 
 	const Candidate *best = nullptr;
 	float bestCost = 0.f;

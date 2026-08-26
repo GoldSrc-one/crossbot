@@ -80,6 +80,8 @@ struct MergedConnection
 	double rideSeconds = 0.0;
 	double rideSecondsMax = 0.0;
 	double rideWaitSeconds = 0.0;
+
+	double gravity = 1.0;
 };
 
 struct MergeResult

@@ -92,6 +92,8 @@ struct PlanConnection
 	float rideSecondsMax = 0.f;
 	float rideWaitSeconds = 0.f;
 
+	float gravity = 1.f;
+
 	PlanGate gateA, gateB;
 
 	float gateAYaw[2] = {0.f, 0.f};
@@ -156,7 +158,10 @@ struct PlanTraceContext
 {
 	PmSim::PmTraceFn duckTrace;
 	PmSim::PmTraceFn standTrace;
+	PmSim::PmPushFn duckPush;
+	PmSim::PmPushFn standPush;
 	PmSim::PmPhysics physics;
+	float gravityMultiplier = 1.f;
 	bool dumpAirmoves = false;
 	bool collectRunupTraces = false;
 };

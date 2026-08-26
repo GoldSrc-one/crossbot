@@ -294,8 +294,12 @@ volumes per hull. `BuildLadderConnections` deliberately leaves it null on its ow
 starts inside the ladder it is leaving and would abort on frame one.
 
 ### ProbeAirMoves
+Runs **once per gravity multiplier** (see "Gravity" below). Everything described here happens inside one
+such pass, and every connection it emits is stamped with that pass's multiplier.
+
 For each connection:
-1. **Collect launch edges** - perimeter of floor faces (outward normal from face center)
+1. **Collect launch edges** - perimeter of floor faces (outward normal from face center), plus the
+   footprint boundary of any `trigger_push` field over the area (see "Push Fields")
 2. **Seed drops** - from each edge, fan yaws ±45° around outward, 1.7x maxSpeed run-up
 3. **Seed jumps** - same edges, add jump impulse, fan yaws ±90°
 4. **Seed reverse jumps (climbs)** - from landing spread of drops, edge along landings, outward toward ledge
@@ -312,9 +316,64 @@ For each connection:
 - Gate endpoints = mean ± 1σ (min 1.0), clamped to sample range
 - Returns invalid if cloud too thin/tight
 
+### Gravity
+`trigger_gravity` copies its own `pev->gravity` onto whoever touches it, and that sticks until the player
+respawns. So a bot is only ever running at one of a small, statically known set of multipliers:
+`CollectGravityMultipliers` returns 1.0 plus one entry per distinct `trigger_gravity` value (capped at four,
+with a warning past that).
+
+`ProbeAirMoves` runs once per multiplier with `physics.gravity` scaled accordingly, and stamps
+`MergedConnection::gravity` on everything it emits. A map with no `trigger_gravity` gets exactly one pass at
+1.0 and costs nothing extra. `xen_dm` has ten triggers, all `0.4`, so it gets two passes and roughly twice
+the air moves — that is intended: the runtime filter is strict, and each gravity regime needs its own set.
+
+Two things inside a pass move with gravity rather than staying at their 800-tuned defaults:
+- `existingPairs` is built from **non**-air-move connections only. Without that, pass two would see pass
+  one's air moves and suppress itself entirely.
+- the reverse-seed gate is `params.maxJumpHeight - PlainJumpHeight(kGravity) + PlainJumpHeight(gravity)`,
+  which is the default 64 at gravity 800 and 109 at half gravity. The 64 is step height plus a plain jump;
+  leaving it fixed means low gravity never seeds a climb back up a ledge it can now clearly reach.
+
+`PruneRedundantLadders` counts only default-gravity air moves as an alternative route, so a ladder is not
+pruned because of a jump that exists solely under a `trigger_gravity`.
+
+Ladder mount reach (`ladder_connections.cpp`) still uses a single gravity; ladders are not duplicated per
+multiplier.
+
+The `--dump-path` debug route is planned at the **lowest** multiplier the map offers, not at 1.0. A bot
+holds exactly one multiplier at a time, and the lowest one unlocks the most air moves, so previewing there
+keeps a map whose route only exists under a `trigger_gravity` from reading as unroutable offline. navgen
+prints `debug path planned at gravity xN` when it is not 1.0.
+
+### Push Fields
+`trigger_push` hands the player a base velocity every frame it is touched. `ExtractPushVolumes` reads the
+brush model per hull exactly like `ExtractLadderVolumes`, with `push = speed * movedir`; `START_OFF` fields
+spawn `SOLID_NOT` and are skipped. They are `SOLID_TRIGGER`, so they never enter `blockers`,
+`standBlockers` or `supportBlockers`, and never carve or split a leaf.
+
+`PM_MoveSimulator::PushAt` sums the push of every field whose hull-expanded bounds contain the origin and
+whose clipnodes classify it solid — the same point test `OnLadder` uses, and the same one `SV_TouchLinks`
+uses to decide a trigger touch. It is handed to `PmSim` as a `PmPushFn`; see `doc/nav.md` for what the
+simulator does with it, and note that a vertical push only acts on an **airborne** player.
+
+**Launch seeding.** `FilterLaunchEdges` keeps only floor-perimeter edges with void ahead, so a push field
+standing on flat floor against a wall produces no launch points at all and applying push during flight
+would never fire. `PushLaunchEdges` clips the four vertical sides of each field's footprint against the
+area's walkable floor faces (2D Cyrus-Beck, endpoints lifted onto the face plane) and emits each surviving
+segment as a `LaunchEdge` whose `outward` points **into** the field. Because `runSweep` sets the launch back
+along `outward` and aims the yaw fan along it, that gives launches just outside the field aimed inwards — a
+bot running into the shaft and jumping.
+
+These go through the existing `seed` parameter of `sweepArea`, which already forces jumps only and requires
+the launch to be inside the source area. They also set `LaunchEdge::noJumpBack`: the random 0-32 unit
+jump-back that helps an ordinary ledge jump is actively wrong here, because it smears the launch cloud
+across a band where only the end nearest the field works, and `FitGate` then produces a gate whose
+interpolated speed misses. Pinning the launch to the boundary is what makes the fitted gate usable.
+
 ### Reverse-Jump Seeds
-A drop under `maxJumpHeight` seeds a climb back the other way: `SeedEdgeFromLandings` turns the drop's landing
-points into a synthetic launch edge in the destination area, swept like any other edge.
+A drop under the (gravity-scaled) `maxJumpHeight` seeds a climb back the other way: `SeedEdgeFromLandings`
+turns the drop's landing points into a synthetic launch edge in the destination area, swept like any other
+edge.
 
 Every edge, seeded or not, fans yaw over the full `±yawSpread` (90°) around its outward normal.
 
@@ -1044,8 +1103,8 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v16):
-- Header: magic "CBNV", version 16, mapName[64], bspChecksum, counts (including `detourCount` and
+Serializes MergeResult to crossbot_nav format (v17):
+- Header: magic "CBNV", version 17, mapName[64], bspChecksum, counts (including `detourCount` and
   `detourPointCount`), and `designMaxSpeed`
 - `designMaxSpeed` is the `--maxspeed` the run was built with. Nothing navgen does reads it back; it is
   recorded because the runtime has no other way to know what speed the mesh assumes, and a bot faster

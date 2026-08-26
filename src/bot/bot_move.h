@@ -16,6 +16,10 @@ Vector Bot_YawDir(float yawDeg);
 
 PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull);
 
+PmSim::PmPushFn Bot_PushFields(int hull);
+
+float Bot_GravityMultiplier(edict_t *pEdict);
+
 float Bot_MaxSpeed(edict_t *pEdict);
 
 PmSim::PmPhysics Bot_Physics(edict_t *pEdict);

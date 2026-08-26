@@ -62,8 +62,9 @@ float PlainJumpHeight(float gravity)
 	return kJumpImpulse * kJumpImpulse / (2.f * gravity);
 }
 
-PmSimulator::PmSimulator(PmTraceFn trace, const PmPhysics &physics)
+PmSimulator::PmSimulator(PmTraceFn trace, const PmPhysics &physics, PmPushFn push)
 	: m_trace(std::move(trace))
+	, m_push(std::move(push))
 	, m_physics(physics)
 {
 }
@@ -105,14 +106,36 @@ void PmSimulator::BeginAirborne(const Vector &origin, const Vector &velocity, fl
 	Reset(origin, velocity, yawDegrees, commandedSpeed, false, false);
 }
 
-void PmSimulator::AddCorrectGravity(float *velocity) const
+void PmSimulator::CheckVelocity(float *velocity) const
+{
+	float bound = m_physics.maxVelocity;
+	for (int i = 0; i < 3; ++i)
+	{
+		if (std::isnan(velocity[i]))
+			velocity[i] = 0.0f;
+		else if (velocity[i] > bound)
+			velocity[i] = bound;
+		else if (velocity[i] < -bound)
+			velocity[i] = -bound;
+	}
+}
+
+void PmSimulator::AddCorrectGravity(float *velocity, float *baseVelocity) const
 {
 	velocity[2] -= m_physics.gravity * 0.5f * m_physics.frameTime;
+
+	// PM_AddCorrectGravity folds the vertical push into velocity as an acceleration and clears it
+	// from the base velocity, so only the horizontal remainder wraps FlyMove below.
+	velocity[2] += baseVelocity[2] * m_physics.frameTime;
+	baseVelocity[2] = 0.0f;
+
+	CheckVelocity(velocity);
 }
 
 void PmSimulator::FixupGravityVelocity(float *velocity) const
 {
 	velocity[2] -= m_physics.gravity * 0.5f * m_physics.frameTime;
+	CheckVelocity(velocity);
 }
 
 void PmSimulator::PreventMegaBunnyJumping(float *velocity) const
@@ -277,7 +300,16 @@ bool PmSimulator::Step()
 	if (!m_onGround)
 		m_fallSpeed = -m_vel[2];
 
-	AddCorrectGravity(m_vel);
+	float base[3] = {0.0f, 0.0f, 0.0f};
+	if (m_push)
+	{
+		Vector push = m_push(m_origin);
+		base[0] = push.x;
+		base[1] = push.y;
+		base[2] = push.z;
+	}
+
+	AddCorrectGravity(m_vel, base);
 
 	if (m_jumpPending && m_onGround)
 	{
@@ -296,13 +328,24 @@ bool PmSimulator::Step()
 
 	AirAccelerate(wishdir, wishspeed, m_vel);
 
+	// The horizontal base velocity wraps the move the way PM_AirMove and PM_WalkMove do: added
+	// before the clip-and-slide, pulled back out once the ground check has seen it.
+	for (int i = 0; i < 3; ++i)
+		m_vel[i] += base[i];
+
 	if (FlyMove(m_pos, m_vel, m_physics.frameTime) == 4)
 	{
+		for (int i = 0; i < 3; ++i)
+			m_vel[i] -= base[i];
 		m_origin = Vector(m_pos[0], m_pos[1], m_pos[2]);
 		return false;
 	}
 
 	m_onGround = CatagorizePosition(m_pos, m_vel);
+
+	for (int i = 0; i < 3; ++i)
+		m_vel[i] -= base[i];
+	CheckVelocity(m_vel);
 
 	FixupGravityVelocity(m_vel);
 

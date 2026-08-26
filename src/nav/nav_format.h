@@ -7,7 +7,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 16;
+constexpr uint32_t kNavVersion = 17;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
 
@@ -159,9 +159,12 @@ struct NavConnectionRecord
 	float rideSeconds;
 	float rideSecondsMax;
 	float rideWaitSeconds;
+
+	// pev->gravity multiplier this air move was sampled at. 1.0 for every other connection type.
+	float gravity;
 };
 
-static_assert(sizeof(NavConnectionRecord) == 140, "NavConnectionRecord layout changed without a version bump");
+static_assert(sizeof(NavConnectionRecord) == 144, "NavConnectionRecord layout changed without a version bump");
 
 enum GateValidFlags : uint8_t
 {

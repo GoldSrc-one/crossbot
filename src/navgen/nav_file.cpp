@@ -197,6 +197,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.rideSeconds = static_cast<float>(c.rideSeconds);
 		rec.rideSecondsMax = static_cast<float>(c.rideSecondsMax);
 		rec.rideWaitSeconds = static_cast<float>(c.rideWaitSeconds);
+		rec.gravity = static_cast<float>(c.gravity);
 	}
 
 	NavHeader header{};

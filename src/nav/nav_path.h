@@ -22,9 +22,13 @@ PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 
 constexpr float kUnreachableSeconds = 1.0e9f;
 
-void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out);
+// gravityMultiplier filters air moves the same way PlanWalker::Cross does, so goal selection and
+// route search agree about which jumps exist.
+void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out,
+	float gravityMultiplier = 1.f);
 
-void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out);
+void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out,
+	float gravityMultiplier = 1.f);
 
 }
 

@@ -1,6 +1,7 @@
 #include "airmove_prune.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <limits>
@@ -73,6 +74,10 @@ AirmovePruneStats PruneRedundant(const std::vector<Area> &areas, std::vector<Mer
 	for (const MergedConnection &c : conns)
 	{
 		if (!inRoute(c.connType))
+			continue;
+		// Only default-gravity air moves count as an alternative route; a jump that exists solely at
+		// some trigger_gravity value is not a route the bot can generally rely on.
+		if (c.connType == crossbot_nav::CONN_AIRMOVE && std::fabs(c.gravity - 1.0) > 0.005)
 			continue;
 		if (c.areaA < 0 || c.areaB < 0)
 			continue;

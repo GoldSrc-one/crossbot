@@ -29,6 +29,8 @@ constexpr float kAirmoveSimMinTime = 0.1f;
 
 constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
 
+constexpr float kPlanGravityEpsilon = 0.01f;
+
 constexpr float kPlanAirmoveRunupTime = 0.1f;
 constexpr float kPlanAirmoveRunupMin = 8.f;
 constexpr float kPlanAirmoveRunupEps = 1.f;
@@ -773,12 +775,14 @@ bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, 
 	if (!trace)
 		return false;
 
+	const PmSim::PmPushFn &push = needsCrouch ? m_traces->duckPush : m_traces->standPush;
+
 	bool duckLaunch = (fromAreaId < m_areas->size()) && (*m_areas)[fromAreaId].crouch;
 	float launchLift = duckLaunch ? 0.f : kPlanStandHeight;
 	float zAdjust = needsCrouch ? 0.f : kPlanStandHeight;
 
 	PmSim::PmPhysics physics = m_traces->physics;
-	PmSim::PmSimulator sim(trace, physics);
+	PmSim::PmSimulator sim(trace, physics, push);
 	sim.Begin(Vector(launchFloor.x, launchFloor.y, launchFloor.z + launchLift + kPlanLaunchLift),
 		yaw, speed, false);
 
@@ -1111,6 +1115,11 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 
 	if (conn.connType == crossbot_nav::CONN_AIRMOVE)
 	{
+		// Air moves are sampled once per gravity a trigger_gravity can put the bot in. The ones baked
+		// for a gravity we are not currently at simply do not exist for us.
+		if (m_traces && std::fabs(conn.gravity - m_traces->gravityMultiplier) > kPlanGravityEpsilon)
+			return false;
+
 		bool needsCrouch = (conn.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH) != 0;
 		bool jump = (conn.connFlags & crossbot_nav::CONN_FLAG_JUMP) != 0;
 

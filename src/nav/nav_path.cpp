@@ -1,5 +1,6 @@
 #include "nav_path.h"
 
+#include <cmath>
 #include <queue>
 
 #include "astar_graph.h"
@@ -64,7 +65,10 @@ PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 namespace
 {
 
-void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::vector<float> &out)
+constexpr float kGravityEpsilon = 0.01f;
+
+void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::vector<float> &out,
+	float gravityMultiplier)
 {
 	size_t n = mesh.areas.size();
 	out.assign(n, kUnreachableSeconds);
@@ -104,6 +108,9 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 				continue;
 			if (!GateAllowsCrossing(mesh, connIdx, from, to))
 				continue;
+			if (c.connType == crossbot_nav::CONN_AIRMOVE &&
+				std::fabs(c.gravity - gravityMultiplier) > kGravityEpsilon)
+				continue;
 
 			float step = currentDist + c.travelSeconds + c.costSeconds + c.runtimePenalty;
 			if (step >= out[neighbor])
@@ -117,14 +124,16 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 
 }
 
-void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out)
+void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out,
+	float gravityMultiplier)
 {
-	AreaCostsImpl(mesh, startArea, false, out);
+	AreaCostsImpl(mesh, startArea, false, out, gravityMultiplier);
 }
 
-void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out)
+void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out,
+	float gravityMultiplier)
 {
-	AreaCostsImpl(mesh, goalArea, true, out);
+	AreaCostsImpl(mesh, goalArea, true, out, gravityMultiplier);
 }
 
 }

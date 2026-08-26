@@ -148,6 +148,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.rideSeconds = rec.rideSeconds;
 		conn.rideSecondsMax = rec.rideSecondsMax;
 		conn.rideWaitSeconds = rec.rideWaitSeconds;
+		conn.gravity = rec.gravity;
 
 		conn.gateA.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_A) != 0;
 		conn.gateB.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_B) != 0;
@@ -234,6 +235,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		pc.rideSeconds = c.rideSeconds;
 		pc.rideSecondsMax = c.rideSecondsMax;
 		pc.rideWaitSeconds = c.rideWaitSeconds;
+		pc.gravity = c.gravity;
 		pc.gateA = c.gateA;
 		pc.gateB = c.gateB;
 		for (int k = 0; k < 2; ++k)

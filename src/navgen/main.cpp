@@ -999,6 +999,15 @@ int main(int argc, char **argv)
 		std::vector<navgen::BlockingVolume> standLadders =
 			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullHuman);
 
+		// trigger_push is SOLID_TRIGGER: it never blocks, carves or supports, it only shows up in the
+		// movement simulation and as a launch seed.
+		std::vector<navgen::PushVolume> duckPushes =
+			navgen::ExtractPushVolumes(bsp, entities, navgen::kHullDuck);
+		std::vector<navgen::PushVolume> standPushes =
+			navgen::ExtractPushVolumes(bsp, entities, navgen::kHullHuman);
+		if (!standPushes.empty())
+			std::printf("%s: %zu trigger_push fields\n", bspPath.c_str(), standPushes.size());
+
 		navgen::PassableSet duckPassables = noPassables
 			? navgen::PassableSet()
 			: navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck, elevators.claimedEntities);
@@ -1319,14 +1328,38 @@ int main(int argc, char **argv)
 		navgen::AirmoveSampleParams airmoveParams;
 		airmoveParams.samplesPerUnit = airmoveSamplesPerUnit;
 
-		navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers, &duckLadders};
+		navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers, &duckLadders,
+			&duckPushes};
 		navgen::HullContext standHull{worldModel.headnode[navgen::kHullHuman], &standBlockers,
-			&standLadders};
+			&standLadders, &standPushes};
+
+		// trigger_gravity sticks to whoever touches it, so a bot only ever runs at one of these
+		// multipliers. Sample a full air move set per multiplier and let the runtime pick.
+		std::vector<double> gravityMultipliers = navgen::CollectGravityMultipliers(entities);
+		if (gravityMultipliers.size() > 1)
+		{
+			std::printf("%s: %zu gravity multipliers from trigger_gravity:", bspPath.c_str(),
+				gravityMultipliers.size());
+			for (double g : gravityMultipliers)
+				std::printf(" x%.2f", g);
+			std::printf("\n");
+		}
+
 		if (airmoveSamplesPerUnit <= 0.0f)
 			std::printf("air move sampling skipped (--airmove-samples 0)\n");
 		else
-			navgen::ProbeAirMoves(bsp, duckHull, standHull, airmoveWorlds, merged.areas, merged.conns,
-				physics, airmoveParams, dumpElevators);
+		{
+			for (double multiplier : gravityMultipliers)
+			{
+				physics.gravityMultiplier = static_cast<float>(multiplier);
+				physics.gravity = static_cast<float>(PmSim::kGravity * multiplier);
+				navgen::ProbeAirMoves(bsp, duckHull, standHull, airmoveWorlds, merged.areas, merged.conns,
+					physics, airmoveParams, dumpElevators);
+			}
+
+			physics.gravityMultiplier = 1.0f;
+			physics.gravity = PmSim::kGravity;
+		}
 
 		navgen::LadderStats ladders = navgen::BuildLadderConnections(bsp, entities, duckHull, standHull,
 			merged.areas, merged.conns, physics, dumpLadders);
@@ -1574,14 +1607,28 @@ int main(int argc, char **argv)
 		if (!objPath.empty() || !svgPath.empty() || dumpPath || dumpAirmove)
 		{
 
+			// A bot only ever holds one gravity multiplier, and the lowest one the map hands out is the
+			// one that unlocks the most air moves. Preview the path there, so a map whose route exists
+			// only under a trigger_gravity does not read as unroutable offline.
+			navgen::PhysicsParams planPhysics = physics;
+			if (!gravityMultipliers.empty() && gravityMultipliers.front() < 1.0)
+			{
+				planPhysics.gravityMultiplier = static_cast<float>(gravityMultipliers.front());
+				planPhysics.gravity = static_cast<float>(PmSim::kGravity * gravityMultipliers.front());
+				std::printf("debug path planned at gravity x%.2f\n", gravityMultipliers.front());
+			}
+
 			navgen::PM_MoveSimulator duckSim(bsp, worldModel.headnode[navgen::kHullDuck], blockers,
-				airmoveParams, physics);
+				airmoveParams, planPhysics, &duckLadders, &duckPushes);
 			navgen::PM_MoveSimulator standSim(bsp, worldModel.headnode[navgen::kHullHuman], standBlockers,
-				airmoveParams, physics);
+				airmoveParams, planPhysics, &standLadders, &standPushes);
 
 			NavPlan::PlanTraceContext traces;
 			traces.duckTrace = duckSim.TraceFn();
 			traces.standTrace = standSim.TraceFn();
+			traces.duckPush = duckSim.PushFn();
+			traces.standPush = standSim.PushFn();
+			traces.gravityMultiplier = planPhysics.gravityMultiplier;
 			traces.physics = standSim.Physics();
 			if (planSpeed > 0.f)
 				traces.physics.maxSpeed = planSpeed;

@@ -1809,9 +1809,16 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
   mid-air and repaths from an airborne origin. The cost of holding the clock open is that a flight which
   never ends is invisible to every other timer, which is why the flight bounds itself — see
   `RunAirmoveFlight`.
-- `BotPhysics` reads sv_gravity, sv_airaccelerate, sv_accelerate, sv_friction, sv_stopspeed and
-  sv_edgefriction, so plan-time physics match a non-default server. Only the first three were read
-  before, which silently diverged the profile from the engine.
+- `Bot_Physics` reads sv_airaccelerate, sv_accelerate, sv_friction, sv_stopspeed, sv_edgefriction and
+  sv_maxvelocity, so plan-time physics match a non-default server. Only the first three were read
+  before, which silently diverged the profile from the engine. It does *not* read `sv_gravity` — the
+  800 is `PmSim::kGravity` (see `doc/game.md`) — but it does multiply by `pev->gravity`, which is what
+  `trigger_gravity` writes onto the player.
+- `Bot_PushFields` snapshots the live `trigger_push` entities into a `PmSim::PmPushFn` once per plan,
+  so `JumpLandsIn` simulates a launch through a push field the same way navgen sampled it. A field
+  that is `SOLID_NOT` (START_OFF, or toggled off) is skipped; the next repath picks up the change.
+- `sv_maxvelocity` matters only where a push field is involved: `bounce`'s pods push at 3800 u/s
+  squared, which runs the simulated velocity into the engine's clamp within a second.
 - Jump waypoints are commitments — not passed until the jump is made, and gated on on-ground,
   distance and facing tolerance, with duck added while rising.
 - Aim leads the next waypoint rather than the current one, so the bot looks around corners; the move

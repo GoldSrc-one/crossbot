@@ -100,6 +100,7 @@ PlanModel BuildPlanModel(const MergeResult &merged, bool walkOnly)
 			pc.gateASpeed[k] = static_cast<float>(c.gateASpeed[k]);
 		}
 		pc.connFlags = c.connFlags;
+		pc.gravity = static_cast<float>(c.gravity);
 		pc.exitSpeed = static_cast<float>(c.exitSpeed);
 		pc.exitAngle = static_cast<float>(c.exitAngle);
 		pc.jumpBackDist = static_cast<float>(c.jumpBackDist);

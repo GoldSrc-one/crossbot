@@ -98,7 +98,10 @@ namespace
 		NavPlan::PlanTraceContext traces;
 		traces.standTrace = Bot_EngineTraceFn(pEdict, kHullHuman);
 		traces.duckTrace = Bot_EngineTraceFn(pEdict, kHullDuck);
+		traces.standPush = Bot_PushFields(kHullHuman);
+		traces.duckPush = Bot_PushFields(kHullDuck);
 		traces.physics = Bot_Physics(pEdict);
+		traces.gravityMultiplier = Bot_GravityMultiplier(pEdict);
 		return traces;
 	}
 

@@ -28,6 +28,11 @@ constexpr int kSfDoorPassable = 8;
 constexpr int kSfDoorUseOnly = 256;
 constexpr int kSfWallStartOff = 1;
 constexpr int kSfConveyorNotSolid = 2;
+constexpr int kSfPushStartOff = 1;
+
+constexpr double kDefaultPushSpeed = 100.0;
+constexpr double kGravityEpsilon = 0.005;
+constexpr size_t kMaxGravityMultipliers = 4;
 
 constexpr double kDefaultDoorSpeed = 100.0;
 constexpr double kDefaultRotateDistance = 90.0;
@@ -333,6 +338,92 @@ std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::
 		vol.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
 			model.maxs[2] + hullMaxs.z) + vol.origin;
 		result.push_back(vol);
+	}
+
+	return result;
+}
+
+std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
+	int hullIndex)
+{
+	Vec3 hullMins(kHumanHullMinX, kHumanHullMinY, kHumanHullMinZ);
+	Vec3 hullMaxs(kHumanHullMaxX, kHumanHullMaxY, kHumanHullMaxZ);
+	if (hullIndex == kHullDuck)
+	{
+		hullMins = Vec3(kDuckClipHullMinX, kDuckClipHullMinY, kDuckClipHullMinZ);
+		hullMaxs = Vec3(kDuckClipHullMaxX, kDuckClipHullMaxY, kDuckClipHullMaxZ);
+	}
+
+	std::vector<PushVolume> result;
+
+	for (size_t i = 0; i < entities.size(); ++i)
+	{
+		const Entity &ent = entities[i];
+		if (ent.Get("classname") != "trigger_push")
+			continue;
+
+		// A START_OFF field spawns SOLID_NOT, so nothing touches it until something turns it on.
+		if ((ParseInt(ent.Get("spawnflags"), 0) & kSfPushStartOff) != 0)
+			continue;
+
+		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
+		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
+			continue;
+
+		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
+		if (model.headnode[hullIndex] < 0)
+			continue;
+
+		double speed = ParseDouble(ent.Get("speed"), kDefaultPushSpeed);
+		if (speed == 0.0)
+			speed = kDefaultPushSpeed;
+
+		PushVolume push;
+		push.push = MoveDirFromAngles(EntityAngles(ent)) * speed;
+		push.volume.headnode = model.headnode[hullIndex];
+		push.volume.origin = ParseEntityOrigin(ent.Get("origin"));
+		push.volume.mins = Vec3(model.mins[0] + hullMins.x, model.mins[1] + hullMins.y,
+			model.mins[2] + hullMins.z) + push.volume.origin;
+		push.volume.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
+			model.maxs[2] + hullMaxs.z) + push.volume.origin;
+		push.volume.entityIndex = static_cast<int>(i);
+		result.push_back(push);
+	}
+
+	return result;
+}
+
+std::vector<double> CollectGravityMultipliers(const std::vector<Entity> &entities)
+{
+	// trigger_gravity copies its own pev->gravity onto whoever touches it and that sticks, so the
+	// set of gravities a bot can ever be running at is the default plus one per distinct trigger.
+	std::vector<double> result{1.0};
+
+	for (const Entity &ent : entities)
+	{
+		if (ent.Get("classname") != "trigger_gravity")
+			continue;
+
+		double gravity = ParseDouble(ent.Get("gravity"), 0.0);
+		if (gravity <= 0.0)
+			continue;
+
+		bool seen = false;
+		for (double have : result)
+			if (std::fabs(have - gravity) < kGravityEpsilon)
+				seen = true;
+
+		if (!seen)
+			result.push_back(gravity);
+	}
+
+	std::sort(result.begin(), result.end());
+
+	if (result.size() > kMaxGravityMultipliers)
+	{
+		std::printf("warning: %zu distinct trigger_gravity values, sampling only the first %zu\n",
+			result.size(), kMaxGravityMultipliers);
+		result.resize(kMaxGravityMultipliers);
 	}
 
 	return result;

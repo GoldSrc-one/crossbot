@@ -420,6 +420,103 @@ std::vector<LaunchEdge> FilterLaunchEdges(const PM_MoveSimulator &sim, const Are
 	return edges;
 }
 
+std::vector<LaunchEdge> PushLaunchEdges(const Area &area, const std::vector<PushVolume> &pushes)
+{
+	std::vector<LaunchEdge> edges;
+
+	for (const PushVolume &vol : pushes)
+	{
+		// Four vertical sides of the footprint, each with the normal pointing into the field. Feeding
+		// that as LaunchEdge::outward makes runSweep set the launch back to just outside the field and
+		// aim the yaw fan inwards, which is a bot running into the shaft and jumping.
+		const Vec3 &mn = vol.volume.mins;
+		const Vec3 &mx = vol.volume.maxs;
+		struct Side { Vec3 a, b, inward; };
+		const Side sides[4] = {
+			{Vec3(mn.x, mn.y, 0.0), Vec3(mn.x, mx.y, 0.0), Vec3(1.0, 0.0, 0.0)},
+			{Vec3(mx.x, mn.y, 0.0), Vec3(mx.x, mx.y, 0.0), Vec3(-1.0, 0.0, 0.0)},
+			{Vec3(mn.x, mn.y, 0.0), Vec3(mx.x, mn.y, 0.0), Vec3(0.0, 1.0, 0.0)},
+			{Vec3(mn.x, mx.y, 0.0), Vec3(mx.x, mx.y, 0.0), Vec3(0.0, -1.0, 0.0)},
+		};
+
+		for (const Face &face : area.polytope.faces)
+		{
+			if (!face.walkable || face.plane.normal.z <= kFloorNormalZ)
+				continue;
+			if (face.winding.size() < 3)
+				continue;
+
+			Vec3 center(0, 0, 0);
+			for (const Vec3 &v : face.winding)
+				center = center + v;
+			center = center * (1.0 / static_cast<double>(face.winding.size()));
+
+			if (center.z + 1.0 < mn.z || center.z + 1.0 > mx.z)
+				continue;
+
+			for (const Side &side : sides)
+			{
+				// Cyrus-Beck clip of the side segment against the face winding, in plan view.
+				double tEnter = 0.0, tExit = 1.0;
+				bool alive = true;
+
+				for (size_t i = 0; i < face.winding.size() && alive; ++i)
+				{
+					const Vec3 &p0 = face.winding[i];
+					const Vec3 &p1 = face.winding[(i + 1) % face.winding.size()];
+
+					Vec3 inward(-(p1.y - p0.y), p1.x - p0.x, 0.0);
+					double len = std::sqrt(inward.x * inward.x + inward.y * inward.y);
+					if (len < 1e-9)
+						continue;
+					inward = inward * (1.0 / len);
+					if (inward.x * (center.x - p0.x) + inward.y * (center.y - p0.y) < 0.0)
+						inward = inward * -1.0;
+
+					double f0 = inward.x * (side.a.x - p0.x) + inward.y * (side.a.y - p0.y);
+					double f1 = inward.x * (side.b.x - p0.x) + inward.y * (side.b.y - p0.y);
+
+					if (f0 < 0.0 && f1 < 0.0)
+					{
+						alive = false;
+						break;
+					}
+					if (f0 < 0.0)
+						tEnter = std::max(tEnter, f0 / (f0 - f1));
+					else if (f1 < 0.0)
+						tExit = std::min(tExit, f0 / (f0 - f1));
+				}
+
+				if (!alive || tExit - tEnter < 1e-6)
+					continue;
+
+				Vec3 span = side.b - side.a;
+				Vec3 a = side.a + span * tEnter;
+				Vec3 b = side.a + span * tExit;
+
+				const Plane &pl = face.plane;
+				if (std::fabs(pl.normal.z) < 1e-9)
+					continue;
+				a.z = (pl.dist - pl.normal.x * a.x - pl.normal.y * a.y) / pl.normal.z;
+				b.z = (pl.dist - pl.normal.x * b.x - pl.normal.y * b.y) / pl.normal.z;
+
+				LaunchEdge edge;
+				edge.a = a;
+				edge.b = b;
+				edge.outward = side.inward;
+				edge.noJumpBack = true;
+				edge.length = (b - a).Length();
+				if (edge.length < 1.0)
+					continue;
+
+				edges.push_back(edge);
+			}
+		}
+	}
+
+	return edges;
+}
+
 int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas)
 {
 	for (const Area &area : areas)
@@ -441,11 +538,12 @@ int FindAreaStrict(const Vec3 &point, const std::vector<Area> &areas)
 
 PM_MoveSimulator::PM_MoveSimulator(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 	const AirmoveSampleParams &params, const PhysicsParams &physics,
-	const std::vector<BlockingVolume> *ladders)
+	const std::vector<BlockingVolume> *ladders, const std::vector<PushVolume> *pushes)
 	: m_bsp(bsp)
 	, m_headnode(headnode)
 	, m_blockers(blockers)
 	, m_ladders(ladders)
+	, m_pushes(pushes)
 	, m_params(params)
 {
 	m_pmPhysics.maxSpeed = physics.maxSpeed;
@@ -487,6 +585,43 @@ PmSim::PmTraceFn PM_MoveSimulator::TraceFn() const
 		out.startsolid = tr.startsolid;
 		return out;
 	};
+}
+
+PmSim::PmPushFn PM_MoveSimulator::PushFn() const
+{
+	if (!m_pushes || m_pushes->empty())
+		return nullptr;
+
+	const PM_MoveSimulator *self = this;
+	return [self](const Vector &origin)
+	{
+		Vec3 push = self->PushAt(Vec3(origin.x, origin.y, origin.z));
+		return Vector(static_cast<float>(push.x), static_cast<float>(push.y),
+			static_cast<float>(push.z));
+	};
+}
+
+Vec3 PM_MoveSimulator::PushAt(const Vec3 &origin) const
+{
+	Vec3 total(0.0, 0.0, 0.0);
+	if (!m_pushes)
+		return total;
+
+	// SV_TouchLinks decides a trigger touch with a point test of the player origin against the
+	// trigger's hull-expanded clipnodes, which is exactly what OnLadder does below.
+	for (const PushVolume &vol : *m_pushes)
+	{
+		if (origin.x < vol.volume.mins.x || origin.x > vol.volume.maxs.x ||
+			origin.y < vol.volume.mins.y || origin.y > vol.volume.maxs.y ||
+			origin.z < vol.volume.mins.z || origin.z > vol.volume.maxs.z)
+			continue;
+		if (ClassifyPoint(m_bsp, vol.volume.headnode, origin - vol.volume.origin) != CONTENTS_SOLID)
+			continue;
+
+		total = total + vol.push;
+	}
+
+	return total;
 }
 
 bool PM_MoveSimulator::OnLadder(const Vec3 &origin) const
@@ -555,7 +690,7 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 	result.jumped = jump;
 	landingArea = -1;
 
-	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics);
+	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics, PushFn());
 	sim.Begin(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
 		static_cast<float>(launchPos.z)), yawDegrees, commandedSpeed, jump);
 
@@ -572,7 +707,7 @@ AirmoveTrajectory PM_MoveSimulator::SimulateAirborne(const Vec3 &launchPos, cons
 	result.exitYaw = yawDegrees;
 	landingArea = -1;
 
-	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics);
+	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics, PushFn());
 	sim.BeginAirborne(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
 		static_cast<float>(launchPos.z)),
 		Vector(static_cast<float>(velocity.x), static_cast<float>(velocity.y),
@@ -646,6 +781,10 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	std::unordered_set<long long> existingPairs;
 	for (const MergedConnection &c : conns)
 	{
+		// Air moves from an earlier gravity pass must not block this one: each gravity gets its own set.
+		if (c.connType == crossbot_nav::CONN_AIRMOVE)
+			continue;
+
 		existingPairs.insert(PairKey(c.areaA, c.areaB));
 		existingPairs.insert(PairKey(c.areaB, c.areaA));
 	}
@@ -674,11 +813,11 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	composeWorld();
 
 	PM_MoveSimulator standSim(bsp, standHull.headnode, standWorld, params, physics,
-		standHull.ladders);
+		standHull.ladders, standHull.pushes);
 	PM_MoveSimulator crouchJumpSim(bsp, duckHull.headnode, duckWorld, params, physics,
-		duckHull.ladders);
+		duckHull.ladders, duckHull.pushes);
 	PM_MoveSimulator duckSim(bsp, duckHull.headnode, duckWorld, params, duckPhysics,
-		duckHull.ladders);
+		duckHull.ladders, duckHull.pushes);
 
 	SweepMode standSweep;
 	standSweep.sim = &standSim;
@@ -729,7 +868,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 				float yaw = baseYaw + (unit(rng) * 2.0f - 1.0f) * params.yawSpread;
 				float speed = unit(rng) * mode.maxSpeed;
 
-				float jumpBack = unit(rng) * params.jumpBackMax;
+				float jumpBack = edge.noJumpBack ? 0.0f : unit(rng) * params.jumpBackMax;
 
 				Vec3 edgePos = edge.a + (edge.b - edge.a) * t;
 
@@ -866,6 +1005,31 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	for (const Area &area : areas)
 		sweepArea(area, nullptr);
 
+	// A push field sitting on flat floor has no perimeter edge with void ahead, so the perimeter sweep
+	// never launches there. Seed the field's own footprint boundary instead, aimed inwards.
+	size_t pushSeedAreas = 0;
+	size_t pushSeedEdges = 0;
+	for (const Area &area : areas)
+	{
+		bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		const std::vector<PushVolume> *volumes = crouch ? duckHull.pushes : standHull.pushes;
+		if (!volumes || volumes->empty())
+			continue;
+
+		std::vector<LaunchEdge> seed = PushLaunchEdges(area, *volumes);
+		if (seed.empty())
+			continue;
+
+		pushSeedEdges += seed.size();
+		++pushSeedAreas;
+		sweepArea(area, &seed);
+	}
+
+	// The 64-unit default is step height plus a plain jump at gravity 800; under a trigger_gravity the
+	// bot climbs back up a taller drop, so the seeding gate has to move with it.
+	double maxJumpHeight = static_cast<double>(params.maxJumpHeight) -
+		PmSim::PlainJumpHeight(PmSim::kGravity) + PmSim::PlainJumpHeight(physics.gravity);
+
 	size_t reverseSeeds = 0;
 	for (int bin : {kBinStandDrop, kBinDuckDrop})
 	{
@@ -876,7 +1040,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			const AirmoveTrajectory &drop = entry.second.best;
 
 			double rise = drop.launchPos.z - drop.landingPos.z;
-			if (rise <= 0.0 || rise > params.maxJumpHeight)
+			if (rise <= 0.0 || rise > maxJumpHeight)
 				continue;
 			if (existingPairs.count(PairKey(to, from)) || static_cast<size_t>(to) >= areas.size())
 				continue;
@@ -924,6 +1088,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			conn.jumpBackDist = traj.jumpBackDist;
 			conn.fallDamage = traj.fallDamage;
 			conn.flightTime = traj.flightTime;
+			conn.gravity = physics.gravityMultiplier;
 			conns.push_back(conn);
 		}
 	}
@@ -933,16 +1098,22 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		if (entry.second)
 			++crouchOnly;
 
-	std::printf("air move sampling: %zu trajectories at %.2f samples/unit from %zu areas (%zu launched), "
+	std::printf("air move sampling at gravity x%.2f: %zu trajectories at %.2f samples/unit from %zu areas "
+		"(%zu launched), "
 		"%zu pairs [stand drop %zu, stand jump %zu, duck drop %zu, duck jump %zu] -> %zu connections "
 		"(%zu crouch-only, %zu drops seeded a climb back under %.0f units, "
 		"%zu dropped for too few samples to fit a gate)\n",
+		physics.gravityMultiplier,
 		simulated, params.samplesPerUnit, areas.size(), sourceAreas.size(),
 		bins[kBinStandDrop].size() + bins[kBinStandJump].size() + bins[kBinDuckDrop].size() +
 			bins[kBinDuckJump].size(),
 		bins[kBinStandDrop].size(), bins[kBinStandJump].size(), bins[kBinDuckDrop].size(),
-		bins[kBinDuckJump].size(), emitted.size(), crouchOnly, reverseSeeds, params.maxJumpHeight,
+		bins[kBinDuckJump].size(), emitted.size(), crouchOnly, reverseSeeds, maxJumpHeight,
 		unfitted);
+
+	if (pushSeedEdges > 0)
+		std::printf("  %zu push-field launch edges seeded across %zu areas\n", pushSeedEdges,
+			pushSeedAreas);
 }
 
 }
