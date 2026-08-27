@@ -5,6 +5,7 @@
 #include <limits>
 #include <unordered_set>
 
+#include "clipnode_tree.h"
 #include "nav_math.h"
 
 namespace navgen
@@ -14,6 +15,8 @@ namespace
 {
 
 constexpr double kPointInAreaEpsilon = 1.0;
+constexpr double kLethalSampleStep = 8.0;
+constexpr double kLethalStandLift = 36.0;
 
 bool IsSpawnClassname(const std::string &classname)
 {
@@ -209,6 +212,61 @@ MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vec
 	}
 
 	return result;
+}
+
+size_t PruneLethalConnections(const BspFile &bsp, const std::vector<BlockingVolume> &hurtVolumes,
+	std::vector<MergedConnection> &conns)
+{
+	if (hurtVolumes.empty() || conns.empty())
+		return 0;
+
+	std::vector<MergedConnection> kept;
+	kept.reserve(conns.size());
+
+	for (const MergedConnection &c : conns)
+	{
+		if (c.connType == crossbot_nav::CONN_TELEPORT || c.connType == crossbot_nav::CONN_ELEVATOR)
+		{
+			kept.push_back(c);
+			continue;
+		}
+
+		Vec3 delta = c.pointB - c.pointA;
+		double length = delta.Length();
+		size_t steps = static_cast<size_t>(length / kLethalSampleStep) + 1;
+
+		bool lethal = false;
+		for (size_t s = 0; s <= steps && !lethal; ++s)
+		{
+			Vec3 p = c.pointA + delta * (static_cast<double>(s) / static_cast<double>(steps));
+			for (const BlockingVolume &vol : hurtVolumes)
+			{
+				if (p.x < vol.mins.x || p.x > vol.maxs.x || p.y < vol.mins.y || p.y > vol.maxs.y ||
+					p.z < vol.mins.z || p.z > vol.maxs.z + kLethalStandLift)
+					continue;
+
+				for (double lift = 0.0; lift <= kLethalStandLift; lift += kLethalStandLift)
+				{
+					Vec3 probe = p - vol.origin;
+					probe.z += lift;
+					if (ClassifyPoint(bsp, vol.headnode, probe) == CONTENTS_SOLID)
+					{
+						lethal = true;
+						break;
+					}
+				}
+				if (lethal)
+					break;
+			}
+		}
+
+		if (!lethal)
+			kept.push_back(c);
+	}
+
+	size_t dropped = conns.size() - kept.size();
+	conns.swap(kept);
+	return dropped;
 }
 
 }

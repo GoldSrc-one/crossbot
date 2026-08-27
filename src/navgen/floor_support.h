@@ -46,6 +46,9 @@ struct FloorSupportStats
 	size_t absorbed = 0;
 };
 
+size_t DropLethalFloorLeaves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+	const std::vector<BlockingVolume> &hurtVolumes, std::vector<ExtractedLeaf> &leaves);
+
 std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const std::vector<ExtractedLeaf> &leaves, double mapRadius,
 	FloorSupportStats *statsOut = nullptr, bool dump = false);

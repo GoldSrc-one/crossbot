@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 #include "area_merger.h"
@@ -38,6 +39,7 @@ struct AirmoveSampleParams
 	float frameTime = 1.0f / 60.0f;
 	float maxSimulationTime = 6.0f;
 	unsigned int seed = 0x5EEDBEEFu;
+	size_t threadCount = 0;
 };
 
 struct AirmoveTrajectory

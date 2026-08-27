@@ -16,6 +16,7 @@
 #include "airmove_sampler.h"
 #include "blocking_entities.h"
 #include "bsp_file.h"
+#include "bsp_vis.h"
 #include "clipnode_tree.h"
 #include "astar_graph.h"
 #include "elevators.h"
@@ -31,6 +32,8 @@
 #include "stand_classifier.h"
 #include "svg_debug.h"
 #include "teleport_connections.h"
+#include "vantage_sampler.h"
+#include "work_pool.h"
 #include "path_profile.h"
 #include "waypoint_plan.h"
 
@@ -40,6 +43,20 @@ namespace
 constexpr double kMapRadius = 8192.0;
 constexpr size_t kCarveDumpThreshold = 16;
 constexpr size_t kCarveTableRows = 15;
+
+const char *ContentsName(int contents)
+{
+	switch (contents)
+	{
+	case CONTENTS_EMPTY: return "empty";
+	case CONTENTS_SOLID: return "solid";
+	case CONTENTS_WATER: return "water";
+	case CONTENTS_SLIME: return "slime";
+	case CONTENTS_LAVA: return "lava";
+	case CONTENTS_SKY: return "sky";
+	default: return "other";
+	}
+}
 
 void PrintNullCarveEvents(const std::vector<navgen::Entity> &entities, const navgen::CarveStats &stats)
 {
@@ -121,6 +138,20 @@ void PrintUsage(const char *argv0)
 		"  --dump-obj <path> write the walkable floor of every area as an OBJ mesh (plus a sidecar\n"
 		"                    .mtl): crouch areas are coloured apart, the planned route is a ribbon\n"
 		"  --dump-svg <path> write a top-down SVG of the final area graph, for offline inspection\n"
+		"  --dump-vantage-svg <path> sample the visibility field and write it as a top-down SVG: one\n"
+		"                    glyph per vantage point, with its watch directions, exposure and camp focus\n"
+		"  --vantage-grid <n> lattice spacing the visibility field is sampled at, in units (default %.0f)\n"
+		"  --vantage-spacing <n> average spacing between vantages after reduction, in units (default\n"
+		"                    %.0f): one kept sample per n-by-n square of walkable floor, spent adaptively\n"
+		"  --vantage-cone <n> half-angle in degrees a watch direction clusters over (default %.0f)\n"
+		"  --vantage-neighbors <n> vantages the reduction interpolates each candidate from (default %zu)\n"
+		"  --vantage-verify-neighbors cross-check every nearest-neighbour query against a brute-force\n"
+		"                    scan and report mismatches (debug: validates the reduction's grid index)\n"
+		"  --no-vantage      skip the visibility field entirely: the nav file gets no vantage section\n"
+		"                    and bots on it fall back to no idle look and uncone-weighted senses\n"
+		"  --dump-vis-probe \"x y z x y z\" report what the visibility sampler sees between two world\n"
+		"                    points: the BSP leaf each lands in, whether the PVS links them, and the\n"
+		"                    hull-0 traceline result. Repeatable\n"
 		"  --trace <path>    overlay a recorded bot trajectory on the SVG: one \"x y z\" per line, as\n"
 		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
@@ -150,15 +181,23 @@ void PrintUsage(const char *argv0)
 		"  --dump-carve      print what the blocker carve and the passable split do to the leaf set:\n"
 		"                    per-leaf fragment counts, and how many carves fragmented a piece\n"
 		"                    without removing any volume from it\n"
+		"  --dump-sky        classify every merged area's floor by the BSP leaf contents just\n"
+		"                    below it, reporting how much walkable footprint stands on sky\n"
+		"  --no-lethal       keep floors and routes that only a fall through a lethal trigger_hurt\n"
+		"                    can reach (debug: isolate what the lethal prune removes)\n"
 		"  --no-blockers     ignore func_wall/func_wall_toggle/func_conveyor/charger brushes\n"
 		"                    (debug: isolate how much of the leaf explosion the blocker carve owns)\n"
 		"  --no-passables    ignore func_door/func_door_rotating/func_breakable brushes (debug:\n"
 		"                    same, for the passable split)\n"
 		"  --no-floor-split  keep leaves whose floor is not solid (debug: pre-floor-support behaviour)\n"
 		"  --no-prune        skip PruneUnreachableAreas (debug only): keep areas unreachable from any spawn\n"
+		"  --threads <n>     worker threads for air-move sampling and vantage pair checking\n"
+		"                    (default: one per logical processor plus one, %zu here). 1 runs serially\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
-		argv0, navgen::PhysicsParams().maxSpeed, navgen::kDefaultAirmoveWalkRatio,
-		navgen::kDefaultLadderRatio, navgen::kDefaultMaxMergeGroup);
+		argv0, navgen::kDefaultVantageGrid, navgen::kDefaultVantageSpacing, navgen::kDefaultVantageCone,
+		navgen::kDefaultVantageNeighbors, navgen::PhysicsParams().maxSpeed,
+		navgen::kDefaultAirmoveWalkRatio, navgen::kDefaultLadderRatio, navgen::kDefaultMaxMergeGroup,
+		navgen::DefaultThreadCount());
 }
 
 using navgen::kFloorNormalZ;
@@ -699,10 +738,13 @@ int main(int argc, char **argv)
 	bool dumpPath = false;
 	bool dumpAirmove = false;
 	bool dumpCarve = false;
+	bool dumpSky = false;
 	bool noBlockers = false;
+	bool noLethal = false;
 	bool noPassables = false;
 	bool noFloorSplit = false;
 	bool noPrune = false;
+	bool noVantage = false;
 	size_t maxMergeGroup = navgen::kDefaultMaxMergeGroup;
 	float airmoveSamplesPerUnit = navgen::AirmoveSampleParams().samplesPerUnit;
 	double airmoveWalkRatio = navgen::kDefaultAirmoveWalkRatio;
@@ -710,6 +752,7 @@ int main(int argc, char **argv)
 	bool dumpAirmovePrune = false;
 	bool dumpLadders = false;
 	bool dumpElevators = false;
+	size_t threadCount = 0;
 	bool dumpTeleports = false;
 	float maxSpeed = navgen::PhysicsParams().maxSpeed;
 	float planSpeed = 0.f;
@@ -718,6 +761,15 @@ int main(int argc, char **argv)
 	std::string svgPath;
 	std::string tracePath;
 	std::string navPath;
+	std::string vantageSvgPath;
+	navgen::VantageParams vantageParams;
+
+	struct VisProbe
+	{
+		navgen::Vec3 a;
+		navgen::Vec3 b;
+	};
+	std::vector<VisProbe> visProbes;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -769,6 +821,14 @@ int main(int argc, char **argv)
 		else if (arg == "--dump-carve")
 		{
 			dumpCarve = true;
+		}
+		else if (arg == "--dump-sky")
+		{
+			dumpSky = true;
+		}
+		else if (arg == "--no-lethal")
+		{
+			noLethal = true;
 		}
 		else if (arg == "--no-blockers")
 		{
@@ -925,6 +985,107 @@ int main(int argc, char **argv)
 			}
 			svgPath = argv[++i];
 		}
+		else if (arg == "--dump-vantage-svg")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			vantageSvgPath = argv[++i];
+		}
+		else if (arg == "--vantage-grid" || arg == "--vantage-spacing" || arg == "--vantage-cone")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed <= 0.0)
+			{
+				std::fprintf(stderr, "%s: expected a positive number, got \"%s\"\n", arg.c_str(), value);
+				return 1;
+			}
+			if (arg == "--vantage-grid")
+				vantageParams.gridSize = parsed;
+			else if (arg == "--vantage-spacing")
+				vantageParams.targetSpacing = parsed;
+			else
+				vantageParams.clusterConeDeg = parsed;
+		}
+		else if (arg == "--vantage-neighbors")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1 || parsed > 64)
+			{
+				std::fprintf(stderr, "--vantage-neighbors: expected 1..64, got \"%s\"\n", value);
+				return 1;
+			}
+			vantageParams.neighborCount = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--threads")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1 || parsed > 256)
+			{
+				std::fprintf(stderr, "--threads: expected 1..256, got \"%s\"\n", value);
+				return 1;
+			}
+			threadCount = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--vantage-verify-neighbors")
+		{
+			vantageParams.verifyNeighbors = true;
+		}
+		else if (arg == "--no-vantage")
+		{
+			noVantage = true;
+		}
+		else if (arg == "--dump-vis-probe")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			double v[6] = {0, 0, 0, 0, 0, 0};
+			const char *cursor = value;
+			bool ok = true;
+			for (int k = 0; k < 6 && ok; ++k)
+			{
+				char *parseEnd = nullptr;
+				v[k] = std::strtod(cursor, &parseEnd);
+				if (parseEnd == cursor)
+					ok = false;
+				cursor = parseEnd;
+			}
+			while (*cursor == ' ' || *cursor == '\t')
+				++cursor;
+			if (!ok || *cursor != '\0')
+			{
+				std::fprintf(stderr, "--dump-vis-probe: expected \"x y z x y z\", got \"%s\"\n", value);
+				return 1;
+			}
+			visProbes.push_back({navgen::Vec3(v[0], v[1], v[2]), navgen::Vec3(v[3], v[4], v[5])});
+		}
 		else if (arg == "--trace")
 		{
 			if (i + 1 >= argc)
@@ -960,6 +1121,12 @@ int main(int argc, char **argv)
 		PrintUsage(argv[0]);
 		return 1;
 	}
+
+	if (threadCount == 0)
+		threadCount = navgen::DefaultThreadCount();
+
+	vantageParams.threadCount = threadCount;
+	std::printf("navgen: %zu worker threads\n", threadCount);
 
 	try
 	{
@@ -1253,6 +1420,17 @@ int main(int argc, char **argv)
 				floorStats.noFloor, beforeFloorSplit, leaves.size());
 		}
 
+		std::vector<navgen::BlockingVolume> hurtVolumes =
+			navgen::ExtractHurtVolumes(bsp, entities, navgen::kHullDuck);
+		if (!hurtVolumes.empty() && !noLethal)
+		{
+			size_t lethalLeaves = navgen::DropLethalFloorLeaves(bsp,
+				worldModel.headnode[navgen::kHullDuck], supportBlockers, hurtVolumes, leaves);
+			std::printf("%s: %zu lethal trigger_hurt volume(s) dropped %zu leaves reachable "
+				"only by falling through them\n",
+				bspPath.c_str(), hurtVolumes.size(), lethalLeaves);
+		}
+
 		std::vector<bool> isCrouchLeaf;
 		{
 			size_t standSplitLeaves = 0;
@@ -1333,6 +1511,7 @@ int main(int argc, char **argv)
 		physics.maxSpeed = maxSpeed;
 		navgen::AirmoveSampleParams airmoveParams;
 		airmoveParams.samplesPerUnit = airmoveSamplesPerUnit;
+		airmoveParams.threadCount = threadCount;
 
 		navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers, &duckLadders,
 			&duckPushes};
@@ -1408,6 +1587,13 @@ int main(int argc, char **argv)
 			std::printf("%s: floor-snapped %zu of %zu connection endpoints pairs (%zu had no floor beneath)\n",
 				bspPath.c_str(), snappedConns, merged.conns.size(), merged.conns.size() - snappedConns);
 
+		if (!hurtVolumes.empty() && !noLethal)
+		{
+			size_t lethalConns = navgen::PruneLethalConnections(bsp, hurtVolumes, merged.conns);
+			std::printf("%s: %zu lethal trigger_hurt volume(s) cut %zu connections\n",
+				bspPath.c_str(), hurtVolumes.size(), lethalConns);
+		}
+
 		size_t rawAreaCount = merged.areas.size();
 		std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
 		if (noPrune)
@@ -1452,6 +1638,202 @@ int main(int argc, char **argv)
 				"(%zu areas with no service point)\n",
 				bspPath.c_str(), detourStats.gatedAreas, detourStats.activators,
 				detourStats.servicePoints, detourStats.areasWithoutService);
+
+		if (!visProbes.empty())
+		{
+			navgen::VisIndex visIndex(bsp);
+			navgen::HullTree hull = visIndex.Hull0();
+			int visHeadnode = worldModel.headnode[navgen::kHullPoint];
+			std::vector<navgen::BlockingVolume> probeBlockers =
+				navgen::ExtractVisBlockers(bsp, entities);
+
+			std::printf("%s: %zu leaves, %s VIS data, %zu vis blockers\n", bspPath.c_str(),
+				visIndex.LeafCount(), visIndex.HasVisData() ? "has" : "no", probeBlockers.size());
+
+			for (const VisProbe &probe : visProbes)
+			{
+				int leafA = visIndex.LeafForPoint(probe.a);
+				int leafB = visIndex.LeafForPoint(probe.b);
+				bool pvs = visIndex.LeafVisible(leafA, leafB);
+				bool pvsBack = visIndex.LeafVisible(leafB, leafA);
+				navgen::TraceResult tr = navgen::TraceHull(hull, visHeadnode, probe.a, probe.b);
+
+				std::printf("  probe (%.0f %.0f %.0f) -> (%.0f %.0f %.0f): leaf %d -> %d, "
+					"pvs %s / %s, trace fraction %.4f%s\n",
+					probe.a.x, probe.a.y, probe.a.z, probe.b.x, probe.b.y, probe.b.z, leafA, leafB,
+					pvs ? "visible" : "blocked", pvsBack ? "visible" : "blocked", tr.fraction,
+					tr.startsolid ? " (start solid)" : "");
+			}
+		}
+
+		if (dumpSky)
+		{
+			navgen::VisIndex skyIndex(bsp);
+			const std::vector<dleaf_t> &skyLeafs = bsp.Leafs();
+			std::vector<std::pair<int, double>> byContents;
+			std::vector<std::pair<double, int>> bigAreas;
+			double totalFootprint = 0.0;
+			double skyFootprint = 0.0;
+			double hurtFootprint = 0.0;
+			size_t floorFaces = 0;
+			size_t skyFaces = 0;
+			size_t hurtFaces = 0;
+
+			for (const navgen::BlockingVolume &vol : hurtVolumes)
+			{
+				navgen::Vec3 mid = (vol.mins + vol.maxs) * 0.5 - vol.origin;
+				std::printf("%s: lethal trigger_hurt entity %d: (%.0f %.0f %.0f)..(%.0f %.0f %.0f) "
+					"hull-3 headnode %d, centre reads %s\n",
+					bspPath.c_str(), vol.entityIndex, vol.mins.x, vol.mins.y, vol.mins.z,
+					vol.maxs.x, vol.maxs.y, vol.maxs.z, vol.headnode,
+					ContentsName(navgen::ClassifyPoint(bsp, vol.headnode, mid)));
+			}
+
+			for (const navgen::Area &area : merged.areas)
+			{
+				double areaFootprint = 0.0;
+				for (const navgen::Face &f : area.polytope.faces)
+				{
+					if (!navgen::IsFloorFace(f) || f.winding.size() < 3)
+						continue;
+
+					double a = navgen::WindingAreaXY(f.winding);
+					navgen::Vec3 stand = navgen::WindingCentroid(f.winding);
+					navgen::Vec3 probe = stand;
+					probe.z += navgen::kDuckClipHullMinZ - 2.0;
+
+					int leaf = skyIndex.LeafForPoint(probe);
+					int contents = CONTENTS_EMPTY;
+					if (leaf >= 0 && static_cast<size_t>(leaf) < skyLeafs.size())
+						contents = skyLeafs[static_cast<size_t>(leaf)].contents;
+
+					bool found = false;
+					for (std::pair<int, double> &bucket : byContents)
+					{
+						if (bucket.first == contents)
+						{
+							bucket.second += a;
+							found = true;
+							break;
+						}
+					}
+					if (!found)
+						byContents.push_back(std::make_pair(contents, a));
+
+					++floorFaces;
+					areaFootprint += a;
+					if (contents == CONTENTS_SKY)
+					{
+						++skyFaces;
+						skyFootprint += a;
+					}
+
+					for (const navgen::BlockingVolume &vol : hurtVolumes)
+					{
+						if (navgen::ClassifyPoint(bsp, vol.headnode, stand - vol.origin) !=
+							CONTENTS_SOLID)
+							continue;
+						++hurtFaces;
+						hurtFootprint += a;
+						break;
+					}
+				}
+
+				totalFootprint += areaFootprint;
+				bigAreas.push_back(std::make_pair(areaFootprint, area.id));
+			}
+
+			std::sort(byContents.begin(), byContents.end());
+			std::sort(bigAreas.rbegin(), bigAreas.rend());
+
+			std::printf("%s: sky floor report: %zu of %zu floor faces stand on sky, "
+				"%.0f of %.0f sq units (%.1f%%), %zu areas\n",
+				bspPath.c_str(), skyFaces, floorFaces, skyFootprint, totalFootprint,
+				totalFootprint > 0.0 ? 100.0 * skyFootprint / totalFootprint : 0.0,
+				merged.areas.size());
+
+			std::printf("%s: %zu of %zu floor faces stand inside a lethal trigger_hurt, "
+				"%.0f sq units (%.1f%%)\n",
+				bspPath.c_str(), hurtFaces, floorFaces, hurtFootprint,
+				totalFootprint > 0.0 ? 100.0 * hurtFootprint / totalFootprint : 0.0);
+
+			for (const std::pair<int, double> &bucket : byContents)
+				std::printf("  world contents %d (%s) under the floor: %.0f sq units (%.1f%%)\n",
+					bucket.first, ContentsName(bucket.first), bucket.second,
+					totalFootprint > 0.0 ? 100.0 * bucket.second / totalFootprint : 0.0);
+
+			size_t shown = std::min<size_t>(15, bigAreas.size());
+			for (size_t i = 0; i < shown; ++i)
+			{
+				const navgen::Area *hit = nullptr;
+				for (const navgen::Area &area : merged.areas)
+					if (area.id == bigAreas[i].second)
+						hit = &area;
+				if (!hit)
+					continue;
+
+				navgen::Winding foot = navgen::WalkableFootprint(hit->polytope);
+				navgen::Vec3 lo(1e30, 1e30, 1e30), hi(-1e30, -1e30, -1e30);
+				for (const navgen::Vec3 &v : foot)
+				{
+					lo.x = std::min(lo.x, v.x); hi.x = std::max(hi.x, v.x);
+					lo.y = std::min(lo.y, v.y); hi.y = std::max(hi.y, v.y);
+					lo.z = std::min(lo.z, v.z); hi.z = std::max(hi.z, v.z);
+				}
+				std::printf("  area %d: %.0f sq units, bounds (%.0f %.0f %.0f)..(%.0f %.0f %.0f)\n",
+					bigAreas[i].second, bigAreas[i].first, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+			}
+		}
+
+		std::vector<navgen::Vantage> vantages;
+		navgen::VantageStats vantageStats;
+		if (!noVantage)
+		{
+			navgen::VisIndex visIndex(bsp);
+			if (!visIndex.HasVisData())
+				std::fprintf(stderr, "%s: BSP has no VIS data, every vantage pair will be traced\n",
+					bspPath.c_str());
+
+			std::vector<navgen::BlockingVolume> visBlockers =
+				noBlockers ? std::vector<navgen::BlockingVolume>()
+					: navgen::ExtractVisBlockers(bsp, entities);
+
+			vantages = navgen::BuildVantages(bsp, visIndex, visBlockers, merged.areas, vantageParams,
+				&vantageStats);
+
+			std::printf("%s: vantage field: %zu lattice points, %zu sampled (%zu solid), "
+				"%zu/%zu pairs passed PVS, %zu visible, %zu kept (budget %zu over %.0f sq units), "
+				"reduction err mean %.5f max %.5f\n",
+				bspPath.c_str(), vantageStats.latticePoints, vantageStats.sampled,
+				vantageStats.solidRejected, vantageStats.pvsPairs, vantageStats.totalPairs,
+				vantageStats.visiblePairs, vantageStats.kept, vantageStats.budget,
+				vantageStats.footprintArea, vantageStats.meanReductionError,
+				vantageStats.maxReductionError);
+
+			double vantageTotal = vantageStats.candidateSeconds + vantageStats.leafSeconds +
+				vantageStats.pairSeconds + vantageStats.deriveSeconds + vantageStats.reduceSeconds;
+			std::printf("%s: vantage timing: %.1fs total = %.1fs candidates + %.1fs leaves + "
+				"%.1fs pairs (%.1fs in %zu world + %zu blocker traces, %.2f us each) + "
+				"%.1fs derive + %.1fs reduce\n",
+				bspPath.c_str(), vantageTotal, vantageStats.candidateSeconds,
+				vantageStats.leafSeconds, vantageStats.pairSeconds, vantageStats.traceSeconds,
+				vantageStats.worldTraces, vantageStats.blockerTraces,
+				(vantageStats.worldTraces + vantageStats.blockerTraces) > 0
+					? 1e6 * vantageStats.traceSeconds /
+						static_cast<double>(vantageStats.worldTraces + vantageStats.blockerTraces)
+					: 0.0,
+				vantageStats.deriveSeconds, vantageStats.reduceSeconds);
+
+			std::printf("%s: vantage pair loop on %zu threads: slowest bin %.1fs, fastest %.1fs\n",
+				bspPath.c_str(), vantageStats.threads, vantageStats.binWallMax,
+				vantageStats.binWallMin);
+
+			if (vantageParams.verifyNeighbors)
+				std::printf("%s: vantage neighbour check: %zu queries, %zu mismatches, %.1fs "
+					"(not counted in reduce)\n",
+					bspPath.c_str(), vantageStats.neighborChecks, vantageStats.neighborMismatches,
+					vantageStats.verifySeconds);
+		}
 
 		int walkConns = 0, airMoveConns = 0, ladderConns = 0, teleportConns = 0;
 		for (const navgen::MergedConnection &c : merged.conns)
@@ -1681,12 +2063,21 @@ int main(int argc, char **argv)
 					std::printf("wrote %s\n", svgPath.c_str());
 				}
 
+		if (!vantageSvgPath.empty())
+		{
+			std::string mapName = DeriveMapName(bspPath);
+			navgen::WriteVantageSvg(vantageSvgPath, mapName, merged.areas, vantages, vantageStats);
+			std::printf("wrote %s\n", vantageSvgPath.c_str());
+		}
+
 		if (!navPath.empty())
 		{
 			std::string mapName = DeriveMapName(bspPath);
 			navgen::WriteNavFile(navPath, mapName, bsp.Checksum(), merged.areas, merged.conns,
-				physics.maxSpeed);
-			std::printf("wrote %s (map \"%s\", checksum 0x%08X)\n", navPath.c_str(), mapName.c_str(), bsp.Checksum());
+				physics.maxSpeed, vantages, static_cast<float>(vantageParams.targetSpacing),
+				static_cast<float>(vantageStats.maxExposure));
+			std::printf("wrote %s (map \"%s\", checksum 0x%08X, %zu vantages)\n", navPath.c_str(),
+				mapName.c_str(), bsp.Checksum(), vantages.size());
 		}
 	}
 	catch (const std::exception &e)

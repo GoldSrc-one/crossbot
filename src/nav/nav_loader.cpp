@@ -64,13 +64,15 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	std::vector<NavAreaPlane> areaPlanes;
 	std::vector<NavActivationDetourRecord> detourRecords;
 	std::vector<NavDetourPointRecord> detourPoints;
+	std::vector<NavVantageRecord> vantageRecords;
 
 	bool ok = ReadArray(f, header.areaCount, areaRecords) &&
 		ReadArray(f, header.connCount, connRecords) &&
 		ReadArray(f, header.areaConnIndexCount, areaConnIndex) &&
 		ReadArray(f, header.areaPlaneCount, areaPlanes) &&
 		ReadArray(f, header.detourCount, detourRecords) &&
-		ReadArray(f, header.detourPointCount, detourPoints);
+		ReadArray(f, header.detourPointCount, detourPoints) &&
+		ReadArray(f, header.vantageCount, vantageRecords);
 	std::fclose(f);
 
 	if (!ok)
@@ -246,9 +248,36 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 
 	}
 
+	mesh->vantageField.spacing = header.vantageSpacing;
+	mesh->vantageField.maxExposure = header.maxExposure;
+	mesh->vantageField.vantages.resize(vantageRecords.size());
+	for (size_t i = 0; i < vantageRecords.size(); ++i)
+	{
+		const NavVantageRecord &rec = vantageRecords[i];
+		Vantage &v = mesh->vantageField.vantages[i];
+		v.pos = Vector(rec.pos[0], rec.pos[1], rec.pos[2]);
+		v.exposure = rec.exposure;
+		for (size_t k = 0; k < kNavFocusLevels; ++k)
+			v.focus[k] = rec.focus[k];
+
+		v.watchCount = 0;
+		for (size_t k = 0; k < kNavWatchDirs; ++k)
+		{
+			if (rec.watch[k].amount <= 0.f)
+				continue;
+			VantageWatch &wd = v.watch[v.watchCount++];
+			wd.yaw = rec.watch[k].yaw;
+			wd.pitch = rec.watch[k].pitch;
+			wd.spread = rec.watch[k].spread;
+			wd.amount = rec.watch[k].amount;
+		}
+	}
+	BuildVantageGrid(mesh->vantageField);
+
 	char msg[700];
-	snprintf(msg, sizeof(msg), "CrossBot: loaded nav file %s (%zu areas, %zu connections).\n",
-		navPath, mesh->areas.size(), mesh->conns.size());
+	snprintf(msg, sizeof(msg),
+		"CrossBot: loaded nav file %s (%zu areas, %zu connections, %zu vantages).\n",
+		navPath, mesh->areas.size(), mesh->conns.size(), mesh->vantageField.vantages.size());
 	SERVER_PRINT(msg);
 
 	return mesh;

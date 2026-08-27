@@ -105,10 +105,15 @@ void CollectActivatorsFor(const BspFile &bsp, const std::vector<Entity> &entitie
 std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex);
 
+std::vector<BlockingVolume> ExtractVisBlockers(const BspFile &bsp, const std::vector<Entity> &entities);
+
 std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex);
 
 std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
+	int hullIndex);
+
+std::vector<BlockingVolume> ExtractHurtVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex);
 
 std::vector<double> CollectGravityMultipliers(const std::vector<Entity> &entities);

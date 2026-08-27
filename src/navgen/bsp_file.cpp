@@ -68,6 +68,9 @@ BspFile::BspFile(const std::string &path)
 	m_planes = ReadLump<dplane_t>(data, header.lumps[LUMP_PLANES], "LUMP_PLANES");
 	m_clipnodes = ReadLump<dclipnode_t>(data, header.lumps[LUMP_CLIPNODES], "LUMP_CLIPNODES");
 	m_models = ReadLump<dmodel_t>(data, header.lumps[LUMP_MODELS], "LUMP_MODELS");
+	m_nodes = ReadLump<dnode_t>(data, header.lumps[LUMP_NODES], "LUMP_NODES");
+	m_leafs = ReadLump<dleaf_t>(data, header.lumps[LUMP_LEAFS], "LUMP_LEAFS");
+	m_visData = ReadLump<uint8_t>(data, header.lumps[LUMP_VISIBILITY], "LUMP_VISIBILITY");
 
 	const lump_t &entLump = header.lumps[LUMP_ENTITIES];
 	if (entLump.filelen < 0 ||

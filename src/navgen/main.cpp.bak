@@ -1,0 +1,1926 @@
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
+
+#include "activation_detours.h"
+#include "area_merger.h"
+#include "airmove_prune.h"
+#include "airmove_sampler.h"
+#include "blocking_entities.h"
+#include "bsp_file.h"
+#include "bsp_vis.h"
+#include "clipnode_tree.h"
+#include "astar_graph.h"
+#include "elevators.h"
+#include "entity_parser.h"
+#include "floor_support.h"
+#include "hull_defs.h"
+#include "ladder_connections.h"
+#include "leaf_extractor.h"
+#include "nav_file.h"
+#include "plan_model.h"
+#include "plan_search.h"
+#include "reachability.h"
+#include "stand_classifier.h"
+#include "svg_debug.h"
+#include "teleport_connections.h"
+#include "vantage_sampler.h"
+#include "work_pool.h"
+#include "path_profile.h"
+#include "waypoint_plan.h"
+
+namespace
+{
+
+constexpr double kMapRadius = 8192.0;
+constexpr size_t kCarveDumpThreshold = 16;
+constexpr size_t kCarveTableRows = 15;
+
+void PrintNullCarveEvents(const std::vector<navgen::Entity> &entities, const navgen::CarveStats &stats)
+{
+	for (const navgen::NullCarveEvent &ev : stats.nullEvents)
+	{
+		std::string classname = "?";
+		std::string targetname;
+		if (ev.entityIndex >= 0 && static_cast<size_t>(ev.entityIndex) < entities.size())
+		{
+			classname = entities[static_cast<size_t>(ev.entityIndex)].Get("classname");
+			targetname = entities[static_cast<size_t>(ev.entityIndex)].Get("targetname");
+		}
+
+		std::printf("  carve event: %-18s %-16s in %zu faces vol %14.1f at (%.0f, %.0f, %.0f) "
+			"-> out vol %16.1f, first piece %zu faces\n",
+			classname.c_str(), targetname.c_str(), ev.pieces, ev.volume, ev.centroid.x, ev.centroid.y,
+			ev.centroid.z, ev.after, ev.outFaces);
+	}
+}
+
+
+void PrintCarveBlockerTable(const std::vector<navgen::Entity> &entities,
+	const std::vector<navgen::BlockingVolume> &blockers, const navgen::CarveStats &stats)
+{
+	std::vector<size_t> order;
+	for (size_t i = 0; i < blockers.size() && i < stats.perBlockerPieces.size(); ++i)
+		if (stats.perBlockerBoundsHits[i] > 0)
+			order.push_back(i);
+
+	std::sort(order.begin(), order.end(), [&](size_t a, size_t b)
+		{ return stats.perBlockerPieces[a] > stats.perBlockerPieces[b]; });
+
+	size_t shown = 0;
+	for (size_t i : order)
+	{
+		if (shown++ >= kCarveTableRows)
+			break;
+
+		const navgen::BlockingVolume &vol = blockers[i];
+		std::string classname = "?";
+		std::string targetname;
+		if (vol.entityIndex >= 0 && static_cast<size_t>(vol.entityIndex) < entities.size())
+		{
+			classname = entities[static_cast<size_t>(vol.entityIndex)].Get("classname");
+			targetname = entities[static_cast<size_t>(vol.entityIndex)].Get("targetname");
+		}
+
+		std::printf("  blocker %3zu %-18s %-16s size %5.0f x %5.0f x %5.0f: %6zu carves, %7zu pieces, "
+			"%6zu removed nothing\n",
+			i, classname.c_str(), targetname.c_str(), vol.maxs.x - vol.mins.x, vol.maxs.y - vol.mins.y,
+			vol.maxs.z - vol.mins.z, stats.perBlockerBoundsHits[i], stats.perBlockerPieces[i],
+			stats.perBlockerNullCarves[i]);
+	}
+}
+
+
+void PrintUsage(const char *argv0)
+{
+	std::fprintf(stderr,
+		"usage: %s <map.bsp> [options]\n"
+		"  --dump-leaves     print per-leaf (pre-merge) id/faces/volume/centroid stats\n"
+		"  --dump-areas      print per-area (post-merge) id/faces/volume/centroid/member-leaf stats\n"
+		"  --dump-activators print activator discovery and the precomputed door detours: each gated\n"
+		"                    entity's activator brushes and their use/touch volumes, every candidate\n"
+		"                    service point with the area it stands in and why it was kept or rejected,\n"
+		"                    and for each (door area, entering neighbour) the chosen service point and\n"
+		"                    detour polyline, or why the entry is blocked\n"
+		"  --dump-conns      print every final connection: type, flags, endpoints, air-move parameters\n"
+		"  --dump-steps      print every walk connection the step filter trimmed or dropped: area pair,\n"
+		"                    shallowest crossing, both floor heights, surviving walkable runs, and each\n"
+		"                    floor face's normal z plus its 2D offset from the query point\n"
+		"  --dump-support    print every leaf fragment dropped as unsupported: floor centroid, floor\n"
+		"                    normal, fragment volume\n"
+		"  --dump-path       print the waypoint plan for the debug route: per-waypoint clearance and\n"
+		"                    per-segment arc/line/gap rows, plus the profile summary line\n"
+		"  --dump-airmove    print air-move launch derivation: why no funnel launch was found, and every\n"
+		"                    re-simulation miss with its launch, yaw, speed and where it actually landed\n"
+		"  --dump-planes <id> print one final area's exact plane list (normal+dist) and face windings\n"
+		"  --dump-obj <path> write the walkable floor of every area as an OBJ mesh (plus a sidecar\n"
+		"                    .mtl): crouch areas are coloured apart, the planned route is a ribbon\n"
+		"  --dump-svg <path> write a top-down SVG of the final area graph, for offline inspection\n"
+		"  --dump-vantage-svg <path> sample the visibility field and write it as a top-down SVG: one\n"
+		"                    glyph per vantage point, with its watch directions, exposure and camp focus\n"
+		"  --vantage-grid <n> lattice spacing the visibility field is sampled at, in units (default %.0f)\n"
+		"  --vantage-spacing <n> average spacing between vantages after reduction, in units (default\n"
+		"                    %.0f): one kept sample per n-by-n square of walkable floor, spent adaptively\n"
+		"  --vantage-cone <n> half-angle in degrees a watch direction clusters over (default %.0f)\n"
+		"  --vantage-neighbors <n> vantages the reduction interpolates each candidate from (default %zu)\n"
+		"  --vantage-verify-neighbors cross-check every nearest-neighbour query against a brute-force\n"
+		"                    scan and report mismatches (debug: validates the reduction's grid index)\n"
+		"  --no-vantage      skip the visibility field entirely: the nav file gets no vantage section\n"
+		"                    and bots on it fall back to no idle look and uncone-weighted senses\n"
+		"  --dump-vis-probe \"x y z x y z\" report what the visibility sampler sees between two world\n"
+		"                    points: the BSP leaf each lands in, whether the PVS links them, and the\n"
+		"                    hull-0 traceline result. Repeatable\n"
+		"  --trace <path>    overlay a recorded bot trajectory on the SVG: one \"x y z\" per line, as\n"
+		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
+		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
+		"                    edge gets 128 samples; 0.5 halves it; 0 disables air-move sampling)\n"
+		"  --max-speed <n>   ground speed air moves are sampled at, in units/sec (default %.0f): the\n"
+		"                    speed range the baked gates cover\n"
+		"  --plan-speed <n>  ground speed the debug plan is planned at (default: --max-speed). Set it to\n"
+		"                    the server's sv_maxspeed to reproduce what the runtime planner does with a\n"
+		"                    mesh sampled at a higher --max-speed\n"
+		"  --airmove-walk-ratio <n> drop an air move when a walk-only route between the same two areas\n"
+		"                    costs less than n times the air move (default %.1f; 0 keeps every air move)\n"
+		"  --dump-airmove-prune print the walk-vs-air comparison for every sampled air move, and the\n"
+		"                    walk+air-vs-ladder comparison for every ladder connection\n"
+		"  --dump-ladders    print ladder discovery: each func_ladder's hull-3 volume, why each face was\n"
+		"                    kept or rejected, the mount and top positions, and every dismount simulation\n"
+		"  --dump-elevators  print elevator classification: every func_door/func_plat, its movedir and\n"
+		"                    footprint, whether it was reclassified as a rideable platform or left to the\n"
+		"                    door path, and for each accepted one its stop positions, ride and dwell times,\n"
+		"                    activation, shaft column and the boxes carved out of the walkable leaves\n"
+		"  --dump-teleports  print teleport discovery: every trigger_teleport, why it was skipped, where\n"
+		"                    its destination lands and which areas can walk into it\n"
+		"  --ladder-prune-ratio <n> drop a ladder connection when a walk+air-move route between the same\n"
+		"                    two areas costs less than n times the ladder (default %.1f; 0 keeps every\n"
+		"                    ladder)\n"
+		"  --max-merge-group <n> most leaf groups one merge may fuse (default %zu). 1 disables merging\n"
+		"                    entirely (debug: each BSP hull-3 leaf becomes its own area)\n"
+		"  --dump-carve      print what the blocker carve and the passable split do to the leaf set:\n"
+		"                    per-leaf fragment counts, and how many carves fragmented a piece\n"
+		"                    without removing any volume from it\n"
+		"  --no-blockers     ignore func_wall/func_wall_toggle/func_conveyor/charger brushes\n"
+		"                    (debug: isolate how much of the leaf explosion the blocker carve owns)\n"
+		"  --no-passables    ignore func_door/func_door_rotating/func_breakable brushes (debug:\n"
+		"                    same, for the passable split)\n"
+		"  --no-floor-split  keep leaves whose floor is not solid (debug: pre-floor-support behaviour)\n"
+		"  --no-prune        skip PruneUnreachableAreas (debug only): keep areas unreachable from any spawn\n"
+		"  --threads <n>     worker threads for air-move sampling and vantage pair checking\n"
+		"                    (default: one per logical processor plus one, %zu here). 1 runs serially\n"
+		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
+		argv0, navgen::kDefaultVantageGrid, navgen::kDefaultVantageSpacing, navgen::kDefaultVantageCone,
+		navgen::kDefaultVantageNeighbors, navgen::PhysicsParams().maxSpeed,
+		navgen::kDefaultAirmoveWalkRatio, navgen::kDefaultLadderRatio, navgen::kDefaultMaxMergeGroup,
+		navgen::DefaultThreadCount());
+}
+
+using navgen::kFloorNormalZ;
+
+struct ObjMaterial
+{
+	const char *name;
+	double r, g, b;
+};
+
+const ObjMaterial kObjMaterials[] = {
+	{"nav_floor", 0.35, 0.55, 0.78},
+	{"nav_floor_crouch", 0.92, 0.58, 0.18},
+	{"nav_path", 0.20, 0.85, 0.35},
+};
+
+std::string ReplaceExtension(const std::string &path, const char *ext)
+{
+	size_t slash = path.find_last_of("/\\");
+	size_t dot = path.find_last_of('.');
+	if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+		return path + ext;
+	return path.substr(0, dot) + ext;
+}
+
+std::string BaseName(const std::string &path)
+{
+	size_t slash = path.find_last_of("/\\");
+	return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+void WriteObjMaterialLib(const std::string &path)
+{
+	FILE *f = std::fopen(path.c_str(), "w");
+	if (!f)
+		throw std::runtime_error("cannot open output MTL file: " + path);
+
+	for (const ObjMaterial &m : kObjMaterials)
+	{
+		std::fprintf(f, "newmtl %s\n", m.name);
+		std::fprintf(f, "Ka %.3f %.3f %.3f\n", m.r * 0.3, m.g * 0.3, m.b * 0.3);
+		std::fprintf(f, "Kd %.3f %.3f %.3f\n", m.r, m.g, m.b);
+		std::fprintf(f, "Ks 0.000 0.000 0.000\nd 1.0\nillum 1\n\n");
+	}
+
+	std::fclose(f);
+}
+
+bool WindingOpposesNormal(const navgen::Face &face)
+{
+	navgen::Vec3 sum(0, 0, 0);
+	for (size_t i = 1; i + 1 < face.winding.size(); ++i)
+	{
+		navgen::Vec3 a = face.winding[i] - face.winding[0];
+		navgen::Vec3 b = face.winding[i + 1] - face.winding[0];
+		sum = sum + a.Cross(b);
+	}
+	return sum.Dot(face.plane.normal) < 0.0;
+}
+
+struct ObjStats
+{
+	size_t floorFaces = 0;
+	size_t crouchAreas = 0;
+	size_t pathSegments = 0;
+};
+
+ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> &areas,
+	const std::vector<navgen::Vec3> &pathPoints)
+{
+	std::string mtlPath = ReplaceExtension(path, ".mtl");
+	WriteObjMaterialLib(mtlPath);
+
+	FILE *f = std::fopen(path.c_str(), "w");
+	if (!f)
+		throw std::runtime_error("cannot open output OBJ file: " + path);
+
+	std::fprintf(f, "mtllib %s\n", BaseName(mtlPath).c_str());
+
+	ObjStats stats;
+	int nextVertexIndex = 1;
+
+	for (const navgen::Area &area : areas)
+	{
+		bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		bool opened = false;
+
+		for (const navgen::Face &face : area.polytope.faces)
+		{
+			if (!face.walkable || face.plane.normal.z <= kFloorNormalZ || face.winding.size() < 3)
+				continue;
+
+			if (!opened)
+			{
+				std::fprintf(f, "g area_%d%s\nusemtl %s\n", area.id, crouch ? "_crouch" : "",
+					crouch ? "nav_floor_crouch" : "nav_floor");
+				opened = true;
+				if (crouch)
+					++stats.crouchAreas;
+			}
+
+			for (const navgen::Vec3 &v : face.winding)
+				std::fprintf(f, "v %.3f %.3f %.3f\n", v.x, v.y, v.z);
+
+			bool flip = WindingOpposesNormal(face);
+			size_t count = face.winding.size();
+			std::fprintf(f, "f");
+			for (size_t i = 0; i < count; ++i)
+			{
+				size_t idx = flip ? count - 1 - i : i;
+				std::fprintf(f, " %d", nextVertexIndex + static_cast<int>(idx));
+			}
+			std::fprintf(f, "\n");
+
+			nextVertexIndex += static_cast<int>(count);
+			++stats.floorFaces;
+		}
+	}
+
+	if (pathPoints.size() >= 2)
+	{
+		constexpr double kPathHalfWidth = 3.0;
+
+		std::fprintf(f, "g path\nusemtl nav_path\n");
+
+		for (size_t i = 0; i + 1 < pathPoints.size(); ++i)
+		{
+			const navgen::Vec3 &a = pathPoints[i];
+			const navgen::Vec3 &b = pathPoints[i + 1];
+
+			navgen::Vec3 dir = b - a;
+			navgen::Vec3 side(-dir.y, dir.x, 0.0);
+			double len = side.Length();
+			if (len < 1e-6)
+				side = navgen::Vec3(kPathHalfWidth, 0.0, 0.0);
+			else
+				side = side * (kPathHalfWidth / len);
+
+			const navgen::Vec3 quad[4] = {a - side, b - side, b + side, a + side};
+			for (const navgen::Vec3 &v : quad)
+				std::fprintf(f, "v %.3f %.3f %.3f\n", v.x, v.y, v.z);
+
+			std::fprintf(f, "f %d %d %d %d\n", nextVertexIndex, nextVertexIndex + 1,
+				nextVertexIndex + 2, nextVertexIndex + 3);
+
+			nextVertexIndex += 4;
+			++stats.pathSegments;
+		}
+	}
+
+	std::fclose(f);
+	return stats;
+}
+
+std::vector<navgen::Vec3> ReadTraceFile(const std::string &path)
+{
+	std::vector<navgen::Vec3> points;
+
+	FILE *f = std::fopen(path.c_str(), "r");
+	if (!f)
+	{
+		std::fprintf(stderr, "--trace: cannot open %s, drawing no trace\n", path.c_str());
+		return points;
+	}
+
+	char line[256];
+	while (std::fgets(line, sizeof(line), f))
+	{
+		double x = 0, y = 0, z = 0;
+		if (std::sscanf(line, "%lf %lf %lf", &x, &y, &z) == 3)
+			points.push_back(navgen::Vec3(x, y, z));
+	}
+
+	std::fclose(f);
+	return points;
+}
+
+std::string DeriveMapName(const std::string &bspPath)
+{
+	size_t slash = bspPath.find_last_of("/\\");
+	std::string base = (slash == std::string::npos) ? bspPath : bspPath.substr(slash + 1);
+	size_t dot = base.find_last_of('.');
+	if (dot != std::string::npos)
+		base = base.substr(0, dot);
+	return base;
+}
+
+std::vector<navgen::Vec3> CollectTargetPoints(const std::vector<navgen::Entity> &entities)
+{
+	std::vector<navgen::Vec3> points;
+	for (const navgen::Entity &ent : entities)
+	{
+		if (ent.Get("classname") != "info_target")
+			continue;
+		double x = 0, y = 0, z = 0;
+		if (std::sscanf(ent.Get("origin").c_str(), "%lf %lf %lf", &x, &y, &z) != 3)
+			continue;
+		points.push_back(navgen::Vec3(x, y, z));
+	}
+	return points;
+}
+
+Vector ClampToAreaBounds(const Vector &point, const navgen::Polytope &poly)
+{
+	navgen::Vec3 mins(1e9, 1e9, 1e9), maxs(-1e9, -1e9, -1e9);
+	for (const navgen::Face &f : poly.faces)
+	{
+		for (const navgen::Vec3 &v : f.winding)
+		{
+			mins.x = std::min(mins.x, v.x); mins.y = std::min(mins.y, v.y); mins.z = std::min(mins.z, v.z);
+			maxs.x = std::max(maxs.x, v.x); maxs.y = std::max(maxs.y, v.y); maxs.z = std::max(maxs.z, v.z);
+		}
+	}
+
+	auto clamp = [](float v, double lo, double hi)
+	{
+		return static_cast<float>(std::max(lo, std::min(hi, static_cast<double>(v))));
+	};
+
+	return Vector(clamp(point.x, mins.x, maxs.x), clamp(point.y, mins.y, maxs.y), clamp(point.z, mins.z, maxs.z));
+}
+
+void ReportTraceDeviation(const NavPlan::PlanProfile &profile,
+	const std::vector<navgen::Vec3> &trace)
+{
+	if (profile.Empty() || trace.empty())
+		return;
+
+	double sum = 0.0;
+	float worst = 0.f;
+	float worstS = 0.f;
+	float s = 0.f;
+	size_t counted = 0;
+
+	for (const navgen::Vec3 &p : trace)
+	{
+		Vector pos((float)p.x, (float)p.y, (float)p.z);
+		float lateral = 0.f;
+		s = NavPlan::ProjectOntoProfile(profile, pos, s - 32.f, s + 128.f, &lateral);
+
+		sum += lateral;
+		++counted;
+		if (lateral > worst)
+		{
+			worst = lateral;
+			worstS = s;
+		}
+	}
+
+	NavPlan::ProfileSample at = NavPlan::SampleProfile(profile, worstS);
+	std::printf("trace deviation: mean %.1f, max %.1f at s=%.0f (wp %zu, clearance %.1f)\n",
+		counted ? sum / (double)counted : 0.0, worst, worstS, at.wpIndex, at.clearance);
+}
+
+std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &entities,
+	const navgen::MergeResult &merged, const NavPlan::PlanTraceContext *traces,
+	std::vector<uint8_t> *segmentKindsOut, std::vector<navgen::FailedAirmove> *failedAirmovesOut,
+	std::vector<float> *segmentSpeedsOut, bool dumpPath, NavPlan::PlanProfile *profileOut)
+{
+	std::vector<navgen::Vec3> points;
+	if (merged.areas.empty())
+		return points;
+
+	std::vector<navgen::Vec3> spawnPoints;
+	std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas, &spawnPoints);
+	if (spawnAreas.empty())
+		return points;
+
+	auto ToVector = [](const navgen::Vec3 &v)
+	{
+		return Vector(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z));
+	};
+
+	navgen::PlanModel model = navgen::BuildPlanModel(merged);
+	std::vector<NavPlan::PlanArea> &planAreas = model.areas;
+	std::vector<NavPlan::PlanConnection> &planConns = model.conns;
+	std::vector<NavAStar::Connection> &graphConns = model.graphConns;
+	std::vector<std::vector<uint32_t>> &areaConnIndices = model.areaConnIndices;
+
+	uint32_t startArea = static_cast<uint32_t>(spawnAreas.front());
+	Vector startPoint = ToVector(spawnPoints.front());
+
+	std::vector<navgen::Vec3> targetPoints;
+	std::vector<int> targetAreas = navgen::FindTargetAreas(entities, merged.areas, &targetPoints);
+	uint32_t goalArea = startArea;
+	bool goalFromTarget = false;
+	Vector goalPoint = planAreas[startArea].centroid;
+	if (!targetAreas.empty() && targetAreas.front() != static_cast<int>(startArea))
+	{
+		goalArea = static_cast<uint32_t>(targetAreas.front());
+		goalPoint = ToVector(targetPoints.front());
+		goalFromTarget = true;
+	}
+
+	if (!goalFromTarget)
+	{
+		double best = -1.0;
+		for (size_t i = 0; i < merged.areas.size(); ++i)
+		{
+			navgen::Vec3 a = merged.areas[startArea].polytope.Centroid();
+			navgen::Vec3 b = merged.areas[i].polytope.Centroid();
+			double d = (b - a).Length();
+			if (d > best)
+			{
+				best = d;
+				goalArea = static_cast<uint32_t>(i);
+			}
+		}
+		goalPoint = planAreas[goalArea].centroid;
+	}
+
+	if (goalArea == startArea)
+		return points;
+
+	goalPoint = ClampToAreaBounds(goalPoint, merged.areas[goalArea].polytope);
+
+	NavPlan::PlanStats planStats;
+	NavPlan::PlannedRoute result = NavPlan::PlanRoute(areaConnIndices, graphConns, planAreas,
+		planConns, startArea, goalArea, startPoint, goalPoint, traces, &planStats);
+	if (!result.found || result.connPath.empty())
+	{
+		std::printf("debug path: no route from area %u to area %u\n", startArea, goalArea);
+		return points;
+	}
+
+	std::vector<NavPlan::PlanWaypoint> plan = std::move(result.waypoints);
+
+	NavPlan::PlanProfile profile = NavPlan::BuildPathProfile(plan,
+		traces ? traces->physics : PmSim::PmPhysics(), traces);
+
+	if (profileOut)
+		*profileOut = profile;
+
+	auto PushPoint = [&](const Vector &v, uint8_t kind, float speed)
+	{
+		navgen::Vec3 p(v.x, v.y, v.z);
+		if (!points.empty() && (p - points.back()).Length() < 0.5)
+		{
+			if (segmentKindsOut && !segmentKindsOut->empty() && kind != navgen::PATH_SEG_WALK)
+				segmentKindsOut->back() = kind;
+			return;
+		}
+		points.push_back(p);
+		if (segmentKindsOut)
+			segmentKindsOut->push_back(kind);
+		if (segmentSpeedsOut)
+			segmentSpeedsOut->push_back(speed);
+	};
+
+	for (const NavPlan::ProfileSeg &seg : profile.segs)
+	{
+		const NavPlan::PlanWaypoint &startWp = plan[std::min<size_t>(seg.wpIndex - 1, plan.size() - 1)];
+
+		uint8_t kind = navgen::PATH_SEG_WALK;
+		if (seg.gap && startWp.airmoveLaunch)
+			kind = startWp.launchSimulated ? navgen::PATH_SEG_AIRMOVE_SIMULATED
+				: navgen::PATH_SEG_AIRMOVE_STORED;
+		else if (seg.gap && startWp.requiresLadder)
+			kind = navgen::PATH_SEG_LADDER;
+
+		PushPoint(seg.a, kind, seg.vEntry);
+
+		if (seg.isArc)
+		{
+			int steps = std::max(2, static_cast<int>(std::fabs(seg.turn) * 8.f));
+			for (int k = 1; k < steps; ++k)
+			{
+				float t = static_cast<float>(k) / static_cast<float>(steps);
+				NavPlan::ProfileSample s = NavPlan::SampleProfile(profile, seg.sStart + seg.sLen * t);
+				PushPoint(s.point, kind, s.speed);
+			}
+		}
+	}
+
+	if (!profile.segs.empty())
+		PushPoint(profile.segs.back().b, navgen::PATH_SEG_WALK, profile.segs.back().vExit);
+
+	for (const NavPlan::PlanWaypoint &wp : plan)
+	{
+		if (failedAirmovesOut && wp.launchSimFailed)
+		{
+			navgen::FailedAirmove fa;
+			fa.launch = navgen::Vec3(wp.launchSimFrom.x, wp.launchSimFrom.y, wp.launchSimFrom.z);
+			fa.landing = navgen::Vec3(wp.launchSimTo.x, wp.launchSimTo.y, wp.launchSimTo.z);
+			fa.aim = navgen::Vec3(wp.launchSimAim.x, wp.launchSimAim.y, wp.launchSimAim.z);
+			failedAirmovesOut->push_back(fa);
+		}
+	}
+
+	size_t offMesh = 0;
+	{
+		auto overSomeArea = [&](const Vector &p)
+		{
+			for (const NavPlan::PlanArea &a : planAreas)
+			{
+				if (a.boundPlanes.empty())
+					continue;
+				bool inside = true;
+				for (const NavPlan::PlanPlane &pl : a.boundPlanes)
+				{
+					if (std::fabs(pl.normal.z) > 0.3f)
+						continue;
+					if (p.x * pl.normal.x + p.y * pl.normal.y - pl.dist < -0.05f)
+					{
+						inside = false;
+						break;
+					}
+				}
+				if (inside)
+					return true;
+			}
+			return false;
+		};
+
+		for (size_t i = 0; i + 1 < plan.size(); ++i)
+		{
+			if (plan[i].airmoveLaunch || plan[i].requiresTeleport || plan[i].requiresLadder)
+				continue;
+			const Vector &a = plan[i].point;
+			const Vector &b = plan[i + 1].point;
+			for (int s = 1; s <= 16; ++s)
+			{
+				float t = static_cast<float>(s) / 17.0f;
+				if (!overSomeArea(Vector(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, 0.f)))
+				{
+					++offMesh;
+					break;
+				}
+			}
+		}
+	}
+
+	std::printf("debug path: area %u -> %u via %zu connections, %zu waypoints "
+		"(%zu air moves re-simulated, %zu rescaled, %zu run-ups extended, %zu re-speeded, "
+		"%zu re-speed kept design, %zu retracted, %zu retract kept design, "
+		"%zu rejected in search; %zu corners, "
+		"%zu gates short of full clearance, %zu segments leaving the mesh)\n",
+		startArea, goalArea, result.connPath.size(), plan.size(), planStats.airmovesSimulated,
+		planStats.airmovesRescaled, planStats.airmovesRunupExtended, planStats.airmovesRespeeded,
+		planStats.airmovesRespeedKept, planStats.airmovesRetracted, planStats.airmovesRetractKept,
+		result.airmovesRejected, planStats.corners, planStats.gatesClamped, offMesh);
+
+	std::printf("debug search: %zu areas expanded, %zu air move simulations\n", result.expansions,
+		result.airmovesTried);
+
+	std::printf("debug profile: %zu segments, %.0f units, %.1fs, %zu corners arced, "
+		"%zu slowed, %zu shrunk by trace\n",
+		profile.segs.size(), profile.totalLength, profile.totalTime, profile.cornersArced,
+		profile.cornersSlowed, profile.cornersShrunk);
+
+	if (dumpPath)
+	{
+		for (size_t i = 0; i < plan.size(); ++i)
+		{
+			const NavPlan::PlanWaypoint &wp = plan[i];
+			const char *kind = "corner";
+			if (i == 0)
+				kind = "start";
+			else if (i + 1 == plan.size())
+				kind = "goal";
+			else if (wp.requiresButtonUse)
+				kind = "button";
+			else if (wp.requiresTriggerTouch)
+				kind = "trigger";
+			else if (wp.requiresElevatorRide)
+				kind = "ride";
+			else if (wp.requiresTeleport)
+				kind = "teleport";
+			else if (wp.requiresLadder)
+				kind = wp.ladderUp ? "climb" : "descend";
+			else if (wp.airmoveLaunch)
+				kind = wp.requiresJump ? "jump" : "dropoff";
+			else if (i > 0 && plan[i - 1].airmoveLaunch)
+				kind = "landing";
+			else if (i > 0 && plan[i - 1].requiresLadder)
+				kind = "dismount";
+			else if (i > 0 && plan[i - 1].requiresElevatorRide)
+				kind = "arrive";
+			else if (wp.requiresDoor)
+				kind = "door";
+
+			std::printf("  wp[%2zu] %-8s (%8.1f, %8.1f, %8.1f) area %3d%s%s",
+				i, kind, wp.point.x, wp.point.y, wp.point.z, wp.targetAreaId,
+				wp.requiresCrouch ? " crouch" : "", wp.requiresJump ? " JUMP" : "");
+			if (wp.airmoveLaunch)
+				std::printf(" launch %.0f yaw %.1f jumpBack %.1f", wp.launchSpeed, wp.launchYaw,
+					wp.jumpBackDist);
+			if (wp.requiresElevatorRide)
+				std::printf(" ride %.2fs wait %.2fs", wp.elevatorTravelTime, wp.elevatorWaitTime);
+			if (wp.requiresLadder)
+			{
+				std::printf(" climb %.0f yaw %.1f to z %.1f", wp.ladderSpeed, wp.ladderYaw,
+					wp.ladderExit.z);
+				if (std::fabs(wp.ladderEntryYaw - wp.ladderYaw) > 0.5f)
+					std::printf(" enter yaw %.1f", wp.ladderEntryYaw);
+			}
+			std::printf(" clearance %.1f", wp.clearance);
+			std::printf("\n");
+		}
+
+		for (size_t i = 0; i < profile.segs.size(); ++i)
+		{
+			const NavPlan::ProfileSeg &seg = profile.segs[i];
+			if (seg.isArc)
+				std::printf("  seg[%2zu] arc  wp %2zu r %6.1f turn %6.1fdeg len %6.1f "
+					"v %5.0f -> %5.0f cap %5.0f reach %5.0f -> %5.0f clearance %.1f\n",
+					i, seg.wpIndex, seg.radius, seg.turn * 180.f / 3.14159265f, seg.sLen,
+					seg.vEntry, seg.vExit, seg.vCap, seg.vReachEntry, seg.vReachExit,
+					seg.clearance);
+			else
+				std::printf("  seg[%2zu] %-4s wp %2zu %26slen %6.1f v %5.0f -> %5.0f cap %5.0f "
+					"reach %5.0f -> %5.0f\n",
+					i, seg.gap ? "gap" : "line", seg.wpIndex, "", seg.sLen, seg.vEntry, seg.vExit,
+					seg.vCap, seg.vReachEntry, seg.vReachExit);
+		}
+	}
+
+	return points;
+}
+
+}
+
+int main(int argc, char **argv)
+{
+	if (argc < 2)
+	{
+		PrintUsage(argv[0]);
+		return 1;
+	}
+
+	std::string bspPath;
+	bool dumpLeaves = false;
+	bool dumpAreas = false;
+	bool dumpActivators = false;
+	bool dumpConns = false;
+	bool dumpSteps = false;
+	bool dumpSupport = false;
+	bool dumpPath = false;
+	bool dumpAirmove = false;
+	bool dumpCarve = false;
+	bool noBlockers = false;
+	bool noPassables = false;
+	bool noFloorSplit = false;
+	bool noPrune = false;
+	bool noVantage = false;
+	size_t maxMergeGroup = navgen::kDefaultMaxMergeGroup;
+	float airmoveSamplesPerUnit = navgen::AirmoveSampleParams().samplesPerUnit;
+	double airmoveWalkRatio = navgen::kDefaultAirmoveWalkRatio;
+	double ladderPruneRatio = navgen::kDefaultLadderRatio;
+	bool dumpAirmovePrune = false;
+	bool dumpLadders = false;
+	bool dumpElevators = false;
+	size_t threadCount = 0;
+	bool dumpTeleports = false;
+	float maxSpeed = navgen::PhysicsParams().maxSpeed;
+	float planSpeed = 0.f;
+	int dumpPlanesAreaId = -1;
+	std::string objPath;
+	std::string svgPath;
+	std::string tracePath;
+	std::string navPath;
+	std::string vantageSvgPath;
+	navgen::VantageParams vantageParams;
+
+	struct VisProbe
+	{
+		navgen::Vec3 a;
+		navgen::Vec3 b;
+	};
+	std::vector<VisProbe> visProbes;
+
+	for (int i = 1; i < argc; ++i)
+	{
+		std::string arg = argv[i];
+		if (arg == "--dump-leaves")
+		{
+			dumpLeaves = true;
+		}
+		else if (arg == "--dump-activators")
+		{
+			dumpActivators = true;
+		}
+		else if (arg == "--dump-areas")
+		{
+			dumpAreas = true;
+		}
+		else if (arg == "--dump-conns")
+		{
+			dumpConns = true;
+		}
+		else if (arg == "--dump-steps")
+		{
+			dumpSteps = true;
+		}
+		else if (arg == "--dump-support")
+		{
+			dumpSupport = true;
+		}
+		else if (arg == "--dump-path")
+		{
+			dumpPath = true;
+		}
+		else if (arg == "--dump-airmove")
+		{
+			dumpAirmove = true;
+		}
+		else if (arg == "--dump-ladders")
+		{
+			dumpLadders = true;
+		}
+		else if (arg == "--dump-elevators")
+		{
+			dumpElevators = true;
+		}
+		else if (arg == "--dump-teleports")
+		{
+			dumpTeleports = true;
+		}
+		else if (arg == "--dump-carve")
+		{
+			dumpCarve = true;
+		}
+		else if (arg == "--no-blockers")
+		{
+			noBlockers = true;
+		}
+		else if (arg == "--no-passables")
+		{
+			noPassables = true;
+		}
+		else if (arg == "--no-floor-split")
+		{
+			noFloorSplit = true;
+		}
+		else if (arg == "--max-merge-group")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1)
+			{
+				std::fprintf(stderr, "--max-merge-group: expected a positive integer, got \"%s\"\n", value);
+				return 1;
+			}
+			maxMergeGroup = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--no-prune")
+		{
+			noPrune = true;
+		}
+		else if (arg == "--airmove-samples")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 0.0)
+			{
+				std::fprintf(stderr, "--airmove-samples: expected a non-negative number, got \"%s\"\n", value);
+				return 1;
+			}
+			airmoveSamplesPerUnit = static_cast<float>(parsed);
+		}
+		else if (arg == "--max-speed")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed <= 0.0)
+			{
+				std::fprintf(stderr, "--max-speed: expected a positive number, got \"%s\"\n", value);
+				return 1;
+			}
+			maxSpeed = static_cast<float>(parsed);
+		}
+		else if (arg == "--plan-speed")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed <= 0.0)
+			{
+				std::fprintf(stderr, "--plan-speed: expected a positive number, got \"%s\"\n", value);
+				return 1;
+			}
+			planSpeed = static_cast<float>(parsed);
+		}
+		else if (arg == "--dump-airmove-prune")
+		{
+			dumpAirmovePrune = true;
+		}
+		else if (arg == "--airmove-walk-ratio")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 0.0)
+			{
+				std::fprintf(stderr, "--airmove-walk-ratio: expected a non-negative number, got \"%s\"\n",
+					value);
+				return 1;
+			}
+			airmoveWalkRatio = parsed;
+		}
+		else if (arg == "--ladder-prune-ratio")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 0.0)
+			{
+				std::fprintf(stderr, "--ladder-prune-ratio: expected a non-negative number, got \"%s\"\n",
+					value);
+				return 1;
+			}
+			ladderPruneRatio = parsed;
+		}
+		else if (arg == "--dump-planes")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			dumpPlanesAreaId = std::atoi(argv[++i]);
+		}
+		else if (arg == "--dump-obj")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			objPath = argv[++i];
+		}
+		else if (arg == "--dump-svg")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			svgPath = argv[++i];
+		}
+		else if (arg == "--dump-vantage-svg")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			vantageSvgPath = argv[++i];
+		}
+		else if (arg == "--vantage-grid" || arg == "--vantage-spacing" || arg == "--vantage-cone")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			double parsed = std::strtod(value, &parseEnd);
+			if (parseEnd == value || *parseEnd != '\0' || parsed <= 0.0)
+			{
+				std::fprintf(stderr, "%s: expected a positive number, got \"%s\"\n", arg.c_str(), value);
+				return 1;
+			}
+			if (arg == "--vantage-grid")
+				vantageParams.gridSize = parsed;
+			else if (arg == "--vantage-spacing")
+				vantageParams.targetSpacing = parsed;
+			else
+				vantageParams.clusterConeDeg = parsed;
+		}
+		else if (arg == "--vantage-neighbors")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1 || parsed > 64)
+			{
+				std::fprintf(stderr, "--vantage-neighbors: expected 1..64, got \"%s\"\n", value);
+				return 1;
+			}
+			vantageParams.neighborCount = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--threads")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1 || parsed > 256)
+			{
+				std::fprintf(stderr, "--threads: expected 1..256, got \"%s\"\n", value);
+				return 1;
+			}
+			threadCount = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--vantage-verify-neighbors")
+		{
+			vantageParams.verifyNeighbors = true;
+		}
+		else if (arg == "--no-vantage")
+		{
+			noVantage = true;
+		}
+		else if (arg == "--dump-vis-probe")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			double v[6] = {0, 0, 0, 0, 0, 0};
+			const char *cursor = value;
+			bool ok = true;
+			for (int k = 0; k < 6 && ok; ++k)
+			{
+				char *parseEnd = nullptr;
+				v[k] = std::strtod(cursor, &parseEnd);
+				if (parseEnd == cursor)
+					ok = false;
+				cursor = parseEnd;
+			}
+			while (*cursor == ' ' || *cursor == '\t')
+				++cursor;
+			if (!ok || *cursor != '\0')
+			{
+				std::fprintf(stderr, "--dump-vis-probe: expected \"x y z x y z\", got \"%s\"\n", value);
+				return 1;
+			}
+			visProbes.push_back({navgen::Vec3(v[0], v[1], v[2]), navgen::Vec3(v[3], v[4], v[5])});
+		}
+		else if (arg == "--trace")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			tracePath = argv[++i];
+		}
+		else if (arg == "-o")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			navPath = argv[++i];
+		}
+		else if (bspPath.empty())
+		{
+			bspPath = arg;
+		}
+		else
+		{
+			std::fprintf(stderr, "unrecognized argument: %s\n", arg.c_str());
+			PrintUsage(argv[0]);
+			return 1;
+		}
+	}
+
+	if (bspPath.empty())
+	{
+		PrintUsage(argv[0]);
+		return 1;
+	}
+
+	if (threadCount == 0)
+		threadCount = navgen::DefaultThreadCount();
+
+	vantageParams.threadCount = threadCount;
+	std::printf("navgen: %zu worker threads\n", threadCount);
+
+	try
+	{
+		navgen::BspFile bsp(bspPath);
+		const dmodel_t &worldModel = bsp.Models()[0];
+
+		std::vector<navgen::ExtractedLeaf> leaves =
+			navgen::ExtractHullLeaves(bsp, worldModel, kMapRadius, navgen::kHullDuck);
+
+		if (dumpCarve)
+		{
+			double volume = 0.0;
+			double worst = 0.0;
+			size_t oversize = 0;
+			double boxVolume =
+				(static_cast<double>(worldModel.maxs[0]) - static_cast<double>(worldModel.mins[0])) *
+				(static_cast<double>(worldModel.maxs[1]) - static_cast<double>(worldModel.mins[1])) *
+				(static_cast<double>(worldModel.maxs[2]) - static_cast<double>(worldModel.mins[2]));
+			for (const navgen::ExtractedLeaf &leaf : leaves)
+			{
+				double v = leaf.polytope.Volume();
+				volume += v;
+				if (v > worst)
+					worst = v;
+				if (v > boxVolume)
+					++oversize;
+			}
+			std::printf("%s: hull-3 extraction: %zu leaves, total volume %.0f, biggest leaf %.0f, "
+				"%zu leaves bigger than the whole map (%.0f)\n",
+				bspPath.c_str(), leaves.size(), volume, worst, oversize, boxVolume);
+			std::fflush(stdout);
+		}
+
+		std::vector<navgen::Entity> entities = navgen::ParseEntities(bsp.EntityText());
+		navgen::ElevatorSet elevators = navgen::ExtractElevators(bsp, entities, kMapRadius, dumpElevators);
+
+		std::vector<navgen::BlockingVolume> blockers = noBlockers
+			? std::vector<navgen::BlockingVolume>()
+			: navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullDuck);
+		std::vector<navgen::BlockingVolume> standBlockers = noBlockers
+			? std::vector<navgen::BlockingVolume>()
+			: navgen::ExtractBlockingVolumes(bsp, entities, navgen::kHullHuman);
+		std::vector<navgen::BlockingVolume> duckLadders =
+			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullDuck);
+		std::vector<navgen::BlockingVolume> standLadders =
+			navgen::ExtractLadderVolumes(bsp, entities, navgen::kHullHuman);
+
+		std::vector<navgen::PushVolume> duckPushes =
+			navgen::ExtractPushVolumes(bsp, entities, navgen::kHullDuck);
+		std::vector<navgen::PushVolume> standPushes =
+			navgen::ExtractPushVolumes(bsp, entities, navgen::kHullHuman);
+		if (!standPushes.empty())
+			std::printf("%s: %zu trigger_push fields\n", bspPath.c_str(), standPushes.size());
+
+		navgen::PassableSet duckPassables = noPassables
+			? navgen::PassableSet()
+			: navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck, elevators.claimedEntities);
+		navgen::PassableSet standPassables = noPassables
+			? navgen::PassableSet()
+			: navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullHuman, elevators.claimedEntities);
+
+	blockers.insert(blockers.end(), duckPassables.impassable.begin(), duckPassables.impassable.end());
+	standBlockers.insert(standBlockers.end(), standPassables.impassable.begin(),
+			standPassables.impassable.end());
+
+		navgen::AirmoveWorlds airmoveWorlds =
+			navgen::BuildAirmoveWorlds(elevators, blockers, standBlockers);
+
+		blockers.insert(blockers.end(), elevators.defaultDuck.begin(), elevators.defaultDuck.end());
+		standBlockers.insert(standBlockers.end(), elevators.defaultStand.begin(),
+			elevators.defaultStand.end());
+
+	std::vector<navgen::BlockingVolume> supportBlockers = blockers;
+	for (const navgen::PassableVolume &p : duckPassables.passable)
+			supportBlockers.push_back(p.volume);
+	supportBlockers.insert(supportBlockers.end(), elevators.supportDuck.begin(),
+			elevators.supportDuck.end());
+
+		const std::vector<navgen::BlockingVolume> &carveBlockers = airmoveWorlds.baseDuck;
+
+		std::vector<navgen::ExtractedLeaf> navigableLeaves;
+		navgen::CarveStats blockerCarve;
+		navigableLeaves.reserve(leaves.size());
+		size_t affectedLeaves = 0;
+		size_t fullyRemovedLeaves = 0;
+		size_t splitLeaves = 0;
+		for (navgen::ExtractedLeaf &leaf : leaves)
+		{
+			bool hitBlocker = navgen::OverlapsAnyBlockingVolume(leaf, carveBlockers);
+			bool hitLadder = navgen::OverlapsAnyBlockingVolume(leaf, duckLadders);
+			if (!hitBlocker && !hitLadder)
+			{
+				leaf.id = static_cast<int>(navigableLeaves.size());
+				navigableLeaves.push_back(std::move(leaf));
+				continue;
+			}
+
+			++affectedLeaves;
+			std::vector<navgen::Polytope> pieces = hitBlocker
+				? navgen::SubtractBlockingVolumes(bsp, leaf.polytope, carveBlockers, kMapRadius, 0.01,
+					dumpCarve ? &blockerCarve : nullptr)
+				: std::vector<navgen::Polytope>{leaf.polytope};
+
+			if (dumpCarve && pieces.size() >= kCarveDumpThreshold)
+			{
+				navgen::Vec3 c = leaf.polytope.Centroid();
+				std::printf("  carve leaf %4d: %zu pieces, leaf volume %.0f, centroid (%.0f, %.0f, %.0f)\n",
+					leaf.id, pieces.size(), leaf.polytope.Volume(), c.x, c.y, c.z);
+				std::fflush(stdout);
+			}
+
+			if (dumpCarve && (affectedLeaves % 200) == 0)
+			{
+				std::printf("  carve progress: %zu leaves carved, %zu pieces out, %zu carves "
+					"(%zu removed no volume)\n",
+					affectedLeaves, blockerCarve.piecesOut, blockerCarve.carves, blockerCarve.nullCarves);
+				std::fflush(stdout);
+			}
+
+			if (hitLadder)
+			{
+				std::vector<navgen::Polytope> unladdered;
+				for (const navgen::Polytope &piece : pieces)
+					for (navgen::Polytope &carved :
+						navgen::SubtractBoxVolumes(piece, duckLadders, kMapRadius))
+						unladdered.push_back(std::move(carved));
+				pieces = std::move(unladdered);
+			}
+
+			if (pieces.empty())
+				++fullyRemovedLeaves;
+			else if (pieces.size() > 1)
+				++splitLeaves;
+
+			for (navgen::Polytope &piece : pieces)
+			{
+				navgen::ExtractedLeaf split;
+				split.id = static_cast<int>(navigableLeaves.size());
+				split.polytope = std::move(piece);
+				navigableLeaves.push_back(std::move(split));
+			}
+		}
+		leaves = std::move(navigableLeaves);
+
+		if (dumpCarve)
+		{
+			double volume = 0.0;
+			double worst = 0.0;
+			for (const navgen::ExtractedLeaf &piece : leaves)
+			{
+				double v = piece.polytope.Volume();
+				volume += v;
+				if (v > worst)
+					worst = v;
+			}
+			std::printf("%s: after blocker+ladder carve: %zu leaves, total volume %.0f, biggest leaf %.0f\n",
+				bspPath.c_str(), leaves.size(), volume, worst);
+			std::fflush(stdout);
+		}
+
+		if (dumpCarve)
+		{
+			std::printf("%s: blocker carve: %zu leaves carved by %zu blockers -> %zu pieces, worst single "
+				"leaf %zu pieces\n",
+				bspPath.c_str(), blockerCarve.inputs, carveBlockers.size(), blockerCarve.piecesOut,
+				blockerCarve.peakPieces);
+			std::printf("%s: blocker carve: %zu piece/blocker bounds tests, %zu carves -- %zu removed "
+				"volume (+%zu pieces), %zu removed nothing (+%zu pieces)\n",
+				bspPath.c_str(), blockerCarve.tests, blockerCarve.carves, blockerCarve.solidCarves,
+				blockerCarve.solidCarveExtraPieces, blockerCarve.nullCarves,
+				blockerCarve.nullCarveExtraPieces);
+			std::printf("%s: blocker carve: %zu carves produced MORE volume than they were given "
+				"(worst %.0fx)\n",
+				bspPath.c_str(), blockerCarve.inflatedCarves, blockerCarve.worstInflation);
+			PrintCarveBlockerTable(entities, carveBlockers, blockerCarve);
+			PrintNullCarveEvents(entities, blockerCarve);
+			std::fflush(stdout);
+		}
+
+		size_t passableLeaves = 0;
+		navgen::CarveStats passableCarve;
+		for (size_t pi = 0; pi < duckPassables.passable.size(); ++pi)
+		{
+			const navgen::BlockingVolume &vol = duckPassables.passable[pi].volume;
+			std::vector<navgen::ExtractedLeaf> next;
+			next.reserve(leaves.size());
+
+			for (navgen::ExtractedLeaf &leaf : leaves)
+			{
+				if (leaf.passableIndex >= 0 || !navgen::OverlapsBlockingVolume(leaf.polytope, vol))
+				{
+					leaf.id = static_cast<int>(next.size());
+					next.push_back(std::move(leaf));
+					continue;
+				}
+
+				std::vector<navgen::Polytope> inside, outside;
+				navgen::SplitByPassableVolume(bsp, leaf.polytope, vol, kMapRadius, inside, outside, 0.01,
+					dumpCarve ? &passableCarve : nullptr);
+
+				for (navgen::Polytope &piece : outside)
+				{
+					navgen::ExtractedLeaf split;
+					split.id = static_cast<int>(next.size());
+					split.polytope = std::move(piece);
+					split.passableIndex = leaf.passableIndex;
+					next.push_back(std::move(split));
+				}
+
+				for (navgen::Polytope &piece : inside)
+				{
+					navgen::ExtractedLeaf split;
+					split.id = static_cast<int>(next.size());
+					split.polytope = std::move(piece);
+					split.passableIndex = static_cast<int>(pi);
+					next.push_back(std::move(split));
+					++passableLeaves;
+				}
+			}
+
+			leaves = std::move(next);
+
+			if (dumpCarve)
+			{
+				double volume = 0.0;
+				double worst = 0.0;
+				for (const navgen::ExtractedLeaf &piece : leaves)
+				{
+					double v = piece.polytope.Volume();
+					volume += v;
+					if (v > worst)
+						worst = v;
+				}
+				std::printf("  passable %zu/%zu: %zu leaves, total volume %.0f, biggest leaf %.0f\n",
+					pi + 1, duckPassables.passable.size(), leaves.size(), volume, worst);
+				std::fflush(stdout);
+			}
+		}
+
+		if (dumpCarve)
+		{
+			double carveVolume = 0.0;
+			for (const navgen::ExtractedLeaf &leaf : leaves)
+				carveVolume += leaf.polytope.Volume();
+			std::printf("%s: after carve + passable split: %zu leaves, total volume %.0f cu.units\n",
+				bspPath.c_str(), leaves.size(), carveVolume);
+			std::fflush(stdout);
+		}
+
+		if (dumpCarve && !duckPassables.passable.empty())
+		{
+			std::printf("%s: passable split: %zu leaf/volume bounds tests, %zu splits -- %zu found solid "
+				"(+%zu pieces), %zu found none (+%zu pieces)\n",
+				bspPath.c_str(), passableCarve.tests, passableCarve.boundsHits, passableCarve.solidCarves,
+				passableCarve.solidCarveExtraPieces, passableCarve.nullCarves,
+				passableCarve.nullCarveExtraPieces);
+			PrintNullCarveEvents(entities, passableCarve);
+			std::fflush(stdout);
+		}
+
+		size_t stopLeaves = 0;
+		if (!elevators.movers.empty())
+		{
+			leaves = navgen::SplitLeavesByElevatorStops(bsp, worldModel.headnode[navgen::kHullDuck],
+				carveBlockers, elevators, leaves, kMapRadius, &stopLeaves, dumpElevators);
+			std::printf("%s: elevator stops split out %zu leaves (%zu leaves after carving the shafts)\n",
+				bspPath.c_str(), stopLeaves, leaves.size());
+		}
+
+		if (!duckLadders.empty())
+			std::printf("%s: %zu func_ladder volumes carved out of the walkable leaves\n",
+				bspPath.c_str(), duckLadders.size());
+
+		if (!duckPassables.passable.empty() || !duckPassables.impassable.empty())
+		{
+			std::printf("%s: %zu passable entities split out %zu door/breakable leaves, %zu impassable "
+				"entities carved\n",
+				bspPath.c_str(), duckPassables.passable.size(), passableLeaves,
+				duckPassables.impassable.size());
+		}
+
+		if (!noFloorSplit)
+		{
+			navgen::FloorSupportStats floorStats;
+			size_t beforeFloorSplit = leaves.size();
+			leaves = navgen::SplitLeavesByFloorSupport(bsp, worldModel.headnode[navgen::kHullDuck],
+				supportBlockers, leaves, kMapRadius, &floorStats, dumpSupport);
+			std::printf("%s: floor support split %zu leaves, absorbed %zu floorless pieces into the leaf "
+				"below, dropped %zu unsupported and %zu steep-bottomed pieces (%zu -> %zu leaves)\n",
+				bspPath.c_str(), floorStats.split, floorStats.absorbed, floorStats.dropped,
+				floorStats.noFloor, beforeFloorSplit, leaves.size());
+		}
+
+		std::vector<bool> isCrouchLeaf;
+		{
+			size_t standSplitLeaves = 0;
+			size_t beforeStandSplit = leaves.size();
+			leaves = navgen::SplitLeavesByStandClearance(bsp, worldModel.headnode[navgen::kHullHuman],
+				standBlockers, leaves, kMapRadius, isCrouchLeaf, &standSplitLeaves);
+			size_t crouchLeaves = 0;
+			for (bool crouch : isCrouchLeaf)
+				if (crouch)
+					++crouchLeaves;
+			std::printf("%s: stand clearance split %zu leaves (%zu -> %zu leaves), %zu crouch-only\n",
+				bspPath.c_str(), standSplitLeaves, beforeStandSplit, leaves.size(), crouchLeaves);
+		}
+
+		double totalLeafVolume = 0.0;
+		for (const navgen::ExtractedLeaf &leaf : leaves)
+			totalLeafVolume += leaf.polytope.Volume();
+
+		std::printf("%s: %zu hull-3 empty leaves (%zu affected by %zu blocking entities: %zu fully removed, %zu split into "
+			"multiple pieces), total volume %.0f cu.units\n",
+			bspPath.c_str(), leaves.size(), affectedLeaves, carveBlockers.size(), fullyRemovedLeaves, splitLeaves, totalLeafVolume);
+
+			if (dumpLeaves)
+		{
+			for (const navgen::ExtractedLeaf &leaf : leaves)
+			{
+				navgen::Vec3 c = leaf.polytope.Centroid();
+				navgen::Vec3 mn(1e9, 1e9, 1e9), mx(-1e9, -1e9, -1e9);
+				for (const navgen::Face &f : leaf.polytope.faces)
+				{
+					for (const navgen::Vec3 &v : f.winding)
+					{
+						mn.x = std::min(mn.x, v.x); mn.y = std::min(mn.y, v.y); mn.z = std::min(mn.z, v.z);
+						mx.x = std::max(mx.x, v.x); mx.y = std::max(mx.y, v.y); mx.z = std::max(mx.z, v.z);
+					}
+				}
+				std::printf("  leaf %4d: %2zu faces, volume %10.0f, centroid (%.1f, %.1f, %.1f), "
+					"mins (%.1f, %.1f, %.1f) maxs (%.1f, %.1f, %.1f)\n",
+					leaf.id, leaf.polytope.faces.size(), leaf.polytope.Volume(), c.x, c.y, c.z,
+					mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+			}
+		}
+
+		size_t leafSeams = 0;
+		navgen::MergeResult merged = navgen::MergeAreas(leaves, isCrouchLeaf, duckPassables.passable,
+			maxMergeGroup, &leafSeams);
+
+		std::printf("%s: %zu leaf floor seams -> %zu areas, %zu inter-area connections "
+			"(MergeAreas, max group %zu)\n",
+			bspPath.c_str(), leafSeams, merged.areas.size(), merged.conns.size(), maxMergeGroup);
+
+		navgen::TagElevatorAreas(elevators, merged.areas);
+
+		size_t illFormedAreas = navgen::ValidateAreaFootprints(merged.areas);
+		if (illFormedAreas > 0)
+			std::printf("%s: %zu areas have an ill-formed walkable footprint\n",
+				bspPath.c_str(), illFormedAreas);
+
+		size_t walkConnsBuilt = navgen::BuildWalkConnections(merged.areas, merged.conns);
+		std::printf("%s: %zu candidate walk connections across shared floor seams\n",
+			bspPath.c_str(), walkConnsBuilt);
+
+		size_t splitWalkConns = 0;
+		size_t steepWalkConns = navgen::FilterWalkConnectionsByStep(merged.areas, merged.conns,
+			navgen::kStepHeight, &splitWalkConns, dumpSteps);
+		if (steepWalkConns > 0 || splitWalkConns > 0)
+			std::printf("%s: dropped %zu and trimmed %zu walk connections exceeding %.0f-unit step height\n",
+				bspPath.c_str(), steepWalkConns, splitWalkConns, navgen::kStepHeight);
+
+		if (!elevators.movers.empty())
+		{
+			size_t rides = navgen::BuildElevatorConnections(elevators, merged.areas, merged.conns,
+				dumpElevators);
+			std::printf("%s: %zu elevator ride connections\n", bspPath.c_str(), rides);
+		}
+
+		navgen::PhysicsParams physics;
+		physics.maxSpeed = maxSpeed;
+		navgen::AirmoveSampleParams airmoveParams;
+		airmoveParams.samplesPerUnit = airmoveSamplesPerUnit;
+		airmoveParams.threadCount = threadCount;
+
+		navgen::HullContext duckHull{worldModel.headnode[navgen::kHullDuck], &blockers, &duckLadders,
+			&duckPushes};
+		navgen::HullContext standHull{worldModel.headnode[navgen::kHullHuman], &standBlockers,
+			&standLadders, &standPushes};
+
+		std::vector<double> gravityMultipliers = navgen::CollectGravityMultipliers(entities);
+		if (gravityMultipliers.size() > 1)
+		{
+			std::printf("%s: %zu gravity multipliers from trigger_gravity:", bspPath.c_str(),
+				gravityMultipliers.size());
+			for (double g : gravityMultipliers)
+				std::printf(" x%.2f", g);
+			std::printf("\n");
+		}
+
+		if (airmoveSamplesPerUnit <= 0.0f)
+			std::printf("air move sampling skipped (--airmove-samples 0)\n");
+		else
+		{
+			for (double multiplier : gravityMultipliers)
+			{
+				physics.gravityMultiplier = static_cast<float>(multiplier);
+				physics.gravity = static_cast<float>(PmSim::kGravity * multiplier);
+				navgen::ProbeAirMoves(bsp, duckHull, standHull, airmoveWorlds, merged.areas, merged.conns,
+					physics, airmoveParams, dumpElevators);
+			}
+
+			physics.gravityMultiplier = 1.0f;
+			physics.gravity = PmSim::kGravity;
+		}
+
+		navgen::LadderStats ladders = navgen::BuildLadderConnections(bsp, entities, duckHull, standHull,
+			merged.areas, merged.conns, physics, dumpLadders);
+		if (ladders.entities > 0)
+			std::printf("%s: %zu func_ladder entities, %zu climbable faces, %zu mounted, "
+				"%zu ladder connections\n",
+				bspPath.c_str(), ladders.entities, ladders.climbFaces, ladders.mounts, ladders.conns);
+
+		navgen::TeleportStats teleports = navgen::BuildTeleportConnections(bsp,
+			worldModel.headnode[navgen::kHullHuman], standBlockers, entities, merged.areas, merged.conns,
+			dumpTeleports);
+		if (teleports.entities > 0)
+			std::printf("%s: %zu trigger_teleport entities, %zu teleport connections (%zu mastered, "
+				"%zu no-clients, %zu with no reachable destination)\n",
+				bspPath.c_str(), teleports.entities, teleports.conns, teleports.mastered,
+				teleports.noClients, teleports.unresolvedDest);
+
+		if (airmoveWalkRatio > 0.0)
+		{
+			navgen::AirmovePruneStats pruned = navgen::PruneWalkableAirmoves(merged.areas, merged.conns,
+				physics.maxSpeed, airmoveWalkRatio, dumpAirmovePrune);
+			if (pruned.examined > 0)
+				std::printf("%s: air move walk check dropped %zu of %zu (%zu had no walk route), "
+					"ratio %.1f\n",
+					bspPath.c_str(), pruned.dropped, pruned.examined, pruned.noWalkRoute,
+					airmoveWalkRatio);
+		}
+
+		if (ladderPruneRatio > 0.0)
+		{
+			navgen::AirmovePruneStats pruned = navgen::PruneRedundantLadders(merged.areas, merged.conns,
+				physics.maxSpeed, ladderPruneRatio, dumpAirmovePrune);
+			if (pruned.examined > 0)
+				std::printf("%s: ladder route check dropped %zu of %zu (%zu had no alternative route), "
+					"ratio %.1f\n",
+					bspPath.c_str(), pruned.dropped, pruned.examined, pruned.noWalkRoute,
+					ladderPruneRatio);
+		}
+
+		size_t snappedConns = navgen::SnapConnectionsToFloor(merged.areas, merged.conns);
+		if (snappedConns != merged.conns.size())
+			std::printf("%s: floor-snapped %zu of %zu connection endpoints pairs (%zu had no floor beneath)\n",
+				bspPath.c_str(), snappedConns, merged.conns.size(), merged.conns.size() - snappedConns);
+
+		size_t rawAreaCount = merged.areas.size();
+		std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
+		if (noPrune)
+		{
+			std::printf("%s: %zu spawn point(s) resolved, %zu areas kept (--no-prune)\n",
+				bspPath.c_str(), spawnAreas.size(), merged.areas.size());
+		}
+		else
+		{
+			merged = navgen::PruneUnreachableAreas(merged.areas, merged.conns, spawnAreas);
+			std::printf("%s: %zu spawn point(s) resolved, %zu areas reachable after first pass (%zu void areas pruned)\n",
+				bspPath.c_str(), spawnAreas.size(), merged.areas.size(), rawAreaCount - merged.areas.size());
+		}
+
+		size_t gatelessConns = navgen::BakeConnectionGates(merged.areas, merged.conns);
+		if (gatelessConns > 0)
+		{
+			size_t walkless = 0, airless = 0, ladderless = 0;
+			for (const navgen::MergedConnection &c : merged.conns)
+			{
+				if (c.connType == crossbot_nav::CONN_TELEPORT || c.connType == crossbot_nav::CONN_ELEVATOR)
+					continue;
+				if (c.gateAValid && c.gateBValid)
+					continue;
+				if (c.connType == crossbot_nav::CONN_WALK)
+					++walkless;
+				else if (c.connType == crossbot_nav::CONN_LADDER)
+					++ladderless;
+				else
+					++airless;
+			}
+			std::printf("%s: %zu connections have no gate on one or both sides (%zu walk, %zu air move, "
+				"%zu ladder)\n",
+				bspPath.c_str(), gatelessConns, walkless, airless, ladderless);
+		}
+
+		navgen::DetourStats detourStats = navgen::BuildActivationDetours(bsp,
+			worldModel.headnode[navgen::kHullHuman], standBlockers, entities,
+			duckPassables.passable, merged.areas, merged.conns, dumpActivators);
+		if (detourStats.gatedAreas > 0)
+			std::printf("%s: %zu activation-gated areas, %zu activators, %zu service points "
+				"(%zu areas with no service point)\n",
+				bspPath.c_str(), detourStats.gatedAreas, detourStats.activators,
+				detourStats.servicePoints, detourStats.areasWithoutService);
+
+		if (!visProbes.empty())
+		{
+			navgen::VisIndex visIndex(bsp);
+			navgen::HullTree hull = visIndex.Hull0();
+			int visHeadnode = worldModel.headnode[navgen::kHullPoint];
+			std::vector<navgen::BlockingVolume> probeBlockers =
+				navgen::ExtractVisBlockers(bsp, entities);
+
+			std::printf("%s: %zu leaves, %s VIS data, %zu vis blockers\n", bspPath.c_str(),
+				visIndex.LeafCount(), visIndex.HasVisData() ? "has" : "no", probeBlockers.size());
+
+			for (const VisProbe &probe : visProbes)
+			{
+				int leafA = visIndex.LeafForPoint(probe.a);
+				int leafB = visIndex.LeafForPoint(probe.b);
+				bool pvs = visIndex.LeafVisible(leafA, leafB);
+				bool pvsBack = visIndex.LeafVisible(leafB, leafA);
+				navgen::TraceResult tr = navgen::TraceHull(hull, visHeadnode, probe.a, probe.b);
+
+				std::printf("  probe (%.0f %.0f %.0f) -> (%.0f %.0f %.0f): leaf %d -> %d, "
+					"pvs %s / %s, trace fraction %.4f%s\n",
+					probe.a.x, probe.a.y, probe.a.z, probe.b.x, probe.b.y, probe.b.z, leafA, leafB,
+					pvs ? "visible" : "blocked", pvsBack ? "visible" : "blocked", tr.fraction,
+					tr.startsolid ? " (start solid)" : "");
+			}
+		}
+
+		std::vector<navgen::Vantage> vantages;
+		navgen::VantageStats vantageStats;
+		if (!noVantage)
+		{
+			navgen::VisIndex visIndex(bsp);
+			if (!visIndex.HasVisData())
+				std::fprintf(stderr, "%s: BSP has no VIS data, every vantage pair will be traced\n",
+					bspPath.c_str());
+
+			std::vector<navgen::BlockingVolume> visBlockers =
+				noBlockers ? std::vector<navgen::BlockingVolume>()
+					: navgen::ExtractVisBlockers(bsp, entities);
+
+			vantages = navgen::BuildVantages(bsp, visIndex, visBlockers, merged.areas, vantageParams,
+				&vantageStats);
+
+			std::printf("%s: vantage field: %zu lattice points, %zu sampled (%zu solid), "
+				"%zu/%zu pairs passed PVS, %zu visible, %zu kept (budget %zu over %.0f sq units), "
+				"reduction err mean %.5f max %.5f\n",
+				bspPath.c_str(), vantageStats.latticePoints, vantageStats.sampled,
+				vantageStats.solidRejected, vantageStats.pvsPairs, vantageStats.totalPairs,
+				vantageStats.visiblePairs, vantageStats.kept, vantageStats.budget,
+				vantageStats.footprintArea, vantageStats.meanReductionError,
+				vantageStats.maxReductionError);
+
+			double vantageTotal = vantageStats.candidateSeconds + vantageStats.leafSeconds +
+				vantageStats.pairSeconds + vantageStats.deriveSeconds + vantageStats.reduceSeconds;
+			std::printf("%s: vantage timing: %.1fs total = %.1fs candidates + %.1fs leaves + "
+				"%.1fs pairs (%.1fs in %zu world + %zu blocker traces, %.2f us each) + "
+				"%.1fs derive + %.1fs reduce\n",
+				bspPath.c_str(), vantageTotal, vantageStats.candidateSeconds,
+				vantageStats.leafSeconds, vantageStats.pairSeconds, vantageStats.traceSeconds,
+				vantageStats.worldTraces, vantageStats.blockerTraces,
+				(vantageStats.worldTraces + vantageStats.blockerTraces) > 0
+					? 1e6 * vantageStats.traceSeconds /
+						static_cast<double>(vantageStats.worldTraces + vantageStats.blockerTraces)
+					: 0.0,
+				vantageStats.deriveSeconds, vantageStats.reduceSeconds);
+
+			std::printf("%s: vantage pair loop on %zu threads: slowest bin %.1fs, fastest %.1fs\n",
+				bspPath.c_str(), vantageStats.threads, vantageStats.binWallMax,
+				vantageStats.binWallMin);
+
+			if (vantageParams.verifyNeighbors)
+				std::printf("%s: vantage neighbour check: %zu queries, %zu mismatches, %.1fs "
+					"(not counted in reduce)\n",
+					bspPath.c_str(), vantageStats.neighborChecks, vantageStats.neighborMismatches,
+					vantageStats.verifySeconds);
+		}
+
+		int walkConns = 0, airMoveConns = 0, ladderConns = 0, teleportConns = 0;
+		for (const navgen::MergedConnection &c : merged.conns)
+		{
+			if (c.connType == crossbot_nav::CONN_WALK)
+				++walkConns;
+			else if (c.connType == crossbot_nav::CONN_AIRMOVE)
+				++airMoveConns;
+			else if (c.connType == crossbot_nav::CONN_LADDER)
+				++ladderConns;
+			else if (c.connType == crossbot_nav::CONN_TELEPORT)
+				++teleportConns;
+		}
+
+		if (ladderConns > 0 || teleportConns > 0)
+			std::printf("%s: %d walk connections, %d air move connections, %d ladder connections, "
+				"%d teleport connections\n",
+				bspPath.c_str(), walkConns, airMoveConns, ladderConns, teleportConns);
+		else
+			std::printf("%s: %d walk connections, %d air move connections\n",
+				bspPath.c_str(), walkConns, airMoveConns);
+
+		if (dumpConns)
+		{
+			for (const navgen::MergedConnection &c : merged.conns)
+			{
+				const char *typeName = (c.connType == crossbot_nav::CONN_AIRMOVE) ? "airmove"
+					: (c.connType == crossbot_nav::CONN_TELEPORT) ? "teleport"
+					: (c.connType == crossbot_nav::CONN_LADDER) ? "ladder"
+					: (c.connType == crossbot_nav::CONN_ELEVATOR) ? "elevator" : "walk";
+				bool oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
+
+				std::printf("  %-8s %3d %s %3d  from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)  planes %d/%d",
+					typeName, c.areaA, oneWay ? "->" : "<->", c.areaB,
+					c.pointA.x, c.pointA.y, c.pointA.z, c.pointB.x, c.pointB.y, c.pointB.z,
+					c.planeA, c.planeB);
+
+				if (c.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH)
+					std::printf("  [crouch]");
+
+				if (c.connFlags & crossbot_nav::CONN_FLAG_JUMP)
+					std::printf("  [jump]");
+
+				if (c.connType == crossbot_nav::CONN_AIRMOVE)
+					std::printf("  speed %.0f yaw %.1f jumpBack %.1f fallDamage %.1f flightTime %.2f",
+						c.exitSpeed, c.exitAngle, c.jumpBackDist, c.fallDamage, c.flightTime);
+
+				if (c.connType == crossbot_nav::CONN_LADDER)
+					std::printf("  climb %.0f speed %.0f yaw %.1f fallDamage %.1f flightTime %.2f",
+						(c.pointB - c.pointA).Length(), c.exitSpeed, c.exitAngle, c.fallDamage,
+						c.flightTime);
+
+				if (c.connType == crossbot_nav::CONN_ELEVATOR)
+					std::printf("  ride %.2fs wait %.2fs", c.rideSeconds, c.rideWaitSeconds);
+
+				if (c.connType == crossbot_nav::CONN_TELEPORT)
+					std::printf("  drop %.0f fallDamage %.1f flightTime %.2f",
+						0.5 * PmSim::kGravity * c.flightTime * c.flightTime, c.fallDamage, c.flightTime);
+
+				if (c.gateAValid)
+					std::printf("\n             gateA (%.1f, %.1f, %.1f)-(%.1f, %.1f, %.1f)",
+						c.gateALeft.x, c.gateALeft.y, c.gateALeft.z,
+						c.gateARight.x, c.gateARight.y, c.gateARight.z);
+				if (c.gateBValid)
+					std::printf("\n             gateB (%.1f, %.1f, %.1f)-(%.1f, %.1f, %.1f)",
+						c.gateBLeft.x, c.gateBLeft.y, c.gateBLeft.z,
+						c.gateBRight.x, c.gateBRight.y, c.gateBRight.z);
+
+				std::printf("\n");
+			}
+		}
+
+		if (dumpAreas)
+		{
+			for (const navgen::Area &area : merged.areas)
+			{
+				std::string areaKind;
+				if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
+					areaKind += " crouch";
+				if (area.prism)
+					areaKind += " prism";
+				if (area.areaFlags & (crossbot_nav::NAV_AREA_DOOR | crossbot_nav::NAV_AREA_BREAKABLE))
+				{
+					static const char *kActivation[] = {"touch", "button", "trigger", "attack"};
+					char buf[128];
+					if (area.activation == crossbot_nav::ACT_NONE)
+					{
+						std::snprintf(buf, sizeof(buf), " %s(touch %.2fs)",
+							(area.areaFlags & crossbot_nav::NAV_AREA_DOOR) ? "door" : "breakable",
+							area.openSeconds);
+					}
+					else
+					{
+						size_t blocked = 0;
+						for (const navgen::ActivationDetour &d : area.detours)
+							blocked += d.blocked ? 1 : 0;
+						std::snprintf(buf, sizeof(buf), " %s(%s, %zu entries: %zu ok / %zu blocked, %.2fs)",
+							(area.areaFlags & crossbot_nav::NAV_AREA_DOOR) ? "door" : "breakable",
+							kActivation[area.activation < 4 ? area.activation : 0],
+							area.detours.size(), area.detours.size() - blocked, blocked,
+							area.openSeconds);
+					}
+					areaKind += buf;
+				}
+				if (area.areaFlags & crossbot_nav::NAV_AREA_ELEVATOR)
+				{
+					static const char *kActivation[] = {"touch", "button", "trigger", "attack"};
+					const navgen::ElevatorStop *stop = elevators.Stop(area.elevatorStopId);
+					size_t blocked = 0;
+					for (const navgen::ActivationDetour &d : area.detours)
+						blocked += d.blocked ? 1 : 0;
+					char buf[192];
+					if (stop && stop->isDefault)
+						std::snprintf(buf, sizeof(buf), " elevator(stop %d, default)", area.elevatorStopId);
+					else
+						std::snprintf(buf, sizeof(buf),
+							" elevator(stop %d, %s, %zu entries: %zu ok / %zu blocked, summon %.2fs)",
+							area.elevatorStopId,
+							kActivation[area.activation < 4 ? area.activation : 0],
+							area.detours.size(), area.detours.size() - blocked, blocked, area.openSeconds);
+					areaKind += buf;
+				}
+				navgen::Vec3 c = area.polytope.Centroid();
+				navgen::Vec3 mn(1e9, 1e9, 1e9), mx(-1e9, -1e9, -1e9);
+				for (const navgen::Face &f : area.polytope.faces)
+				{
+					for (const navgen::Vec3 &v : f.winding)
+					{
+						mn.x = std::min(mn.x, v.x); mn.y = std::min(mn.y, v.y); mn.z = std::min(mn.z, v.z);
+						mx.x = std::max(mx.x, v.x); mx.y = std::max(mx.y, v.y); mx.z = std::max(mx.z, v.z);
+					}
+				}
+				std::printf("  area %4d: %2zu leaves, %2zu faces, volume %10.0f, centroid (%.1f, %.1f, %.1f), "
+					"mins (%.1f, %.1f, %.1f) maxs (%.1f, %.1f, %.1f)%s\n",
+					area.id, area.memberLeafIds.size(), area.polytope.faces.size(),
+					area.polytope.Volume(), c.x, c.y, c.z, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z, areaKind.c_str());
+			}
+		}
+
+		if (dumpPlanesAreaId >= 0)
+		{
+			bool found = false;
+			for (const navgen::Area &area : merged.areas)
+			{
+				if (area.id != dumpPlanesAreaId)
+					continue;
+				found = true;
+				std::printf("area %d: %zu exported bound planes%s\n", area.id, area.boundPlanes.size(),
+					area.prism ? " (prism)" : "");
+				for (const navgen::Plane &p : area.boundPlanes)
+					std::printf("  bound: normal (%.6f, %.6f, %.6f) dist %.3f\n",
+						p.normal.x, p.normal.y, p.normal.z, p.dist);
+
+				std::printf("area %d: %zu faces\n", area.id, area.polytope.faces.size());
+				for (size_t fi = 0; fi < area.polytope.faces.size(); ++fi)
+				{
+					const navgen::Face &f = area.polytope.faces[fi];
+					std::printf("  face %2zu: normal (%.6f, %.6f, %.6f) dist %.3f -- %zu verts\n",
+						fi, f.plane.normal.x, f.plane.normal.y, f.plane.normal.z, f.plane.dist, f.winding.size());
+					for (const navgen::Vec3 &v : f.winding)
+						std::printf("      v (%.2f, %.2f, %.2f)\n", v.x, v.y, v.z);
+				}
+			}
+			if (!found)
+				std::fprintf(stderr, "--dump-planes: no area with id %d in the final area set\n", dumpPlanesAreaId);
+		}
+
+		std::vector<navgen::Vec3> pathPoints;
+		std::vector<uint8_t> pathSegmentKinds;
+		std::vector<float> pathSegmentSpeeds;
+		NavPlan::PlanProfile pathProfile;
+		std::vector<navgen::FailedAirmove> failedAirmoves;
+		if (!objPath.empty() || !svgPath.empty() || dumpPath || dumpAirmove)
+		{
+
+			navgen::PhysicsParams planPhysics = physics;
+			if (!gravityMultipliers.empty() && gravityMultipliers.front() < 1.0)
+			{
+				planPhysics.gravityMultiplier = static_cast<float>(gravityMultipliers.front());
+				planPhysics.gravity = static_cast<float>(PmSim::kGravity * gravityMultipliers.front());
+				std::printf("debug path planned at gravity x%.2f\n", gravityMultipliers.front());
+			}
+
+			navgen::PM_MoveSimulator duckSim(bsp, worldModel.headnode[navgen::kHullDuck], blockers,
+				airmoveParams, planPhysics, &duckLadders, &duckPushes);
+			navgen::PM_MoveSimulator standSim(bsp, worldModel.headnode[navgen::kHullHuman], standBlockers,
+				airmoveParams, planPhysics, &standLadders, &standPushes);
+
+			NavPlan::PlanTraceContext traces;
+			traces.duckTrace = duckSim.TraceFn();
+			traces.standTrace = standSim.TraceFn();
+			traces.duckPush = duckSim.PushFn();
+			traces.standPush = standSim.PushFn();
+			traces.gravityMultiplier = planPhysics.gravityMultiplier;
+			traces.physics = standSim.Physics();
+			if (planSpeed > 0.f)
+				traces.physics.maxSpeed = planSpeed;
+			traces.dumpAirmoves = dumpAirmove;
+
+			pathPoints = BuildDebugPath(entities, merged, &traces, &pathSegmentKinds, &failedAirmoves,
+				&pathSegmentSpeeds, dumpPath, &pathProfile);
+		}
+
+		if (!objPath.empty())
+		{
+			ObjStats stats = WriteFloorObj(objPath, merged.areas, pathPoints);
+			std::printf("wrote %s (+ %s): %zu floor faces, %zu crouch areas, %zu path segments\n",
+				objPath.c_str(), BaseName(ReplaceExtension(objPath, ".mtl")).c_str(),
+				stats.floorFaces, stats.crouchAreas, stats.pathSegments);
+		}
+
+		if (!svgPath.empty())
+		{
+			std::vector<navgen::Vec3> tracePoints;
+					std::vector<std::vector<navgen::Vec3>> runupTraces;
+					if (!tracePath.empty())
+					{
+						tracePoints = ReadTraceFile(tracePath);
+						std::printf("read %zu trace points from %s\n", tracePoints.size(), tracePath.c_str());
+						ReportTraceDeviation(pathProfile, tracePoints);
+					}
+
+					std::string mapName = DeriveMapName(bspPath);
+					navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
+									CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves, tracePoints, runupTraces,
+								pathSegmentSpeeds);
+					std::printf("wrote %s\n", svgPath.c_str());
+				}
+
+		if (!vantageSvgPath.empty())
+		{
+			std::string mapName = DeriveMapName(bspPath);
+			navgen::WriteVantageSvg(vantageSvgPath, mapName, merged.areas, vantages, vantageStats);
+			std::printf("wrote %s\n", vantageSvgPath.c_str());
+		}
+
+		if (!navPath.empty())
+		{
+			std::string mapName = DeriveMapName(bspPath);
+			navgen::WriteNavFile(navPath, mapName, bsp.Checksum(), merged.areas, merged.conns,
+				physics.maxSpeed, vantages, static_cast<float>(vantageParams.targetSpacing),
+				static_cast<float>(vantageStats.maxExposure));
+			std::printf("wrote %s (map \"%s\", checksum 0x%08X, %zu vantages)\n", navPath.c_str(),
+				mapName.c_str(), bsp.Checksum(), vantages.size());
+		}
+	}
+	catch (const std::exception &e)
+	{
+		std::fprintf(stderr, "error: %s\n", e.what());
+		return 1;
+	}
+
+	return 0;
+}
+

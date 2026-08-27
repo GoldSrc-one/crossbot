@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <chrono>
+#include <cstdint>
 #include <map>
+#include <memory>
 #include <random>
 #include <unordered_set>
 #include <utility>
@@ -11,6 +14,7 @@
 #include "hull_defs.h"
 #include "nav_format.h"
 #include "nav_math.h"
+#include "work_pool.h"
 
 namespace navgen
 {
@@ -32,7 +36,55 @@ struct AirmoveSample
 	Vec3 landingPos;
 	float yaw = 0.f;
 	float speed = 0.f;
+	AirmoveTrajectory traj;
+	uint64_t itemId = 0;
+	uint32_t seq = 0;
 };
+
+bool SampleOrderLess(const AirmoveSample &a, const AirmoveSample &b)
+{
+	if (a.itemId != b.itemId)
+		return a.itemId < b.itemId;
+	return a.seq < b.seq;
+}
+
+uint64_t Mix64(uint64_t x)
+{
+	x += 0x9E3779B97F4A7C15ull;
+	x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+	x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+	return x ^ (x >> 31);
+}
+
+uint64_t EdgeSeed(unsigned int base, int phase, int areaId, int modeIndex, size_t edgeIndex)
+{
+	uint64_t h = Mix64(static_cast<uint64_t>(base));
+	h = Mix64(h ^ static_cast<uint64_t>(static_cast<unsigned int>(phase)));
+	h = Mix64(h ^ static_cast<uint64_t>(static_cast<unsigned int>(areaId)));
+	h = Mix64(h ^ static_cast<uint64_t>(static_cast<unsigned int>(modeIndex)));
+	h = Mix64(h ^ static_cast<uint64_t>(edgeIndex));
+	return h;
+}
+
+Vec3 AreaCenter(const Area &area)
+{
+	Vec3 sum(0.0, 0.0, 0.0);
+	size_t count = 0;
+
+	for (const Face &face : area.polytope.faces)
+	{
+		for (const Vec3 &v : face.winding)
+		{
+			sum = sum + v;
+			++count;
+		}
+	}
+
+	if (count == 0)
+		return sum;
+
+	return sum * (1.0 / static_cast<double>(count));
+}
 
 struct GatePoint
 {
@@ -54,6 +106,17 @@ struct BinEntry
 	AirmoveTrajectory best;
 	std::vector<AirmoveSample> samples;
 };
+
+enum Mode
+{
+	kModeStand = 0,
+	kModeCrouchJump,
+	kModeDuck,
+	kModeCount,
+};
+
+constexpr size_t kAirmoveTileItems = 32;
+constexpr double kAirmoveMortonCell = 64.0;
 
 constexpr int kFitIterations = 4;
 constexpr double kTukeyTuning = 4.685;
@@ -768,6 +831,61 @@ AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajecto
 	return result;
 }
 
+namespace
+{
+
+struct WorldConfig
+{
+	std::vector<BlockingVolume> duck;
+	std::vector<BlockingVolume> stand;
+	std::unique_ptr<PM_MoveSimulator> standSim;
+	std::unique_ptr<PM_MoveSimulator> crouchJumpSim;
+	std::unique_ptr<PM_MoveSimulator> duckSim;
+};
+
+struct WorkItem
+{
+	LaunchEdge edge;
+	Vec3 mid;
+	size_t areaIndex = 0;
+	int worldIndex = 0;
+	int modeIndex = 0;
+	bool seeded = false;
+	int edgeSamples = 0;
+	uint64_t seed = 0;
+	uint64_t id = 0;
+};
+
+struct EnumRequest
+{
+	size_t areaIndex = 0;
+	int phase = 0;
+	std::vector<LaunchEdge> seed;
+};
+
+struct SampleOutput
+{
+	std::map<long long, BinEntry> bins[kBinCount];
+	size_t simulated = 0;
+	std::unordered_set<int> sourceAreas;
+	std::vector<size_t> recorded;
+};
+
+int ModesFor(const Area &area, int *out)
+{
+	if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
+	{
+		out[0] = kModeDuck;
+		return 1;
+	}
+
+	out[0] = kModeStand;
+	out[1] = kModeCrouchJump;
+	return 2;
+}
+
+}
+
 void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullContext &standHull,
 	const AirmoveWorlds &worlds, const std::vector<Area> &areas, std::vector<MergedConnection> &conns,
 	const PhysicsParams &physics, const AirmoveSampleParams &params, bool dumpElevators)
@@ -785,244 +903,411 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	PhysicsParams duckPhysics = physics;
 	duckPhysics.maxSpeed = physics.maxSpeed * physics.duckSpeedMultiplier;
 
-	std::vector<int> selected = worlds.defaultStopOf;
-	std::vector<BlockingVolume> duckWorld;
-	std::vector<BlockingVolume> standWorld;
+	std::vector<std::unique_ptr<WorldConfig>> configs;
+	std::vector<int> worldOfStop(worlds.stops.size(), 0);
 
-	auto composeWorld = [&]()
+	auto composeWorld = [&](int placedStop)
 	{
-		duckWorld = worlds.baseDuck;
-		standWorld = worlds.baseStand;
+		std::unique_ptr<WorldConfig> config(new WorldConfig());
+
+		std::vector<int> selected = worlds.defaultStopOf;
+		if (placedStop >= 0)
+		{
+			const AirmoveWorldStop &stop = worlds.stops[static_cast<size_t>(placedStop)];
+			if (stop.moverId >= 0 && static_cast<size_t>(stop.moverId) < selected.size())
+				selected[static_cast<size_t>(stop.moverId)] = placedStop;
+		}
+
+		config->duck = worlds.baseDuck;
+		config->stand = worlds.baseStand;
 		for (int stopIndex : selected)
 		{
 			if (stopIndex < 0 || static_cast<size_t>(stopIndex) >= worlds.stops.size())
 				continue;
+
 			const AirmoveWorldStop &stop = worlds.stops[static_cast<size_t>(stopIndex)];
-			duckWorld.push_back(stop.duckVolume);
-			standWorld.push_back(stop.standVolume);
+			config->duck.push_back(stop.duckVolume);
+			config->stand.push_back(stop.standVolume);
 		}
+
+		config->standSim.reset(new PM_MoveSimulator(bsp, standHull.headnode, config->stand, params,
+			physics, standHull.ladders, standHull.pushes));
+		config->crouchJumpSim.reset(new PM_MoveSimulator(bsp, duckHull.headnode, config->duck, params,
+			physics, duckHull.ladders, duckHull.pushes));
+		config->duckSim.reset(new PM_MoveSimulator(bsp, duckHull.headnode, config->duck, params,
+			duckPhysics, duckHull.ladders, duckHull.pushes));
+
+		configs.push_back(std::move(config));
+		return static_cast<int>(configs.size()) - 1;
 	};
 
-	composeWorld();
-
-	PM_MoveSimulator standSim(bsp, standHull.headnode, standWorld, params, physics,
-		standHull.ladders, standHull.pushes);
-	PM_MoveSimulator crouchJumpSim(bsp, duckHull.headnode, duckWorld, params, physics,
-		duckHull.ladders, duckHull.pushes);
-	PM_MoveSimulator duckSim(bsp, duckHull.headnode, duckWorld, params, duckPhysics,
-		duckHull.ladders, duckHull.pushes);
-
-	SweepMode standSweep;
-	standSweep.sim = &standSim;
-	standSweep.name = "stand";
-	standSweep.probeZ = kStandProbeLift;
-	standSweep.launchZ = kStandProbeLift;
-	standSweep.navZAdjust = -kStandProbeLift;
-	standSweep.maxSpeed = physics.maxSpeed;
-
-	SweepMode crouchJumpSweep;
-	crouchJumpSweep.sim = &crouchJumpSim;
-	crouchJumpSweep.name = "crouchjump";
-	crouchJumpSweep.launchZ = kStandProbeLift;
-	crouchJumpSweep.maxSpeed = physics.maxSpeed;
-	crouchJumpSweep.duckHull = true;
-	crouchJumpSweep.drop = false;
-
-	SweepMode duckSweep;
-	duckSweep.sim = &duckSim;
-	duckSweep.name = "duck";
-	duckSweep.maxSpeed = duckPhysics.maxSpeed;
-	duckSweep.duckHull = true;
-
-	std::mt19937 rng(params.seed);
-	std::uniform_real_distribution<float> unit(0.0f, 1.0f);
-
-	std::map<long long, BinEntry> bins[kBinCount];
-	size_t simulated = 0;
-	std::unordered_set<int> sourceAreas;
-	size_t unfitted = 0;
-	size_t areaLaunchEdges = 0;
-	size_t areaRecorded = 0;
-
-	auto runSweep = [&](const SweepMode &mode, const Area &area, const std::vector<LaunchEdge> &edges,
-		bool requireLaunchInside)
+	composeWorld(-1);
+	for (size_t s = 0; s < worlds.stops.size(); ++s)
 	{
-		for (const LaunchEdge &edge : edges)
+		const AirmoveWorldStop &stop = worlds.stops[s];
+		if (stop.isDefault || stop.moverId < 0 ||
+			static_cast<size_t>(stop.moverId) >= worlds.defaultStopOf.size())
+			continue;
+
+		worldOfStop[s] = composeWorld(static_cast<int>(s));
+	}
+
+	SweepMode modes[kModeCount];
+
+	modes[kModeStand].name = "stand";
+	modes[kModeStand].probeZ = kStandProbeLift;
+	modes[kModeStand].launchZ = kStandProbeLift;
+	modes[kModeStand].navZAdjust = -kStandProbeLift;
+	modes[kModeStand].maxSpeed = physics.maxSpeed;
+
+	modes[kModeCrouchJump].name = "crouchjump";
+	modes[kModeCrouchJump].launchZ = kStandProbeLift;
+	modes[kModeCrouchJump].maxSpeed = physics.maxSpeed;
+	modes[kModeCrouchJump].duckHull = true;
+	modes[kModeCrouchJump].drop = false;
+
+	modes[kModeDuck].name = "duck";
+	modes[kModeDuck].maxSpeed = duckPhysics.maxSpeed;
+	modes[kModeDuck].duckHull = true;
+
+	std::vector<int> worldOfArea(areas.size(), 0);
+	for (size_t a = 0; a < areas.size(); ++a)
+	{
+		int stopIndex = areas[a].elevatorStopId;
+		if (stopIndex >= 0 && static_cast<size_t>(stopIndex) < worldOfStop.size())
+			worldOfArea[a] = worldOfStop[static_cast<size_t>(stopIndex)];
+	}
+
+	auto simFor = [&](int worldIndex, int modeIndex) -> const PM_MoveSimulator &
+	{
+		const WorldConfig &config = *configs[static_cast<size_t>(worldIndex)];
+		if (modeIndex == kModeCrouchJump)
+			return *config.crouchJumpSim;
+		if (modeIndex == kModeDuck)
+			return *config.duckSim;
+		return *config.standSim;
+	};
+
+	size_t threads = (params.threadCount > 0) ? params.threadCount : DefaultThreadCount();
+
+	std::vector<size_t> areaLaunchEdges(areas.size(), 0);
+	uint64_t nextItemId = 0;
+	double enumSeconds = 0.0;
+	double sampleSeconds = 0.0;
+	std::vector<double> binTotals(threads, 0.0);
+
+	auto enumerate = [&](const std::vector<EnumRequest> &requests)
+	{
+		std::vector<WorkItem> items;
+		if (requests.empty())
+			return items;
+
+		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+
+		std::vector<double> cost(requests.size(), 0.0);
+		std::vector<std::pair<uint64_t, size_t>> keys(requests.size());
+		for (size_t r = 0; r < requests.size(); ++r)
 		{
-			int edgeSamples = static_cast<int>(std::lround(edge.length * static_cast<double>(params.samplesPerUnit)));
-			if (edgeSamples <= 0)
-				continue;
-
-			float baseYaw = static_cast<float>(std::atan2(edge.outward.y, edge.outward.x) * 180.0 / kPi);
-
-			for (int s = 0; s < edgeSamples; ++s)
+			const Area &area = areas[requests[r].areaIndex];
+			double weight = 0.0;
+			if (requests[r].seed.empty())
 			{
-				double t = unit(rng);
-				float yaw = baseYaw + (unit(rng) * 2.0f - 1.0f) * params.yawSpread;
-				float speed = unit(rng) * mode.maxSpeed;
-
-				float jumpBack = edge.noJumpBack ? 0.0f : unit(rng) * params.jumpBackMax;
-
-				Vec3 edgePos = edge.a + (edge.b - edge.a) * t;
-
-				for (int variant = 0; variant < 2; ++variant)
+				for (const Face &face : area.polytope.faces)
 				{
-					bool jump = (variant == 1);
-					if (jump ? !mode.jump : !mode.drop)
-						continue;
+					if (face.walkable && face.plane.normal.z > kFloorNormalZ)
+						weight += static_cast<double>(face.winding.size());
+				}
+			}
+			else
+			{
+				weight = static_cast<double>(requests[r].seed.size());
+			}
 
-					double setBack = params.inset + (jump ? static_cast<double>(jumpBack) : 0.0);
-					Vec3 launchPos = edgePos - edge.outward * setBack;
-					launchPos.z += params.lift;
+			cost[r] = std::max(1.0, weight);
+			keys[r] = std::make_pair(MortonKey(AreaCenter(area), kAirmoveMortonCell), r);
+		}
 
-					if (!mode.sim->IsSupported(Vec3(launchPos.x, launchPos.y, launchPos.z + mode.probeZ)))
-						continue;
+		std::sort(keys.begin(), keys.end());
+		std::vector<size_t> order(requests.size());
+		for (size_t k = 0; k < keys.size(); ++k)
+			order[k] = keys[k].second;
 
-					if (requireLaunchInside && FindAreaStrict(launchPos, areas) != area.id)
-						continue;
+		size_t binCount = std::min(threads, requests.size());
+		std::vector<std::vector<size_t>> bins = BuildWorkBins(cost, order, kAirmoveTileItems, binCount);
 
-					launchPos.z += mode.launchZ;
+		std::vector<std::vector<WorkItem>> perRequest(requests.size());
+		std::vector<size_t> perRequestEdges(requests.size(), 0);
 
-					int landingArea = -1;
-					AirmoveTrajectory traj = mode.sim->Simulate(launchPos, yaw, speed, jump, areas,
-						area.id, landingArea, mode.navZAdjust);
-					traj.jumpBackDist = jump ? jumpBack : 0.0f;
-					traj.duckHull = mode.duckHull;
+		RunBins(binCount, [&](size_t binIndex)
+		{
+			for (size_t r : bins[binIndex])
+			{
+				const EnumRequest &request = requests[r];
+				const Area &area = areas[request.areaIndex];
+				int worldIndex = worldOfArea[request.areaIndex];
 
-					traj.launchPos.z -= mode.launchZ - mode.probeZ;
-					++simulated;
+				int modeList[kModeCount];
+				int modeCount = ModesFor(area, modeList);
 
-					if (!traj.landed || landingArea < 0)
-						continue;
+				for (int m = 0; m < modeCount; ++m)
+				{
+					int modeIndex = modeList[m];
+					const std::vector<LaunchEdge> *edges = &request.seed;
 
-					long long key = PairKey(area.id, landingArea);
-					if (existingPairs.count(key))
-						continue;
+					std::vector<LaunchEdge> perimeter;
+					if (request.seed.empty())
+					{
+						perimeter = FilterLaunchEdges(simFor(worldIndex, modeIndex), area,
+							modes[modeIndex].probeZ, params);
+						edges = &perimeter;
+					}
 
-					std::map<long long, BinEntry> &bin = bins[BinFor(mode.duckHull, jump)];
-					BinEntry &entry = bin[key];
-					if (entry.samples.empty() || BetterTrajectory(traj, entry.best))
-						entry.best = traj;
+					perRequestEdges[r] += edges->size();
 
-					AirmoveSample sample;
-					sample.launchPos = traj.launchPos;
-					sample.landingPos = traj.landingPos;
-					sample.yaw = traj.exitYaw;
-					sample.speed = traj.exitSpeed;
-					entry.samples.push_back(sample);
+					for (size_t e = 0; e < edges->size(); ++e)
+					{
+						const LaunchEdge &edge = (*edges)[e];
+						int edgeSamples = static_cast<int>(std::lround(
+							edge.length * static_cast<double>(params.samplesPerUnit)));
+						if (edgeSamples <= 0)
+							continue;
 
-					sourceAreas.insert(area.id);
-					++areaRecorded;
+						WorkItem item;
+						item.edge = edge;
+						item.mid = (edge.a + edge.b) * 0.5;
+						item.areaIndex = request.areaIndex;
+						item.worldIndex = worldIndex;
+						item.modeIndex = modeIndex;
+						item.seeded = !request.seed.empty();
+						item.edgeSamples = edgeSamples;
+						item.seed = EdgeSeed(params.seed, request.phase, area.id, modeIndex, e);
+						perRequest[r].push_back(item);
+					}
+				}
+			}
+		});
+
+		for (size_t r = 0; r < requests.size(); ++r)
+		{
+			areaLaunchEdges[requests[r].areaIndex] += perRequestEdges[r];
+			for (WorkItem &item : perRequest[r])
+			{
+				item.id = nextItemId++;
+				items.push_back(item);
+			}
+		}
+
+		enumSeconds += std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - start).count();
+
+		return items;
+	};
+
+	auto sample = [&](const std::vector<WorkItem> &items, SampleOutput &out)
+	{
+		if (items.empty())
+			return;
+
+		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+
+		std::vector<double> cost(items.size(), 0.0);
+		std::vector<std::pair<uint64_t, size_t>> keys(items.size());
+		for (size_t i = 0; i < items.size(); ++i)
+		{
+			const SweepMode &mode = modes[items[i].modeIndex];
+			int variants = (mode.jump ? 1 : 0) + ((mode.drop && !items[i].seeded) ? 1 : 0);
+			cost[i] = static_cast<double>(items[i].edgeSamples) *
+				static_cast<double>(std::max(1, variants));
+			keys[i] = std::make_pair(MortonKey(items[i].mid, kAirmoveMortonCell), i);
+		}
+
+		std::sort(keys.begin(), keys.end());
+		std::vector<size_t> order(items.size());
+		for (size_t k = 0; k < keys.size(); ++k)
+			order[k] = keys[k].second;
+
+		size_t binCount = std::min(threads, items.size());
+		std::vector<std::vector<size_t>> bins = BuildWorkBins(cost, order, kAirmoveTileItems, binCount);
+
+		std::vector<SampleOutput> parts(binCount);
+		std::vector<double> binWall(binCount, 0.0);
+
+		RunBins(binCount, [&](size_t binIndex)
+		{
+			std::chrono::steady_clock::time_point binStart = std::chrono::steady_clock::now();
+
+			SampleOutput &local = parts[binIndex];
+			local.recorded.assign(areas.size(), 0);
+
+			for (size_t index : bins[binIndex])
+			{
+				const WorkItem &item = items[index];
+				const Area &area = areas[item.areaIndex];
+
+				SweepMode mode = modes[item.modeIndex];
+				if (item.seeded)
+					mode.drop = false;
+				mode.sim = &simFor(item.worldIndex, item.modeIndex);
+
+				std::mt19937 rng(static_cast<uint32_t>(item.seed));
+				std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+
+				float baseYaw = static_cast<float>(
+					std::atan2(item.edge.outward.y, item.edge.outward.x) * 180.0 / kPi);
+
+				for (int s = 0; s < item.edgeSamples; ++s)
+				{
+					double t = unit(rng);
+					float yaw = baseYaw + (unit(rng) * 2.0f - 1.0f) * params.yawSpread;
+					float speed = unit(rng) * mode.maxSpeed;
+
+					float jumpBack = item.edge.noJumpBack ? 0.0f : unit(rng) * params.jumpBackMax;
+
+					Vec3 edgePos = item.edge.a + (item.edge.b - item.edge.a) * t;
+
+					for (int variant = 0; variant < 2; ++variant)
+					{
+						bool jump = (variant == 1);
+						if (jump ? !mode.jump : !mode.drop)
+							continue;
+
+						double setBack = params.inset + (jump ? static_cast<double>(jumpBack) : 0.0);
+						Vec3 launchPos = edgePos - item.edge.outward * setBack;
+						launchPos.z += params.lift;
+
+						if (!mode.sim->IsSupported(Vec3(launchPos.x, launchPos.y,
+							launchPos.z + mode.probeZ)))
+							continue;
+
+						if (item.seeded && FindAreaStrict(launchPos, areas) != area.id)
+							continue;
+
+						launchPos.z += mode.launchZ;
+
+						int landingArea = -1;
+						AirmoveTrajectory traj = mode.sim->Simulate(launchPos, yaw, speed, jump, areas,
+							area.id, landingArea, mode.navZAdjust);
+						traj.jumpBackDist = jump ? jumpBack : 0.0f;
+						traj.duckHull = mode.duckHull;
+
+						traj.launchPos.z -= mode.launchZ - mode.probeZ;
+						++local.simulated;
+
+						if (!traj.landed || landingArea < 0)
+							continue;
+
+						long long key = PairKey(area.id, landingArea);
+						if (existingPairs.count(key))
+							continue;
+
+						AirmoveSample record;
+						record.launchPos = traj.launchPos;
+						record.landingPos = traj.landingPos;
+						record.yaw = traj.exitYaw;
+						record.speed = traj.exitSpeed;
+						record.traj = traj;
+						record.itemId = item.id;
+						record.seq = static_cast<uint32_t>(s) * 2u + static_cast<uint32_t>(variant);
+
+						local.bins[BinFor(mode.duckHull, jump)][key].samples.push_back(record);
+						local.sourceAreas.insert(area.id);
+						++local.recorded[item.areaIndex];
+					}
+				}
+			}
+
+			binWall[binIndex] = std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - binStart).count();
+		});
+
+		for (size_t b = 0; b < binCount; ++b)
+		{
+			out.simulated += parts[b].simulated;
+			for (int id : parts[b].sourceAreas)
+				out.sourceAreas.insert(id);
+
+			for (size_t a = 0; a < areas.size(); ++a)
+				out.recorded[a] += parts[b].recorded[a];
+
+			for (int k = 0; k < kBinCount; ++k)
+			{
+				for (const std::pair<const long long, BinEntry> &entry : parts[b].bins[k])
+				{
+					std::vector<AirmoveSample> &dst = out.bins[k][entry.first].samples;
+					dst.insert(dst.end(), entry.second.samples.begin(), entry.second.samples.end());
+				}
+			}
+		}
+
+		sampleSeconds += std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - start).count();
+		for (size_t b = 0; b < binCount; ++b)
+			binTotals[b] += binWall[b];
+	};
+
+	auto finalize = [&](SampleOutput &target)
+	{
+		for (int k = 0; k < kBinCount; ++k)
+		{
+			for (std::pair<const long long, BinEntry> &entry : target.bins[k])
+			{
+				std::vector<AirmoveSample> &samples = entry.second.samples;
+				std::sort(samples.begin(), samples.end(), SampleOrderLess);
+
+				for (size_t i = 0; i < samples.size(); ++i)
+				{
+					if (i == 0 || BetterTrajectory(samples[i].traj, entry.second.best))
+						entry.second.best = samples[i].traj;
 				}
 			}
 		}
 	};
 
-	auto sweepAreaInWorld = [&](const Area &area, const std::vector<LaunchEdge> *seed)
+	SampleOutput out;
+	out.recorded.assign(areas.size(), 0);
+
+	std::vector<EnumRequest> requests;
+	for (size_t a = 0; a < areas.size(); ++a)
 	{
-		auto run = [&](const SweepMode &base, const PM_MoveSimulator &sim)
-		{
-			SweepMode mode = base;
-			if (seed)
-				mode.drop = false;
-
-			std::vector<LaunchEdge> perimeter;
-			if (!seed)
-				perimeter = FilterLaunchEdges(sim, area, mode.probeZ, params);
-
-			areaLaunchEdges += seed ? seed->size() : perimeter.size();
-			runSweep(mode, area, seed ? *seed : perimeter, seed != nullptr);
-		};
-
-		if (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH)
-		{
-
-			run(duckSweep, duckSim);
-			return;
-		}
-
-		run(standSweep, standSim);
-		run(crouchJumpSweep, crouchJumpSim);
-	};
-
-	auto sweepArea = [&](const Area &area, const std::vector<LaunchEdge> *seed)
-	{
-		int stopIndex = area.elevatorStopId;
-		if (stopIndex < 0 || static_cast<size_t>(stopIndex) >= worlds.stops.size())
-		{
-			sweepAreaInWorld(area, seed);
-			return;
-		}
-
-		const AirmoveWorldStop &stop = worlds.stops[static_cast<size_t>(stopIndex)];
-		if (stop.isDefault || stop.moverId < 0 ||
-			static_cast<size_t>(stop.moverId) >= selected.size())
-		{
-			sweepAreaInWorld(area, seed);
-			return;
-		}
-
-		bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
-		const PM_MoveSimulator &probeSim = crouch ? duckSim : standSim;
-		double probeZ = crouch ? 0.0 : kStandProbeLift;
-
-		std::vector<LaunchEdge> perimeter;
-		size_t supportedParked = 0;
-		if (dumpElevators)
-		{
-			perimeter = CollectPerimeterEdges(area);
-			supportedParked = CountSupportedEdges(probeSim, perimeter, probeZ, params);
-		}
-
-		int previous = selected[static_cast<size_t>(stop.moverId)];
-		selected[static_cast<size_t>(stop.moverId)] = stopIndex;
-		composeWorld();
-
-		areaLaunchEdges = 0;
-		areaRecorded = 0;
-		sweepAreaInWorld(area, seed);
-
-		if (dumpElevators)
-		{
-			std::printf("  airmove area %d (mover %d stop %d placed): %zu perimeter edges, "
-				"support %zu parked -> %zu placed, %zu launch edges, %zu samples\n",
-				area.id, stop.moverId, stopIndex, perimeter.size(), supportedParked,
-				CountSupportedEdges(probeSim, perimeter, probeZ, params), areaLaunchEdges,
-				areaRecorded);
-		}
-
-		selected[static_cast<size_t>(stop.moverId)] = previous;
-		composeWorld();
-	};
-
-	for (const Area &area : areas)
-		sweepArea(area, nullptr);
+		EnumRequest request;
+		request.areaIndex = a;
+		request.phase = 0;
+		requests.push_back(request);
+	}
 
 	size_t pushSeedAreas = 0;
 	size_t pushSeedEdges = 0;
-	for (const Area &area : areas)
+	for (size_t a = 0; a < areas.size(); ++a)
 	{
-		bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+		bool crouch = (areas[a].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		const std::vector<PushVolume> *volumes = crouch ? duckHull.pushes : standHull.pushes;
 		if (!volumes || volumes->empty())
 			continue;
 
-		std::vector<LaunchEdge> seed = PushLaunchEdges(area, *volumes);
+		std::vector<LaunchEdge> seed = PushLaunchEdges(areas[a], *volumes);
 		if (seed.empty())
 			continue;
 
 		pushSeedEdges += seed.size();
 		++pushSeedAreas;
-		sweepArea(area, &seed);
+
+		EnumRequest request;
+		request.areaIndex = a;
+		request.phase = 1;
+		request.seed = seed;
+		requests.push_back(request);
 	}
+
+	sample(enumerate(requests), out);
+	finalize(out);
 
 	double maxJumpHeight = static_cast<double>(params.maxJumpHeight) -
 		PmSim::PlainJumpHeight(PmSim::kGravity) + PmSim::PlainJumpHeight(physics.gravity);
 
-	size_t reverseSeeds = 0;
+	std::vector<EnumRequest> reverse;
 	for (int bin : {kBinStandDrop, kBinDuckDrop})
 	{
-		for (const auto &entry : bins[bin])
+		for (const std::pair<const long long, BinEntry> &entry : out.bins[bin])
 		{
 			int from = static_cast<int>(entry.first / 1000000LL);
 			int to = static_cast<int>(entry.first % 1000000LL);
@@ -1038,16 +1323,54 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			if (!SeedEdgeFromLandings(entry.second, seed))
 				continue;
 
-			std::vector<LaunchEdge> seedEdges{seed};
-			sweepArea(areas[static_cast<size_t>(to)], &seedEdges);
-			++reverseSeeds;
+			EnumRequest request;
+			request.areaIndex = static_cast<size_t>(to);
+			request.phase = 2;
+			request.seed.push_back(seed);
+			reverse.push_back(request);
+		}
+	}
+
+	size_t reverseSeeds = reverse.size();
+	if (!reverse.empty())
+	{
+		sample(enumerate(reverse), out);
+		finalize(out);
+	}
+
+	if (dumpElevators)
+	{
+		for (size_t a = 0; a < areas.size(); ++a)
+		{
+			int stopIndex = areas[a].elevatorStopId;
+			if (stopIndex < 0 || static_cast<size_t>(stopIndex) >= worlds.stops.size())
+				continue;
+
+			const AirmoveWorldStop &stop = worlds.stops[static_cast<size_t>(stopIndex)];
+			if (stop.isDefault || stop.moverId < 0)
+				continue;
+
+			bool crouch = (areas[a].areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+			int modeIndex = crouch ? kModeDuck : kModeStand;
+			double probeZ = crouch ? 0.0 : kStandProbeLift;
+
+			std::vector<LaunchEdge> perimeter = CollectPerimeterEdges(areas[a]);
+			size_t parked = CountSupportedEdges(simFor(0, modeIndex), perimeter, probeZ, params);
+			size_t placed = CountSupportedEdges(simFor(worldOfArea[a], modeIndex), perimeter, probeZ,
+				params);
+
+			std::printf("  airmove area %d (mover %d stop %d placed): %zu perimeter edges, "
+				"support %zu parked -> %zu placed, %zu launch edges, %zu samples\n",
+				areas[a].id, stop.moverId, stopIndex, perimeter.size(), parked, placed,
+				areaLaunchEdges[a], out.recorded[a]);
 		}
 	}
 
 	std::map<long long, bool> emitted;
+	size_t unfitted = 0;
 	for (int bin = 0; bin < kBinCount; ++bin)
 	{
-		for (const auto &entry : bins[bin])
+		for (const std::pair<const long long, BinEntry> &entry : out.bins[bin])
 		{
 			if (emitted.count(entry.first))
 				continue;
@@ -1083,9 +1406,11 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	}
 
 	size_t crouchOnly = 0;
-	for (const auto &entry : emitted)
+	for (const std::pair<const long long, bool> &entry : emitted)
+	{
 		if (entry.second)
 			++crouchOnly;
+	}
 
 	std::printf("air move sampling at gravity x%.2f: %zu trajectories at %.2f samples/unit from %zu areas "
 		"(%zu launched), "
@@ -1093,12 +1418,18 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		"(%zu crouch-only, %zu drops seeded a climb back under %.0f units, "
 		"%zu dropped for too few samples to fit a gate)\n",
 		physics.gravityMultiplier,
-		simulated, params.samplesPerUnit, areas.size(), sourceAreas.size(),
-		bins[kBinStandDrop].size() + bins[kBinStandJump].size() + bins[kBinDuckDrop].size() +
-			bins[kBinDuckJump].size(),
-		bins[kBinStandDrop].size(), bins[kBinStandJump].size(), bins[kBinDuckDrop].size(),
-		bins[kBinDuckJump].size(), emitted.size(), crouchOnly, reverseSeeds, maxJumpHeight,
-		unfitted);
+		out.simulated, params.samplesPerUnit, areas.size(), out.sourceAreas.size(),
+		out.bins[kBinStandDrop].size() + out.bins[kBinStandJump].size() +
+			out.bins[kBinDuckDrop].size() + out.bins[kBinDuckJump].size(),
+		out.bins[kBinStandDrop].size(), out.bins[kBinStandJump].size(),
+		out.bins[kBinDuckDrop].size(), out.bins[kBinDuckJump].size(), emitted.size(), crouchOnly,
+		reverseSeeds, maxJumpHeight, unfitted);
+
+	std::printf("  air move sampling on %zu threads: %.1fs launch-edge scan + %.1fs simulation "
+		"(slowest bin %.1fs, fastest %.1fs)\n",
+		threads, enumSeconds, sampleSeconds,
+		*std::max_element(binTotals.begin(), binTotals.end()),
+		*std::min_element(binTotals.begin(), binTotals.end()));
 
 	if (pushSeedEdges > 0)
 		std::printf("  %zu push-field launch edges seeded across %zu areas\n", pushSeedEdges,
@@ -1106,4 +1437,3 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 }
 
 }
-

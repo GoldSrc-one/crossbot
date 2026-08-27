@@ -17,6 +17,7 @@ constexpr double kCollinearEpsilon = 0.1;
 constexpr double kMinRimLength = 0.1;
 constexpr double kPlaneNormalEpsilon = 1e-4;
 constexpr double kPlaneDistEpsilon = 0.01;
+constexpr double kLethalProbeLift = 1.0;
 constexpr double kOnBoundaryEpsilon = 0.1;
 constexpr double kMinNotchArea = 1.0;
 constexpr double kMinFragmentVolume = 1.0;
@@ -880,6 +881,58 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 		*statsOut = stats;
 
 	return out;
+}
+
+
+size_t DropLethalFloorLeaves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
+	const std::vector<BlockingVolume> &hurtVolumes, std::vector<ExtractedLeaf> &leaves)
+{
+	if (hurtVolumes.empty() || leaves.empty())
+		return 0;
+
+	std::vector<ExtractedLeaf> kept;
+	kept.reserve(leaves.size());
+
+	for (const ExtractedLeaf &leaf : leaves)
+	{
+		const Face *floorFace = LowestFloorFace(leaf.polytope);
+		bool lethal = false;
+
+		if (floorFace)
+		{
+			Vec3 stand = WindingCentroid(floorFace->winding);
+			stand.z += kLethalProbeLift;
+
+			for (const BlockingVolume &vol : hurtVolumes)
+			{
+				if (stand.x < vol.mins.x || stand.x > vol.maxs.x ||
+					stand.y < vol.mins.y || stand.y > vol.maxs.y || stand.z >= vol.maxs.z)
+					continue;
+
+				Vec3 entry = stand;
+				entry.z = vol.mins.z + kLethalProbeLift;
+				if (entry.z <= stand.z)
+				{
+					lethal = true;
+					break;
+				}
+
+				TraceResult tr = TraceHullWithEntities(bsp, headnode, blockers, stand, entry);
+				if (!tr.startsolid && tr.fraction >= 1.0f)
+				{
+					lethal = true;
+					break;
+				}
+			}
+		}
+
+		if (!lethal)
+			kept.push_back(leaf);
+	}
+
+	size_t dropped = leaves.size() - kept.size();
+	leaves.swap(kept);
+	return dropped;
 }
 
 }

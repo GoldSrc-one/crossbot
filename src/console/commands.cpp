@@ -186,6 +186,19 @@ namespace
 		BotManager::PrintSenseStatus();
 	}
 
+	void Cmd_CrossBotVantageStatus()
+	{
+		if (CMD_ARGC() < 4)
+		{
+			BotManager::PrintVantageStatus(nullptr);
+			return;
+		}
+
+		Vector at(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
+			static_cast<float>(atof(CMD_ARGV(3))));
+		BotManager::PrintVantageStatus(&at);
+	}
+
 	void Cmd_CrossBotFireStatus()
 	{
 		BotManager::PrintFireStatus();
@@ -586,6 +599,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_aim_test", Cmd_CrossBotAimTest);
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
+	ADD_SERVER_COMMAND("crossbot_vantage_status", Cmd_CrossBotVantageStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
 	ADD_SERVER_COMMAND("crossbot_weapon_usage", Cmd_CrossBotWeaponUsage);

@@ -5,6 +5,7 @@
 #include <cstddef>
 
 #include "../game/ent_handle.h"
+#include "../nav/nav_vantage.h"
 
 struct CBot;
 
@@ -28,6 +29,19 @@ enum SuspicionKind : unsigned char
 	KIND_MONSTER,
 	KIND_OTHER,
 	KIND_COUNT,
+};
+
+enum LookSource : unsigned char
+{
+	LOOK_NONE = 0,
+	LOOK_DISABLED,
+	LOOK_GATED,
+	LOOK_AIM,
+	LOOK_SENSE,
+	LOOK_VANTAGE_IDLE,
+	LOOK_VANTAGE_PATH,
+	LOOK_VANTAGE_OFFPATH,
+	LOOK_NO_VANTAGE,
 };
 
 struct Suspicion
@@ -67,7 +81,15 @@ struct State
 	int lookEntries = 0;
 	SuspicionKind lookKind = KIND_OTHER;
 	bool lookValid = false;
+
+	Nav::VantageBlend vantage;
+	float nextVantageTime = 0.f;
+	LookSource lookSource = LOOK_NONE;
 };
+
+bool VantageEnabled();
+
+float ConeWeight(const Nav::VantageBlend &blend, const Vector &dir);
 
 bool Enabled();
 
@@ -100,5 +122,7 @@ const Suspicion *Freshest(const CBot &bot);
 const char *SourceName(SuspicionSource source);
 
 const char *KindName(SuspicionKind kind);
+
+const char *LookSourceName(LookSource source);
 
 }

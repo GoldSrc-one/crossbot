@@ -29,6 +29,9 @@ constexpr int kSfDoorUseOnly = 256;
 constexpr int kSfWallStartOff = 1;
 constexpr int kSfConveyorNotSolid = 2;
 constexpr int kSfPushStartOff = 1;
+constexpr int kSfHurtStartOff = 2;
+constexpr int kSfHurtNoClients = 8;
+constexpr double kLethalHurtDamage = 100.0;
 
 constexpr double kDefaultPushSpeed = 100.0;
 constexpr double kGravityEpsilon = 0.005;
@@ -304,6 +307,36 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 	return result;
 }
 
+std::vector<BlockingVolume> ExtractVisBlockers(const BspFile &bsp, const std::vector<Entity> &entities)
+{
+	std::vector<BlockingVolume> result;
+
+	for (size_t entIndex = 0; entIndex < entities.size(); ++entIndex)
+	{
+		const Entity &ent = entities[entIndex];
+		if (!IsBlockingEntity(ent))
+			continue;
+
+		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
+		if (modelIndex <= 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
+			continue;
+
+		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
+		if (model.headnode[kHullPoint] < 0)
+			continue;
+
+		BlockingVolume vol;
+		vol.headnode = model.headnode[kHullPoint];
+		vol.origin = ParseEntityOrigin(ent.Get("origin"));
+		vol.mins = Vec3(model.mins[0], model.mins[1], model.mins[2]) + vol.origin;
+		vol.maxs = Vec3(model.maxs[0], model.maxs[1], model.maxs[2]) + vol.origin;
+		vol.entityIndex = static_cast<int>(entIndex);
+		result.push_back(vol);
+	}
+
+	return result;
+}
+
 std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex)
 {
@@ -387,6 +420,54 @@ std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector
 			model.maxs[2] + hullMaxs.z) + push.volume.origin;
 		push.volume.entityIndex = static_cast<int>(i);
 		result.push_back(push);
+	}
+
+	return result;
+}
+
+
+std::vector<BlockingVolume> ExtractHurtVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
+	int hullIndex)
+{
+	Vec3 hullMins(kHumanHullMinX, kHumanHullMinY, kHumanHullMinZ);
+	Vec3 hullMaxs(kHumanHullMaxX, kHumanHullMaxY, kHumanHullMaxZ);
+	if (hullIndex == kHullDuck)
+	{
+		hullMins = Vec3(kDuckClipHullMinX, kDuckClipHullMinY, kDuckClipHullMinZ);
+		hullMaxs = Vec3(kDuckClipHullMaxX, kDuckClipHullMaxY, kDuckClipHullMaxZ);
+	}
+
+	std::vector<BlockingVolume> result;
+
+	for (size_t i = 0; i < entities.size(); ++i)
+	{
+		const Entity &ent = entities[i];
+		if (ent.Get("classname") != "trigger_hurt")
+			continue;
+
+		if ((ParseInt(ent.Get("spawnflags"), 0) & (kSfHurtStartOff | kSfHurtNoClients)) != 0)
+			continue;
+
+		if (ParseDouble(ent.Get("dmg"), 0.0) < kLethalHurtDamage)
+			continue;
+
+		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
+		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= bsp.Models().size())
+			continue;
+
+		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
+		if (model.headnode[hullIndex] < 0)
+			continue;
+
+		BlockingVolume vol;
+		vol.headnode = model.headnode[hullIndex];
+		vol.origin = ParseEntityOrigin(ent.Get("origin"));
+		vol.mins = Vec3(model.mins[0] + hullMins.x, model.mins[1] + hullMins.y,
+			model.mins[2] + hullMins.z) + vol.origin;
+		vol.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
+			model.maxs[2] + hullMaxs.z) + vol.origin;
+		vol.entityIndex = static_cast<int>(i);
+		result.push_back(vol);
 	}
 
 	return result;

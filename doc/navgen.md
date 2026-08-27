@@ -14,6 +14,11 @@ Command-line tool with extensive debug flags:
 - `--dump-steps` - every walk connection the step filter trimmed or dropped: area pair, shallowest
   crossing, both floor heights, surviving walkable runs, each floor face's normal z and 2D offset
 - `--dump-support` - every leaf fragment dropped as unsupported: floor centroid, floor normal, volume
+- `--dump-sky` - classify every merged area's floor by the BSP leaf contents just below it, list the
+  lethal `trigger_hurt` volumes, and report how much walkable footprint stands on sky, how much stands
+  inside a kill volume, and the fifteen largest areas with their bounds. This is the flag that found
+  xen_dm's void floor; `world contents empty under the floor` well above a few percent means the mesh
+  is standing on something that is not world geometry
 - `--dump-airmove` - air-move launch derivation: why no funnel launch was found, every re-simulation
   miss with its launch, yaw, speed and where it landed, every rescaled retry with the speed it
   corrected to and the wanted/travelled distances behind it, and every `retract` attempt with the
@@ -21,6 +26,17 @@ Command-line tool with extensive debug flags:
 - `--dump-planes <id>` - one final area's exact plane list (normal+dist) and face windings
 - `--dump-obj <path>` - walkable floor of every area as OBJ mesh (+ MTL): crouch areas colored apart, planned route as ribbon
 - `--dump-svg <path>` - top-down SVG of final area graph
+- `--dump-vantage-svg <path>` - sample the visibility field and write it as its own top-down SVG: one glyph
+  per vantage point with its watch directions, exposure and camp focus. Tuned by `--vantage-grid`,
+  `--vantage-spacing`, `--vantage-cone` and `--vantage-neighbors`; see `vantage_sampler.cpp` below
+- `--vantage-verify-neighbors` - cross-check every nearest-neighbour query the reduction makes against a
+  brute-force scan and report mismatches
+- `--no-vantage` - skip the visibility field. The `.nav` is still valid and still v18, it just carries no
+  vantage section, and bots on it lose the idle look and the cone weighting. This is the fast-iteration
+  switch: the field is the single most expensive thing navgen does (see `vantage_sampler.cpp`)
+- `--dump-vis-probe "x y z x y z"` - what the visibility sampler sees between two world points: the BSP leaf
+  each lands in, whether the PVS links them (both directions), and the hull-0 traceline result. Repeatable.
+  This is the primitive for validating the PVS and the synthesized point hull against a known-good answer
 - `--dump-airmove-prune` - the walk-vs-air comparison behind every kept or dropped air move, and the
   walk+air-vs-ladder comparison behind every kept or dropped ladder connection
 - `--dump-ladders` - ladder discovery: each `func_ladder`'s hull-3 volume, why each face was kept or
@@ -69,9 +85,14 @@ Command-line tool with extensive debug flags:
   is split out as its own tagged leaf (debug). Doors already claimed as elevators are unaffected:
   they never reach the passable path
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
+- `--no-lethal` - keep floors and routes that only a fall through a lethal `trigger_hurt` can
+  reach (debug: isolate what the lethal prune removes; see `floor_support.cpp`)
 - `--max-merge-group <n>` - most leaf groups one merge may fuse (default 64). `1` blocks the first
   absorption, so nothing merges at all and each BSP hull-3 leaf becomes its own area — this replaces the
   old `--no-merge`, whose output it reproduces exactly
+- `--threads <n>` - worker threads for air-move sampling and vantage pair checking. Defaults to one per
+  logical processor plus one; `1` is a genuinely serial path with no thread spawned. Output does not
+  depend on this value - see `work_pool.cpp`
 - `--no-prune` - skip PruneUnreachableAreas (debug: keep areas unreachable from any spawn)
 - `-o <path>` - write baked .nav file
 
@@ -241,6 +262,7 @@ Candidates sorted by seam length descending (longest seams first). Each candidat
   what stops a slope beside a floor from exporting a gate spanning the part of the seam that is 60 units up
 - `ProbeAirMoves`: samples launch edges, simulates jumps/drops, fits gates to successful samples
 - `SnapConnectionsToFloor`: walk = both endpoints to side A floor; air move = launch only (landing = sim result)
+- `PruneLethalConnections`: drops any route whose chord crosses a lethal `trigger_hurt` (see `reachability.cpp`)
 - `PruneUnreachableAreas`: BFS from spawn areas over connections (respects one-way)
 - `BakeConnectionGates`: runs shared planner code to build gates, lifts endpoints to true floor
 
@@ -311,6 +333,51 @@ For each connection:
 7. **Select best per bin** - prefer: jump > drop; shorter flight time; less fall damage
 8. **Fit gates** - `FitGate` on launch/landing clouds (robust Tukey-weighted PCA segment, local yaw/speed regression at ends)
 9. **Store on connection** - gates, exitSpeed/Yaw, jumpBackDist, fallDamage, flightTime, launchPos/landingPos
+
+### Threading
+The sampler is split into an enumerate pass and a sample pass, both binned by `work_pool.cpp`, with the
+reverse-jump seeds forming a barrier between two such rounds (they are derived from the drop bins, so
+they cannot be enumerated until every drop has landed).
+
+- **Enumerate** — one work item per launch edge. Areas are Morton-sorted by centroid and binned with the
+  perimeter vertex count as the cost, which is known before any trace runs. Each worker runs
+  `FilterLaunchEdges` for its areas; results are written into per-request slots and flattened in request
+  order, so the item list and its ids do not depend on the thread count.
+- **Sample** — items Morton-sorted by edge midpoint, cost `edgeSamples * variants`, tile size 32. Nearby
+  edges land in the same bin so their trajectories walk the same BSP subtrees, and summed cost is near
+  equal across bins. On crossfire this holds 5.1s against 3.3s, a 1.55x spread.
+
+Three pieces of shared mutable state had to go:
+
+1. **The elevator world was mutated mid-sweep.** Each area with a non-default elevator stop used to
+   rewrite the blocker vectors that the three `PM_MoveSimulator`s hold *by reference*. Now every distinct
+   world — the default plus one per placed stop — is composed once up front into its own immutable
+   `WorldConfig` with its own simulator trio, and a work item just carries a world index. This is a win
+   serially too: the old path reallocated two blocker vectors twice per elevator area.
+2. **One shared `std::mt19937`.** Each launch edge now seeds its own generator from
+   `splitmix64(seed, phase, areaId, modeIndex, edgeIndex)` — deliberately *not* mixed with the thread or
+   bin index, so an edge draws the same stream whichever worker runs it. The gravity multiplier is
+   excluded from the mix, preserving the old behaviour where each gravity pass re-runs the same stream.
+3. **The four bins accumulated across areas.** Each worker fills private bins that are merged afterwards.
+
+Per-edge seeding resamples, so air-move output shifts relative to the single-stream version — see
+"Sampling noise" below. Everything else about the result is fixed: each `AirmoveSample` carries the
+`(workItemId, sampleIndex, variant)` it came from, the merge sorts every pair's cloud back into that
+order, and `best` is re-folded over the sorted cloud rather than merged from per-worker bests. `FitGate`
+therefore sees the same sequence, in the same floating-point summation order, for any `--threads`.
+
+On crossfire the simulation goes from 29.5s to 5.4s. Launch-edge enumeration is under 0.1s either way.
+
+### Sampling noise
+Connection counts move by a percent or two when the random stream changes, because a pair whose sample
+cloud is marginal can fall either side of `FitGate`'s minimum-sigma test. This is inherent to the Monte
+Carlo sampling, not to any particular stream: on crossfire the per-edge-seeded build finds 1391 air-move
+connections against the single-stream build's 1367 (+1.8%), and across the 50 test maps the deltas are
+between -2 and +2 with **reachability identical on every map**. Raising `--airmove-samples` collapses the
+gap — at 16 samples/unit the two agree on `test29_ladder3` and `test23_precise`, and the single-stream
+build swings by the same ±1 between sample rates on its own.
+
+If you are comparing two navgen builds, compare reachable-area counts, not air-move connection counts.
 
 ### FitGate (robust segment fitting)
 - Iteratively reweighted (Tukey biweight, 4 iterations)
@@ -673,6 +740,40 @@ Every floor face of the leaf, not just the lowest one. A leaf beside a ramp hold
 ### Patch Cutting
 A supported patch only has to be cut out where it stops being supported, so an edge it shares with another supported patch is a seam and stays uncut. There is no such thing as a patch supported by ground a step below any more: a floor face is supported where solid is directly under it and nowhere else, and the space over the ground below is reunited with that ground by absorption rather than by inventing floor at the upper height.
 
+### DropLethalFloorLeaves
+`trigger_hurt` with `dmg >= 100` is not an obstacle, it is a floor deleter. One tick of it takes a full
+health bar, so any standing spot you can only arrive at by falling through one is not a place a bot can
+be — and, unlike a wall, nothing in the leaf pipeline notices it, because a trigger brush is not solid in
+any hull.
+
+The test is per leaf, on its lowest floor face's centroid. The floor is dead when it is inside a lethal
+volume's xy footprint, below that volume's top, and a duck-hull trace straight up from the floor into the
+volume's underside comes back clear. The upward trace is what keeps the rule narrow: a room under a lava
+pit has a ceiling, the trace stops on it, and the room survives. An open column under a kill plane has
+nothing in the way, and the floor at the bottom of it goes.
+
+Volumes are extracted at `kHullDuck`, so a floor already inside the trigger reports `entry.z <= stand.z`
+and is dropped without a trace. `SF_TRIGGER_HURT_START_OFF` and `SF_TRIGGER_HURT_NO_CLIENTS` triggers are
+skipped; negative `dmg` (healing) never qualifies.
+
+**Why the leaf stage and not reachability.** The obvious place for this is a connection cut plus the
+existing unreachable-area prune, and that is what was tried first: it removed 550 connections on xen_dm
+and pruned nothing. `MergeAreas` had already fused the void-floor leaf with real ledges above it — area
+309 spanned z −2286 to −1758 in one prism — so by the time areas exist there is no longer a void area to
+prune. The kill volume has to be applied while leaves are still separate.
+
+**What it is worth.** On xen_dm the map's whole footprint sits over a clip brush at z ≈ −2304, under a
+map-wide `dmg 10000` slab at −2160. That floor was 32.9M of the mesh's 44.4M sq units of walkable
+footprint — 74% of the map — and it drove the vantage sampler quadratically: 221k lattice candidates
+instead of 53k, and the pair loop goes with the square of that. Dropping 40 leaves takes the footprint to
+12.2M and the whole navgen run to 3m34s; before it, the run was abandoned twice, once at 575s without
+having finished. `pool_party` is the other big one: 616 of
+its 2800 floor faces (29.5% of its footprint) stood *inside* a `dmg 200` trigger, and are now gone.
+
+Across the 50 test maps and the 19 HLDM maps, only four have a qualifying volume: xen_dm (40 leaves),
+pool_party (88), snark_pit (1) and rocket_frenzy (1). `--no-lethal` restores the old behaviour for
+comparison.
+
 ## stand_classifier.cpp
 
 ### SplitLeavesByStandClearance
@@ -708,6 +809,140 @@ that silently double-counts — on test51 that inflated leaf volumes by up to 15
 crouch-only. Cutting is supposed to make fragments uniform; where it does not quite, ducking in a spot that
 allows standing costs nothing, while standing in a spot that does not wedges the bot.
 
+## vantage_sampler.cpp
+
+### What a vantage is
+A sampled eye position carrying a visibility signature: where a bot standing there should watch, how exposed the spot is, and how much of that exposure a single facing covers. `BuildVantages` runs after `PruneUnreachableAreas` (which renumbers areas), and since the field became a `.nav` section it runs on **every** navgen invocation unless `--no-vantage` is passed.
+
+**That is not free, and it is now the dominant cost of a run.** On crossfire the whole invocation went from 8.8s to 47.8s at `--threads 13`; 38.7s of that is the vantage field, and 36.4s of *that* is the pair loop. The full 50-map test sweep in `generate_all_svgs.ps1` runs in 164s. `--no-vantage` exists for iterating on unrelated navgen stages, and the `.nav` it writes is valid — bots simply fall back to no idle look and unweighted senses (`doc/bot.md`, *Where the bot looks when it has no target*).
+
+| Field | Meaning |
+| --- | --- |
+| `watch[]` | up to 4 `WatchDir{yaw, pitch, spread, amount}`, `amount`-descending. `amount` is the fraction of everything that can see this spot arriving from that cone; `spread` is the weighted RMS angular deviation inside it, in degrees |
+| `exposure` | fraction of all sampled vantages in the map with line of sight to this one |
+| `focus[4]` | fraction of the *visible* set inside FOV 90 / 45 / 22.5 / 11.25 around `watch[0]`. `focus[3]` near 1 means one narrow facing covers nearly every sightline in: a camping position |
+
+### The internal datum is a direction histogram
+Sampling accumulates a yaw x pitch weight histogram per vantage (64 x 8 by default), and everything above is derived from it. The histogram is working memory, never output. It is what makes the reduction well-defined: a fixed-length vector has a distance, a variable-length cluster list does not.
+
+Pitch is binned over +/-45 degrees with clamping rather than the full +/-90. Sightlines steeper than that are rare and their exact pitch does not matter, and spending the bins near the horizon is what lets `focus[3]`'s 11.25-degree cone span more than a single bin.
+
+### Grid sampling
+The lattice is **world-aligned**, not area-aligned, so neighbouring areas agree on cell centres and dedup is exact. For each lattice point, every walkable floor face of the area is tested with `Distance2DToWinding` and contributes its own `FloorHeightAt` — per face, not per area, because a prism area (stairs, a ramp) carries several floor faces at different heights and each is a real standing position.
+
+**Eye height.** Area z is in duck-hull-origin space, which is what `kStandProbeLift = kDuckClipHullMinZ - kHumanHullMinZ = 18` exists to undo. With HLSDK's `VEC_VIEW.z = 28` and `VEC_DUCK_VIEW.z = 12` that gives `kDuckEyeLift = 12` (area z + 12 = real floor + 30) and `kStandEyeLift = 46` (real floor + 64). A `NAV_AREA_CROUCH` area uses the duck lift; everything else uses the mean, +29, because the bot may be in either stance.
+
+Two candidates in the same lattice column within 32 units of z are the same spot and merge — a player cannot occupy two floors that close together. Any eye point that classifies `CONTENTS_SOLID` in hull 0 is dropped.
+
+### Pair traces
+Vantages are bucketed by hull-0 leaf and the pair loop walks them in leaf order, so each worker's `VisRowReader` single-row PVS cache hits on essentially every query. Leaf index is depth-first BSP order, so leaf order is already spatially coherent — that is why the pair loop keeps it instead of re-sorting by Morton code when it bins work across threads, and why threading it changed no output at all. A pair that fails the PVS is skipped outright; on crossfire that removes two thirds of the 553M pairs before any tracing happens.
+
+Each surviving pair costs one hull-0 traceline plus, for any blocker whose AABB the segment crosses, one trace against that blocker's own hull-0 tree. The blocker set is `ExtractVisBlockers` — the *permanently* solid brush entities only, at hull 0 and without the movement hull's bounds expansion. Doors and breakables are deliberately excluded: they open, and a mesh that assumes they are shut is wrong most of the time.
+
+Visibility is symmetric, so one trace updates both endpoints' histograms — which is exactly why the histogram has to be atomic once the loop is threaded (see "Where the time goes"). Every vantage represents the same footprint cell by construction, so a uniform weight of 1 per pair is already area-proportional.
+
+### Watch directions: peak extraction, not DBSCAN
+DBSCAN on a sphere with a fixed `eps` degenerates in open areas — everything merges into one cluster. Instead, on a working copy of the histogram: seed at the max bin, mean-shift three passes over the bins inside `--vantage-cone` of the current direction, record the cone's weight/spread, zero those bins, repeat. Stop at 4 directions or when under 5% of the weight is left. This is the same refinement `LookDirection` already does in `bot_sense.cpp`.
+
+`focus[]` is then measured on the *original* histogram — the peak extraction zeroes bins as it goes, so the working copy no longer describes the spot.
+
+### Reduction: the error metric must be scale-free
+Greedy decimation, lowest interpolation error first, until `kept <= footprintArea / spacing^2`. For each candidate, the `--vantage-neighbors` nearest survivors are found, IDW-weighted by `1/(d^2+1)`, and the candidate is scored on how well that interpolation reproduces it.
+
+**The signature is split into shape and magnitude, and this is load-bearing.** The first attempt scored raw L1 distance between un-normalized histograms, which is dominated by vector magnitude: an enclosed spot has a small vector, so its absolute error is small however distinctive it is, and it gets deleted first. On crossfire that kept a set averaging exposure 0.306 against a population average of 0.158 — it preserved the open outdoor bowl and erased the bunker interiors, exactly backwards for a tactical field. Normalizing each histogram to unit L1 and scoring exposure separately (weighted `kExposureErrorWeight = 2` so the two terms are comparable) brings the kept set to 0.133, slightly *below* the population mean, and restores the interior floors.
+
+The only stop guard is never dropping below `neighbors + 1` vantages.
+
+### Where the time goes
+Measured on crossfire at defaults (33266 vantages, 553M pairs), on a 6-core / 12-thread box at
+`--threads 13`. The serial column is the same binary at `--threads 1`.
+
+| Phase | Serial | 13 threads |
+| --- | --- | --- |
+| Candidate grid | 0.0s | 0.0s |
+| Solid rejection + leaf assignment | 0.0s | 0.0s |
+| **Pair loop** | **276.2s** | **40.1s** |
+| Derive (histogram to watch dirs and focus) | 0.6s | 0.7s |
+| Reduction (33266 down to 113) | 1.9s | 1.9s |
+| Whole navgen run, vantage stage included | 313.8s | 52.6s |
+
+The pair loop is the entire cost and it is where all the parallelism went: **6.9x** on 6 physical cores.
+Inside it, hull-0 tracelines are 213.9s of the 276.2s serial figure (184.8M traces at 1.16 us); the rest
+is the PVS test and histogram binning over all 553M pairs.
+
+`traceSeconds` is *summed across workers*, not wall time, so at 13 threads it reads 380.5s against a
+40.1s wall — that is the CPU time, and the per-trace figure inflates from 1.16 us to 2.06 us because the
+workers contend for memory bandwidth and share L3. It also carries its own measurement cost: two
+`steady_clock` reads per traced pair, worth about 1.8s of the 40.1s (4.5%). It is kept because the
+trace-versus-PVS split is what tells you the tracelines are the only thing worth optimising.
+
+**Why the histogram is atomic.** A pair `(i, j)` writes *both* `hist[i]` and `hist[j]` — visibility is
+symmetric and one trace updates both endpoints — so no partition of the outer loop gives a worker
+exclusive ownership of what it writes. The histogram is therefore one flat
+`vector<atomic<uint32_t>>` incremented with relaxed `fetch_add`. Weights are always exactly 1, so integer
+counters lose nothing and, unlike float accumulation, give a bit-identical result whatever order the
+threads interleave in. (C++17 does not guarantee value-initialising an atomic zeroes it — that is C++20's
+P0883 — so the array is explicitly stored to 0 first.)
+
+**Why the cost model counts PVS hits exactly.** Rows are binned by `BuildWorkBins`, which needs a cost per
+row. `count - 1 - a` alone bins badly: a tunnel vantage's PVS admits a handful of partners where a
+courtyard vantage's admits thousands. Because `order` is leaf-sorted, every leaf's vantages occupy a
+contiguous slot range, so the exact number of PVS-admitted partners *after* slot `a` is a sum over the
+visible leaves with a higher index — O(leaves²) to compute for the whole map, negligible. Cost is then
+`(count - 1 - a) * 1 + tracedAfter * 18`, the 18 being the measured per-trace to per-PVS-test ratio. The
+heuristic version (`pvsFrac` of the leaf's whole row) left the bins at a 2.7x spread; the exact count
+brings it to 1.29x (40.1s slowest, 31.1s fastest), which the stats line reports so it stays checkable.
+
+The `VisIndex` row cache had to move out into a per-worker `VisRowReader` — it was `mutable` state on a
+shared object, i.e. a data race. Decompressing every row up front into one flat bitset was the
+alternative and was rejected: that is `leafCount² / 8` bytes, fine at 8k leaves but 112 MB at 30k.
+
+The dominant term is still N² in vantage count, so `--vantage-grid` remains the real lever: 20 instead of
+15 gives about 18.7k vantages and roughly a third of the pairs.
+
+The other lever is upstream, and it is the bigger one: vantage count is walkable footprint over
+`gridSize`², so pairs go as **footprint squared**. A map with junk floor in it pays for that junk twice
+over. xen_dm at 44.4M sq units of footprint would have needed 221k candidates and 2.5e10 pairs, about an
+hour; with the void floor removed it is 12.2M sq units, 53k candidates, 1.4e9 pairs and 146s. If a map's
+vantage stage looks absurd, read the `budget ... over N sq units` figure in the stats line before
+touching `--vantage-grid` — `--dump-sky` will say whether that N is real floor.
+
+Note `--vantage-verify-neighbors` is expensive and is timed separately so it never inflates the reduce
+figure: at spacing 512 it added 290s of brute-force scanning to a 1.9s reduction.
+
+### Nearest-neighbour queries
+A uniform spatial hash over vantage positions, cell size `max(32, grid*2)`. The ring search **expands until the k-th best distance beats the guaranteed radius** `r * cell` — a point outside the searched Chebyshev-r box of cells is at least that far away. Stopping at a fixed one-ring silently returns wrong neighbours near cell boundaries and as the kept set thins out, which would quietly corrupt every reduction decision, so `--vantage-verify-neighbors` cross-checks every query against a brute-force scan and reports mismatches.
+
+## work_pool.cpp
+
+Shared static work-binning used by both threaded stages. Three pieces:
+
+- `DefaultThreadCount()` — `hardware_concurrency() + 1`, falling back to 4 when detection returns 0. The
+  extra thread is deliberate: it keeps a core busy while another worker stalls on a page fault or gets
+  descheduled, and the bins are static so there is nothing to steal.
+- `MortonKey(point, cell)` — Z-order code over the position quantised to `cell`, 21 bits per axis. Sorting
+  by it puts spatially adjacent work next to each other in the list.
+- `BuildWorkBins(cost, order, tileSize, binCount)` — chunks `order` into tiles of `tileSize` consecutive
+  entries, sums each tile's cost, sorts tiles by cost descending, then assigns each to the currently
+  lightest bin (**LPT**). Returns each bin's items back in ascending tile order.
+- `RunBins(binCount, body)` — spawns `binCount - 1` threads and runs bin 0 on the caller. `binCount == 1`
+  calls `body(0)` with no thread at all, so `--threads 1` is a genuinely serial reference path. Each
+  worker catches into an `exception_ptr` slot that is rethrown after the join; navgen throws
+  `std::runtime_error` on malformed BSPs and a throw crossing a thread boundary would otherwise
+  `std::terminate`.
+
+Tiles are the compromise between the two things static binning wants at once. Whole-range partitioning
+gives perfect locality but terrible balance (the pair loop's cost falls off linearly with the row index);
+round-robin over single items balances perfectly but destroys locality. A tile is small enough that LPT
+has hundreds of pieces to balance with, and large enough that the traces inside one reuse the same BSP
+subtrees.
+
+**Output never depends on the thread count.** Both call sites are written so that thread scheduling
+cannot reach the result: the vantage histogram accumulates into integer atomics (integer addition is
+associative, unlike the float accumulation it replaced), and the air-move merge sorts samples back into a
+canonical order before anything reads them. `--threads 1`, `3`, `7` and `13` produce byte-identical
+`.nav` files on all 50 test maps and on crossfire.
+
 ## reachability.cpp
 
 ### FindSpawnAreas / FindTargetAreas
@@ -717,6 +952,22 @@ allows standing costs nothing, while standing in a spot that does not wedges the
 
 ### PruneUnreachableAreas
 BFS from seed areas over connection graph (respects one-way). Remaps area IDs to compact 0..N-1. Filters connections.
+
+### PruneLethalConnections
+The other half of the `trigger_hurt` rule (`DropLethalFloorLeaves` in `floor_support.cpp` is the first).
+That one removes the *floors* a kill volume makes unusable; this one removes the *routes* that pass
+through one between two floors that are both safe — a jump across a lava sheet, a drop past a kill plane
+onto a ledge below it. The chord from `pointA` to `pointB` is sampled every 8 units and tested at the
+duck origin and 36 above it, which together cover a standing bbox in area z-space. `CONN_TELEPORT` and
+`CONN_ELEVATOR` are exempt: neither is traversed through the space between its endpoints.
+
+A chord is not a trajectory — a jump arc bows above it — so this is conservative for jumps, and that is
+deliberate. A route whose straight line clips a volume doing 100+ damage is one where a small navigation
+error is fatal, and a bot is better off not knowing about it.
+
+Be aware that it is unexercised in practice: across the 50 test maps and the 19 HLDM maps it cuts zero
+connections, because `DropLethalFloorLeaves` upstream already removes every floor those routes lead to.
+It fired 550 times on xen_dm only in the version where the leaf drop did not yet exist.
 
 ## clipnode_tree.cpp
 
@@ -735,6 +986,25 @@ GoldSrc RecursiveHullCheck:
 - Plane test at each node → recurse front/back or split
 - On solid leaf: backtrack along fraction to find exact contact
 - Entities: trace each blocker in local space, keep earliest hit
+
+The recursion is written against a `HullTree` (a clipnode array plus a plane array), not against `BspFile`, so the same code serves the movement hulls out of `LUMP_CLIPNODES` and the point hull synthesized from `LUMP_NODES` — see `bsp_vis.cpp`. `WorldHull(bsp)` builds the clipnode-lump view, and the `BspFile` overloads of `ClassifyPoint`/`TraceHull` are one-line wrappers over it, so every existing caller is unchanged.
+
+## bsp_vis.cpp
+
+### Hull 0 is synthesized, not loaded
+`LUMP_CLIPNODES` only describes hulls 1-3, the three player-sized boxes. Line of sight is a *ray*, which is hull 0 — and hull 0 lives in `LUMP_NODES`, a different struct.
+
+It does not need different traversal code, though. `dnode_t` and `dclipnode_t` have byte-identical `planenum` + `short children[2]` prefixes, and the engine exploits exactly this in `Mod_MakeHull0`: walk the node array, copy `planenum` and any non-negative child straight across, and replace each negative child (a leaf reference, encoded `-1 - leafIndex`) with that leaf's `contents`. The result is a clipnode array that `RecursiveHullCheck` traverses unmodified.
+
+Only `CONTENTS_SOLID` blocks, which is the same rule the engine's `TRACE_LINE` uses — water and sky stay transparent to sight.
+
+### PVS
+`VisIndex` decompresses one PVS row at a time and caches it, because the pair loop in `vantage_sampler.cpp` visits sources in leaf order, so the cache hits on essentially every query. Decompressing the whole table up front would cost `numleafs * (numleafs+7)/8` bytes — over 100 MB on a large map — to save nothing.
+
+Row length is `(leafCount + 7) >> 3` and the bit for leaf `L` is at index `L - 1`, matching the engine. Leaf 0 is the outside-the-map solid leaf and has no row; a `visofs` of -1, an empty `LUMP_VISIBILITY`, or an out-of-range leaf all fall back to "everything is visible", which is conservative: the traceline still has the final say, it just costs more of them. A map compiled without VIS reports that on stderr.
+
+### LeafForPoint
+A plain `dnode_t` descent from node 0, returning `-1 - nodeIndex` once the index goes negative. Note this walks nodes directly rather than the synthesized hull-0 clipnodes, because the synthesis throws leaf *identity* away and keeps only leaf *contents* — which is all tracing needs and all the PVS lookup cannot use.
 
 ## blocking_entities.cpp
 
@@ -1163,9 +1433,19 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v17):
-- Header: magic "CBNV", version 17, mapName[64], bspChecksum, counts (including `detourCount` and
-  `detourPointCount`), and `designMaxSpeed`
+Serializes MergeResult to crossbot_nav format (v18):
+- Header: magic "CBNV", version 18, mapName[64], bspChecksum, counts (including `detourCount`,
+  `detourPointCount` and `vantageCount`), `designMaxSpeed`, `vantageSpacing` and `maxExposure`
+- Vantage records (96 B): `pos[3]`, `exposure`, `focus[4]`, and four `NavWatchDir{yaw, pitch, spread,
+  amount}`. Unused watch slots are all-zero and the loader drops them on `amount == 0`, so the record
+  stays fixed-size and the section stays one `fwrite`
+- `exposure` is left raw — the fraction of *all* sampled vantages that can see the spot, before the
+  reduction throws most of them away. `maxExposure` rides in the header so the runtime can normalise
+  against the map's most exposed spot; storing a pre-normalised value instead would make the number
+  meaningless the moment `--vantage-spacing` changed
+- `vantageSpacing` is the header's copy of `--vantage-spacing`. The runtime uses it as its grid cell
+  size, so it is the one number that has to survive: recomputing it from the point cloud would give a
+  different answer on a map where the reduction spent its budget unevenly
 - `designMaxSpeed` is the `--maxspeed` the run was built with. Nothing navgen does reads it back; it is
   recorded because the runtime has no other way to know what speed the mesh assumes, and a bot faster
   than that has movement options no connection on this mesh describes (`doc/bot.md`,
@@ -1232,6 +1512,17 @@ The plan-time run-up simulations, drawn over the route they were derived from so
 
 ### Gravity multiplier visualization
 Air moves sampled under a trigger_gravity only exist for a bot at that gravity. The two sets (default and trigger_gravity multipliers) are drawn separately so they are tellable apart instead of overlapping on the SVG.
+
+### WriteVantageSvg
+A second, separate SVG (`--dump-vantage-svg`), not another overlay on the area graph: the vantage glyphs need the whole canvas to be readable. Areas are drawn flat grey at 0.35 opacity purely as a map backdrop, in the same lowest-floor-first painter's order.
+
+Per vantage, inside one `<g>` so the whole glyph shares a hover tooltip:
+- **Watch wedges** — an arc sector per watch direction, radius proportional to `amount`, angular half-width equal to `spread` (clamped to 4..80 degrees), one colour per rank, painted lowest rank first so the main direction lands on top.
+- **The dot** — filled from a blue/yellow/red heatmap over `exposure / maxExposure`, so the most-seen floor in the map is red regardless of the map's absolute scale.
+- **The ring** — the dot's stroke width is proportional to `focus[3]`. A fat white ring means one 11.25-degree facing covers nearly every sightline into the spot: a camping position, readable at a glance across the whole map.
+- **The tooltip** — id, position, raw and normalized exposure, all four focus values, and every watch direction's yaw/pitch/spread/amount.
+
+World Y is flipped (`x, -y`) like the main SVG, so wedge endpoints are computed in world space and flipped rather than reasoning about screen angles. The arc always uses `sweep-flag=1` because the flip turns world-counterclockwise into screen-clockwise.
 
 ## Trigger Forces in Sampling
 

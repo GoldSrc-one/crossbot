@@ -11,7 +11,9 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "../game/game_profile.h"
+#include "../nav/nav.h"
 #include "../nav/nav_math.h"
+#include "../nav/nav_mesh.h"
 
 namespace
 {
@@ -33,11 +35,11 @@ namespace
 	constexpr size_t kMaxBoneSets = 64;
 	constexpr size_t kMaxSampleBones = 32;
 
-	constexpr float kDegenerateMean = 0.05f;
-
 	constexpr float kLeadEpsilonSq = 1.f;
 
-	constexpr int kRefinePasses = 2;
+	constexpr float kVantageInterval = 0.1f;
+	constexpr float kVantageConeFloor = 0.15f;
+	constexpr float kVantagePathSnap = 60.f;
 
 	struct BoneSetEntry
 	{
@@ -157,6 +159,32 @@ namespace
 
 		boneOut = bone;
 		return origin;
+	}
+
+	void RefreshVantage(CBot &bot)
+	{
+		BotSense::State &sense = bot.sense;
+
+		if (!BotSense::VantageEnabled())
+		{
+			sense.vantage = Nav::VantageBlend();
+			return;
+		}
+
+		if (gpGlobals->time < sense.nextVantageTime)
+			return;
+
+		sense.nextVantageTime = gpGlobals->time + kVantageInterval;
+
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			sense.vantage = Nav::VantageBlend();
+			return;
+		}
+
+		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+		Nav::BlendVantage(mesh->vantageField, eye, sense.vantage);
 	}
 
 	bool Candidate(const CBot &bot, edict_t *ent)
@@ -339,6 +367,54 @@ namespace
 		sense.hadSight = sight;
 	}
 
+	bool ApplyVantageLook(CBot &bot)
+	{
+		const Nav::VantageBlend &blend = bot.sense.vantage;
+		if (!blend.valid || blend.watchCount <= 0)
+		{
+			bot.sense.lookSource = BotSense::LOOK_NO_VANTAGE;
+			bot.desiredAngles.x = 0.f;
+			return false;
+		}
+
+		const Nav::VantageWatch *pick = &blend.watch[0];
+		bot.sense.lookSource = BotSense::LOOK_VANTAGE_IDLE;
+
+		if (bot.waypointIndex < bot.waypoints.size())
+		{
+			bot.sense.lookSource = BotSense::LOOK_VANTAGE_PATH;
+			float pathYaw = bot.desiredAngles.y;
+			float bestOff = 0.f;
+			pick = nullptr;
+
+			for (int i = 0; i < blend.watchCount; ++i)
+			{
+				float off = fabsf(Bot_NormalizeAngle(blend.watch[i].yaw - pathYaw));
+				if (!pick || off < bestOff)
+				{
+					pick = &blend.watch[i];
+					bestOff = off;
+				}
+			}
+
+			if (bestOff > kVantagePathSnap)
+			{
+				bot.sense.lookSource = BotSense::LOOK_VANTAGE_OFFPATH;
+				bot.desiredAngles.x = 0.f;
+				return false;
+			}
+		}
+
+		float pitch = pick->pitch;
+		if (pitch > kLookPitchLimit)
+			pitch = kLookPitchLimit;
+		else if (pitch < -kLookPitchLimit)
+			pitch = -kLookPitchLimit;
+
+		bot.desiredAngles = Vector(pitch, Bot_NormalizeAngle(pick->yaw), 0.f);
+		return true;
+	}
+
 	bool LookDirection(CBot &bot, Vector &dirOut, float &authorityOut, int &entriesOut,
 		BotSense::SuspicionKind &kindOut)
 	{
@@ -359,8 +435,7 @@ namespace
 		if (tier == BotSense::KIND_COUNT)
 			return false;
 
-		Vector sum(0.f, 0.f, 0.f);
-		float totalWeight = 0.f;
+		float bestScore = 0.f;
 		float bestWeight = 0.f;
 		Vector bestDir(0.f, 0.f, 0.f);
 		int live = 0;
@@ -380,78 +455,25 @@ namespace
 			if (dist < 0.001f)
 				continue;
 
-			Vector dir = los * (1.f / dist);
-			sum = sum + dir * w;
-			totalWeight += w;
 			++live;
 
-			if (w > bestWeight)
-			{
-				bestWeight = w;
-				bestDir = dir;
-			}
+			Vector dir = los * (1.f / dist);
+			float score = w * BotSense::ConeWeight(sense.vantage, dir);
+			if (score <= bestScore)
+				continue;
+
+			bestScore = score;
+			bestWeight = w;
+			bestDir = dir;
 		}
 
-		if (live == 0 || totalWeight <= 0.f)
+		if (live == 0 || bestScore <= 0.f)
 			return false;
 
 		authorityOut = bestWeight;
 		kindOut = static_cast<BotSense::SuspicionKind>(tier);
-
-		float mean = sum.Length();
-		if (mean < kDegenerateMean * totalWeight)
-		{
-			dirOut = bestDir;
-			entriesOut = 1;
-			return true;
-		}
-
-		Vector centre = sum * (1.f / mean);
-
-		float fov = bot.pEdict->v.fov;
-		if (fov <= 0.f)
-			fov = kViewCone;
-		float minDot = cosf(fov * 0.5f * kPiF / 180.f);
-
-		int kept = live;
-		for (int pass = 0; pass < kRefinePasses; ++pass)
-		{
-			Vector refined(0.f, 0.f, 0.f);
-			int inCone = 0;
-
-			for (size_t i = 0; i < sense.count; ++i)
-			{
-				const BotSense::Suspicion &entry = sense.slots[i];
-				if (entry.kind != tier)
-					continue;
-
-				float w = LiveWeight(entry, decay);
-				if (w <= 0.f)
-					continue;
-
-				Vector los = entry.pos - eye;
-				float dist = los.Length();
-				if (dist < 0.001f)
-					continue;
-
-				Vector dir = los * (1.f / dist);
-				if (DotProduct(dir, centre) < minDot)
-					continue;
-
-				refined = refined + dir * w;
-				++inCone;
-			}
-
-			float len = refined.Length();
-			if (inCone == 0 || len < 0.001f)
-				break;
-
-			centre = refined * (1.f / len);
-			kept = inCone;
-		}
-
-		dirOut = centre;
-		entriesOut = kept;
+		dirOut = bestDir;
+		entriesOut = live;
 		return true;
 	}
 }
@@ -460,6 +482,33 @@ bool BotSense::Enabled()
 {
 	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_sense");
 	return cvar && cvar->value != 0.f;
+}
+
+bool BotSense::VantageEnabled()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_vantage");
+	return cvar && cvar->value != 0.f;
+}
+
+float BotSense::ConeWeight(const Nav::VantageBlend &blend, const Vector &dir)
+{
+	if (!blend.valid || blend.watchCount <= 0 || blend.watch[0].amount <= 0.f)
+		return 1.f;
+
+	float best = 0.f;
+	for (int i = 0; i < blend.watchCount; ++i)
+	{
+		float rel = blend.watch[i].amount / blend.watch[0].amount;
+		float d = DotProduct(dir, Nav::VantageDir(blend.watch[i].yaw, blend.watch[i].pitch));
+		if (d <= 0.f)
+			continue;
+
+		float score = rel * d;
+		if (score > best)
+			best = score;
+	}
+
+	return kVantageConeFloor + (1.f - kVantageConeFloor) * best;
 }
 
 float BotSense::Decay()
@@ -639,6 +688,7 @@ void BotSense::Update(CBot &bot)
 	}
 
 	SeedSense(bot);
+	RefreshVantage(bot);
 
 	UpdateDamage(bot);
 	UpdateVision(bot);
@@ -677,6 +727,8 @@ void BotSense::OnRespawn(CBot &bot)
 {
 	State &sense = bot.sense;
 	sense.hadSight = false;
+	sense.vantage = Nav::VantageBlend();
+	sense.nextVantageTime = 0.f;
 	ForgetEnemy(bot);
 }
 
@@ -685,8 +737,17 @@ bool BotSense::ApplyLook(CBot &bot)
 	State &sense = bot.sense;
 	bot.aim.servedDelay = 0.f;
 
-	if (!Enabled() || Gated(bot))
+	if (!Enabled())
+	{
+		sense.lookSource = LOOK_DISABLED;
 		return false;
+	}
+
+	if (Gated(bot))
+	{
+		sense.lookSource = LOOK_GATED;
+		return false;
+	}
 
 	float limit = BotAim::PitchLimit();
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
@@ -704,14 +765,12 @@ bool BotSense::ApplyLook(CBot &bot)
 
 		bot.aim.servedDelay = delay;
 		bot.desiredAngles = Vector(pitch, yaw, 0.f);
+		sense.lookSource = LOOK_AIM;
 		return true;
 	}
 
 	if (!sense.lookValid || sense.lookAuthority <= 0.f)
-	{
-		bot.desiredAngles.x = 0.f;
-		return false;
-	}
+		return ApplyVantageLook(bot);
 
 	float wantYaw = 0.f, wantPitch = 0.f;
 	if (!BotAim::LosAngles(eye, eye + sense.lookDir, wantYaw, wantPitch))
@@ -734,5 +793,23 @@ bool BotSense::ApplyLook(CBot &bot)
 		blendPitch = -limit;
 
 	bot.desiredAngles = Vector(blendPitch, blendYaw, 0.f);
+	sense.lookSource = LOOK_SENSE;
 	return true;
+}
+
+const char *BotSense::LookSourceName(LookSource source)
+{
+	switch (source)
+	{
+	case LOOK_NONE: return "none";
+	case LOOK_DISABLED: return "disabled";
+	case LOOK_GATED: return "gated";
+	case LOOK_AIM: return "aim";
+	case LOOK_SENSE: return "sense";
+	case LOOK_VANTAGE_IDLE: return "vantage-idle";
+	case LOOK_VANTAGE_PATH: return "vantage-path";
+	case LOOK_VANTAGE_OFFPATH: return "vantage-offpath";
+	case LOOK_NO_VANTAGE: return "no-vantage";
+	}
+	return "?";
 }

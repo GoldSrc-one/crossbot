@@ -959,17 +959,41 @@ that a player entry decayed to weight 0.1 still beats a door at 1.0 -- the bot g
 contact instead of snapping to the lift. That is why the tier filter runs before `bestWeight` rather than
 after it.
 
-Weight then does double duty within the winning tier: it is the averaging weight, and its maximum is the
-*authority* of the whole result.
+### Nothing is averaged: the winner is one entry, chosen by cone
 
-The direction is a weighted mean of unit vectors to each live entry, then refined twice by keeping only the
-entries inside the view cone of the current mean and re-averaging. That is a two-pass mean-shift, and it
-converts "average everything" into "find the densest cluster the cone can actually cover" -- which is what
-the goal was. A plain mean answers the wrong question when threats are on opposite sides.
+Within the winning tier every live entry is scored
 
-If the seed mean is degenerate -- entries spread evenly enough that the vectors cancel -- the result falls
-back to the single freshest entry. Without that guard the direction is numerically garbage in exactly the
-case where it matters most.
+    score = LiveWeight(entry) * ConeWeight(vantage, dirToEntry)
+
+and the **single highest scorer wins outright**. There is no vector sum, no mean-shift refinement and no
+degenerate-mean fallback any more -- all three existed to make averaging survive threats on opposite
+sides, and an argmax does not have that problem to solve. `authority` is still the winner's recency
+weight alone, so the cone data decides *which* entry the bot looks at and never how hard it commits to
+looking: a fresh contact from an unwatched direction still commands a full turn.
+
+`ConeWeight` reads the bot's blended vantage signature (`nav_vantage.cpp`), which says which cones
+everything with line of sight to this spot arrives through:
+
+    rel  = watch[k].amount / watch[0].amount        // watch is amount-descending, so rel in (0,1]
+    best = max over k of  rel * max(0, dot(dir, watchDir[k]))
+    return kVantageConeFloor + (1 - kVantageConeFloor) * best
+
+**Normalising against the strongest cone, not the sum, is what keeps the scale honest.** A dead-on hit on
+the main cone scores 1.0 whether the spot has one cone or four. Dividing by the sum would cap a four-cone
+spot at 0.25 and the floor would swamp every real hit on it.
+
+`kVantageConeFloor = 0.15` is the whole reason this is a bias and not a blindfold. An entry the map says
+nothing ever arrives from still keeps 15% of its recency weight, so a close, fresh threat from an
+unwatched direction outscores a stale one down the main sightline and the bot turns. Without the floor a
+bot could be structurally incapable of reacting to someone shooting it from a direction navgen never saw
+a sightline through.
+
+The point is the wall-staring case: a noise behind the bot in a direction with no sightline used to drag
+the averaged mean into the wall between it and everything else. Now it simply loses.
+
+With no vantage data -- an old map, `--no-vantage`, or `crossbot_vantage 0` -- `ConeWeight` returns 1 and
+this degenerates to "the freshest live entry in the winning tier wins", which is the old behaviour minus
+the averaging.
 
 `ApplyLook` then blends, rather than overriding:
 
@@ -984,6 +1008,41 @@ drifts back onto the path by itself instead of snapping.
 An aim target always wins: if `ReadDelayed` serves a point, `ApplyLook` aims at it and returns before any
 of the above.
 
+### When there is no suspicion at all, the vantage field drives the head
+
+`ApplyLook`'s `authority == 0` branch used to level the pitch and leave the yaw alone. It now calls
+`ApplyVantageLook`, which splits on whether a path is running:
+
+- **No path** -- write `watch[0]`'s yaw and pitch. That is the direction most of the sightlines into this
+  spot arrive from, so a bot standing still is watching the way it is most likely to be shot from.
+- **Path running** -- `desiredAngles.y` at this point is the path yaw, freshly written from the next
+  waypoint in `bot_move_nav.cpp`. Pick the watch direction closest to it in yaw; snap to it if it is
+  within `kVantagePathSnap = 60` degrees, otherwise keep the path yaw and level the pitch. So a bot
+  rounding a corner is already looking down the corridor rather than at its own next waypoint.
+
+**The 60-degree clamp is not cosmetic: yaw is the movement basis.** `Bot_DecomposeMove` flattens to yaw
+alone, so an unbounded snap turns every corridor into a sideways strafe. The clamp buys the head-turn
+without giving up forward drive.
+
+**Both branches write absolutely, not through the `authority` blend, and that is deliberate** -- see the
+ratchet note below. `base` is the previous frame's own output at the idle call sites, so a blend there
+compounds and the head freezes wherever it drifted to. An absolute write cannot ratchet.
+
+The blend itself is refreshed once every `kVantageInterval = 0.1` s per bot from the bot's eye position,
+not per frame; the field is a smooth spatial function and a bot does not move far in 100 ms.
+
+`crossbot_vantage 0` skips the refresh entirely, so the blend is empty, `ConeWeight` returns 1 and this
+branch falls through to the old `desiredAngles.x = 0`. That switches off everything the vantage field
+does, which is what the nav-sweep A/B needs -- but it is **not** a full revert to the pre-field runtime,
+because the argmax replaced the averaging unconditionally and does not depend on the cvar.
+
+**Senses outrank the vantage look, and on a busy map that matters more than it sounds.** The tier vote
+falls through to `KIND_OTHER`, and map machinery -- doors, chargers, item respawns -- pushes `SUSP_SOUND`
+entries constantly. A live `KIND_OTHER` entry at weight 0.1 still takes the head away from the vantage
+direction, because it is a real sense and this is the fallback. `crossbot_vantage_status` reports which
+branch actually won per bot (`look=sense` / `vantage-idle` / `vantage-path` / `vantage-offpath` /
+`gated`), which is the only reliable way to tell them apart from outside.
+
 ### The gate veto survived from the gaze scaffold
 
 `ApplyLook` refuses entirely when any waypoint in `waypointIndex .. +2` needs a ladder, an airmove launch,
@@ -997,23 +1056,27 @@ would fail dangerous, since a missed site breaks a ladder.
 
 ### Two gaps worth knowing about
 
-**A bot with nothing in its cone and no suspicion never turns.** There is no idle scan: the look direction
-comes from the suspicion list and nothing else, so at `authority == 0` the yaw is simply left alone. A
-stationary bot can therefore face a wall indefinitely, and because acquisition is cone-gated, it will not
-notice an enemy standing behind it. This is visible in `test_sense.ps1`'s static phase, where one bot
-routinely acquires and the other sits at a fixed yaw for the whole run. Both reference bots solve this and
-neither solution is here yet: foxbot picks a random yaw every 1-3s and rejects it unless a 200-unit trace
-comes back clear, and Parabot scores the four compass directions per map cell by how much of the map is
-visible that way weighted by where players historically died, then sweeps the head around the winner.
-Foxbot's is the cheap version and would drop straight into `ApplyLook`'s `authority == 0` branch.
+**A bot with nothing in its cone and no suspicion used to never turn.** This is now solved, and the
+solution is the Parabot one rather than the foxbot one. Parabot scored the four compass directions per
+map cell by how much of the map is visible that way, weighted by where players historically died, then
+swept the head around the winner. navgen's vantage field is that measurement done properly -- an actual
+traced visibility signature per sampled eye position rather than four compass buckets -- and
+`ApplyVantageLook` points the head at its `watch[0]`. Foxbot's cheap version (random yaw every 1-3s,
+rejected unless a 200-unit trace is clear) was the alternative and is not needed.
 
-Footsteps narrow this a long way. A running enemy is now heard at ~625 units regardless of where the bot
-happens to be facing, so a wall-facing bot turns round on its own as soon as anyone moves nearby. What is
-still uncovered is the enemy who is stationary or walking, since below 220 units/s they emit nothing at
-all -- which is exactly the case an idle scan exists to catch.
+What is *not* here is a sweep. The head goes to the main watch direction and stays there; it does not
+cycle through `watch[1..3]`, so a stationary bot is now watching the right way but still watching one way.
+The data to sweep over is already loaded -- `watch[]` carries up to four directions with their `amount`
+and `spread` -- so this is a scheduling question, not a data one.
 
-**Pitch is levelled, and the suspicion pitch is clamped, for a reason.** When `ApplyLook` finds no target
-and no live suspicion it writes `desiredAngles.x = 0` rather than leaving the angles alone. Without that the
+Footsteps narrow the remaining gap. A running enemy is heard at ~625 units regardless of facing, so a bot
+turns round on its own as soon as anyone moves nearby. The uncovered case is the enemy who is stationary
+or walking, since below 220 units/s they emit nothing at all -- and a bot facing its main sightline is
+much better positioned for that case than one facing a wall.
+
+**Pitch is levelled, and the suspicion pitch is clamped, for a reason.** When `ApplyLook` finds no target,
+no live suspicion and no usable vantage direction it writes `desiredAngles.x = 0` rather than leaving the
+angles alone -- and the vantage branches sidestep the same trap by writing absolutely. Without that the
 blend ratchets: `base` is the previous frame's output, so each frame moves further toward the suspicion and
 nothing ever moves it back — when the authority decays to zero the head simply freezes wherever it got to.
 A door sound in a shaft below the bot was enough to leave two bots permanently staring at the floor at
@@ -1034,8 +1097,8 @@ the cone refinement, and cumulative push counts per source.
 can see someone; `target=- enemy=Sense2 enemyAge=1.8s` is the whole point of the feature, and
 `enemy=-` returning after `enemyAge` passes `crossbot_sense_decay` is the record expiring on schedule.
 
-`kept` versus `susp` is the interesting pair -- it is the mean-shift reporting how much of what the bot
-knows about it can actually face at once.
+`kept` is now simply the live entry count in the winning tier, not a mean-shift survivor count -- the
+direction is one entry's, so there is nothing to survive.
 
 `kinds` against `tier` is the second pair, and it is the one assertion worth automating: `tier` must read
 `PLAYER` whenever `kinds=p:` is nonzero. `test_sense.ps1` checks exactly that on every poll.
@@ -1049,6 +1112,27 @@ an enemy's `DAMAGE` entry is overwritten by their own `SIGHT` entry inside the s
 so `fresh=` reads `SIGHT` almost always and `DAMAGE` essentially never. `test_fire.ps1` used to sample
 this command four times per poll to work around that; the counters are cumulative, so one poll cannot
 miss a source that fired between polls, and the sampling loop is gone.
+
+### crossbot_vantage_status
+
+`crossbot_vantage_status` with no arguments reports the loaded field (point count, spacing, resolved
+grid cell and dimensions, `maxExposure`, and the cvar) and then, per bot, the blend at its own eye:
+neighbours used, distance to the nearest, `exposure` raw and as a fraction of the map maximum,
+`focus[4]`, every merged watch direction, and a drive line giving `view=` (actual `v_angle`),
+`desired=` (what the look code commanded this frame), `look=` (which branch produced it) and the
+waypoint index.
+
+`crossbot_vantage_status <x> <y> <z>` blends at a world point instead. **This is the round-trip test:**
+at a stored vantage's exact position the distance-0 neighbour dominates the IDW, so the output must be
+that vantage's own record back -- watch yaws, pitches, spreads and normalised amounts all matching. It is
+the cheapest way to prove the loader, the grid and the angular merge are all correct at once.
+
+`desired=` next to the watch list is what makes the look behaviour checkable from outside. On a
+`look=vantage-path` sample the commanded yaw *and* pitch equal one of the listed watch directions
+exactly, because the branch writes the direction rather than blending toward it. Two caveats when reading
+it: the blend printed here is recomputed at print time, so on a moving bot it can be one sample ahead of
+the one `ApplyLook` used, and `look=vantage-offpath` prints pitch 0 with the path yaw, which is the
+60-degree clamp refusing the snap rather than a missing match.
 
 ### The enemy handle outlives the sight of it
 

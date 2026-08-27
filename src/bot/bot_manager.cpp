@@ -438,6 +438,87 @@ void PrintSenseStatus()
 	SERVER_PRINT(summary);
 }
 
+void PrintVantageStatus(const Vector *at)
+{
+	const Nav::NavMesh *mesh = Nav::Get();
+	if (!mesh)
+	{
+		SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+		return;
+	}
+
+	const Nav::VantageField &field = mesh->vantageField;
+	char summary[192];
+	snprintf(summary, sizeof(summary),
+		"CrossBot: vantage field %zu points, spacing %.0f, cell %.0f, grid %dx%dx%d, "
+		"maxExposure %.4f, crossbot_vantage=%d\n",
+		field.vantages.size(), field.spacing, field.cell, field.dims[0], field.dims[1],
+		field.dims[2], field.maxExposure, BotSense::VantageEnabled() ? 1 : 0);
+	SERVER_PRINT(summary);
+
+	if (field.vantages.empty())
+		return;
+
+	auto report = [&](const char *who, const Vector &eye)
+	{
+		Nav::VantageBlend blend;
+		if (!Nav::BlendVantage(field, eye, blend))
+		{
+			char none[160];
+			snprintf(none, sizeof(none), "CrossBot: %s at (%.0f,%.0f,%.0f): no blend\n", who,
+				eye.x, eye.y, eye.z);
+			SERVER_PRINT(none);
+			return;
+		}
+
+		char head[256];
+		snprintf(head, sizeof(head),
+			"CrossBot: %s at (%.0f,%.0f,%.0f): %d neighbors, nearest %.1f, exposure %.4f "
+			"(%.2f of max), focus %.2f/%.2f/%.2f/%.2f\n",
+			who, eye.x, eye.y, eye.z, blend.neighbors, blend.nearestDist, blend.exposure,
+			field.maxExposure > 0.f ? blend.exposure / field.maxExposure : 0.f,
+			blend.focus[0], blend.focus[1], blend.focus[2], blend.focus[3]);
+		SERVER_PRINT(head);
+
+		for (int i = 0; i < blend.watchCount; ++i)
+		{
+			const Nav::VantageWatch &w = blend.watch[i];
+			char line[160];
+			snprintf(line, sizeof(line),
+				"CrossBot:   watch %d: yaw %.1f pitch %.1f spread %.1f amount %.3f\n", i, w.yaw,
+				w.pitch, w.spread, w.amount);
+			SERVER_PRINT(line);
+		}
+	};
+
+	if (at)
+	{
+		report("point", *at);
+		return;
+	}
+
+	int shown = 0;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		++shown;
+		report(bot.name, bot.pEdict->v.origin + bot.pEdict->v.view_ofs);
+
+		char drive[224];
+		snprintf(drive, sizeof(drive),
+			"CrossBot:   view=(%.1f,%.1f) desired=(%.1f,%.1f) look=%s wp=%zu/%zu\n",
+			bot.pEdict->v.v_angle.x, bot.pEdict->v.v_angle.y, bot.desiredAngles.x,
+			bot.desiredAngles.y, BotSense::LookSourceName(bot.sense.lookSource),
+			bot.waypointIndex, bot.waypoints.size());
+		SERVER_PRINT(drive);
+	}
+
+	if (shown == 0)
+		SERVER_PRINT("CrossBot: no bots; pass \"x y z\" to sample a point\n");
+}
+
 void PrintFireStatus()
 {
 	int shown = 0;

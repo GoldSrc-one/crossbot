@@ -200,12 +200,60 @@ Direct index lookup with fallback to linear search.
 
 ### LoadNavFile
 Loads and validates .nav file:
-- Checks magic ("CBNV") and version (16)
-- Reads area records, connection records, area-connection indices, area planes
+- Checks magic ("CBNV") and version (18)
+- Reads area records, connection records, area-connection indices, area planes, activation detours and
+  detour points, then the vantage section
 - Verifies BSP checksum against live map
 - Converts to runtime NavMesh with PlanArea/PlanConnection views
 - Builds PlanArea boundPlanes from Area planes
 - Builds PlanConnection from Connection (including gates, launch params)
+- Converts `NavVantageRecord`s into `VantageField` and calls `BuildVantageGrid` once
+
+The version check is a hard equality, not a floor, so a file from an older navgen is refused outright
+rather than read with a shifted layout. Every record is `fread` straight into its struct, so any layout
+change is a version bump and a full regeneration of every `.nav`.
+
+## nav_vantage.cpp
+
+### What the field is for
+navgen samples, for every reduced vantage, up to four `WatchDir{yaw, pitch, spread, amount}` — the cones
+that everything with line of sight to that spot arrives *through* — plus `exposure` and `focus[4]`
+(`doc/navgen.md`, *vantage_sampler.cpp*). This is the runtime half: turn a bot's eye position into a
+blended signature it can steer by. `bot_sense.cpp` refreshes one per bot every 0.1 s.
+
+### The grid exists because there was no spatial index at all
+`FindAreaExact` is a linear scan over every area, and nothing else in `src/nav/` indexes space. A blend
+runs per bot at 10 Hz, so it gets its own CSR uniform grid: count pass, prefix sum, fill pass, one
+allocation for `cellStart` and one for `cellItems` rather than a `vector` per cell. Cell size is the
+header's `vantageSpacing`, floored at 32 and doubled until the cell count is within
+`64 * vantages + 4096`, which keeps a long thin map from allocating a mostly-empty lattice.
+
+`FindNearest` walks cells in expanding rings and stops once the fourth-best distance is inside the
+searched ring's inner radius — the ring is a cube shell, so its inscribed radius is `ring * cell`, and
+anything closer than that cannot be hiding in an unsearched cell.
+
+### Blending: scalars interpolate, directions do not
+`exposure` and `focus[]` are IDW-weighted over the four nearest with `1 / (d^2 + 1)` — the same weight
+and the same epsilon navgen's reduction scores its own decimation against, so the runtime reproduces the
+interpolation the decimation assumed was possible.
+
+Watch directions cannot be averaged that way: they are a variable-length list, and a fixed-length vector
+is the only thing that has a distance. So they are merged angularly instead, with the same greedy
+peak-and-absorb `ExtractWatchDirs` runs — take the heaviest entry, mean-shift once over everything
+within 45 degrees, absorb them with summed weight and a weighted-RMS spread, repeat to at most four.
+The difference is that navgen runs it over a 512-bin histogram and this runs it over at most 16 sparse
+entries, each entering at `idw * amount`.
+
+**Merged directions under 5% of the kept weight are dropped.** A far neighbour contributes a direction
+whose weight rounds to nothing, and without the cut it survives as a fourth watch dir with
+`amount 0.000` — which `ApplyVantageLook`'s nearest-to-path search would happily snap the bot's head
+onto. The threshold is navgen's own `minClusterFraction`. Amounts are renormalised over what survives,
+so `watch[0].amount` is always the largest and always meaningful as a denominator.
+
+### Round-tripping is the correctness test
+Blend at a stored vantage's exact position and the distance-0 neighbour dominates the IDW completely, so
+the result must be that vantage's own record back. `crossbot_vantage_status <x y z>` exists to check
+exactly that; anything else means the loader, the grid or the merge is wrong.
 
 ## astar_graph.h
 

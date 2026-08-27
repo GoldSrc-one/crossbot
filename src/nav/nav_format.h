@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace crossbot_nav
@@ -7,7 +8,10 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 17;
+constexpr uint32_t kNavVersion = 18;
+
+constexpr size_t kNavFocusLevels = 4;
+constexpr size_t kNavWatchDirs = 4;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
 
@@ -76,9 +80,12 @@ struct NavHeader
 	uint32_t detourCount;
 	uint32_t detourPointCount;
 	float designMaxSpeed;
+	uint32_t vantageCount;
+	float vantageSpacing;
+	float maxExposure;
 };
 
-static_assert(sizeof(NavHeader) == 108, "NavHeader layout changed without a version bump");
+static_assert(sizeof(NavHeader) == 120, "NavHeader layout changed without a version bump");
 
 struct NavAreaRecord
 {
@@ -164,6 +171,25 @@ struct NavConnectionRecord
 };
 
 static_assert(sizeof(NavConnectionRecord) == 144, "NavConnectionRecord layout changed without a version bump");
+
+struct NavWatchDir
+{
+	float yaw;
+	float pitch;
+	float spread;
+	float amount;
+};
+
+struct NavVantageRecord
+{
+	float pos[3];
+	float exposure;
+	float focus[kNavFocusLevels];
+	NavWatchDir watch[kNavWatchDirs];
+};
+
+static_assert(sizeof(NavWatchDir) == 16, "NavWatchDir layout changed without a version bump");
+static_assert(sizeof(NavVantageRecord) == 96, "NavVantageRecord layout changed without a version bump");
 
 enum GateValidFlags : uint8_t
 {

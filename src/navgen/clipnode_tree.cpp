@@ -123,22 +123,37 @@ double PlaneDiff(const dplane_t &plane, const Vec3 &p)
 
 }
 
-int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point)
+HullTree WorldHull(const BspFile &bsp)
+{
+	HullTree hull;
+	hull.clipnodes = bsp.Clipnodes().data();
+	hull.clipnodeCount = bsp.Clipnodes().size();
+	hull.planes = bsp.Planes().data();
+	hull.planeCount = bsp.Planes().size();
+	return hull;
+}
+
+int ClassifyPoint(const HullTree &hull, int headnode, const Vec3 &point)
 {
 	int nodeIndex = headnode;
 	while (nodeIndex >= 0)
 	{
-		const dclipnode_t &node = bsp.Clipnodes()[static_cast<size_t>(nodeIndex)];
-		const dplane_t &plane = bsp.Planes()[static_cast<size_t>(node.planenum)];
+		const dclipnode_t &node = hull.clipnodes[static_cast<size_t>(nodeIndex)];
+		const dplane_t &plane = hull.planes[static_cast<size_t>(node.planenum)];
 		nodeIndex = (PlaneDiff(plane, point) >= 0.0) ? node.children[0] : node.children[1];
 	}
 	return nodeIndex;
 }
 
+int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point)
+{
+	return ClassifyPoint(WorldHull(bsp), headnode, point);
+}
+
 namespace
 {
 
-bool RecursiveHullCheck(const BspFile &bsp, int headnode, int nodeIndex, double p1f, double p2f,
+bool RecursiveHullCheck(const HullTree &hull, int headnode, int nodeIndex, double p1f, double p2f,
 	const Vec3 &p1, const Vec3 &p2, TraceResult &trace)
 {
 	if (nodeIndex < 0)
@@ -155,16 +170,16 @@ bool RecursiveHullCheck(const BspFile &bsp, int headnode, int nodeIndex, double 
 		return true;
 	}
 
-	const dclipnode_t &node = bsp.Clipnodes()[static_cast<size_t>(nodeIndex)];
-	const dplane_t &plane = bsp.Planes()[static_cast<size_t>(node.planenum)];
+	const dclipnode_t &node = hull.clipnodes[static_cast<size_t>(nodeIndex)];
+	const dplane_t &plane = hull.planes[static_cast<size_t>(node.planenum)];
 
 	double t1 = PlaneDiff(plane, p1);
 	double t2 = PlaneDiff(plane, p2);
 
 	if (t1 >= 0.0 && t2 >= 0.0)
-		return RecursiveHullCheck(bsp, headnode, node.children[0], p1f, p2f, p1, p2, trace);
+		return RecursiveHullCheck(hull, headnode, node.children[0], p1f, p2f, p1, p2, trace);
 	if (t1 < 0.0 && t2 < 0.0)
-		return RecursiveHullCheck(bsp, headnode, node.children[1], p1f, p2f, p1, p2, trace);
+		return RecursiveHullCheck(hull, headnode, node.children[1], p1f, p2f, p1, p2, trace);
 
 	double frac = (t1 < 0.0)
 		? (t1 + kDistEpsilon) / (t1 - t2)
@@ -179,11 +194,11 @@ bool RecursiveHullCheck(const BspFile &bsp, int headnode, int nodeIndex, double 
 
 	int side = (t1 < 0.0) ? 1 : 0;
 
-	if (!RecursiveHullCheck(bsp, headnode, node.children[side], p1f, midf, p1, mid, trace))
+	if (!RecursiveHullCheck(hull, headnode, node.children[side], p1f, midf, p1, mid, trace))
 		return false;
 
-	if (ClassifyPoint(bsp, node.children[side ^ 1], mid) != CONTENTS_SOLID)
-		return RecursiveHullCheck(bsp, headnode, node.children[side ^ 1], midf, p2f, mid, p2, trace);
+	if (ClassifyPoint(hull, node.children[side ^ 1], mid) != CONTENTS_SOLID)
+		return RecursiveHullCheck(hull, headnode, node.children[side ^ 1], midf, p2f, mid, p2, trace);
 
 	if (trace.allsolid)
 		return false;
@@ -193,7 +208,7 @@ bool RecursiveHullCheck(const BspFile &bsp, int headnode, int nodeIndex, double 
 	else
 		trace.planeNormal = Vec3(-plane.normal[0], -plane.normal[1], -plane.normal[2]);
 
-	while (ClassifyPoint(bsp, headnode, mid) == CONTENTS_SOLID)
+	while (ClassifyPoint(hull, headnode, mid) == CONTENTS_SOLID)
 	{
 		frac -= 0.1;
 		if (frac < 0.0)
@@ -215,6 +230,11 @@ bool RecursiveHullCheck(const BspFile &bsp, int headnode, int nodeIndex, double 
 
 TraceResult TraceHull(const BspFile &bsp, int headnode, const Vec3 &start, const Vec3 &end)
 {
+	return TraceHull(WorldHull(bsp), headnode, start, end);
+}
+
+TraceResult TraceHull(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end)
+{
 	TraceResult trace;
 	trace.start = start;
 	trace.end = end;
@@ -224,7 +244,7 @@ TraceResult TraceHull(const BspFile &bsp, int headnode, const Vec3 &start, const
 	trace.startsolid = false;
 	trace.contents = CONTENTS_EMPTY;
 
-	RecursiveHullCheck(bsp, headnode, headnode, 0.0, 1.0, start, end, trace);
+	RecursiveHullCheck(hull, headnode, headnode, 0.0, 1.0, start, end, trace);
 
 	return trace;
 }

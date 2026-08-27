@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "nav_format.h"
+#include "nav_vantage.h"
 #include "waypoint_plan.h"
 
 namespace Nav
@@ -63,6 +64,8 @@ struct NavMesh
 
 	std::vector<NavPlan::PlanArea> planAreas;
 	std::vector<NavPlan::PlanConnection> planConns;
+
+	VantageField vantageField;
 };
 
 }

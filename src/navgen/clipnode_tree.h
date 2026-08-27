@@ -30,6 +30,16 @@ std::vector<Polytope> CarvePolytopeAgainstTree(const BspFile &bsp, int headnode,
 	int removeContents, double mapRadius, double minPieceVolume = 1.0, double epsilon = 0.01,
 	bool *removedAny = nullptr);
 
+struct HullTree
+{
+    const dclipnode_t *clipnodes = nullptr;
+    size_t clipnodeCount = 0;
+    const dplane_t *planes = nullptr;
+    size_t planeCount = 0;
+};
+
+HullTree WorldHull(const BspFile &bsp);
+
 struct TraceResult
 {
     Vec3 start;
@@ -44,6 +54,10 @@ struct TraceResult
 };
 
 TraceResult TraceHull(const BspFile &bsp, int headnode, const Vec3 &start, const Vec3 &end);
+
+int ClassifyPoint(const HullTree &hull, int headnode, const Vec3 &point);
+
+TraceResult TraceHull(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end);
 
 TraceResult TraceHullWithEntities(const BspFile &bsp, int worldHeadnode,
     const std::vector<BlockingVolume> &blockers, const Vec3 &start, const Vec3 &end);

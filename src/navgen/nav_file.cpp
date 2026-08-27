@@ -66,7 +66,8 @@ void WriteRaw(FILE *f, const void *data, size_t bytes, const char *what)
 }
 
 void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t bspChecksum,
-	const std::vector<Area> &areas, const std::vector<MergedConnection> &conns, float designMaxSpeed)
+	const std::vector<Area> &areas, const std::vector<MergedConnection> &conns, float designMaxSpeed,
+	const std::vector<Vantage> &vantages, float vantageSpacing, float maxExposure)
 {
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
@@ -200,6 +201,35 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.gravity = static_cast<float>(c.gravity);
 	}
 
+	std::vector<NavVantageRecord> vantageRecords(vantages.size());
+	for (size_t i = 0; i < vantages.size(); ++i)
+	{
+		const Vantage &v = vantages[i];
+		NavVantageRecord &rec = vantageRecords[i];
+		rec.pos[0] = static_cast<float>(v.pos.x);
+		rec.pos[1] = static_cast<float>(v.pos.y);
+		rec.pos[2] = static_cast<float>(v.pos.z);
+		rec.exposure = static_cast<float>(v.exposure);
+		for (size_t k = 0; k < kVantageFocusLevels; ++k)
+			rec.focus[k] = static_cast<float>(v.focus[k]);
+
+		for (size_t k = 0; k < kMaxWatchDirs; ++k)
+		{
+			NavWatchDir &dst = rec.watch[k];
+			if (k < v.watch.size())
+			{
+				dst.yaw = static_cast<float>(v.watch[k].yaw);
+				dst.pitch = static_cast<float>(v.watch[k].pitch);
+				dst.spread = static_cast<float>(v.watch[k].spread);
+				dst.amount = static_cast<float>(v.watch[k].amount);
+			}
+			else
+			{
+				dst.yaw = dst.pitch = dst.spread = dst.amount = 0.f;
+			}
+		}
+	}
+
 	NavHeader header{};
 	std::memcpy(header.magic, kNavMagic, sizeof(header.magic));
 	header.version = kNavVersion;
@@ -214,6 +244,9 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	header.detourCount = static_cast<uint32_t>(detourRecords.size());
 	header.detourPointCount = static_cast<uint32_t>(detourPoints.size());
 	header.designMaxSpeed = designMaxSpeed;
+	header.vantageCount = static_cast<uint32_t>(vantageRecords.size());
+	header.vantageSpacing = vantageSpacing;
+	header.maxExposure = maxExposure;
 
 	WriteRaw(f, &header, sizeof(header), "header");
 	WriteRaw(f, areaRecords.data(), areaRecords.size() * sizeof(NavAreaRecord), "area records");
@@ -223,6 +256,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	WriteRaw(f, detourRecords.data(), detourRecords.size() * sizeof(NavActivationDetourRecord),
 		"activation detours");
 	WriteRaw(f, detourPoints.data(), detourPoints.size() * sizeof(NavDetourPointRecord), "detour points");
+	WriteRaw(f, vantageRecords.data(), vantageRecords.size() * sizeof(NavVantageRecord), "vantages");
 
 	std::fclose(f);
 }

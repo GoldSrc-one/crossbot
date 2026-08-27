@@ -97,6 +97,12 @@ cvar_t g_aimImpulseCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_vantageCvar = {
+	"crossbot_vantage",
+	"1",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	GameData::Load();
@@ -116,6 +122,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimQuantumCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimImpulseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_fireCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_vantageCvar);
 	RETURN_META(MRES_IGNORED);
 }
 

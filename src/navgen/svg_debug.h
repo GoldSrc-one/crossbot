@@ -6,6 +6,7 @@
 #include "area_merger.h"
 #include "clipnode_tree.h"
 #include "polytope.h"
+#include "vantage_sampler.h"
 
 namespace navgen
 {
@@ -33,6 +34,9 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 	const std::vector<Vec3> &tracePoints = {},
 	const std::vector<std::vector<Vec3>> &runupTraces = {},
 	const std::vector<float> &pathSpeeds = {});
+
+void WriteVantageSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
+	const std::vector<Vantage> &vantages, const VantageStats &stats);
 
 }
 
