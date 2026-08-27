@@ -1372,8 +1372,6 @@ int main(int argc, char **argv)
 				"%zu ladder connections\n",
 				bspPath.c_str(), ladders.entities, ladders.climbFaces, ladders.mounts, ladders.conns);
 
-		// Teleports come last so they can rescue areas nothing else reaches, and before the prune that
-		// would otherwise throw those areas away.
 		navgen::TeleportStats teleports = navgen::BuildTeleportConnections(bsp,
 			worldModel.headnode[navgen::kHullHuman], standBlockers, entities, merged.areas, merged.conns,
 			dumpTeleports);

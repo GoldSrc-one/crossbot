@@ -19,16 +19,12 @@ namespace navgen
 namespace
 {
 
-// SF_TRIGGER_NOCLIENTS: players are not allowed to fire the trigger, so a bot can never use it.
 constexpr int kSfTriggerNoClients = 2;
 
 constexpr double kLandingInsideEpsilon = 1.0;
 constexpr double kLandingFootprintTolerance = 1.0;
 constexpr double kLandingFloorSlack = 1.0;
 
-// TeleportTouch puts the player at dest.origin with the origin lifted out of the feet, then nudges
-// it up one unit: tmp.z -= pOther->pev->mins.z; tmp.z++. That is a standing origin in world space;
-// areas are hull-3 geometry, so drop it by kStandProbeLift to compare against them.
 constexpr double kLandingLift = -kHumanHullMinZ + 1.0 - kStandProbeLift;
 
 long long DirectedPairKey(int from, int to)
@@ -38,8 +34,6 @@ long long DirectedPairKey(int from, int to)
 
 const Entity *FindByTargetname(const std::vector<Entity> &entities, const std::string &name)
 {
-	// FIND_ENTITY_BY_TARGETNAME walks the edict list from the start and takes the first match,
-	// whatever its classname - info_teleport_destination has no special standing here.
 	if (name.empty())
 		return nullptr;
 
@@ -50,9 +44,6 @@ const Entity *FindByTargetname(const std::vector<Entity> &entities, const std::s
 	return nullptr;
 }
 
-// The engine drops the teleportee with no ground flag and zero velocity, so a destination hung above
-// its floor means a fall. Resolve the area the player ends up standing in and the floor point in it.
-// landing is already in the areas' duck-origin space, so drop is a plain z difference.
 bool ResolveLanding(const std::vector<Area> &areas, const Vec3 &landing, int &areaOut, Vec3 &pointOut,
 	double &dropOut)
 {
@@ -81,7 +72,6 @@ bool ResolveLanding(const std::vector<Area> &areas, const Vec3 &landing, int &ar
 		return true;
 	}
 
-	// Not inside any area: fall straight down to the highest area floor beneath the landing point.
 	int best = -1;
 	double bestZ = 0.0;
 	for (const Area &area : areas)
@@ -132,8 +122,6 @@ TeleportStats BuildTeleportConnections(const BspFile &bsp, int standHeadnode,
 			continue;
 		}
 
-		// UTIL_IsMasterTriggered gates TeleportTouch, and the master's state is whatever the map's
-		// logic has done to it at run time. navgen cannot know, so a mastered teleport is not an edge.
 		if (!ent.Get("master").empty())
 		{
 			++stats.mastered;
@@ -193,7 +181,6 @@ TeleportStats BuildTeleportConnections(const BspFile &bsp, int standHeadnode,
 		const dmodel_t &model = bsp.Models()[static_cast<size_t>(modelIndex)];
 		Vec3 origin = ParseEntityOrigin(ent.Get("origin"));
 
-		// FindServicePoints expands the volume by each area's own hull, so hand it the raw bounds.
 		ActivatorVolume act;
 		act.kind = crossbot_nav::ACT_TRIGGER;
 		act.mins = Vec3(model.mins[0], model.mins[1], model.mins[2]) + origin;
