@@ -474,7 +474,7 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
-		Bot_GravityMultiplier(bot.pEdict));
+		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot));
 
 	const Candidate *best = nullptr;
 	float bestCost = 0.f;

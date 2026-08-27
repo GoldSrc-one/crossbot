@@ -88,6 +88,26 @@ measured.
 Those two numbers together are the only way to see why a bot chose what it chose: the same enemy at
 the same distance is picked or ignored purely on the health and guns the bot is holding.
 
+### Carefulness
+
+The same readiness drives *how* the bot travels, not only where. `Bot_Carefulness` returns
+`(1 - readiness)` scaled by `crossbot_careful`, and both searches take it: `Repath` hands it to
+`Nav::PlanPath` and `SelectGoal` hands it to `Nav::AreaCosts`. An armed, healthy bot routes for speed;
+a bot with nothing to fight with routes for cover, however far around that takes it (`doc/nav.md`,
+"Carefulness: routing away from exposure"). `BotOppo::RebuildCosts` is the one caller that must stay at
+0 -- its gain test is a subtraction against real simulated seconds.
+
+**It is sampled once, at repath time, and baked into the route.** A bot that arms itself halfway along
+a timid route finishes that route; carefulness only refreshes on the repaths that already happen.
+
+`crossbot_careful 0` disables the whole thing and restores pure fastest-route planning.
+`crossbot_careful_pin` exists because readiness on a live bot does not reach the ends of its range --
+a fresh spawn with a crowbar and a glock at full health sits around `0.35`, so the derived carefulness
+never leaves the middle. Set it to a value in `[0,1]` to force one and sweep the range; `-1` (the
+default) leaves it off. The `Repath` line reports `careful=`, `route=` (true seconds) and `score=`
+(exposure-weighted) side by side, which is how you tell the factor actually reached the planner: at
+`careful 0` the two are equal by construction.
+
 ### One ignore table, not two
 
 "Respawning until T" and "Repath could not reach it, retry after T" are the same fact — *do not

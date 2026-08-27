@@ -1779,9 +1779,10 @@ namespace
 
 		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
 		NavPlan::PlanStats planStats;
+		float careful = Bot_Carefulness(bot);
 		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
 		Nav::PlannedPath path = Nav::PlanPath(mesh, startArea->id, goalArea->id, pEdict->v.origin,
-			clampedGoal, &traces, &planStats);
+			clampedGoal, &traces, &planStats, careful);
 		float planMs = std::chrono::duration<float, std::milli>(
 			std::chrono::steady_clock::now() - planBegin).count();
 		if (!path.found)
@@ -1827,11 +1828,11 @@ namespace
 			bot.visitedAreaPath.clear();
 			bot.visitedAreaPath.push_back(startArea->id);
 
-			char wpMsg[512];
+			char wpMsg[640];
 			snprintf(wpMsg, sizeof(wpMsg),
 				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
 				"airmoves=%zu simulated/%zu rescaled/%zu runup-ext/%zu respeeded/%zu kept/%zu retracted/%zu retract-kept/%zu rejected | search %zu areas/%zu sims "
-				"in %.1fms | profile segs=%zu len=%.0f "
+				"in %.1fms | careful=%.2f route=%.1fs score=%.1f | profile segs=%zu len=%.0f "
 				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu | penalized=%zu\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
@@ -1840,6 +1841,7 @@ namespace
 				planStats.airmovesRespeedKept, planStats.airmovesRetracted,
 				planStats.airmovesRetractKept,
 				path.airmovesRejected, path.expansions, path.airmovesTried, planMs,
+				careful, path.routeSeconds, path.routeScore,
 				bot.followProfile.segs.size(), bot.followProfile.totalLength,
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,
 				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk, penalizedOnRoute);

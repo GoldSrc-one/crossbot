@@ -15,6 +15,9 @@ constexpr float kVantageMergeCone = 45.f;
 constexpr float kVantageIdwEpsilon = 1.f;
 constexpr float kVantageMinAmount = 0.05f;
 
+constexpr float kVantageDuckEyeLift = 12.f;
+constexpr float kVantageMeanEyeLift = 29.f;
+
 struct VantageWatch
 {
 	float yaw = 0.f;

@@ -7,6 +7,7 @@
 
 #include "bot_move.h"
 #include "bot_fire.h"
+#include "../game/game_profile.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
 
@@ -175,6 +176,33 @@ PmSim::PmPushFn Bot_PushFields(int hull)
 float Bot_GravityMultiplier(edict_t *pEdict)
 {
 	return (pEdict && pEdict->v.gravity > 0.f) ? pEdict->v.gravity : 1.f;
+}
+
+float Bot_Carefulness(const CBot &bot)
+{
+	if (!g_pGameProfile || !bot.pEdict)
+		return 0.f;
+
+	// Test pin: readiness never drops far enough on a live bot to reach the top of the range,
+	// so crossbot_careful_pin >= 0 forces a fixed carefulness instead of deriving one.
+	cvar_t *pin = g_engfuncs.pfnCVarGetPointer("crossbot_careful_pin");
+	if (pin && pin->value >= 0.f)
+		return pin->value > 1.f ? 1.f : pin->value;
+
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_careful");
+	float scale = cvar ? cvar->value : 1.f;
+	if (scale <= 0.f)
+		return 0.f;
+	if (scale > 1.f)
+		scale = 1.f;
+
+	float readiness = g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory);
+	if (readiness < 0.f)
+		readiness = 0.f;
+	if (readiness > 1.f)
+		readiness = 1.f;
+
+	return (1.f - readiness) * scale;
 }
 
 float Bot_MaxSpeed(edict_t *pEdict)

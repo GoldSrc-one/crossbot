@@ -20,6 +20,10 @@ PmSim::PmPushFn Bot_PushFields(int hull);
 
 float Bot_GravityMultiplier(edict_t *pEdict);
 
+// How cautious the bot's routing should be, in [0, 1]: 0 plans the fastest route, 1 plans the
+// least exposed one. Driven by (1 - combat readiness), scaled by crossbot_careful.
+float Bot_Carefulness(const CBot &bot);
+
 float Bot_MaxSpeed(edict_t *pEdict);
 
 PmSim::PmPhysics Bot_Physics(edict_t *pEdict);

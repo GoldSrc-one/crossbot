@@ -27,6 +27,7 @@ struct SearchNode
 {
 	PlanWalker walker;
 	float g = std::numeric_limits<float>::max();
+	float score = std::numeric_limits<float>::max();
 	int64_t parentArea = -1;
 	int64_t parentConn = -1;
 };
@@ -37,7 +38,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	const std::vector<NavAStar::Connection> &graphConns, const std::vector<PlanArea> &planAreas,
 	const std::vector<PlanConnection> &planConns, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint, const PlanTraceContext *traces,
-	PlanStats *stats)
+	PlanStats *stats, float careful, float minExposure)
 {
 	PlannedRoute result;
 
@@ -45,9 +46,17 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	if (startArea >= n || goalArea >= n || areaConnIndices.size() < n)
 		return result;
 
+	careful = std::max(0.f, std::min(1.f, careful));
+	minExposure = std::max(0.f, std::min(1.f, minExposure));
+
+	// Every edge is scaled by at least (1 - careful + careful * minExposure), so scaling the
+	// straight-line time estimate by the same bound keeps the heuristic admissible. It weakens as
+	// careful rises, which is why a careful search expands more areas.
+	const float hScale = 1.f - careful + careful * minExposure;
+
 	auto Heuristic = [&](const Vector &from)
 	{
-		return (goalPoint - from).Length() / NavAStar::kNavRunSpeed;
+		return (goalPoint - from).Length() / NavAStar::kNavRunSpeed * hScale;
 	};
 
 	std::vector<std::vector<uint32_t>> walkPreds(n);
@@ -72,6 +81,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	state[startArea].walker = PlanWalker(planAreas, traces, &walkPreds);
 	state[startArea].walker.Reset(startPoint);
 	state[startArea].g = 0.f;
+	state[startArea].score = 0.f;
 
 	std::priority_queue<OpenEntry, std::vector<OpenEntry>, OpenEntryCompare> open;
 	open.push({Heuristic(startPoint), startArea});
@@ -102,7 +112,9 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 			if (neighbor >= n)
 				continue;
 
-			if (state[current].g + kPlanCostEpsilon >= state[neighbor].g)
+			// The edge can only add score, so the parent's score is a lower bound on what
+			// crossing would reach: prune here, before the expensive Cross().
+			if (state[current].score + kPlanCostEpsilon >= state[neighbor].score)
 				continue;
 
 			if (planConns[connIdx].connType == crossbot_nav::CONN_AIRMOVE)
@@ -117,17 +129,22 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 
 			next.AddCost(gc.costSeconds);
 
+			// g stays true seconds -- the walker's own time, which the profile and the ETA are
+			// built from. Only the parallel score carries the exposure weighting.
 			float g = std::max(next.Time(), state[current].g);
-			if (g + kPlanCostEpsilon >= state[neighbor].g)
+			float score = state[current].score +
+				(g - state[current].g) * (1.f - careful + careful * gc.exposure);
+			if (score + kPlanCostEpsilon >= state[neighbor].score)
 				continue;
 
 			state[neighbor].g = g;
+			state[neighbor].score = score;
 			state[neighbor].walker = std::move(next);
 			state[neighbor].parentArea = static_cast<int64_t>(current);
 			state[neighbor].parentConn = static_cast<int64_t>(connIdx);
 
 			closed[neighbor] = false;
-			open.push({g + Heuristic(state[neighbor].walker.Frontier()), neighbor});
+			open.push({score + Heuristic(state[neighbor].walker.Frontier()), neighbor});
 		}
 	}
 
@@ -159,6 +176,8 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 
 	result.found = true;
 	result.complete = true;
+	result.routeSeconds = state[goalArea].g;
+	result.routeScore = state[goalArea].score;
 	result.areaPath = std::move(areaPath);
 	result.connPath = std::move(connPath);
 

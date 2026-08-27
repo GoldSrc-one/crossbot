@@ -1,5 +1,6 @@
 #include "nav_path.h"
 
+#include <algorithm>
 #include <cmath>
 #include <queue>
 
@@ -28,6 +29,7 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 		gc.crossing = NavPlan::ConnectionCrossing(mesh.planAreas, mesh.planConns[i]);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 		gc.costSeconds = c.costSeconds + c.runtimePenalty;
+		gc.exposure = c.vantageExposure;
 	}
 }
 
@@ -52,14 +54,14 @@ bool GateAllowsCrossing(const NavMesh &mesh, uint32_t connIdx, uint32_t fromId, 
 
 PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint, const NavPlan::PlanTraceContext *traces,
-	NavPlan::PlanStats *stats)
+	NavPlan::PlanStats *stats, float careful)
 {
 	std::vector<std::vector<uint32_t>> areaConnIndices;
 	std::vector<NavAStar::Connection> graphConns;
 	BuildGraph(mesh, areaConnIndices, graphConns);
 
 	return NavPlan::PlanRoute(areaConnIndices, graphConns, mesh.planAreas, mesh.planConns, startArea,
-		goalArea, startPoint, goalPoint, traces, stats);
+		goalArea, startPoint, goalPoint, traces, stats, careful, mesh.minConnExposure);
 }
 
 namespace
@@ -68,12 +70,14 @@ namespace
 constexpr float kGravityEpsilon = 0.01f;
 
 void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::vector<float> &out,
-	float gravityMultiplier)
+	float gravityMultiplier, float careful)
 {
 	size_t n = mesh.areas.size();
 	out.assign(n, kUnreachableSeconds);
 	if (rootArea >= n)
 		return;
+
+	careful = std::max(0.f, std::min(1.f, careful));
 
 	std::vector<bool> settled(n, false);
 	out[rootArea] = 0.f;
@@ -112,7 +116,8 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 				std::fabs(c.gravity - gravityMultiplier) > kGravityEpsilon)
 				continue;
 
-			float step = currentDist + c.travelSeconds + c.costSeconds + c.runtimePenalty;
+			float base = c.travelSeconds + c.costSeconds + c.runtimePenalty;
+			float step = currentDist + base * (1.f - careful + careful * c.vantageExposure);
 			if (step >= out[neighbor])
 				continue;
 
@@ -125,15 +130,15 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 }
 
 void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out,
-	float gravityMultiplier)
+	float gravityMultiplier, float careful)
 {
-	AreaCostsImpl(mesh, startArea, false, out, gravityMultiplier);
+	AreaCostsImpl(mesh, startArea, false, out, gravityMultiplier, careful);
 }
 
 void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out,
-	float gravityMultiplier)
+	float gravityMultiplier, float careful)
 {
-	AreaCostsImpl(mesh, goalArea, true, out, gravityMultiplier);
+	AreaCostsImpl(mesh, goalArea, true, out, gravityMultiplier, careful);
 }
 
 }

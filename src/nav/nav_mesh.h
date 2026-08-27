@@ -38,6 +38,8 @@ struct Connection
 	float travelSeconds = 0.f;
 	float runtimePenalty = 0.f;
 
+	float vantageExposure = 1.f;
+
 	float exitSpeed = 0.f;
 	float exitAngle = 0.f;
 	float jumpBackDist = 0.f;
@@ -61,6 +63,7 @@ struct NavMesh
 	float designMaxSpeed = crossbot_nav::kNavDefaultDesignSpeed;
 	std::vector<Area> areas;
 	std::vector<Connection> conns;
+	float minConnExposure = 1.f;
 
 	std::vector<NavPlan::PlanArea> planAreas;
 	std::vector<NavPlan::PlanConnection> planConns;

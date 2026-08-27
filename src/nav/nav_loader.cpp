@@ -274,10 +274,53 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	}
 	BuildVantageGrid(mesh->vantageField);
 
+	// Cache the normalized vantage exposure at every connection's crossing point. The careful
+	// planner multiplies each edge's time by this, so it must be resolved once per map rather
+	// than re-blended inside the search. Areas live in duck-hull-origin space, so the crossing
+	// has to be lifted to the eye height the probes were sampled at (doc/navgen.md, "Eye height").
+	float exposureSum = 0.f;
+	size_t exposureKnown = 0;
+	for (size_t i = 0; i < mesh->conns.size(); ++i)
+	{
+		Connection &conn = mesh->conns[i];
+		conn.vantageExposure = 1.f;
+
+		if (i >= mesh->planConns.size() || mesh->vantageField.maxExposure <= 0.f)
+			continue;
+
+		Vector point = NavPlan::ConnectionCrossing(mesh->planAreas, mesh->planConns[i]);
+
+		bool crouch = (conn.areaA < mesh->planAreas.size() && mesh->planAreas[conn.areaA].crouch) ||
+			(conn.areaB < mesh->planAreas.size() && mesh->planAreas[conn.areaB].crouch);
+		point.z += crouch ? kVantageDuckEyeLift : kVantageMeanEyeLift;
+
+		// BlendVantage returns whether the blend produced watch directions; the exposure is good
+		// whenever any probe was found, so gate on the neighbour count instead of the return.
+		VantageBlend blend;
+		BlendVantage(mesh->vantageField, point, blend);
+		if (blend.neighbors <= 0)
+			continue;
+
+		float exposure = blend.exposure / mesh->vantageField.maxExposure;
+		if (exposure < 0.f)
+			exposure = 0.f;
+		if (exposure > 1.f)
+			exposure = 1.f;
+
+		conn.vantageExposure = exposure;
+		exposureSum += exposure;
+		++exposureKnown;
+		if (exposure < mesh->minConnExposure)
+			mesh->minConnExposure = exposure;
+	}
+
 	char msg[700];
 	snprintf(msg, sizeof(msg),
-		"CrossBot: loaded nav file %s (%zu areas, %zu connections, %zu vantages).\n",
-		navPath, mesh->areas.size(), mesh->conns.size(), mesh->vantageField.vantages.size());
+		"CrossBot: loaded nav file %s (%zu areas, %zu connections, %zu vantages); "
+		"connection exposure known %zu, mean %.3f, min %.3f.\n",
+		navPath, mesh->areas.size(), mesh->conns.size(), mesh->vantageField.vantages.size(),
+		exposureKnown, exposureKnown > 0 ? exposureSum / static_cast<float>(exposureKnown) : 1.f,
+		mesh->minConnExposure);
 	SERVER_PRINT(msg);
 
 	return mesh;

@@ -69,6 +69,47 @@ the plan stopped 112 units short at `goal (448,336,32)` and the harness called i
 an example any more — navgen now builds the `trigger_teleport` edge into that pocket and the map
 passes.
 
+### Carefulness: routing away from exposure
+
+`PlanPath` takes a `careful` factor in `[0, 1]`. It weights every edge's time by the vantage exposure
+at that edge's crossing point:
+
+```
+edge score = time * (1 - careful) + time * exposure * careful
+```
+
+`careful = 0` is the plain fastest route and reproduces the pre-carefulness planner exactly — the
+factor collapses to 1 and the score is the time. `careful = 1` drops the time term entirely and
+minimizes exposure alone. It is **deliberately uncapped**: a bot with nothing to fight with should
+take the covered way however long it is. `Repath` feeds it `Bot_Carefulness`, which is
+`(1 - combat readiness)` scaled by `crossbot_careful` (`doc/bot.md`, "Carefulness").
+
+**The exposure is cached on the connection, not blended during the search.** `nav_loader.cpp` resolves
+`Connection::vantageExposure` once per map: `ConnectionCrossing` for the point, lifted to eye height
+(`kVantageMeanEyeLift`, or `kVantageDuckEyeLift` when either endpoint is a crouch area — areas are in
+duck-hull-origin space, so the raw crossing z is 29 units below where the probes were sampled), then
+`BlendVantage` and a divide by `field.maxExposure`. Roughly 2200 blends on crossfire, none of them
+allocating, so it is lost in the load.
+
+Two traps live in that pass. `BlendVantage` returns `out.valid`, which is *`watchCount > 0`* — a spot
+nothing looks at returns `false` carrying a perfectly good exposure, so gate on `blend.neighbors`
+instead. And the fallback for an unresolvable edge is **1.0, not 0**: an unknown edge must collapse the
+factor to 1 and behave like careful mode is off, never become free. A map built with `--no-vantage`
+therefore plans identically at every `careful`.
+
+**`g` stays true seconds.** `SearchNode` carries `score` *beside* `g`, and only `score` drives the
+ordering, the dominance test and the open-list key. Nothing touches `PlanWalker`'s lengths or
+`m_extraTime`, which is why the ETA needs no separate accounting at all: it is built by
+`BuildPathProfile` from waypoint geometry (`doc/bot.md`), never from the search cost, so a careful
+route reports the longer time it will actually take to walk.
+
+**The heuristic has to shrink with it.** The factor can go below 1, so the straight-line estimate is
+scaled by `1 - careful + careful * minExposure`, the lowest factor any edge can carry
+(`NavMesh::minConnExposure`, also resolved at load). Without that scaling A* would overestimate and
+quietly return suboptimal routes. The cost is that the heuristic weakens as `careful` rises and the
+search drifts toward Dijkstra — on crossfire one leg goes 45 expansions / 7ms at `careful 0` to 107
+expansions / 21ms at `careful 1`. Bounded, but it is the number to watch.
+
 ## plan_search.cpp
 
 ### NavPlan::PlanRoute
@@ -311,6 +352,15 @@ the walker, which is the whole reason phase 1 is a plain Dijkstra (`doc/bot.md`,
 Being seconds is also what lets `runtimePenalty` be added straight on top in `BuildGraph` (see
 `nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
 everything.
+
+`AreaCosts` takes the same `careful` factor as `PlanPath` and applies it the same way, to
+`travelSeconds + costSeconds + runtimePenalty` as a whole. **Above 0 the values stop being seconds and
+become scores**, which splits the two callers. `BotItems::SelectGoal` passes the bot's carefulness and
+is fine with it — it only ever ranks candidates against each other. `BotOppo::RebuildCosts` must leave
+it at 0, because `TryJump` subtracts two of these values and compares the difference against a real
+simulated flight time (`doc/bot.md`); careful-scaled costs there would silently deflate every gain.
+Reachability is unaffected either way: the factor is strictly positive, so nothing that was reachable
+becomes unreachable.
 
 ### AreaCostsToGoal
 

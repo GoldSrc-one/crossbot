@@ -103,6 +103,18 @@ cvar_t g_vantageCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_carefulCvar = {
+	"crossbot_careful",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_carefulPinCvar = {
+	"crossbot_careful_pin",
+	"-1",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	GameData::Load();
@@ -123,6 +135,8 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimImpulseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_fireCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_vantageCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulPinCvar);
 	RETURN_META(MRES_IGNORED);
 }
 
