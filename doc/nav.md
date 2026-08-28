@@ -95,7 +95,7 @@ Two traps live in that pass. `BlendVantage` returns `out.valid`, which is *`watc
 nothing looks at returns `false` carrying a perfectly good exposure, so gate on `blend.neighbors`
 instead. And the fallback for an unresolvable edge is **1.0, not 0**: an unknown edge must collapse the
 factor to 1 and behave like careful mode is off, never become free. A map built with `--no-vantage`
-therefore plans identically at every `careful`.
+therefore plans identically at every `careful`. The normalized exposure is `blend.exposure / field.maxExposure`, clamped to `[0, 1]`.
 
 **`g` stays true seconds.** `SearchNode` carries `score` *beside* `g`, and only `score` drives the
 ordering, the dominance test and the open-list key. Nothing touches `PlanWalker`'s lengths or
@@ -106,7 +106,7 @@ route reports the longer time it will actually take to walk.
 **The heuristic has to shrink with it.** The factor can go below 1, so the straight-line estimate is
 scaled by `1 - careful + careful * minExposure`, the lowest factor any edge can carry
 (`NavMesh::minConnExposure`, also resolved at load). Without that scaling A* would overestimate and
-quietly return suboptimal routes. The cost is that the heuristic weakens as `careful` rises and the
+quietly return suboptimal routes. Every edge is scaled by at least this bound `(1 - careful + careful * minExposure)`, so scaling the straight-line time estimate by the same bound keeps the heuristic admissible — it remains consistent with the search's own edge weighting. The cost is that the heuristic weakens as `careful` rises and the
 search drifts toward Dijkstra — on crossfire one leg goes 45 expansions / 7ms at `careful 0` to 107
 expansions / 21ms at `careful 1`. Bounded, but it is the number to watch.
 
@@ -158,6 +158,15 @@ Two properties worth knowing before changing it:
 
 The goal node's walker **is** the finished plan: reconstruction calls `Finish` on it and takes its
 waypoints. There is no replay pass, so the plan cannot drift from what the search costed.
+
+**`g` stays true seconds.** `SearchNode` carries `score` beside `g`, and only `score` drives the
+ordering, the dominance test and the open-list key. Nothing touches `PlanWalker`'s lengths or running cost,
+which is why the ETA needs no separate accounting: it is built by `BuildPathProfile` from waypoint geometry,
+never from the search cost, so a careful route correctly reports the longer time it will actually take to walk.
+A node's `g` is the string-pulled travel time plus each connection's `costSeconds` — real seconds, unweighted
+by exposure.
+
+The edge cost scaling for exposure weighting only applies to `score`: `score = parent.score + (g - parent.g) * (1 - careful + careful * exposure)`. This separation lets the planner bound the true path length independently of the exposure weighting.
 
 ### Cost of planning in the search
 Every air-move edge the search relaxes runs a full `PmSim` re-simulation, so the price is worth

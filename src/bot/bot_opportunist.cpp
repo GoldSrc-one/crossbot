@@ -43,8 +43,6 @@ namespace
 			bot.oppoCosts.size() == mesh.areas.size())
 			return true;
 
-		// No carefulness here: TryJump subtracts two of these against a real simulated flight
-		// time, so they have to stay in true seconds.
 		Nav::AreaCostsToGoal(mesh, goalArea->id, bot.oppoCosts, Bot_GravityMultiplier(bot.pEdict));
 		bot.oppoCostsGoalArea = static_cast<int>(goalArea->id);
 		return true;

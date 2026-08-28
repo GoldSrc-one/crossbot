@@ -49,9 +49,6 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	careful = std::max(0.f, std::min(1.f, careful));
 	minExposure = std::max(0.f, std::min(1.f, minExposure));
 
-	// Every edge is scaled by at least (1 - careful + careful * minExposure), so scaling the
-	// straight-line time estimate by the same bound keeps the heuristic admissible. It weakens as
-	// careful rises, which is why a careful search expands more areas.
 	const float hScale = 1.f - careful + careful * minExposure;
 
 	auto Heuristic = [&](const Vector &from)
@@ -112,8 +109,6 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 			if (neighbor >= n)
 				continue;
 
-			// The edge can only add score, so the parent's score is a lower bound on what
-			// crossing would reach: prune here, before the expensive Cross().
 			if (state[current].score + kPlanCostEpsilon >= state[neighbor].score)
 				continue;
 
@@ -129,8 +124,6 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 
 			next.AddCost(gc.costSeconds);
 
-			// g stays true seconds -- the walker's own time, which the profile and the ETA are
-			// built from. Only the parallel score carries the exposure weighting.
 			float g = std::max(next.Time(), state[current].g);
 			float score = state[current].score +
 				(g - state[current].g) * (1.f - careful + careful * gc.exposure);

@@ -274,10 +274,6 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	}
 	BuildVantageGrid(mesh->vantageField);
 
-	// Cache the normalized vantage exposure at every connection's crossing point. The careful
-	// planner multiplies each edge's time by this, so it must be resolved once per map rather
-	// than re-blended inside the search. Areas live in duck-hull-origin space, so the crossing
-	// has to be lifted to the eye height the probes were sampled at (doc/navgen.md, "Eye height").
 	float exposureSum = 0.f;
 	size_t exposureKnown = 0;
 	for (size_t i = 0; i < mesh->conns.size(); ++i)
@@ -294,8 +290,6 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 			(conn.areaB < mesh->planAreas.size() && mesh->planAreas[conn.areaB].crouch);
 		point.z += crouch ? kVantageDuckEyeLift : kVantageMeanEyeLift;
 
-		// BlendVantage returns whether the blend produced watch directions; the exposure is good
-		// whenever any probe was found, so gate on the neighbour count instead of the return.
 		VantageBlend blend;
 		BlendVantage(mesh->vantageField, point, blend);
 		if (blend.neighbors <= 0)

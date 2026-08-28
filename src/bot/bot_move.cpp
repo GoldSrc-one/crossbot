@@ -26,7 +26,6 @@ namespace
 
 	using NavMath::kPiF;
 
-	// Latched once per server frame by Bot_BeginFrame; see bot_move.h.
 	float g_frameTime = 0.f;
 }
 
@@ -200,8 +199,6 @@ float Bot_Carefulness(const CBot &bot)
 	if (!g_pGameProfile || !bot.pEdict)
 		return 0.f;
 
-	// Test pin: readiness never drops far enough on a live bot to reach the top of the range,
-	// so crossbot_careful_pin >= 0 forces a fixed carefulness instead of deriving one.
 	cvar_t *pin = g_engfuncs.pfnCVarGetPointer("crossbot_careful_pin");
 	if (pin && pin->value >= 0.f)
 		return pin->value > 1.f ? 1.f : pin->value;

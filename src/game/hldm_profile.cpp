@@ -108,9 +108,6 @@ void CHLDMProfile::Respawn(edict_t *pEdict) const
 {
 	unsigned short buttons = (pEdict->v.deadflag == DEAD_RESPAWNABLE) ? IN_ATTACK : 0;
 
-	// One frame's worth, not a token 1ms: this is the dead bot's only physics
-	// tick, and pfnRunPlayerMove leaves gpGlobals->frametime holding whatever msec
-	// it was given, which every later bot in the frame would otherwise inherit.
 	byte msec = Bot_FrameMsec();
 	BotTiming::BeginMove(pEdict, msec);
 	g_engfuncs.pfnRunPlayerMove(pEdict, pEdict->v.v_angle, 0.f, 0.f, 0.f, buttons, 0, msec);

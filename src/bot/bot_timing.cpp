@@ -16,13 +16,11 @@ namespace
 	{
 		bool active = false;
 
-		// Per-frame
 		int postThinks = 0;
 		int postThinksAtMoveStart = 0;
 		byte pendingMsec = 0;
 		int movesThisFrame = 0;
 
-		// Per-report window
 		int frames = 0;
 		int framesNoMove = 0;
 		int framesMultiMove = 0;
@@ -35,11 +33,10 @@ namespace
 		int deadFrames = 0;
 		int shortFrames = 0;
 		float worstRatio = 1.f;
-		float frameMsec = 0.f;			// msec issued this frame
+		float frameMsec = 0.f;
 		Vector lastOrigin;
 		bool hasLastOrigin = false;
 
-		// Lifetime, mirrors what SV_CheckCmdTimes tracks per client
 		double cmdSeconds = 0.0;
 		float clockStart = 0.f;
 		bool clockStarted = false;
@@ -47,7 +44,6 @@ namespace
 
 	Slot g_slots[kMaxPlayers];
 
-	// Wall time and host frame time budget for the current report window.
 	float g_windowStart = 0.f;
 	double g_windowHostTime = 0.0;
 	float g_frameHostTime = 0.f;
@@ -96,9 +92,6 @@ void BeginFrame()
 	if (!Enabled())
 		return;
 
-	// Read before any pfnRunPlayerMove runs: SV_RunCmd overwrites
-	// gGlobalVariables.frametime with the command's msec and never restores it,
-	// so this is the only point in the frame where it is still host_frametime.
 	g_frameHostTime = gpGlobals->frametime;
 
 	if (!g_windowOpen)
@@ -112,9 +105,6 @@ void BeginFrame()
 	g_windowHostTime += g_frameHostTime;
 	++g_windowFrames;
 
-	// Once a second, dump one whole frame in the order BotManager walks the bot
-	// array. Because pfnRunPlayerMove leaves gpGlobals->frametime holding the
-	// msec it was just given, each entry shows what the bot before it left behind.
 	float now = RealTime();
 	g_dumpFrame = (now - g_lastDump >= kReportInterval);
 	if (g_dumpFrame)
@@ -183,13 +173,8 @@ void EndMove(edict_t *pEdict)
 		slot.clockStart = RealTime();
 		slot.cmdSeconds = 0.0;
 	}
-	// SV_RunCmd charges cmdtime even for the commands it throws away, so this
-	// accumulator has to as well if it is going to mirror the engine's drift.
 	slot.cmdSeconds += slot.pendingMsec / 1000.0;
 
-	// SV_RunCmd returns before pfnCmdStart/PlayerPreThink/PlayerPostThink when
-	// it drops a command, so no PostThink between BeginMove and here means the
-	// engine ignored this move entirely.
 	if (slot.postThinks == slot.postThinksAtMoveStart)
 	{
 		slot.droppedMsec += slot.pendingMsec;
@@ -230,8 +215,6 @@ void EndBot(CBot &bot)
 	if (speed > slot.peakSpeed)
 		slot.peakSpeed = speed;
 
-	// A dead bot only gets the 1ms nudge that presses +attack to respawn, so it
-	// is never short-changed in a way that matters -- score it separately.
 	bool dead = bot.pEdict->v.deadflag != DEAD_NO || bot.pEdict->v.health <= 0.f;
 	if (dead)
 	{

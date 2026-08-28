@@ -95,10 +95,40 @@ The same readiness drives *how* the bot travels, not only where. `Bot_Carefulnes
 `Nav::PlanPath` and `SelectGoal` hands it to `Nav::AreaCosts`. An armed, healthy bot routes for speed;
 a bot with nothing to fight with routes for cover, however far around that takes it (`doc/nav.md`,
 "Carefulness: routing away from exposure"). `BotOppo::RebuildCosts` is the one caller that must stay at
-0 -- its gain test is a subtraction against real simulated seconds.
+0 -- its gain test is a subtraction against real simulated seconds, so the exposure weighting must not
+distort the cost values.
 
 **It is sampled once, at repath time, and baked into the route.** A bot that arms itself halfway along
 a timid route finishes that route; carefulness only refreshes on the repaths that already happen.
+
+## bot_move.h
+
+### Frame time latching
+
+A fake client receives no engine physics: `SV_Physics` skips every edict with index <= maxclients, so a bot advances only by the msec handed to `pfnRunPlayerMove`. The bot's movement clock is entirely our responsibility.
+
+The engine's `pfnRunPlayerMove` does not restore `gpGlobals->frametime` after it executes: `SV_RunCmd` overwrites it with each command's msec and never restores it. After the first bot in the frame has moved, the global holds the previous bot's command length, not the frame time. Any bot code that runs between moves will read stale timing, so every movement calculation must latch the frame time before any bot runs.
+
+`Bot_BeginFrame()` captures it at the top of `StartFrame`, before any bot has moved. `Bot_FrameTime()` and `Bot_FrameMsec()` return the latched value. Bot code must use these instead of `gpGlobals->frametime` for anything integrated per frame.
+
+## bot_timing.h
+
+### Movement clock diagnostics
+
+A bot that receives less sim time per second than the wall clock spends looks like it is wading through honey -- both running and gravity appear slower. This module measures, per bot per second:
+
+- **host frame time actually elapsed** (the budget)
+- **msec issued** and over how many `pfnRunPlayerMove` calls
+- **how much the engine actually executed** — `SV_RunCmd` silently drops commands while `host_client->ignorecmdtime > realtime` (the "clockwindow" speedhack guard), which is invisible from the game DLL unless you watch for `PlayerPostThink` not firing
+- **the resulting drift** between bot sim time and real time, which is the same quantity `SV_CheckCmdTimes` compares against `clockwindow`
+
+`crossbot_time_debug 1` enables per-second reports and a once-per-second frame dump showing what each bot in order saw as its frame time.
+
+## hldm_profile.cpp
+
+### Dead bot respawn
+
+A dead bot's only physics tick is the respawn frame. `pfnRunPlayerMove` receives one frame's worth of msec (not a token 1ms), and leaves `gpGlobals->frametime` holding whatever msec it was given. Every later bot in the frame would inherit that stale timing if nothing restored it, so the respawn is a full frame's worth to avoid propagating old command msec into the next bot's calculations.
 
 `crossbot_careful 0` disables the whole thing and restores pure fastest-route planning.
 `crossbot_careful_pin` exists because readiness on a live bot does not reach the ends of its range --
