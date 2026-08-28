@@ -26,6 +26,10 @@ public:
 
 	int MeleeWeapon() const override;
 
+	int DeployWeapon(DeployKind kind) const override;
+
+	const char *DeployEntity(DeployKind kind) const override;
+
 	bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const override;
 };

@@ -6,6 +6,7 @@ struct GameOffsets
 
 	int ent_fInAttack;
 	int ent_flStartThrow;
+	int ent_chargeReady;
 
 	int item_pPlayer;
 	int item_pNext;

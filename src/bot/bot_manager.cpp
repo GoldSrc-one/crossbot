@@ -3,12 +3,14 @@
 
 #include "bot_manager.h"
 #include "bot.h"
+#include "bot_deploy.h"
 #include "bot_fire.h"
 #include "bot_items.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_opportunist.h"
 #include "bot_sense.h"
+#include "bot_timing.h"
 #include "bot_weapons.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
@@ -21,6 +23,10 @@ IGameProfile *g_pGameProfile = nullptr;
 namespace
 {
 	constexpr int kMaxBots = 16;
+
+	constexpr float kBeamRefresh = 0.25f;
+
+	float g_nextBeamRefresh = 0.f;
 
 	CBot g_bots[kMaxBots];
 	int g_botSerial = 0;
@@ -117,13 +123,25 @@ void ClientDisconnect(edict_t *pEntity)
 {
 	CBot *pBot = FindBot(pEntity);
 	if (pBot)
+	{
+		BotTiming::Reset(pEntity);
 		*pBot = CBot();
+	}
 }
 
 void StartFrame()
 {
 	if (!g_pGameProfile)
 		return;
+
+	Bot_BeginFrame();
+	BotTiming::BeginFrame();
+
+	if (gpGlobals->time >= g_nextBeamRefresh || gpGlobals->time < g_nextBeamRefresh - kBeamRefresh)
+	{
+		g_nextBeamRefresh = gpGlobals->time + kBeamRefresh;
+		BotDeploy::RefreshBeams();
+	}
 
 	for (auto &bot : g_bots)
 	{
@@ -135,6 +153,7 @@ void StartFrame()
 		{
 			g_pGameProfile->Respawn(bot.pEdict);
 			bot.wasDead = true;
+			BotTiming::EndBot(bot);
 			continue;
 		}
 
@@ -145,13 +164,18 @@ void StartFrame()
 			BotItems::OnRespawn(bot);
 			BotSense::OnRespawn(bot);
 			BotFire::Reset(bot);
+			BotDeploy::OnRespawn(bot);
 			bot.brk = BotBreak::State();
 		}
 
 		BotWeapons::Refresh(bot);
 
 		Bot_MoveNav(bot);
+
+		BotTiming::EndBot(bot);
 	}
+
+	BotTiming::EndFrame();
 }
 
 namespace
@@ -584,6 +608,34 @@ void PrintFireStatus()
 	char summary[160];
 	snprintf(summary, sizeof(summary), "CrossBot: %d bot(s), fire=%d\n", shown,
 		BotFire::Enabled() ? 1 : 0);
+	SERVER_PRINT(summary);
+}
+
+void PrintDeployStatus()
+{
+	int shown = 0;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		++shown;
+
+		const BotDeploy::State &st = bot.deploy;
+
+		char line[320];
+		snprintf(line, sizeof(line),
+			"CrossBot: %s deploy=%s conn=%u open=%.0f surface=%s stance=%s placed=%d dets=%d "
+			"aborts=%d memo=%zu why=%s\n",
+			bot.name, BotDeploy::PhaseName(st.phase), st.spot.connIndex, st.spot.opening,
+			BotDeploy::SpotKindName(st.spot.kind), st.spot.duck ? "duck" : "stand", st.placements,
+			st.detonations, st.aborts, st.memo.size(), st.lastReason);
+		SERVER_PRINT(line);
+	}
+
+	char summary[160];
+	snprintf(summary, sizeof(summary), "CrossBot: %d bot(s), deploy=%d\n", shown,
+		BotDeploy::Enabled() ? 1 : 0);
 	SERVER_PRINT(summary);
 }
 

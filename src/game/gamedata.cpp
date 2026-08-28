@@ -31,6 +31,7 @@ const Request kRequests[] = {
 	{ "CBaseEntity",       "pev",                     CB_OFF(pev) },
 	{ "CBaseEntity",       "m_fInAttack",             CB_OFF(ent_fInAttack) },
 	{ "CBaseEntity",       "m_flStartThrow",          CB_OFF(ent_flStartThrow) },
+	{ "CBaseEntity",       "m_chargeReady",           CB_OFF(ent_chargeReady) },
 
 	{ "CBasePlayerItem",   "m_pPlayer",               CB_OFF(item_pPlayer) },
 	{ "CBasePlayerItem",   "m_pNext",                 CB_OFF(item_pNext) },

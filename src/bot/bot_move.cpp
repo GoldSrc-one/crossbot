@@ -7,6 +7,7 @@
 
 #include "bot_move.h"
 #include "bot_fire.h"
+#include "bot_timing.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
@@ -24,6 +25,9 @@ namespace
 	constexpr float kDefaultMaxVelocity = 2000.f;
 
 	using NavMath::kPiF;
+
+	// Latched once per server frame by Bot_BeginFrame; see bot_move.h.
+	float g_frameTime = 0.f;
 }
 
 bool Bot_HasLongJumpModule(edict_t *pEdict)
@@ -39,10 +43,19 @@ float Bot_NormalizeAngle(float a)
 	return a;
 }
 
+void Bot_BeginFrame()
+{
+	g_frameTime = gpGlobals->frametime;
+}
+
+float Bot_FrameTime()
+{
+	return g_frameTime;
+}
+
 byte Bot_FrameMsec()
 {
-
-	int msec = static_cast<int>(gpGlobals->frametime * 1000.f);
+	int msec = static_cast<int>(Bot_FrameTime() * 1000.f);
 	if (msec < 1)
 		msec = 1;
 	else if (msec > 100)
@@ -64,13 +77,17 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 
 	if ((buttons & IN_JUMP) != 0 && msec > kMaxJumpCommandMsec)
 	{
+		BotTiming::BeginMove(pEdict, kMaxJumpCommandMsec);
 		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0,
 			kMaxJumpCommandMsec);
+		BotTiming::EndMove(pEdict);
 		buttons &= ~IN_JUMP;
 		msec -= kMaxJumpCommandMsec;
 	}
 
+	BotTiming::BeginMove(pEdict, msec);
 	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, msec);
+	BotTiming::EndMove(pEdict);
 }
 
 void Bot_DecomposeMove(float viewYawDeg, const Vector &worldDir, float driveLength, float &forwardMove,
@@ -247,7 +264,7 @@ PmSim::PmPhysics Bot_Physics(edict_t *pEdict)
 	if (maxVelocity <= 0.f)
 		maxVelocity = kDefaultMaxVelocity;
 
-	float frameTime = gpGlobals->frametime;
+	float frameTime = Bot_FrameTime();
 	if (frameTime < 1.f / 128.f || frameTime > 1.f / 20.f)
 		frameTime = 1.f / 60.f;
 

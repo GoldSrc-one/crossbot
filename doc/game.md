@@ -23,6 +23,14 @@ the fire gate re-measures, so nothing anywhere has to invert the game's own rema
 `WPN_Q_THROW_ARC` under `weapon_spec.h`.
 
 
+`DeployWeapon(kind)` and `DeployEntity(kind)` are the two halves of the same rule `MeleeWeapon()`
+follows: `src/bot/` must not name `weapon_tripmine` or `monster_satchel`. `DeployKind` is
+`DEPLOY_TRIPMINE` / `DEPLOY_SATCHEL`, and the pair answers "which weapon places one" and "what does a
+placed one look like in the world". `bot_deploy.cpp` needs both — the first to draw and fire, the
+second to check whether a gate is already mined, to confirm a placement landed, and to find the
+bot's own live charges — and `bot_avoid.cpp` needs the second to recognise a beam's owner. A mod with
+no deployables returns 0 and null and the whole feature idles.
+
 `AmmoEntity(weaponId, pool)` is the mapping from a weapon and one of its ammo pools to the entity
 classname that refills it, and it is here for the same reason `ThrowLaunch` is: `src/bot/` must not
 name `ammo_ARgrenades`. It exists because the pin now equips (see `bot_fire.cpp` in `doc/bot.md`), and
@@ -489,8 +497,22 @@ the radio is pressed later. Throwing without being able to press the radio is wo
 so the state and the throw are one feature and neither ships alone.
 
 `m_chargeReady` is **not** a `CSatchel` field. It is on `CBaseEntity` alongside `m_flStartThrow`,
-`m_fInAttack` and `m_fireState`, so reading it would cost the offset rule nothing. It is absent
-because there is no fire path behind it yet, not because it is expensive.
+`m_fInAttack` and `m_fireState`, so reading it cost the offset rule nothing — it is requested now,
+as `ent_chargeReady`, because `bot_deploy.cpp` needs it. `BotWeapons::Read` fills it only for a mode
+carrying `WPN_Q_HIDDEN_STATE`, the same gate `rpg_cActiveRockets` sits behind, so the satchel is the
+only weapon it is ever read from.
+
+It is read for two different questions and both need the real field rather than a guess. The
+**throw** is confirmed by `m_chargeReady == 1`, because a satchel is 80 units downrange before any
+position check could find it. The **detonation** is refused unless `m_chargeReady == 1`, because
+primary means three different things depending on it, and a bot that guessed wrong would throw
+another satchel when it meant to blow one up. Inferring the state from live `monster_satchel`
+entities is close but not equal: `AddToPlayer` resets the field to 0 on pickup while the old charges
+are still in the world and still owned by the same edict.
+
+`WPN_Q_HIDDEN_STATE` still rejects both satchel modes in `BotFire::Supported`, and that has not
+changed. The quirk means "this mode's behaviour depends on private state", which is exactly why the
+firing path must not touch it; `bot_deploy.cpp` reads the state instead and drives the weapon itself.
 
 **RPG secondary** toggles `CRpg::m_fSpotActive`, and here the quirk earns its keep by keeping the bot
 away from a button it must never press. `CRpg::Spawn` sets `m_fSpotActive = 1`, so **the laser is on

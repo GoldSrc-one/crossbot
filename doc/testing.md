@@ -368,6 +368,53 @@ frame and no 2-second poll would ever see it. Reload is the behaviour the SDK re
 to get wrong — hold the trigger through an empty clip and the weapon clicks forever — so it needs a
 witness that does not depend on sampling luck.
 
+## scripts/test_deploy.ps1
+
+Four phases, each on its own server, each asserting something only it can show. `-Phase` runs one;
+`-Seconds` sets the bot phases' length (default 150).
+
+```powershell
+.\scripts\test_deploy.ps1
+```
+
+| phase | what it proves |
+|---|---|
+| `gates` | `crossbot_list_gates` finds chokepoints on crossfire, boot_camp, stalkyard and test2_doorway, and no accepted gate exceeds the 144-unit opening bound. Needs no bots, and it is the phase that catches a broken gate scan on its own |
+| `tripmine` | placements happen, **both stances appear**, and both maneuvers follow — `avoid jump` and `avoid duck` against `monster_tripmine`. Also that no mine was removed for finding no surface, and that bots still reach goals with beams up |
+| `standoff` | with the surface pinned to ground on `test2_doorway`, the side search gives up, `EngageStandoff` runs, and the mine is destroyed by gunfire — and the bot never sits `blocked by monster_tripmine` |
+| `satchel` | satchels are thrown and detonated, no detonation is counted twice, and **no detonation fires on a contact under 16 units** |
+
+**The stance assertion is the load-bearing one in the tripmine phase.** A standing placement puts the
+beam 64 above the floor and a ducked one puts it at 30, which land on opposite sides of the duck and
+jump predicates. If only one stance ever appears the roll is dead and half the avoidance code is
+untested while every counter still looks healthy.
+
+**The standoff phase needs the pin, and equipping does not substitute.** A vertical beam is only
+reachable through `crossbot_deploy_surface 3`: mounts on the ceiling or ground are gated behind a
+48-unit opening, which is rare enough that an unpinned scan over six stock maps finds none. Without
+the pin the side-search and shoot branches never run at all. `test2_doorway` is the map because it has
+one route per gate, so a beam across it cannot be walked around.
+
+That map is also **smaller than the 375-unit standoff**, so the retreat always ends on
+`kBreakRetreatTime` rather than on distance. That is the designed degradation, not a failure — the bot
+fires from as far back as the corridor allows and takes some blast. A run where `killed` is non-zero
+has exercised the path whether or not the retreat completed.
+
+**The bot has to be driven on `test2_doorway`.** There are no items to fetch, so `BotItems::SelectGoal`
+returns false, the bot idles in its spawn area forever and never stands in a gate. The phase alternates
+`crossbot_nav_goal` between the spawn and the `info_target` to walk it through the doorways.
+
+**The satchel contact bound is the real assertion.** `monster_satchel` plays a bounce sound on landing,
+`BotSense::Hear` pushes a suspicion for the emitter, and a bot that counts its own charge as a contact
+detonates the instant it lands — reporting a contact about 2 units away. An early run scored 181
+detonations off 7 satchels that way, with every other counter looking fine.
+
+**Placements are stochastic and the counts will not repeat.** Deployment is opportunistic — a bot mines
+only gates in the area it happens to be standing in — so which gates get mined, and whether anyone
+walks back through them, varies per run. The assertions are all "more than zero" for that reason.
+A phase reporting `placed=0` on crossfire is a real failure; a phase reporting 9 where it once
+reported 14 is not.
+
 ## scripts/test_aim_error.ps1
 
 Measures the intentional aim error by firing the same flick many times through `crossbot_aim_test` and
@@ -480,3 +527,20 @@ come from what the change touches.
 `BotFire::Think` exits on its first branch every frame and the whole system is inert. That cuts both
 ways: it is also why a firing change can be cleared for movement regressions by the nav sweep alone,
 and why a nav sweep result of 45/45 says nothing whatsoever about whether firing works.
+
+**Deployables.** `test_deploy.ps1`. The nav sweep is blind to this one **by construction, not by
+accident**: `test_nav_goal.ps1` boots with `crossbot_deploy 0`, alongside the `crossbot_gather 0` it
+already set. It has to. A bot that mines a doorway changes every route through it for the rest of the
+run, so the per-map waypoint diffs the sweep exists to produce would stop meaning anything, and a map
+would fail for a beam rather than for the change under test.
+
+The useful consequence is the same as the firing one: with deploy off, `BotDeploy` never runs and the
+beam registry stays empty, so every branch this feature added to `bot_avoid.cpp` early-outs. A nav
+sweep therefore clears a deployable change for movement regressions and says nothing at all about
+whether deployment works. It also means the reverse check is cheap — if a sweep failure's per-map log
+has no `avoid` or `monster_tripmine` lines in it, the deployable code did not run there and cannot be
+the cause.
+
+Running the sweep a second time with deploy left **on** is worth doing once for a change to the
+avoidance side, but read it as an observation and not as a gate: with three bots mining crossfire the
+route each one takes stops being repeatable, which is exactly what the sweep needs it to be.

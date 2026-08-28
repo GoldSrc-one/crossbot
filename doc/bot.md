@@ -1877,27 +1877,23 @@ in any of them is a death, which is how `test_fire.ps1` counts deaths without re
 
 ### What is not here
 
-**One family is left, and it is the deployables.** Every quirk in `WeaponQuirks` now has an
-implementation; what `Supported` still rejects is a `WeaponToggle`, an aim of `AIM_NONE` or
-`AIM_SURFACE`, and `WPN_Q_HIDDEN_STATE`. Those three doors hold exactly two weapons.
+**The deployables are no longer here, and `Supported` never learned them.** The tripmine and the
+satchel are placed by `bot_deploy.cpp`, which owns the frame the way `BotBreak` does, and `BotFire`
+stands down for it exactly as it does for a break. `Supported` still rejects `AIM_NONE`,
+`AIM_SURFACE`, `WeaponToggle` and `WPN_Q_HIDDEN_STATE`, and that is correct: the diagnosis below was
+right, and the answer was a second decision layer rather than a wider gate.
 
-- **The tripmine** (`AIM_SURFACE`) needs a wall within 128 units, which is a placement rather than a
-  shot: `CTripmine::PrimaryAttack` traces 128 ahead and does nothing at all unless
-  `tr.flFraction < 1.0` on a non-conveyor entity.
-- **The satchel** (both modes, `WPN_Q_HIDDEN_STATE`) is a thrown **mine** detonated by a *later* radio
-  press, and both modes branch on `m_chargeReady`. Throwing without being able to detonate is worse
-  than not throwing, so the state and the throw are one feature.
+What they shared is why neither belonged in `BotFire`: **both fire with no target at all**, and
+`Think` returns `no-target` several branches before any mode is considered. They wanted a decision
+layer that runs on the map rather than on an enemy, plus a memory of what the bot has already placed.
+Both now exist in `bot_deploy.cpp` — the map layer is the nav mesh's own connection gates, and the
+memory is a per-bot connection memo.
 
-What they share is why neither is a small job: **both fire with no target at all**, and `Think`
-returns `no-target` several branches before any mode is considered. They want a decision layer that
-runs on the map rather than on an enemy, plus a memory of what the bot has already placed. That is a
-different feature from firing, which is why the frontier stops here rather than one door short.
-
-`CRpg::m_fSpotActive` also stays out of `GameOffsets`, and the reason is no longer the per-class rule
+`CRpg::m_fSpotActive` still stays out of `GameOffsets`, and the reason is no longer the per-class rule
 — `rpg_cActiveRockets` broke that deliberately and safely, gated by the quirk. It stays out because
 nothing would read it: the laser is on from `CRpg::Spawn` and the bot is forbidden from pressing the
-button that turns it off. `m_chargeReady` is a `CBaseEntity` field and costs nothing whenever a
-consumer turns up.
+button that turns it off. `m_chargeReady` was in the same position until the satchel needed it; it is
+requested now, and it cost the offset rule nothing, exactly as predicted.
 
 Also still absent: weapon preference weights, and recoil compensation. The aim override, the toggle
 step, the commit machine and both arc solves exist now, and none of the above needs a fifth one.
@@ -1910,6 +1906,38 @@ PM_WalkMove and PM_AirMove both flatten forward/right and renormalize before use
 ### Bot_NormalizeAngle
 Wraps an angle into (-180, 180]. Lives here rather than in bot_move_nav.cpp so both movement
 translation units share one copy.
+
+### Bot_BeginFrame and Bot_FrameTime
+**`gpGlobals->frametime` is not the frame time once a bot has moved.** `PF_RunPlayerMove_I` calls
+`SV_RunCmd`, and `SV_RunCmd` ends with `gGlobalVariables.frametime = ucmd->msec * 0.001` before
+`pfnPlayerPostThink` (`sv_user.cpp:1055`). It never restores it. The engine only puts the real value back
+at the top of `SV_Frame` and after each `SV_ExecuteClientMessage` in `SV_ReadPackets` -- nothing
+restores it between two bots inside one `pfnStartFrame`. So the second bot in the loop reads the *first
+bot's command length*, the third reads the second's, and so on down the array.
+
+While every bot asks for the same msec that is self-sustaining and invisible. It stops being invisible
+the moment one bot in the middle of the array issues a short command:
+
+```
+CrossBot TIME chain (frame 10.04ms): bot1[saw 10ms]=10ms ... bot6[saw 10ms]=10ms
+  bot7(dead)[saw 10ms]=1ms bot8[saw 1ms]=1ms bot9[saw 1ms]=1ms ... bot12[saw 1ms]=1ms
+```
+
+One dead bot pressing `+attack` to respawn used to hand the engine a token 1 ms command, and every bot
+after it in `g_bots` then ran at 1 ms of simulated time per 10 ms frame -- a tenth of real speed, for as
+long as that one bot stayed dead. Movement *and* gravity slow together, because both are integrated
+against the same msec, which is what makes it look like the bot is wading through honey rather than
+like a bot that is lagging or stuck. With a dozen bots someone is nearly always dead, so nearly always
+somebody is in it. The 50 ms first half of the jump split and the engine's own halving of commands over
+50 ms are the same bug at lower server framerates.
+
+`Bot_BeginFrame` latches `gpGlobals->frametime` at the top of `BotManager::StartFrame`, before any bot
+has moved, and `Bot_FrameTime` hands that value out for the rest of the frame. Every per-frame
+integration in the bot -- `Bot_FrameMsec`, the aim filter's `dt`, `AirmoveLaunchLead`, the weapon-usage
+accumulator -- reads the latch. `gpGlobals->frametime` must not be read directly from bot code.
+
+`crossbot_time_debug 1` prints the per-second budget-vs-issued report and the frame chain above; see
+`bot_timing.cpp`.
 
 ### Bot_RunPlayerMove
 The engine halves any usercmd longer than 50 ms and runs PM_PlayerMove once per half, so a
@@ -2976,6 +3004,81 @@ The root cause of that particular loop was upstream, in navgen — the charger w
 all, so the goal point was inside it. `doc/navgen.md` has that half. This section is about why the
 runtime could not save itself from a bad goal, which is a property worth keeping fixed independently.
 
+### Tripmine beams, which no trace can see
+
+A tripmine beam is a `CBeam`, not geometry: it is `SOLID_NOT`, it has no bounding box, and the forward
+hull trace goes straight through it. The mine detonates on a `FTRACE_SIMPLEBOX` traceline it casts
+itself, from its own origin along its own normal, so what the bot has to avoid is a **line segment**
+that nothing in the engine will report as a hit.
+
+**The registry is shared and refreshed at 4 Hz**, in `BotManager::StartFrame` rather than per bot per
+frame — sixteen bots times `maxEntities` every frame is the expensive way to learn something that
+changes only when a mine is placed or destroyed. One entry per armed `monster_tripmine`: handle,
+origin, and the beam end from a single 2048-unit traceline, mirroring `CTripmineGrenade::MakeBeam`.
+
+Armed is `solid == SOLID_BBOX`, which the mine only becomes after its 2.5 s powerup — before that
+there is no beam, and a bot that walks through the space is in no danger.
+
+**The direction has to be un-negated.** The mine's angles come from `UTIL_VecToAngles(planeNormal)`,
+whose pitch convention is the opposite of a view angle's, and `CTripmineGrenade::Spawn` recovers the
+normal with `UTIL_MakeAimVectors`, which negates pitch before `MAKE_VECTORS`. The registry does the
+same. Skipping that negation gives a beam that is mirrored vertically and mostly still plausible.
+
+### The beam as an obstacle
+
+`Probe` is the single choke point for "is this leg blocked, and by what", so teaching *it* about beams
+makes `Solve`, `SolveAround` and the destination search beam-aware together. It marches the hull AABB
+along the leg in 8-unit steps and slab-clips each beam segment against it; whichever of the solid hit
+and the beam is nearer wins, and the beam's mine edict is reported as `tr.pHit` so the visited set and
+every message keep working unchanged.
+
+`SolveAround` and `PickDestination` take explicit bounds now, because the mine's own 16-unit box is
+not the obstacle — the **beam's** bounding box is, and for a wall mount that box spans the doorway.
+
+**The mine body and its beam must be one obstacle.** A ground-mounted mine sits 8 units off the floor,
+so the hull trace hits the *body* first, and the body alone reads as a 16-tall box: under step height,
+so no jump; no gap, so no duck; and `BotBreak::IsTarget` rejects `MOVETYPE_FLY`, so no break either.
+The bot stood in a doorway repeating `blocked by monster_tripmine` forever. `BotDeploy::BeamFor` maps
+a hit edict back to its beam, and both the forward trace and `Probe` use it, so hitting the body is
+the same event as hitting the beam.
+
+### Two predicates change, and both follow from the beam having no thickness
+
+**The step-height floor is dropped.** `canJump` normally requires `top > kAvoidStepHeight`, because
+below that the engine steps up for free. It does no such thing for a beam — a 12-unit-high beam trips
+exactly like a 60-unit one — so for a beam the lower bound goes and only the reachability ceiling
+remains.
+
+**`depth` is the bot's own 32, not `min(box.x, box.y)`.** A wall-to-wall beam's AABB spans the
+corridor, and feeding that width into the crawl-hold would ask the bot to stay ducked for the length
+of the room.
+
+The three outcomes then fall out of the existing ladder, with `gap` and `top` taken from the z range
+of the beam *inside* the hull rather than from a box:
+
+- a beam 40 or more above the feet clears the 36-tall duck hull, so it is **crawled under**;
+- a beam within `PlainJumpHeight + 18` is **jumped**;
+- a beam above 72 is not an obstacle at all and never enters the ladder;
+- a **vertical** beam spans the whole column, so `gap` is 0 and `top` is 72, neither applies, and the
+  side search **walks around** it. `RunSideSearch` already handles a thin tall column; for a
+  horizontal beam it correctly fails, because the beam runs wall to wall.
+
+Measured on crossfire with bot-placed mines: beams from a standing placement report `gap 61 top 69`
+and are ducked; beams from a ducked placement report `gap 27 top 35` and are jumped. The 8-unit spread
+between gap and top is `2 * kAvoidBeamPad`.
+
+**When nothing works, shoot it.** Where the side search fails, `TakeMineTarget` sets `mineTarget`
+instead of `breakTarget`, and `Bot_MoveNav` hands it to `BotBreak::EngageStandoff` at
+`kMineSafeRadius`. `TakeBreakTarget` cannot serve here: it requires `IsTarget`, which excludes
+`MOVETYPE_FLY` deliberately, and a crowbar at melee range against a 150-damage blast is not a plan.
+
+**Own mines are not exempt, and must not be.** A tripmine's beam-break test traces from the mine, and
+`pev->owner` is the wall it is stuck to, so the player who placed it breaks the beam like anyone else.
+There is no owner filter anywhere in this path.
+
+**Placed satchels get no code at all.** A live `monster_satchel` is 8 units tall, well under the
+engine's 18-unit step, so the bot walks over it and `HitQualifies` is left alone.
+
 ## bot_break.cpp
 
 Owns the frame while the bot is destroying something, the same way `RunElevatorRide` and
@@ -3048,6 +3151,202 @@ Idling it leaves `fire.mode == MODE_NONE`, so `Buttons` returns 0 and `BotBreak`
 `absmin`/`absmax` and then nudged `kBreakNudge` toward the centre, so the traceline ends inside the
 brush rather than grazing its face. A bot whose eye is already inside the box — which happens, the
 hull overlaps before the trace does — falls back to aiming at the centre.
+
+### The standoff variant
+
+`EngageStandoff(bot, ent, minRange)` is the same machine with the approach inverted, and it exists for
+tripmine beams (`bot_deploy.cpp`). It shares `Run`, the weapon save/restore, the `lastProgressTime`
+hold and the `Abort` path; the differences are four.
+
+**It bypasses `IsTarget`.** A tripmine is `MOVETYPE_FLY`, which `IsTarget` excludes on purpose — that
+exclusion is what keeps live satchels out of the melee path, and widening it would undo that. The
+standoff caller names its target explicitly instead.
+
+**`inRange` inverts.** Melee wants `los <= kBreakReach`; standoff wants `los >= standoff`, and the
+drive direction flips with it, so `moveDir` is negated and the bot backs away along the line it came
+in on. `kMineSafeRadius` is 375 because that is where a 150-damage blast reaches zero — the bot is
+retreating out of its own explosion, not merely out of reach.
+
+**A corridor shorter than the standoff must not deadlock.** `kBreakRetreatTime` (4 s) forces `inRange`
+true once the retreat has had its chance, so a bot backed against a wall shoots anyway and eats some
+blast. That is strictly better than standing there. On `test2_doorway` it is the only case — the map
+is smaller than 375 units end to end, so every observed standoff fires on the timer and still kills
+the mine in one shot.
+
+**The weapon choice inverts too.** `WantWeaponId` returns the melee weapon for a break; for a standoff
+it returns the active weapon unless that *is* the melee weapon, in which case it takes the first
+non-melee weapon carried. A crowbar at 375 units hits nothing.
+
+A tripmine is `health == 1` and `takedamage == DAMAGE_YES`, so one hit anywhere destroys it, and
+`Killed` -> `DelayDeathThink` -> `Explode` is the expected outcome rather than a failure. The
+no-damage grace still applies and still means what it means: shots that are not landing.
+
+## bot_deploy.cpp
+
+Placing tripmines and satchels, and detonating satchels. It owns the frame the way `BotBreak` does —
+aim, drive, buttons and `Bot_RunPlayerMove` all come from here and `Bot_MoveNav` returns — and
+`BotFire::Think` idles with `why=deploying` while it runs, for the same reason it idles during a
+break: `Buttons` would otherwise fight the weapon switch every half second.
+
+It is called from `Bot_MoveNav` immediately after `BotBreak::Run`, before goal selection.
+`ManeuverActive` includes `deploy.active`, which is what stops `TryStart` re-entering and what keeps
+the rescore path off its back.
+
+### Why the deployables never fit in BotFire
+
+`BotFire::Think` returns `no-target` several branches before any mode is considered, and both
+deployables fire with **no target at all**. "What is not here" named this: they want a decision layer
+that runs on the map rather than on an enemy. That layer is this file. The `Supported` gate was never
+widened — `AIM_SURFACE`, `AIM_NONE` and `WPN_Q_HIDDEN_STATE` are still rejected there, and nothing
+about firing changed.
+
+### The damage rule is one number, and it comes from the SDK
+
+`sk_plr_tripmine` and `sk_plr_satchel` are both 150. `CGrenade::Explode` calls
+`RadiusDamage(pev->dmg, pev->dmg * 2.5)`, so the radius is 375 and the falloff is `150/375 = 0.4` per
+unit: damage at distance `d` is `150 - 0.4d`. Two constants fall out and both are load-bearing.
+
+- **`kDeployKillRadius` is 125** — where the blast still does 100. This is the whole meaning of "a gate
+  small enough that anyone in it dies", and `Covers` applies it directly rather than through a width
+  threshold, sampling the gate cross-section at three points along the span and three body-centre
+  heights and requiring every sample within 125 *with line of sight to the mount*.
+- **`kMineSafeRadius` is 375** — where it does nothing. That is the standoff range in `bot_break.cpp`.
+
+### The mesh already knows where the chokepoints are
+
+Every walk connection carries `gateA`/`gateB`, a two-endpoint floor segment per side, and they survive
+the `.nav` round trip. **No format change and no map regeneration was needed for any of this.** The
+gate supplies the crossing point and the beam direction; it does not supply a usable width.
+
+**The stored gate is inset twice, and the second inset is easy to miss.** navgen builds areas by
+carving the *hull 3* clipnode tree, so area boundaries already sit a player radius inside the real
+walls; `GateFromEdge` then insets each end by `kPlanClearance` again. So the true opening is
+`|left - right| + 4 * kPlanClearance`, not `+ 2`. Getting this wrong is invisible — every number is
+still plausible — which is why the physical measurement below is what the code actually trusts.
+
+### A short gate is not a chokepoint
+
+The first version accepted a gate on `|left - right|` alone and found **1238 of them on crossfire**.
+Two mesh seams across an open floor produce a short gate for the same reason two areas are small, and
+a mine there traps nobody. Worse, the ceiling/ground fallback rescued every one of them: there is
+always a floor below you.
+
+`EvaluateGate` measures the opening instead. From the eye at the gate midpoint it traces both ways
+along the gate direction; **both sides must hit something** within `kDeployReach`, and
+`opening = distA + distB` must be at most `kDeployOpeningMax` (144). Crossfire drops to 99, and the
+opening histogram is 96 and 128 — Half-Life's two standard doorway widths, which is the sanity check
+that matters more than the count.
+
+### The gate direction, and the clamped case that had none
+
+For an ordinary gate the direction is `normalize(right - left)`. A **clamped** gate — one whose raw
+opening was under 32, so `GateFromEdge` collapsed it to a single point — has `left == right` and no
+direction at all.
+
+Guessing it from the two areas' centroids is wrong often enough to matter: on `test2_doorway` every
+gate is clamped, and the centroid guess measured the openings diagonally as 113 when they are 64, then
+rejected all four for `no-surface`. **The far side's gate midpoint is the right source.** `gateA` and
+`gateB` are the two sides of the same portal, so `gateB.mid - gateA.mid` is the crossing normal by
+construction, and the gate direction is its horizontal perpendicular. Centroids remain the last
+fallback. This was not only a count fix — it fixed the measurement, and it raised every map
+(`stalkyard` 93 -> 114, `datacore` 91 -> 118).
+
+### Where the mine goes, and why the wall comes first
+
+`CTripmine::PrimaryAttack` traces 128 units from the gun position along `v_forward`, spawns
+`monster_tripmine` at `tr.vecEndPos + tr.vecPlaneNormal * 8`, and sets its angles from the plane
+normal — so **the beam runs back out along the surface normal**. A beam that crosses a doorway
+therefore needs a mount on a *side* wall, one whose normal lies in the gate plane. That is what
+"a wall with normal parallel to the gate" means, and `Probe` enforces it: the hit's normal must be
+within `kDeployNormalTol` (~20 degrees) of facing back down the trace.
+
+Preference is wall, then ceiling, then ground, and the vertical two are gated behind
+`opening <= kDeployVerticalMax` (48). The gate is the point: a vertical beam is a line, and in
+anything wider than about a player's width people simply walk past it. Forced open, ground mounts in
+crossfire's 128-wide doorways were stepped around without the avoidance system ever engaging.
+
+The bot stands **at the gate midpoint**, and `EvaluateGate` probes from exactly that point. Evaluating
+from anywhere else stops the pre-scan predicting what the shot will do.
+
+### Stance is rolled, and that is what makes the avoidance visible
+
+Standing, the eye is 64 above the floor; ducked it is 30 — `VEC_DUCK_VIEW` is 12 above a duck origin
+that sits 18 up. The mine mounts at eye height, so the beam does too, and the two stances land on
+opposite sides of every avoidance predicate: a beam at 64 is crawled under, a beam at 30 is jumped.
+`TryStart` flips a per-bot coin. Without it every horizontal beam is a crawl-under and the jump branch
+never runs outside a test map.
+
+Nav areas are in duck-origin space, so the gate's own z is `floor + 18` and the eye offsets from it
+are 46 and 12 rather than 64 and 30.
+
+### The phases, and the one that is not optional
+
+`APPROACH` -> `SELECT` -> `AIM` -> `FIRE` -> `VERIFY`, plus `DETONATE` entered from its own trigger.
+The chassis is `RunActivation` almost verbatim, including the three details that are easy to lose:
+`lastProgressTime` is refreshed every frame or the 2 s stall detector repaths mid-placement; the press
+is gated on the angles `Bot_UpdateFacing` *returned* rather than the ones requested, because the aim
+controller is rate-limited; and the approach drive is `NavFollow::SolveDrive` + `Bot_DecomposeMove`
+straight at the spot. Straight-line drive is safe because an area is a convex prism and the gate
+midpoint lies on its boundary.
+
+`VERIFY` asks a different question per weapon, and the obvious one is wrong for the satchel. A
+tripmine is confirmed by a `monster_tripmine` within 48 of the predicted mount. A satchel is **not**:
+it leaves at 274 u/s and is 80 units away before the 0.3 s verify delay is up. It is confirmed by
+`m_chargeReady == 1`, which is the game's own record that a satchel is deployed.
+
+**The memo is not optional.** Every exit writes `Memo { connIndex, expireTime }`, success or failure,
+and `FindBest` honours it. Without it the bot re-picks the gate it just failed at, walks zero
+distance, and spins at full framerate exactly where it wants to be — the failure mode described for
+`BotItems::OnArrived`, and no stall detector catches this one either.
+
+### Satchels are dropped, not lobbed
+
+The satchel shares the whole chassis with the surface search skipped: the spot is the gate midpoint,
+the coverage test runs from the floor rest point, and the press is `IN_ATTACK2`.
+`CSatchel::SecondaryAttack` throws for any `m_chargeReady != 2`, so the throw needs no state knowledge
+— only the detonation does. Tripmine is preferred; a satchel is placed only when there is no tripmine
+ammo, and `CSatchel::AddDuplicate` refuses new satchels while any are deployed, so the live group is
+self-limiting.
+
+### Detonation, and the contact that was the bot's own satchel
+
+The trigger runs every frame in `TryStart`, ahead of the placement throttle: for each live
+`monster_satchel` the bot owns, fire when a live suspicion sits within 375 of it **and** closer to it
+than the bot is, out of combat and with no fire commit open.
+
+`BotSense` had no spatial query — `Freshest` and `LiveCounts` have no position filter — so
+`NearestLive` was added beside them, running the same `[0, count)` scan through the file-static
+`LiveWeight`, keeping the file's one-liveness-test rule.
+
+**`livingOnly` is the whole feature.** Without it the first run detonated 181 times off 7 satchels,
+every one reporting `contact 2 away`: `monster_satchel` plays `weapons/g_bounce*.wav` when it lands,
+`BotSense::Hear` pushes a suspicion for the emitter, and the bot blew up its own charge because it
+heard it hit the floor. `NearestLive` now skips `KIND_OTHER` and skips any entity owned by the bot.
+"An entity near the satchel" has to mean something that can be killed.
+
+**The press must be confirmed, not assumed.** The same run counted a detonation on the frame it
+pressed and then re-fired forever. `DETONATE` now presses only when `m_chargeReady == 1` and both the
+player's and the weapon's own attack timers are clear, then waits `kDeployVerifyDelay` and calls it
+done only if `m_chargeReady` has left 1.
+
+### crossbot_deploy_surface
+
+`0` is off; `1`/`2`/`3` pin wall/ceiling/ground and bypass the `kDeployVerticalMax` gate. It exists for
+the same reason `crossbot_fire_pin` does: vertical mounts are rare by design — a 48-unit opening is
+uncommon, and across six stock maps the unpinned scan finds none — so the side-search and standoff
+branches are unreachable in a normal run and would ship untested. Pinned to ground on `test2_doorway`
+they are reached every time.
+
+### crossbot_list_gates and crossbot_deploy_status
+
+`crossbot_list_gates` dumps every area's walk gates with the mesh width, the measured opening, the
+chosen surface, the mount point and the rejection reason. It prints a gate that reached the surface or
+coverage stage even when it failed, and stays quiet about ones filtered earlier, so the interesting
+rejections are visible without burying them.
+
+`crossbot_deploy_status` is per bot: phase, target connection, measured opening, surface, stance,
+`placed`, `dets`, `aborts`, memo size and `why`. Unlike the fire counters these are **not** per life —
+`OnRespawn` clears the memo and the active placement but leaves the tallies alone.
 
 ## bot_manager.cpp
 

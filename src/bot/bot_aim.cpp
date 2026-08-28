@@ -395,7 +395,7 @@ Vector Bot_UpdateFacing(CBot &bot)
 		}
 	}
 
-	float dt = gpGlobals->frametime;
+	float dt = Bot_FrameTime();
 	if (dt < kMinFrameTime)
 		dt = kMinFrameTime;
 	else if (dt > kMaxFrameTime)

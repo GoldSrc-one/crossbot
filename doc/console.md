@@ -13,6 +13,16 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_list_spawns` / `crossbot_list_targets` — entity positions, for picking a goal by hand
 - `crossbot_list_items` — every pickup and charger with its kind, resolved nav area, `frame`, `solid`
   and state; see `doc/bot.md`, `bot_items.cpp`
+- `crossbot_list_gates` — every walk gate that could hold a mine: the mesh width, the *measured*
+  opening, the chosen surface, the mount point and the rejection reason. A gate that failed only at
+  the surface or coverage stage is printed too, so the near misses are visible; ones filtered earlier
+  are not. Read the openings before the count — they should be doorway widths (96, 128), and a map
+  reporting hundreds of gates across open floor means the opening measurement is not running; see
+  `doc/bot.md`, `bot_deploy.cpp`
+- `crossbot_deploy_status` — per bot: phase, target connection, measured opening, surface, stance,
+  `placed`, `dets`, `aborts`, memo size and `why`. Unlike the `crossbot_fire_status` counters these
+  are **not** per life — respawn clears the memo and any placement in flight but leaves the tallies
+  alone, so a drop in them is a bug rather than a death; see `doc/bot.md`, `bot_deploy.cpp`
 - `crossbot_weapons [name]` — the inventory snapshot: every weapon with its `m_iId`, clip, ammo indices
   and carried counts, both attack timers, and a `*` on the active one; see `doc/bot.md`,
   `bot_weapons.cpp`
@@ -125,6 +135,13 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`
 - `crossbot_oppo_jump` — opportunistic jumping. Default 1
+- `crossbot_time_debug` — movement-clock diagnostics. Default 0. Once a second prints the server's own
+  frame budget, then one line per bot: msec issued versus that budget, how much of it the engine
+  actually ran (`SV_RunCmd` silently drops commands while the `clockwindow` guard is armed, which is
+  only visible as `PlayerPostThink` not firing), the resulting drift between bot time and real time, and
+  a `chain` line showing the whole bot loop in order with the msec each one saw and issued. A bot
+  getting less sim time per second than the wall clock is the "honey mode" symptom -- slow running and
+  slow gravity together; see `doc/bot.md`, *Bot_BeginFrame and Bot_FrameTime*
 - `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default 0.3. Inert unless
   `crossbot_sense` is on, since vision is what feeds the queue
 - `crossbot_sense` — the whole sense system: vision, heard sounds and events, damage, and the suspicion
@@ -150,6 +167,19 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 - `crossbot_aim_impulse` — smallest non-zero hand speed in deg/s, clamped [0, 100]. Default 15. The hand
   cannot creep more slowly than this, so it never fully stops: it dithers across the nearest mouse count and
   `crossbot_aim_status` shows an idle hand speed of 21 rather than 0. 0 disables
+
+- `crossbot_deploy` — whether bots place tripmines and satchels. Default 1. **The nav sweep sets it to
+  0**, the same way it sets `crossbot_gather 0`: a mine changes every route through the doorway it
+  blocks, and the sweep's per-map waypoint diffs depend on the route being repeatable. With it off the
+  beam registry stays empty and every branch this feature added to `bot_avoid.cpp` early-outs, so a
+  sweep clears a deployable change for movement regressions and says nothing about deployment itself;
+  see `doc/bot.md`, `bot_deploy.cpp`
+- `crossbot_deploy_surface` — pin the mount surface: 0 off, 1 wall, 2 ceiling, 3 ground. Default 0.
+  A pin also bypasses the opening bound that normally keeps ceiling and ground mounts to gaps under 48
+  units. It exists for the reason `crossbot_fire_pin` does: a vertical beam is what reaches the side
+  search and the standoff shot, and openings that narrow are rare enough that an unpinned scan across
+  six stock maps finds none, so those branches would ship untested. Not for playing against — a
+  vertical beam in a wide doorway is walked past without anyone noticing it
 
 Output from all of these is `SERVER_PRINT`, so it goes to the HLDS console and `hlds/qconsole.log` —
 **not** to the stdout of whatever script sent the command over RCON.

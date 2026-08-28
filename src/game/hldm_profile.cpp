@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "../bot/bot_fire.h"
+#include "../bot/bot_move.h"
+#include "../bot/bot_timing.h"
 #include "../bot/bot_weapons.h"
 #include "ent_handle.h"
 #include "hldm_profile.h"
@@ -106,7 +108,13 @@ void CHLDMProfile::Respawn(edict_t *pEdict) const
 {
 	unsigned short buttons = (pEdict->v.deadflag == DEAD_RESPAWNABLE) ? IN_ATTACK : 0;
 
-	g_engfuncs.pfnRunPlayerMove(pEdict, pEdict->v.v_angle, 0.f, 0.f, 0.f, buttons, 0, 1);
+	// One frame's worth, not a token 1ms: this is the dead bot's only physics
+	// tick, and pfnRunPlayerMove leaves gpGlobals->frametime holding whatever msec
+	// it was given, which every later bot in the frame would otherwise inherit.
+	byte msec = Bot_FrameMsec();
+	BotTiming::BeginMove(pEdict, msec);
+	g_engfuncs.pfnRunPlayerMove(pEdict, pEdict->v.v_angle, 0.f, 0.f, 0.f, buttons, 0, msec);
+	BotTiming::EndMove(pEdict);
 }
 
 ItemKind CHLDMProfile::ClassifyItem(const char *classname) const
@@ -172,6 +180,26 @@ const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
 int CHLDMProfile::MeleeWeapon() const
 {
 	return kHLDMMelee;
+}
+
+int CHLDMProfile::DeployWeapon(DeployKind kind) const
+{
+	switch (kind)
+	{
+	case DEPLOY_TRIPMINE: return kHLDMTripmine;
+	case DEPLOY_SATCHEL: return kHLDMSatchel;
+	default: return 0;
+	}
+}
+
+const char *CHLDMProfile::DeployEntity(DeployKind kind) const
+{
+	switch (kind)
+	{
+	case DEPLOY_TRIPMINE: return "monster_tripmine";
+	case DEPLOY_SATCHEL: return "monster_satchel";
+	default: return NULL;
+	}
 }
 
 const char *CHLDMProfile::AmmoEntity(int weaponId, WeaponAmmo pool) const

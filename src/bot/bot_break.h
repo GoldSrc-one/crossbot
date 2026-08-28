@@ -29,6 +29,8 @@ struct State
 	float nextSwingTime = 0.f;
 	float refusedUntil = 0.f;
 
+	float standoff = 0.f;
+
 	char targetName[32] = {};
 };
 
@@ -52,6 +54,8 @@ bool IsTarget(edict_t *ent);
 bool AimSwing(CBot &bot, edict_t *ent, Vector &aimAngles, bool &swing);
 
 bool Engage(CBot &bot, edict_t *ent);
+
+bool EngageStandoff(CBot &bot, edict_t *ent, float minRange);
 
 bool Run(CBot &bot);
 

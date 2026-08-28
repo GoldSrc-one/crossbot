@@ -4,6 +4,7 @@
 
 #include "../bot/bot_manager.h"
 #include "../bot/bot_sense.h"
+#include "../bot/bot_timing.h"
 #include "../console/commands.h"
 #include "../game/gamedata.h"
 
@@ -115,6 +116,24 @@ cvar_t g_carefulPinCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_deployCvar = {
+	"crossbot_deploy",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_deploySurfaceCvar = {
+	"crossbot_deploy_surface",
+	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_timeDebugCvar = {
+	"crossbot_time_debug",
+	"0",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	GameData::Load();
@@ -137,6 +156,9 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_vantageCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulPinCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -167,6 +189,12 @@ void ClientDisconnect(edict_t *pEntity)
 void StartFrame()
 {
 	BotManager::StartFrame();
+	RETURN_META(MRES_IGNORED);
+}
+
+void PlayerPostThink(edict_t *pEntity)
+{
+	BotTiming::NotePostThink(pEntity);
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -267,6 +295,7 @@ C_DLLEXPORT int GetEntityAPI2_Post(DLL_FUNCTIONS *pFunctionTable, int *interface
 	pFunctionTable->pfnServerActivate = ServerActivate;
 	pFunctionTable->pfnServerDeactivate = ServerDeactivate;
 	pFunctionTable->pfnStartFrame = StartFrame;
+	pFunctionTable->pfnPlayerPostThink = PlayerPostThink;
 	pFunctionTable->pfnPM_Move = PM_Move_Post;
 	return TRUE;
 }

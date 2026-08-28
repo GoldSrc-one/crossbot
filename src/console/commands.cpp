@@ -4,6 +4,7 @@
 #include "commands.h"
 #include "../bot/bot.h"
 #include "../bot/bot_aim.h"
+#include "../bot/bot_deploy.h"
 #include "../bot/bot_fire.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
@@ -547,6 +548,23 @@ namespace
 		BotItems::PrintCandidates(*mesh);
 	}
 
+	void Cmd_CrossBotListGates()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+			return;
+		}
+
+		BotDeploy::PrintGates(*mesh);
+	}
+
+	void Cmd_CrossBotDeployStatus()
+	{
+		BotManager::PrintDeployStatus();
+	}
+
 	void Cmd_CrossBotNavPenalties()
 	{
 		const Nav::NavMesh *mesh = Nav::Get();
@@ -593,6 +611,8 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
 	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
+	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
+	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
 	ADD_SERVER_COMMAND("crossbot_weaponspec", Cmd_CrossBotWeaponSpec);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);

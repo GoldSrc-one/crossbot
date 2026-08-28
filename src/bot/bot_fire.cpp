@@ -4,9 +4,11 @@
 #include <algorithm>
 
 #include "bot_fire.h"
+#include "bot_move.h"
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_break.h"
+#include "bot_deploy.h"
 #include "bot_weapons.h"
 #include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
@@ -1031,7 +1033,7 @@ static void AccrueUsage(CBot &bot, Mode mode)
 	if (mode != MODE_PRIMARY && mode != MODE_SECONDARY)
 		return;
 
-	bot.weaponUsage.seconds[fire.weaponId][mode - 1] += gpGlobals->frametime;
+	bot.weaponUsage.seconds[fire.weaponId][mode - 1] += Bot_FrameTime();
 }
 
 static bool WeaponViable(CBot &bot, const BotWeapon &w)
@@ -1416,6 +1418,13 @@ void Think(CBot &bot)
 	{
 		fire.idleReloadId = 0;
 		Idle(fire, "breaking");
+		return;
+	}
+
+	if (BotDeploy::Active(bot))
+	{
+		fire.idleReloadId = 0;
+		Idle(fire, "deploying");
 		return;
 	}
 

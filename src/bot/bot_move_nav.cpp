@@ -12,6 +12,7 @@
 #include "bot_sense.h"
 #include "bot_avoid.h"
 #include "bot_break.h"
+#include "bot_deploy.h"
 #include "bot_items.h"
 #include "bot_opportunist.h"
 #include "../game/game_profile.h"
@@ -121,6 +122,8 @@ namespace
 	constexpr float kTriggerTouchHeight = 40.f;
 
 	constexpr float kTeleportJumpThreshold = 150.f;
+
+	constexpr float kMineSafeRadius = 375.f;
 	constexpr float kRepathInterval = 2.f;
 	constexpr float kEtaSafetyMargin = 1.6f;
 	constexpr float kProgressEpsilon = 8.f;
@@ -405,7 +408,7 @@ namespace
 
 		float drive = (wp.launchSpeed > 1.f) ? wp.launchSpeed : kFullDrive;
 
-		bool atLaunchPlane = remaining <= NavPlan::AirmoveLaunchLead(speed, gpGlobals->frametime);
+		bool atLaunchPlane = remaining <= NavPlan::AirmoveLaunchLead(speed, Bot_FrameTime());
 		bool upToSpeed = (wp.launchSpeed <= 1.f) ||
 			(speed >= wp.launchSpeed * NavPlan::kAirmoveLaunchSpeedTolerance);
 
@@ -1044,7 +1047,7 @@ namespace
 		bool committed = wp.ladderUp
 			? (onLadder && dist <= kLadderMountRadius)
 			: (onLadder || (dist <= kLadderCommitRadius &&
-				remaining <= NavPlan::AirmoveLaunchLead(speed, gpGlobals->frametime)));
+				remaining <= NavPlan::AirmoveLaunchLead(speed, Bot_FrameTime())));
 
 		if (committed)
 		{
@@ -1110,7 +1113,7 @@ namespace
 			pEdict->v.movetype, onLadder ? 1 : 0, (pEdict->v.flags & FL_ONGROUND) != 0 ? 1 : 0,
 			(pEdict->v.flags & FL_DUCKING) != 0 ? 1 : 0, wp.point.x, wp.point.y, wp.point.z,
 			wp.ladderDismount.z, dist, remaining,
-			NavPlan::AirmoveLaunchLead(speed, gpGlobals->frametime), aim.x, aim.y, aimYaw,
+			NavPlan::AirmoveLaunchLead(speed, Bot_FrameTime()), aim.x, aim.y, aimYaw,
 			pEdict->v.v_angle.y, blocked ? 1 : 0,
 			(bot.ladderReachTime > 0.f) ? gpGlobals->time - bot.ladderReachTime : 0.f,
 			reachUp ? 1 : 0);
@@ -1911,7 +1914,7 @@ namespace
 	bool ManeuverActive(const CBot &bot)
 	{
 		return bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive ||
-			bot.chargerActive || bot.brk.active;
+			bot.chargerActive || bot.brk.active || bot.deploy.active;
 	}
 
 	bool RepathDue(const CBot &bot)
@@ -2017,6 +2020,12 @@ void Bot_MoveNav(CBot &bot)
 	BotItems::RefreshMemos(bot);
 
 	if (BotBreak::Run(bot))
+		return;
+
+	if (!ManeuverActive(bot))
+		BotDeploy::TryStart(bot, *mesh);
+
+	if (BotDeploy::Run(bot))
 		return;
 
 	if (BotItems::UpdateGoalItem(bot))
@@ -2276,6 +2285,12 @@ void Bot_MoveNav(CBot &bot)
 	if (!avoid.detourPoints.empty())
 	{
 		SpliceDetour(bot, pEdict, avoid, physics);
+		RunIdleMove(bot, angles);
+		return;
+	}
+
+	if (avoid.mineTarget && BotBreak::EngageStandoff(bot, avoid.mineTarget, kMineSafeRadius))
+	{
 		RunIdleMove(bot, angles);
 		return;
 	}

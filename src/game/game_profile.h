@@ -26,6 +26,13 @@ inline bool ItemKindIsCharger(ItemKind kind)
 	return kind == ITEM_HEALTHCHARGER || kind == ITEM_RECHARGE;
 }
 
+enum DeployKind
+{
+	DEPLOY_TRIPMINE = 0,
+	DEPLOY_SATCHEL,
+	DEPLOY_COUNT,
+};
+
 struct BotInventory;
 
 class IGameProfile
@@ -61,6 +68,10 @@ public:
 	virtual const char *AmmoEntity(int weaponId, WeaponAmmo pool) const = 0;
 
 	virtual int MeleeWeapon() const = 0;
+
+	virtual int DeployWeapon(DeployKind kind) const = 0;
+
+	virtual const char *DeployEntity(DeployKind kind) const = 0;
 
 	virtual bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const = 0;

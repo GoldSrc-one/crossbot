@@ -667,6 +667,41 @@ const BotSense::Suspicion *BotSense::Freshest(const CBot &bot)
 	return best;
 }
 
+const BotSense::Suspicion *BotSense::NearestLive(const CBot &bot, const Vector &point, float radius,
+	bool livingOnly, float *distOut)
+{
+	const State &sense = bot.sense;
+	float decay = Decay();
+	float bestDist = radius;
+
+	const Suspicion *best = nullptr;
+	for (size_t i = 0; i < sense.count; ++i)
+	{
+		const Suspicion &entry = sense.slots[i];
+		if (LiveWeight(entry, decay) <= 0.f)
+			continue;
+		if (entry.ent.Is(bot.pEdict))
+			continue;
+		if (livingOnly && entry.kind != KIND_PLAYER && entry.kind != KIND_MONSTER)
+			continue;
+
+		edict_t *ent = entry.ent.Get();
+		if (ent && ent->v.owner == bot.pEdict)
+			continue;
+
+		float dist = (entry.pos - point).Length();
+		if (dist > bestDist)
+			continue;
+
+		bestDist = dist;
+		best = &entry;
+	}
+
+	if (best && distOut)
+		*distOut = bestDist;
+	return best;
+}
+
 void BotSense::Update(CBot &bot)
 {
 	State &sense = bot.sense;

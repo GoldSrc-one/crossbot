@@ -22,6 +22,7 @@ struct BotWeapon
 	int chargeState = 0;
 	float throwStart = 0.f;
 	int guidedCount = 0;
+	int chargeReady = 0;
 };
 
 struct BotInventory

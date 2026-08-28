@@ -119,6 +119,9 @@ int LiveCounts(const CBot &bot, int counts[KIND_COUNT]);
 
 const Suspicion *Freshest(const CBot &bot);
 
+const Suspicion *NearestLive(const CBot &bot, const Vector &point, float radius, bool livingOnly,
+	float *distOut = nullptr);
+
 const char *SourceName(SuspicionSource source);
 
 const char *KindName(SuspicionKind kind);

@@ -9,6 +9,7 @@
 #include "bot_avoid.h"
 #include "bot.h"
 #include "bot_break.h"
+#include "bot_deploy.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_query.h"
 #include "../nav/waypoint_plan.h"
@@ -55,6 +56,11 @@ namespace
 	constexpr float kAvoidMoverSpeed = 16.f;
 	constexpr float kAvoidSpinRadiusMin = 4.f;
 	constexpr float kAvoidDegToRad = 0.01745329252f;
+
+	constexpr float kAvoidBeamStep = 8.f;
+	constexpr int kAvoidBeamMaxSteps = 48;
+	constexpr float kAvoidBeamDepth = 32.f;
+	constexpr float kAvoidBeamPad = 4.f;
 
 	const char *ClassOf(edict_t *ent)
 	{
@@ -105,6 +111,111 @@ namespace
 		Vector w(av.z * kAvoidDegToRad, av.x * kAvoidDegToRad, av.y * kAvoidDegToRad);
 		Vector spin(w.y * r.z - w.z * r.y, w.z * r.x - w.x * r.z, w.x * r.y - w.y * r.x);
 		return ent->v.velocity + spin;
+	}
+
+	void HullExtents(int hull, Vector &mins, Vector &maxs)
+	{
+		float half = hull == kHullDuck ? kDuckHullHalf : kStandHullHalf;
+		mins = Vector(-kAvoidHullHalf, -kAvoidHullHalf, -half);
+		maxs = Vector(kAvoidHullHalf, kAvoidHullHalf, half);
+	}
+
+	bool ClipSegmentToBox(const Vector &a, const Vector &b, const Vector &mins, const Vector &maxs,
+		float &t0, float &t1)
+	{
+		t0 = 0.f;
+		t1 = 1.f;
+
+		const float av[3] = { a.x, a.y, a.z };
+		const float bv[3] = { b.x, b.y, b.z };
+		const float lo[3] = { mins.x, mins.y, mins.z };
+		const float hi[3] = { maxs.x, maxs.y, maxs.z };
+
+		for (int i = 0; i < 3; ++i)
+		{
+			float d = bv[i] - av[i];
+			if (fabsf(d) < 1e-6f)
+			{
+				if (av[i] < lo[i] || av[i] > hi[i])
+					return false;
+				continue;
+			}
+
+			float p0 = (lo[i] - av[i]) / d;
+			float p1 = (hi[i] - av[i]) / d;
+			if (p0 > p1)
+				std::swap(p0, p1);
+
+			if (p0 > t0) t0 = p0;
+			if (p1 < t1) t1 = p1;
+			if (t0 > t1)
+				return false;
+		}
+		return true;
+	}
+
+	bool BeamMeetsHull(const BotDeploy::Beam &beam, const Vector &at, int hull, float &zLo,
+		float &zHi)
+	{
+		Vector mins, maxs;
+		HullExtents(hull, mins, maxs);
+		mins = at + mins;
+		maxs = at + maxs;
+
+		float t0 = 0.f, t1 = 1.f;
+		if (!ClipSegmentToBox(beam.start, beam.end, mins, maxs, t0, t1))
+			return false;
+
+		float za = beam.start.z + (beam.end.z - beam.start.z) * t0;
+		float zb = beam.start.z + (beam.end.z - beam.start.z) * t1;
+		zLo = std::min(za, zb);
+		zHi = std::max(za, zb);
+		return true;
+	}
+
+	const BotDeploy::Beam *BeamAlong(const Vector &from, const Vector &to, int hull, float &distOut,
+		float &zLo, float &zHi)
+	{
+		const std::vector<BotDeploy::Beam> &beams = BotDeploy::Beams();
+		if (beams.empty())
+			return nullptr;
+
+		Vector delta = to - from;
+		float len = delta.Length();
+		if (len < 1.f)
+			return nullptr;
+
+		int steps = static_cast<int>(len / kAvoidBeamStep) + 1;
+		if (steps > kAvoidBeamMaxSteps)
+			steps = kAvoidBeamMaxSteps;
+
+		for (int s = 0; s <= steps; ++s)
+		{
+			float t = static_cast<float>(s) / static_cast<float>(steps);
+			Vector at = from + delta * t;
+
+			for (size_t i = 0; i < beams.size(); ++i)
+			{
+				if (!beams[i].ent || beams[i].ent->free)
+					continue;
+				if (!BeamMeetsHull(beams[i], at, hull, zLo, zHi))
+					continue;
+
+				distOut = len * t;
+				return &beams[i];
+			}
+		}
+		return nullptr;
+	}
+
+	void BeamBounds(const BotDeploy::Beam &beam, Vector &mins, Vector &maxs)
+	{
+		mins.x = std::min(beam.start.x, beam.end.x);
+		mins.y = std::min(beam.start.y, beam.end.y);
+		mins.z = std::min(beam.start.z, beam.end.z);
+		maxs.x = std::max(beam.start.x, beam.end.x);
+		maxs.y = std::max(beam.start.y, beam.end.y);
+		maxs.z = std::max(beam.start.z, beam.end.z);
 	}
 
 	bool AabbOverlap(const Vector &aMin, const Vector &aMax, const Vector &bMin, const Vector &bMax)
@@ -193,6 +304,7 @@ namespace
 		edict_t *ignore = nullptr;
 		int hull = kHullHuman;
 		int traces = 0;
+		const BotDeploy::Beam *lastBeam = nullptr;
 	};
 
 	enum ProbeResult
@@ -204,6 +316,8 @@ namespace
 
 	ProbeResult Probe(SearchCtx &ctx, const Vector &a, const Vector &b, TraceResult &tr)
 	{
+		ctx.lastBeam = nullptr;
+
 		if (ctx.traces >= kAvoidMaxTraces)
 			return PROBE_WORLD;
 		++ctx.traces;
@@ -211,8 +325,26 @@ namespace
 		g_engfuncs.pfnTraceHull(a, b, dont_ignore_monsters, ctx.hull, ctx.ignore, &tr);
 		if (tr.fStartSolid || tr.fAllSolid)
 			return PROBE_WORLD;
+
+		float solidDist = tr.flFraction >= 1.f ? (b - a).Length() : (tr.vecEndPos - a).Length();
+
+		float beamDist = 0.f, zLo = 0.f, zHi = 0.f;
+		const BotDeploy::Beam *beam = BeamAlong(a, b, ctx.hull, beamDist, zLo, zHi);
+		if (beam && beamDist <= solidDist)
+		{
+			ctx.lastBeam = beam;
+			tr.pHit = beam->ent;
+			tr.vecEndPos = a + (b - a) * (beamDist / std::max(1.f, (b - a).Length()));
+			return PROBE_ENTITY;
+		}
+
 		if (tr.flFraction >= 1.f)
 			return PROBE_CLEAR;
+		if (const BotDeploy::Beam *body = BotDeploy::BeamFor(tr.pHit))
+		{
+			ctx.lastBeam = body;
+			return PROBE_ENTITY;
+		}
 		if (HitQualifies(*ctx.bot, *ctx.mesh, tr.pHit))
 			return PROBE_ENTITY;
 
@@ -255,8 +387,8 @@ namespace
 	}
 
 	bool SolveAround(SearchCtx &ctx, const Vector &from, const Vector &to, edict_t *hit,
-		const Vector &contact, std::vector<int> &visited, int depth, std::vector<Vector> &out,
-		float &length);
+		const BotDeploy::Beam *beam, const Vector &contact, std::vector<int> &visited, int depth,
+		std::vector<Vector> &out, float &length);
 
 	bool Solve(SearchCtx &ctx, const Vector &from, const Vector &to, std::vector<int> &visited,
 		int depth, std::vector<Vector> &out, float &length)
@@ -270,12 +402,13 @@ namespace
 		}
 		if (probe == PROBE_WORLD)
 			return false;
-		return SolveAround(ctx, from, to, tr.pHit, tr.vecEndPos, visited, depth, out, length);
+		return SolveAround(ctx, from, to, tr.pHit, ctx.lastBeam, tr.vecEndPos, visited, depth, out,
+			length);
 	}
 
 	bool SolveAround(SearchCtx &ctx, const Vector &from, const Vector &to, edict_t *hit,
-		const Vector &contact, std::vector<int> &visited, int depth, std::vector<Vector> &out,
-		float &length)
+		const BotDeploy::Beam *beam, const Vector &contact, std::vector<int> &visited, int depth,
+		std::vector<Vector> &out, float &length)
 	{
 		if (depth >= kAvoidMaxDepth)
 			return false;
@@ -287,11 +420,16 @@ namespace
 				return false;
 		}
 
+		Vector bmin = hit->v.absmin;
+		Vector bmax = hit->v.absmax;
+		if (beam)
+			BeamBounds(*beam, bmin, bmax);
+
 		float pad = kAvoidHullHalf + kAvoidCornerMargin;
-		float minX = hit->v.absmin.x - pad;
-		float minY = hit->v.absmin.y - pad;
-		float maxX = hit->v.absmax.x + pad;
-		float maxY = hit->v.absmax.y + pad;
+		float minX = bmin.x - pad;
+		float minY = bmin.y - pad;
+		float maxX = bmax.x + pad;
+		float maxY = bmax.y + pad;
 
 		Vector fwd((minX + maxX) * 0.5f - from.x, (minY + maxY) * 0.5f - from.y, 0.f);
 		float fwdLen = Length2D(fwd);
@@ -377,8 +515,8 @@ namespace
 
 				if (legProbe == PROBE_ENTITY)
 				{
-					if (!SolveAround(ctx, cur, to, leg.pHit, leg.vecEndPos, visited, depth + 1, tail,
-							tailLength))
+					if (!SolveAround(ctx, cur, to, leg.pHit, ctx.lastBeam, leg.vecEndPos, visited,
+							depth + 1, tail, tailLength))
 						continue;
 				}
 				else
@@ -445,14 +583,20 @@ namespace
 		return bot.waypointIndex < state.detourEnd && now < state.detourExpire;
 	}
 
-	bool PickDestination(const CBot &bot, SearchCtx &ctx, edict_t *hit, const Vector &origin,
-		float hullHalf, Vector &destOut, size_t &indexOut)
+	bool PickDestination(const CBot &bot, SearchCtx &ctx, edict_t *hit,
+		const BotDeploy::Beam *beam, const Vector &origin, float hullHalf, Vector &destOut,
+		size_t &indexOut)
 	{
+		Vector bmin = hit->v.absmin;
+		Vector bmax = hit->v.absmax;
+		if (beam)
+			BeamBounds(*beam, bmin, bmax);
+
 		float pad = kAvoidHullHalf + kAvoidCornerMargin;
-		float minX = hit->v.absmin.x - pad;
-		float minY = hit->v.absmin.y - pad;
-		float maxX = hit->v.absmax.x + pad;
-		float maxY = hit->v.absmax.y + pad;
+		float minX = bmin.x - pad;
+		float minY = bmin.y - pad;
+		float maxX = bmax.x + pad;
+		float maxY = bmax.y + pad;
 
 		int probes = 0;
 		Vector prev = origin;
@@ -488,6 +632,26 @@ namespace
 		return false;
 	}
 
+	bool TakeMineTarget(CBot &bot, BotAvoid::Decision &out, edict_t *hit,
+		const BotDeploy::Beam *beam, const char *why)
+	{
+		if (!beam || !hit)
+			return false;
+
+		out.mineTarget = hit;
+		bot.avoid.lastKind = BotAvoid::AVOID_SHOOT;
+
+		const Vector &origin = bot.pEdict->v.origin;
+
+		char msg[288];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: %s avoid shooting %s at (%.1f,%.1f,%.1f), %s\n",
+			bot.name, ClassOf(hit), origin.x, origin.y, origin.z, why);
+		SERVER_PRINT(msg);
+
+		return true;
+	}
+
 	bool TakeBreakTarget(CBot &bot, BotAvoid::Decision &out, edict_t *hit, const char *why)
 	{
 		if (!BotBreak::IsTarget(hit))
@@ -508,8 +672,8 @@ namespace
 	}
 
 	void RunSideSearch(CBot &bot, const Nav::NavMesh &mesh, BotAvoid::Decision &out, edict_t *hit,
-		const Vector &contact, const Vector &pathDir, float gap, float top, int hull, float hullHalf,
-		float now)
+		const BotDeploy::Beam *beam, const Vector &contact, const Vector &pathDir, float gap,
+		float top, int hull, float hullHalf, float now)
 	{
 		BotAvoid::State &state = bot.avoid;
 		const Vector &origin = bot.pEdict->v.origin;
@@ -543,8 +707,10 @@ namespace
 		char msg[288];
 		Vector dest;
 		size_t d = bot.waypointIndex;
-		if (!PickDestination(bot, ctx, hit, origin, hullHalf, dest, d))
+		if (!PickDestination(bot, ctx, hit, beam, origin, hullHalf, dest, d))
 		{
+			if (!recedes && TakeMineTarget(bot, out, hit, beam, "no clear rejoin point"))
+				return;
 			if (!recedes && TakeBreakTarget(bot, out, hit, "no clear rejoin point"))
 				return;
 
@@ -591,6 +757,8 @@ namespace
 			return;
 		}
 
+		if (!recedes && TakeMineTarget(bot, out, hit, beam, ok ? "too long" : "no way around"))
+			return;
 		if (!recedes && TakeBreakTarget(bot, out, hit, ok ? "too long" : "no way around"))
 			return;
 
@@ -622,6 +790,7 @@ const char *KindName(Kind kind)
 	case AVOID_FOLLOW: return "follow";
 	case AVOID_BLOCKED: return "blocked";
 	case AVOID_BREAK: return "break";
+	case AVOID_SHOOT: return "shoot";
 	default: return "none";
 	}
 }
@@ -672,21 +841,47 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 		bool wantsBreak = false;
 		bool qualifies = tr.flFraction < 1.f && HitQualifies(bot, mesh, tr.pHit, &wantsBreak);
 
-		if (tr.flFraction < 1.f && !qualifies && wantsBreak && BotBreak::IsTarget(tr.pHit))
+		float solidDist = tr.flFraction < 1.f ? Length2D(tr.vecEndPos - origin) : lookahead;
+
+		float beamDist = 0.f, beamLo = 0.f, beamHi = 0.f;
+		const BotDeploy::Beam *beam = BeamAlong(origin, end, hull, beamDist, beamLo, beamHi);
+		if (beam && qualifies && beamDist > solidDist)
+			beam = nullptr;
+
+		if (!beam && tr.flFraction < 1.f)
+		{
+			if (const BotDeploy::Beam *body = BotDeploy::BeamFor(tr.pHit))
+			{
+				beam = body;
+				beamDist = solidDist;
+				beamLo = std::min(body->start.z, body->end.z);
+				beamHi = std::max(body->start.z, body->end.z);
+			}
+		}
+
+		if (beam)
+		{
+			qualifies = false;
+			wantsBreak = false;
+		}
+
+		if (tr.flFraction < 1.f && !qualifies && !beam && wantsBreak
+			&& BotBreak::IsTarget(tr.pHit))
 		{
 			edict_t *hit = tr.pHit;
 			out.breakTarget = hit;
 			Record(state, AVOID_BREAK, hit, hit->v.absmin.z - feetZ, hit->v.absmax.z - feetZ);
 		}
 
-		if (qualifies)
+		if (qualifies || beam)
 		{
-			edict_t *hit = tr.pHit;
-			float dist = Length2D(tr.vecEndPos - origin);
-			float gap = hit->v.absmin.z - feetZ;
-			float top = hit->v.absmax.z - feetZ;
-			float depth = std::min(hit->v.absmax.x - hit->v.absmin.x,
-				hit->v.absmax.y - hit->v.absmin.y);
+			edict_t *hit = beam ? beam->ent : tr.pHit;
+			float dist = beam ? beamDist : Length2D(tr.vecEndPos - origin);
+			float gap = beam ? (beamLo - kAvoidBeamPad - feetZ) : (hit->v.absmin.z - feetZ);
+			float top = beam ? (beamHi + kAvoidBeamPad - feetZ) : (hit->v.absmax.z - feetZ);
+			float depth = beam ? kAvoidBeamDepth
+				: std::min(hit->v.absmax.x - hit->v.absmin.x,
+					hit->v.absmax.y - hit->v.absmin.y);
 
 			float duckSpeed = physics.maxSpeed * PmSim::kDuckingMultiplier;
 			if (duckSpeed < 1.f)
@@ -695,7 +890,8 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 			float plainJump = PmSim::PlainJumpHeight(physics.gravity);
 			float crouchJump = plainJump + kDuckHullHalf;
 
-			bool canJump = top > kAvoidStepHeight && top <= crouchJump - kAvoidJumpMargin;
+			bool canJump = (beam || top > kAvoidStepHeight)
+				&& top <= crouchJump - kAvoidJumpMargin;
 			bool canDuck = gap >= kAvoidDuckClearance;
 
 			if (canJump)
@@ -748,8 +944,8 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 			else if (now >= state.nextSearchTime && !DetourActive(bot, state, now)
 				&& bot.waypointIndex < bot.waypoints.size())
 			{
-				RunSideSearch(bot, mesh, out, hit, tr.vecEndPos, pathDir, gap, top, hull, hullHalf,
-					now);
+				RunSideSearch(bot, mesh, out, hit, beam, tr.vecEndPos, pathDir, gap, top, hull,
+					hullHalf, now);
 			}
 		}
 	}

@@ -93,6 +93,13 @@ to change bot behaviour — see `doc/testing.md` before trading that for wall cl
 ```
 The nav sweep cannot see firing -- one bot per server means no target. `-Full` for the rarer cases.
 
+### Test deployables
+```powershell
+.\scripts\test_deploy.ps1
+```
+Tripmines, satchels and beam avoidance. The nav sweep runs with `crossbot_deploy 0` -- mines change
+every route. `-Phase` runs one of gates/tripmine/standoff/satchel.
+
 ### Sweep the mesh, then the routes
 ```powershell
 & .\.claude\skills\crossbot-navgen\scripts\sweep.ps1 -Out before.txt

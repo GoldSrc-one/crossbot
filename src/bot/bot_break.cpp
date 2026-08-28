@@ -30,6 +30,7 @@ namespace
 	constexpr float kBreakNoDamageGrace = 2.f;
 	constexpr float kBreakTimeout = 8.f;
 	constexpr float kBreakRefuseTime = 15.f;
+	constexpr float kBreakRetreatTime = 4.f;
 
 	constexpr float kBreakMoveDeadzone = 0.01f;
 
@@ -107,6 +108,22 @@ namespace
 	int WantWeaponId(const CBot &bot)
 	{
 		int melee = g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
+
+		if (bot.brk.standoff > 0.f)
+		{
+			int active = ActiveWeaponId(bot);
+			if (active != 0 && active != melee)
+				return active;
+
+			const BotInventory &inv = bot.inventory;
+			for (int i = 0; i < inv.count; ++i)
+			{
+				if (inv.weapons[i].id != 0 && inv.weapons[i].id != melee)
+					return inv.weapons[i].id;
+			}
+			return active;
+		}
+
 		if (melee != 0 && Carries(bot, melee))
 			return melee;
 		return ActiveWeaponId(bot);
@@ -137,8 +154,8 @@ namespace
 			return;
 
 		char msg[224];
-		snprintf(msg, sizeof(msg), "CrossBot: %s went back to %s after breaking %s\n",
-			bot.name, drawn, st.targetName);
+		snprintf(msg, sizeof(msg), "CrossBot: %s went back to %s after %s %s\n", bot.name, drawn,
+			st.standoff > 0.f ? "shooting" : "breaking", st.targetName);
 		SERVER_PRINT(msg);
 	}
 
@@ -154,11 +171,12 @@ namespace
 
 	void Finish(CBot &bot)
 	{
-		Report(bot, "broke");
+		Report(bot, bot.brk.standoff > 0.f ? "destroyed" : "broke");
 		RestoreWeapon(bot);
 
 		BotBreak::State &st = bot.brk;
 		st.active = false;
+		st.standoff = 0.f;
 		st.target.Clear();
 
 		bot.nextRepathTime = gpGlobals->time;
@@ -173,6 +191,7 @@ namespace
 		st.refused = st.target;
 		st.refusedUntil = gpGlobals->time + kBreakRefuseTime;
 		st.active = false;
+		st.standoff = 0.f;
 		st.target.Clear();
 
 		Bot_PenalizeCurrentConnection(bot);
@@ -269,6 +288,40 @@ bool AimSwing(CBot &bot, edict_t *ent, Vector &aimAngles, bool &swing)
 	return true;
 }
 
+bool EngageStandoff(CBot &bot, edict_t *ent, float minRange)
+{
+	State &st = bot.brk;
+
+	if (st.active)
+		return st.target.Is(ent);
+
+	if (!Enabled() || !g_pGameProfile || !ent || ent->free)
+		return false;
+
+	if (st.refused.Is(ent) && gpGlobals->time < st.refusedUntil)
+		return false;
+
+	st.target.Set(ent);
+	st.active = true;
+	st.standoff = minRange;
+	st.prevWeaponId = ActiveWeaponId(bot);
+	st.swings = 0;
+	st.startTime = gpGlobals->time;
+	st.lastDamageTime = gpGlobals->time;
+	st.lastHealth = ent->v.health;
+	st.nextSelectTime = 0.f;
+	st.nextSwingTime = 0.f;
+	snprintf(st.targetName, sizeof(st.targetName), "%s", CBotClassOf(ent));
+
+	char msg[288];
+	snprintf(msg, sizeof(msg),
+		"CrossBot: %s is shooting %s at (%.1f,%.1f,%.1f) from %.0f units\n", bot.name,
+		st.targetName, ent->v.origin.x, ent->v.origin.y, ent->v.origin.z, minRange);
+	SERVER_PRINT(msg);
+
+	return true;
+}
+
 bool Engage(CBot &bot, edict_t *ent)
 {
 	State &st = bot.brk;
@@ -284,6 +337,7 @@ bool Engage(CBot &bot, edict_t *ent)
 
 	st.target.Set(ent);
 	st.active = true;
+	st.standoff = 0.f;
 	st.prevWeaponId = ActiveWeaponId(bot);
 	st.swings = 0;
 	st.startTime = gpGlobals->time;
@@ -346,7 +400,9 @@ bool Run(CBot &bot)
 	Vector angles = Bot_UpdateFacing(bot);
 
 	Vector los = aimPoint - eye;
-	bool inRange = canHit && los.Length() <= kBreakReach;
+	bool standoff = st.standoff > 0.f;
+	bool inRange = canHit && (standoff ? los.Length() >= st.standoff
+		: los.Length() <= kBreakReach);
 	bool aimed =
 		fabsf(Bot_NormalizeAngle(bot.desiredAngles.y - angles.y)) <= kBreakAimTolerance &&
 		fabsf(Bot_NormalizeAngle(bot.desiredAngles.x - angles.x)) <= kBreakAimTolerance;
@@ -354,11 +410,16 @@ bool Run(CBot &bot)
 	Vector to(aimPoint.x - origin.x, aimPoint.y - origin.y, 0.f);
 	float dist = sqrtf(to.x * to.x + to.y * to.y);
 
+	if (standoff && !inRange && now - st.startTime > kBreakRetreatTime)
+		inRange = canHit;
+
 	float drive = 0.f;
 	Vector moveDir(0.f, 0.f, 0.f);
-	if (!inRange && dist > kBreakStandRadius)
+	if (!inRange && (standoff || dist > kBreakStandRadius))
 	{
 		moveDir = Norm2D(to);
+		if (standoff)
+			moveDir = moveDir * -1.f;
 		drive = Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
 
 		NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,

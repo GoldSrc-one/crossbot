@@ -8,6 +8,16 @@ float Bot_NormalizeAngle(float a);
 void Bot_DecomposeMove(float viewYawDeg, const Vector &worldDir, float driveLength, float &forwardMove,
 	float &sideMove);
 
+// Latch the engine's frame time for this server frame. Must be called before
+// any bot moves: pfnRunPlayerMove leaves gpGlobals->frametime holding the msec
+// it was handed, so after the first bot has moved the global no longer holds
+// the frame time -- it holds the previous bot's command length.
+void Bot_BeginFrame();
+
+// The frame time latched by Bot_BeginFrame. Bot code must use this instead of
+// gpGlobals->frametime for anything integrated per frame.
+float Bot_FrameTime();
+
 byte Bot_FrameMsec();
 
 bool Bot_HasLongJumpModule(edict_t *pEdict);
