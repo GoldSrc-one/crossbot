@@ -2,6 +2,9 @@
 
 #include <extdll.h>
 
+#include <vector>
+
+#include "../bot/bot_goal.h"
 #include "weapon_spec.h"
 
 enum GameFlags : unsigned int
@@ -91,6 +94,11 @@ public:
 
 	virtual bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const = 0;
+
+	virtual bool IsFunTerminal(edict_t *ent) const = 0;
+
+	virtual void CollectStrategicGoals(const CBot &bot, const Nav::NavMesh &mesh,
+		std::vector<BotGoal::Candidate> &out) const = 0;
 };
 
 IGameProfile *GameProfile_Detect();

@@ -2,11 +2,16 @@
 
 ## bot_items.cpp
 
-The first goal source the bot has. Everything else in `src/bot/` executes a goal; this decides what
-the goal is. It runs only where `Bot_MoveNav` finds `hasGoal == false`, which is both "just arrived"
-and "just gave up", so a gather goal never preempts one in flight. `crossbot_gather 0` turns it off
-and restores the old stand-still-until-commanded behaviour — `test_nav_goal.ps1` sets it, for the
-reason under "Why the nav sweep disables it" below.
+The lowest of the three goal tiers, and the only one on a stock HLDM map that is always populated.
+`bot_goal.cpp` owns the tier decision and calls in here for candidates; this file knows about items
+and nothing else. `crossbot_gather 0` turns it off and restores the old
+stand-still-until-commanded behaviour — `test_nav_goal.ps1` sets it, for the reason under "Why the
+nav sweep disables it" below.
+
+`Collect` is the entry point: `ScanItems` plus the `SCAN_OK` filter, which used to be the front half
+of a `SelectGoal` that also did the picking. The picking moved to `bot_goal.cpp` so every tier is
+priced by one shared Dijkstra; what stayed is everything item-specific — the ignore table, the
+respawn memo, `UpdateGoalItem`, and the charger and volume arrival behaviours.
 
 ### Selection is two searches, not one
 
@@ -71,6 +76,277 @@ distort the cost values.
 
 **It is sampled once, at repath time, and baked into the route.** A bot that arms itself halfway along
 a timid route finishes that route; carefulness only refreshes on the repaths that already happen.
+
+## bot_goal.cpp
+
+Owns *what the bot wants*, in three tiers: `GOAL_STRATEGIC` (CS hostages, TFC flags, DOD areas — the
+seam only; `CollectStrategicGoals` is a no-op for HLDM), `GOAL_FUN` (`bot_fun.cpp`), `GOAL_GATHER`
+(`bot_items.cpp`). It knows what none of them are. `Select` asks each in turn, highest first, and the
+first tier with a surviving candidate wins outright — a bot with a tank to mount does not weigh it
+against a shotgun, it goes to the tank.
+
+`Select` still runs only where `Bot_MoveNav` finds `hasGoal == false`, so no tier preempts a goal in
+flight. Re-tiering happens at arrival, not continuously; a higher tier appearing mid-route waits.
+
+**One Dijkstra, shared.** `Nav::AreaCosts` runs once per selection and is handed to every tier, so
+adding tiers does not add searches. The cost model is the one from "Selection is two searches, not
+one" above, unchanged and non-negotiable: `travelSeconds + costSeconds`, plus the same
+`|point − reference| / kNavRunSpeed` refinement so ties inside the bot's own area break sensibly.
+
+**Gather picks the cheapest; fun and strategic pick at random, weighted toward closer.** The weight
+is `1 / (cost + 2)^crossbot_goal_bias`. Nearest-first is right for items — the point of a battery is
+that it is on the way — and wrong for gimmicks, because four bots that all deterministically pick the
+nearest tank produce three bots queueing behind one. The `+ 2` floor keeps a goal the bot is standing
+on from taking the entire weight.
+
+### The distant target is sticky; only the leg is re-decided
+
+`state.target` is the goal proper and is held across repaths. `state.stop` is where the current leg
+ends, and it is what `bot.goalPoint` points at — `Repath` reads `goalPoint` and nothing else, so
+changing legs is `goalPoint = …; Bot_ResetNavPath(bot)` and the existing A* does the rest.
+
+No itinerary is ever materialised. `PickStop` runs at selection and again at each leg's end and
+answers one question — where does *this* leg stop?
+
+```
+here = toGoal[botArea]
+accept candidate c when   toGoal[c] < here                      strictly closer in
+                    and   fromBot[c] + toGoal[c] - here <= crossbot_detour_budget
+minimise fromBot[c]
+```
+
+`toGoal` is `Nav::AreaCostsToGoal`, a reverse Dijkstra that depends only on the target, so it is
+computed once per *retarget* and cached in `state.toTargetCosts` with a `toTargetArea` guard — the
+same shape as `bot.oppoCosts` / `oppoCostsGoalArea`. A repath therefore costs one `AreaCosts`, which
+selection was already paying, not two.
+
+`toGoal[c] < here` is what makes the walk monotone: every leg ends strictly closer to the target than
+it started, so detours cannot chain forever. If they ever appear to, the reverse field is being
+rebuilt against the wrong area.
+
+A healthy transcript is one `wants` line followed by several `detours to` lines whose "left after"
+figure decreases every time, then the arrival:
+
+```
+Player1 wants fun func_tankcontrols at (-368.0,-1576.0,-1284.0) in area 515, 18.5s away, 7 candidates
+Player1 detours to item_healthkit  ... 0.7s out, 18.3s left after
+Player1 detours to ammo_rpgclip    ... 1.7s out, 18.0s left after
+Player1 detours to ammo_gaussclip  ... 3.1s out, 17.6s left after
+Player1 detours to ammo_crossbow   ... 1.2s out, 17.5s left after
+Player1 detours to ammo_rpgclip    ... 0.8s out, 17.1s left after
+Player1 reached the tank func_tankcontrols
+```
+
+The failure signature is a fresh `wants` line where a `detours to` should be: the target is being
+re-selected instead of held, and the bot oscillates between two goals forever without reaching
+either.
+
+### TargetValid must not read the bot's arrival state
+
+This is the trap, and it is worth stating plainly because the code gives no hint.
+
+`CommitStop` calls `BotItems::ForgetGoalItem` and `BotFun::Forget` on **every** leg, since the stop
+it is about to commit may belong to a different tier than the last one. So while a bot is walking to
+a gather detour on the way to a tank, `bot.fun` is empty — it holds the *stop*, not the target.
+
+`TargetValid` therefore cannot ask `BotFun::Valid(bot)`, which reads `bot.fun.goal`. It asks
+`BotFun::ValidFor(bot, ent, payload)` against the target's own entity instead. The version that read
+per-bot state failed exactly this way: the fun target tested invalid the moment the first detour was
+committed, `Advance` cleared it, and the bot re-selected from scratch on arrival at every single
+item. It looked like weighted-random churn and it was a validity bug.
+
+### Failure is per-leg
+
+Phase-1 Dijkstra can still name a stop phase-2 A* cannot reach. On a **detour** that is not fatal:
+`OnRepathFailed` logs `could not plan a route to the detour X, going straight on`, adds the entity to
+`state.skipped`, and re-runs `PickStop` with the target intact. Only a repath failure against the
+target itself goes through the owning tier's `OnRepathFailed` and kills the goal.
+
+`BotCombat` clears the goal outright (`BotGoal::Clear`), target and cached reverse field included.
+That is inherited behaviour — the gather tier did the same before there were tiers — and it means
+that on a small map with several bots, fun goals get re-selected often. Fighting is not a goal.
+
+## bot_fun.cpp
+
+The middle tier: the map gimmicks that make an HLDM map what it is. Two kinds ship —
+`FUN_SWITCH` (a button or trigger whose chain reaches something that hurts people) and `FUN_TANK` (a
+mounted gun). `crossbot_fun 0` empties the tier, at which point `BotGoal::Select` reduces exactly to
+the old gather-only behaviour.
+
+**This is entirely a runtime feature. No nav format change, no `kNavVersion` bump, no navgen work.**
+Everything a fun goal needs is either a plain `entvars_t` field or an offset already present in
+`gamedata/valve-win.json` (`doc/game.md`, gamedata.cpp).
+
+### The chain table
+
+Built once per map into a file static, keyed on `gpGlobals->mapname`, cleared by `ResetMap` on both
+`ServerActivate` and `ServerDeactivate`. It is pure map data, so it is not per bot.
+
+From every `func_button` / `func_rot_button` / `trigger_multiple` / `trigger_once`, breadth-first
+over `pev->target` → matching `targetname`, depth ≤ 6, cycle-guarded, passing through `trigger_relay`,
+`multisource` and `multi_manager` and stopping anywhere else.
+
+**`multi_manager` targets must be read from `m_iTargetName[0 .. m_cTargets)` through gamedata, never
+from the map keys.** Worldcraft writes duplicate keys with `#N` suffixes — crossfire's `strike_pain`
+and `strike_pain#1` are the on and off edges of the same 0.1 s kill window — and only the engine's
+array is stripped and delay-sorted. A `multisource`'s *inputs* are a reverse edge: a button naming a
+multisource is arming it, not firing through it.
+
+A chain is interesting if it reaches a `trigger_hurt` with `dmg > 0`, a `func_water` (or a `func_door`
+with `skin < 0`, which is the same class), an `env_explosion` without `SF_ENVEXPLOSION_NODAMAGE`, a
+`func_mortar_field`, or a `monstermaker`. It is not interesting if the only terminals are
+`func_door` / `func_plat` / `func_train` / `func_breakable` — navgen already models those as
+activation detours, so crossfire's four `lift*` buttons stay navigation. `trigger_push` is excluded
+for the same reason: mobility is navgen's business.
+
+**Dangling targets are the norm, not an error.** crossfire has 8 and doublecross 4. A chain that
+resolves to nothing yields no terminal, and that is precisely the filter that drops crossfire's four
+inert tower buttons — the two-tower arming mechanic was cut and the names they fire do not exist —
+and stalkyard's `armorall` gag button, whose only target is an `ambient_generic`.
+
+One consequence to keep in mind: an `env_explosion` deletes itself after firing unless
+`SF_ENVEXPLOSION_REPEATABLE`, so the table has to tolerate a terminal edict vanishing under it.
+
+### Activation is three different actions
+
+`CBaseButton::Spawn` decides which, and guessing wrong means a bot standing at a button pressing a
+key that was never wired up:
+
+| condition | how the bot activates it |
+| --- | --- |
+| `health > 0` | **shoot it** — `takedamage` strips `FCAP_IMPULSE_USE` |
+| `spawnflags & 256` (`SF_BUTTON_TOUCH_ONLY`) | **walk into it** — `SetUse` is never installed |
+| a trigger brush | **walk into it** |
+| otherwise | **`+USE`** |
+
+The `SHOOT` path hands off to `BotBreak`. No stock DM map has a shootable button whose chain is
+interesting under the rule above, so it ships detected-but-unexercised; detecting it still matters,
+because without it the bot would press `+USE` at a button that has no `SetUse` until it timed out.
+
+The single most famous goal in HLDM is not a button at all: crossfire's nuke is a 16×14×19
+`trigger_multiple` at `(0, -2219, -1846)`, `wait 60`. A detector keyed on `func_button` misses it.
+
+### "Cannot be activated" is a real test, not a guess
+
+A fun goal the bot cannot act on is not offered. For a `+USE` or shoot switch that is
+`m_toggle_state == TS_AT_BOTTOM`; `TS_GOING_UP` / `TS_GOING_DOWN` is mid-move, and `TS_AT_TOP` is
+waiting out `m_flWait` or, with `wait -1`, latched forever.
+
+This has to come from gamedata. Undertow's flood button is `wait 142` **and** `spawnflags 1`
+(`SF_BUTTON_DONTMOVE`): it does not move when pressed, so no geometric test can tell whether it is
+waiting.
+
+For a touch trigger it is `v.solid != SOLID_NOT` plus a hull-3 trace from the containing area's
+stand point to the clamped point inside the volume. That is what makes crossfire's nuke correctly
+report `no nav area` before t=180, while `strike_ready_door` still seals the bunker.
+
+For a tank it is `spawnflags & SF_TANK_CANCONTROL (0x20)`, `m_pController == NULL`, and — if
+`m_iszMaster` is set — the named `multisource`, read as `m_rgTriggered` against `m_iTotal`.
+(`CMultiSource::m_iState` does not exist; `IsTriggered` reads those two.)
+
+### UTIL_ClampVectorToBox is not a clamp
+
+The one finding that cost the most time. `PlayerUse` tests
+
+```c
+vecLOS = UTIL_ClampVectorToBox( VecBModelOrigin(pev) - eye, pObject->pev->size * 0.5 );
+flDot  = DotProduct( vecLOS, gpGlobals->v_forward );   // must exceed VIEW_FIELD_NARROW = 0.7
+```
+
+and `UTIL_ClampVectorToBox` (util.cpp:1439) **subtracts** the half-extent per axis, zeroes any axis
+the eye is already inside, and returns the result **normalized**. It does not clamp anything. `flDot`
+is therefore a true cosine measured toward the nearest *face* of the brush, not toward its centre.
+
+Aiming at the box centre is the intuitive thing to do and it fails on tall brushes. Standing beside
+stalkyard's 12×70×100 controls brush and looking at its centre is 54° down, cos 0.58, under the 0.7
+gate — the bot pressed `+USE` correctly, forever, and got `common/wpn_denyselect.wav` every time,
+with every gamedata read verifiably correct. Small brushes hide it, because centre and nearest-face
+directions nearly coincide; undertow's button worked from the first try.
+
+`RunArrival` therefore faces along `UseDir` — the same subtract-and-normalize — and re-checks the real
+cosine against a 0.75 floor before pressing, rather than trusting the facing convergence alone.
+
+Range is the engine's, too: `UTIL_FindEntityInSphere` measures **box distance from `pev->origin` to
+`absmin`/`absmax`** (rehlds `pr_cmds.cpp:864`), from the feet, not the eye, radius 64. Centre
+distance is the wrong number and is far too pessimistic on a long brush. `kFunUseRange` is 56, inside
+the engine's 64.
+
+### `+USE` is edge-triggered, and one press is easy to lose
+
+`m_afButtonPressed = (m_afButtonLast ^ pev->button) & pev->button` (player.cpp:1849), so holding
+`IN_USE` yields exactly one edge, ever. A single one-frame press is nonetheless unreliable, because
+`PlayerUse` is reachable only from `ImpulseCommands` ← `ItemPostFrame`, which returns early on
+`m_flNextAttack`. `RunArrival` pulses `IN_USE` on and off every 0.2 s instead, and `BotFire::Think`
+gets a `BotFun::Pressing(bot)` early-out alongside the `BotBreak::Active` / `BotDeploy::Active` ones
+so the weapon code cannot push `m_flNextAttack` out from under it.
+
+### The tank
+
+`func_tank` has no use caps at all; only the `func_tankcontrols` `SOLID_TRIGGER` brush does, and it
+resolves its tank once at spawn from `target`. `TankOfControls` reads `CFuncTankControls::m_pTank`
+and falls back to a name match on `strncmp(cls, "func_tank", 9)`.
+
+Placement prefers standing *beside* the controls volume (`BotItems::StandArea`) over standing in the
+middle of it, with volume areas within `kTankReachRange` as fallbacks. Standing at the centre of a
+tall brush is the geometry that trips the dot test above.
+
+Two mechanics shape the whole state machine:
+
+- **`m_vecControllerUsePos` is the player's origin at the instant of mounting**, and the leash is
+  `< 30` units, 3-D. A mounted bot must hold its feet still — `Run` sends zero move input. A mount
+  immediately followed by an unexplained dismount is this, and nothing else.
+- **`+USE` cannot dismount.** `ItemPostFrame` returns immediately while `m_pTank` is set
+  (player.cpp:3432), so `PlayerUse`'s dismount branch is unreachable. The bot dismounts by walking
+  more than 30 units away. There is no other mechanism.
+
+Aiming is indirect. The tank slews its own `pev->angles` toward the controller's `v_angle` (pitch
+inverted) at `m_yawRate` / `m_pitchRate` deg/s, clamped to `m_yawCenter ± m_yawRange` and
+`m_pitchCenter ± m_pitchRange`, and bullets leave along the **tank's** angles, not the crosshair. So
+`IN_ATTACK` is held only once the tank's own angles are within `kTankAimTolerance`; firing on the
+crosshair sprays while the barrel is still swinging.
+
+### Three ways off the tank, and only one of them is boredom
+
+**Boredom.** No enemy seen for `kFunBoredom` (10 s) → dismount, record
+`abandonReadiness = EvaluateCombat(...)` against *that* tank, and filter it out of `Collect` for this
+bot until readiness rises above that mark. That is what sends the bot to resupply and come back
+rather than remounting the same gun in the same state.
+
+**Shot from outside the cone.** A mounted bot has no weapon and a barrel that only covers
+`m_yawCenter ± m_yawRange`; an attacker outside that arc cannot be answered, so staying put is
+standing still to be killed. `BotCombat::DamageSource` is read each frame while mounted — and it must
+be read **before** `Bot_RunPlayerMove` for the frame — and a source outside the traversable cone, or
+one whose position is unknown, dismounts at once. `BotCombat` picks the bot up on the next tick,
+because that same damage is its entry condition.
+
+This exit is deliberately **not** boredom: it records no `abandonReadiness` and leaves no readiness
+gate, so the bot may come straight back once the fight is over. It takes only a short flat cooldown
+on that tank, purely so a bot being spawn-camped from behind cannot loop mount → shot → dismount.
+Damage from *inside* the cone is not a dismount at all — that is what the gun is for.
+
+**The tank died, or the bot did.**
+
+### What is deliberately not here
+
+The bot does not reason about surviving its own gimmick. Pressing the crossfire nuke starts a 52 s
+fuse and seals the bunker at t=20; the activator is inside the bunker, so a bot that presses and stays
+put happens to live. doublecross poisons that same bunker for 115 s afterwards. Evacuation is real
+work and belongs with strategic goals.
+
+Nor do bots cooperate. rocket_frenzy needs three separate buttons armed before its launch button
+unlocks; rustmill's bunker door needs two held at once. The `multisource` read makes a bot correctly
+*skip* a locked button; it does not make two bots unlock one.
+
+`func_mortar_field` with `m_fControl == 1` shells **the activator**, so pressing that switch bombs
+the bot that pressed it. `m_fControl` is not in `gamedata/valve-win.json` and cannot be read the way
+the others can. No stock DM map puts one behind a switch, so it is treated as interesting and left
+alone.
+
+The drivable-train tier is deferred, and the map survey argues for deferring it further: **no stock
+DM map has a `func_traincontrols` at all**, and `func_vehicle`, `func_tanklaser`, `func_tankrocket`
+and `momentary_rot_button` have zero occurrences across all 19 DM maps. subtransit's single
+`func_tracktrain` runs its 43-node `path_track` loop autonomously and is a `dmg 1000` crusher, not a
+vehicle.
 
 ## bot_move.h
 
@@ -3582,6 +3858,13 @@ The pairs that carry the diagnosis:
   area it resolved to, and how many entries are in each memo. `item=-` with `hasGoal=1` is a
   commanded `crossbot_nav_goal`, not a gathered one. `charging=` appears only while the charger
   runner owns the frame, and carries the value it is watching.
+- `tier=` with `stopTier=`, `detour=`, `target=` and `targetArea=` — the goal hierarchy. `tier` is the
+  distant target's tier, `stopTier` the current leg's, and they differ exactly when `detour=1`: a bot
+  reading `tier=fun stopTier=gather detour=1` is on its way to a gimmick and picking something up en
+  route, which is the intended shape and not a confusion. `tier` changing while `detour=1` holds is
+  the broken-stickiness signature (`bot_goal.cpp`).
+- `fun=` with `funKind=`, `funAct=`, `mounted=` and `shots=` — present only while the fun tier owns
+  the goal. `mounted=1` with a nonzero `move=` is the 30-unit leash about to break.
 - `combat=` with `enemy=`, `enemyAge=` and `ready=` — whether `BotCombat` owns the bot, who sense
   remembers, how stale the sighting is, and the bot's `EvaluateCombat` score. `combat=0` next to a
   live `enemy=` is normal and not a contradiction: sense remembers someone the bot never saw well

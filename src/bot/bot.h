@@ -14,6 +14,8 @@
 #include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fire.h"
+#include "bot_fun.h"
+#include "bot_goal.h"
 #include "bot_sense.h"
 #include "bot_weapons.h"
 
@@ -46,6 +48,9 @@ struct CBot
 
 	bool hasGoal = false;
 	Vector goalPoint;
+
+	BotGoal::State goal;
+	BotFun::State fun;
 
 	CBotEntHandle goalItem;
 	ItemKind goalItemKind = ITEM_NONE;

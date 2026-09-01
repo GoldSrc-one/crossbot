@@ -20,6 +20,8 @@
 
 namespace
 {
+	constexpr int kEnvExplosionNoDamage = 1;
+
 	constexpr float kHLDMWeaponRespawn = 20.f;
 	constexpr float kHLDMAmmoRespawn = 20.f;
 	constexpr float kHLDMItemRespawn = 30.f;
@@ -280,6 +282,41 @@ bool CHLDMProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &e
 	elevation = -pitch;
 	speed = v;
 	return true;
+}
+
+bool CHLDMProfile::IsFunTerminal(edict_t *ent) const
+{
+	if (!ent || ent->free)
+		return false;
+
+	const char *cls = STRING(ent->v.classname);
+	if (!cls || !cls[0])
+		return false;
+
+	if (strcmp(cls, "trigger_hurt") == 0)
+		return ent->v.dmg > 0.f;
+
+	if (strcmp(cls, "func_water") == 0)
+		return true;
+
+	if (strcmp(cls, "func_door") == 0)
+		return ent->v.skin < 0;
+
+	if (strcmp(cls, "env_explosion") == 0)
+		return (static_cast<int>(ent->v.spawnflags) & kEnvExplosionNoDamage) == 0;
+
+	if (strcmp(cls, "func_mortar_field") == 0)
+		return true;
+
+	if (strncmp(cls, "monstermaker", 12) == 0)
+		return true;
+
+	return false;
+}
+
+void CHLDMProfile::CollectStrategicGoals(const CBot &, const Nav::NavMesh &,
+	std::vector<BotGoal::Candidate> &) const
+{
 }
 
 IGameProfile *GameProfile_Detect()

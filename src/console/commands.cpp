@@ -6,6 +6,7 @@
 #include "../bot/bot_aim.h"
 #include "../bot/bot_deploy.h"
 #include "../bot/bot_fire.h"
+#include "../bot/bot_fun.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
 #include "../bot/bot_move_nav.h"
@@ -554,6 +555,18 @@ namespace
 		BotItems::PrintCandidates(*mesh);
 	}
 
+	void Cmd_CrossBotListFun()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+			return;
+		}
+
+		BotFun::PrintCandidates(*mesh);
+	}
+
 	void Cmd_CrossBotListGates()
 	{
 		const Nav::NavMesh *mesh = Nav::Get();
@@ -641,6 +654,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
 	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
+	ADD_SERVER_COMMAND("crossbot_list_fun", Cmd_CrossBotListFun);
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
 	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
 	ADD_SERVER_COMMAND("crossbot_airmove_cache_stats", Cmd_CrossBotAirmoveCache);

@@ -12,6 +12,7 @@
 #include "../nav/path_follower.h"
 #include "bot.h"
 #include "bot_combat.h"
+#include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
 #include "bot_move.h"
@@ -398,7 +399,7 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 	if (!st.driving)
 	{
 		st.driving = true;
-		BotItems::ClearGoalItem(bot);
+		BotGoal::Clear(bot);
 		BOT_VLOG("CrossBot: %s drops its goal to fight\n", bot.name);
 	}
 

@@ -27,6 +27,31 @@ struct GameOffsets
 	int plr_pActiveItem;
 	int plr_rgpPlayerItems;
 	int plr_rgAmmo;
+	int plr_pTank;
+
+	int tog_toggleState;
+	int tog_flWait;
+
+	int btn_fStayPushed;
+
+	int tank_pController;
+	int tank_vecControllerUsePos;
+	int tank_yawCenter;
+	int tank_yawRange;
+	int tank_yawRate;
+	int tank_pitchCenter;
+	int tank_pitchRange;
+	int tank_pitchRate;
+	int tank_fireRate;
+	int tank_iszMaster;
+
+	int tankctl_pTank;
+
+	int mm_cTargets;
+	int mm_iTargetName;
+
+	int ms_rgTriggered;
+	int ms_iTotal;
 };
 
 extern GameOffsets g_offsets;

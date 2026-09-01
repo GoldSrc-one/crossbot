@@ -2,13 +2,30 @@
 
 #include <extdll.h>
 
+#include <cstdint>
+#include <vector>
+
 #include "../game/game_profile.h"
 #include "../nav/nav_mesh.h"
+#include "bot_goal.h"
 
 struct CBot;
 
 namespace BotItems
 {
+	struct Placement
+	{
+		uint32_t areaId = 0;
+		Vector point;
+	};
+
+	Vector ClampToArea(const Nav::Area &area, const Vector &point);
+
+	const Nav::Area *StandArea(const Nav::NavMesh &mesh, const Vector &center);
+
+	void VolumeAreas(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
+		std::vector<Placement> &out);
+
 	bool IsPickupGone(edict_t *ent);
 	bool IsChargerEmpty(edict_t *ent);
 	bool IsVolumeInactive(edict_t *ent);
@@ -28,7 +45,10 @@ namespace BotItems
 
 	bool Enabled();
 
-	bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh);
+	void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
+		std::vector<BotGoal::Candidate> &out);
+
+	void Accept(CBot &bot, const BotGoal::Candidate &cand);
 
 	bool UpdateGoalItem(CBot &bot);
 

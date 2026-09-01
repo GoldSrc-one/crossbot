@@ -51,6 +51,30 @@ cvar_t g_gatherDebugCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_funCvar = {
+	"crossbot_fun",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_funDebugCvar = {
+	"crossbot_fun_debug",
+	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_goalBiasCvar = {
+	"crossbot_goal_bias",
+	"2",
+	FCVAR_SERVER
+};
+
+cvar_t g_detourBudgetCvar = {
+	"crossbot_detour_budget",
+	"6",
+	FCVAR_SERVER
+};
+
 cvar_t g_oppoJumpCvar = {
 	"crossbot_oppo_jump",
 	"1",
@@ -175,6 +199,10 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_funCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_funDebugCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_goalBiasCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_detourBudgetCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);

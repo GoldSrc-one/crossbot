@@ -182,6 +182,47 @@ The rule is otherwise unchanged, and this is the only exception. `CRpg::m_fSpotA
 below the counter and is *not* requested: the same gate would make it safe, but see "The deployables"
 below for why nothing wants it.
 
+### The fun-goal offsets, and why entvars_t is not enough
+
+The fun goal tier (`doc/bot.md`, `bot_fun.cpp`) added a block of offsets that have nothing to do with
+weapons. They are all on brush entities, not the player, and every one of them exists because the
+question it answers is *not* visible in `entvars_t`:
+
+| offset | class | what it answers |
+| --- | --- | --- |
+| `plr_pTank` | `CBasePlayer::m_pTank` | is this bot on a tank right now |
+| `tog_toggleState` | `CBaseToggle::m_toggle_state` | is this button pressed, waiting, or mid-move |
+| `tog_flWait` | `CBaseToggle::m_flWait` | how long before it can be pressed again |
+| `btn_fStayPushed` | `CBaseButton::m_fStayPushed` | is it a one-shot latch |
+| `tank_pController` | `CFuncTank::m_pController` | is the gun free |
+| `tank_vecControllerUsePos` | `CFuncTank` | the 30-unit leash origin |
+| `tank_yaw/pitch Center,Range,Rate` | `CFuncTank` | the cone the barrel can cover, and how fast |
+| `tank_fireRate` | `CFuncTank` | rounds per second |
+| `tank_iszMaster` | `CFuncTank` | which `multisource` unlocks it |
+| `tankctl_pTank` | `CFuncTankControls::m_pTank` | which gun this control brush drives |
+| `mm_cTargets`, `mm_iTargetName` | `CMultiManager` | what this manager actually fires |
+| `ms_rgTriggered`, `ms_iTotal` | `CMultiSource` | is the master satisfied |
+
+Two of these are load-bearing in a way that is easy to miss.
+
+**`tog_toggleState`.** Undertow's flood button is `wait 142` *and* `spawnflags 1`
+(`SF_BUTTON_DONTMOVE`) — it does not move when pressed, so there is no geometric or `pev` observation
+that distinguishes "ready" from "waiting out 142 seconds". Without this offset the bot walks back to
+a dead button every time it repaths.
+
+**`mm_cTargets` / `mm_iTargetName`.** Worldcraft writes duplicate `multi_manager` keys with `#N`
+suffixes, so parsing the map entity lump gives `strike_pain` and `strike_pain#1` as two different
+targets when they are the on and off edges of one 0.1 s kill window. The engine's array is already
+stripped and delay-sorted; the map text is not.
+
+**`CMultiSource::m_iState` does not exist** and cannot be requested. `CMultiSource::IsTriggered`
+(buttons.cpp:214) reads `m_rgTriggered` against `m_iTotal`, so those are the two offsets, and
+`MasterSatisfied` mirrors that function rather than inventing a state test.
+
+These all obey the base-class rule above without an exception: every one is read off a pointer whose
+classname the caller has already matched, and none of them is a derived field read through a base
+pointer.
+
 ### Every failure is fatal
 
 A wrong offset is a wild read into another object's memory, which corrupts silently and crashes

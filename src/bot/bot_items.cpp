@@ -11,6 +11,7 @@
 #include "../nav/nav_path.h"
 #include "../nav/nav_query.h"
 #include "bot.h"
+#include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
 #include "bot_move.h"
@@ -26,7 +27,6 @@ namespace
 	constexpr float kChargerUseRadius = 48.f;
 	constexpr float kChargerSpotSearch = 96.f;
 	constexpr float kGoalItemSeenInterval = 0.25f;
-	constexpr float kSelectRetryInterval = 0.5f;
 	constexpr float kHealReachMargin = 48.f;
 	constexpr float kStandOriginLift = 18.f;
 	constexpr int kHullHuman = 1;
@@ -93,11 +93,7 @@ namespace
 		return best;
 	}
 
-	struct Placement
-	{
-		uint32_t areaId = 0;
-		Vector point;
-	};
+	using BotItems::Placement;
 
 	// A healing trigger_hurt is a room-sized brush the bot stands inside, not a fixture it walks
 	// up to, so every area overlapping it is a way in. Offering them all lets the cost field in
@@ -551,9 +547,7 @@ void ForgetGoalItem(CBot &bot)
 
 void ClearGoalItem(CBot &bot)
 {
-	ForgetGoalItem(bot);
-	bot.hasGoal = false;
-	Bot_ResetNavPath(bot);
+	BotGoal::Clear(bot);
 }
 
 bool Enabled()
@@ -562,77 +556,72 @@ bool Enabled()
 	return !cvar || cvar->value != 0.f;
 }
 
-bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
+Vector ClampToArea(const Nav::Area &area, const Vector &point)
+{
+	return ClampIntoArea(area, point);
+}
+
+const Nav::Area *StandArea(const Nav::NavMesh &mesh, const Vector &center)
+{
+	return ResolveChargerArea(mesh, center);
+}
+
+void VolumeAreas(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
+	std::vector<Placement> &out)
+{
+	ResolveVolumeAreas(mesh, ent, from, out);
+}
+
+void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
+	std::vector<BotGoal::Candidate> &out)
 {
 	if (!g_pGameProfile || bot.currentAreaId < 0 || !Enabled())
-		return false;
+		return;
 
-	if (gpGlobals->time < bot.nextSelectTime)
-		return false;
-
-	PruneMemos(bot);
+	PruneMemos(const_cast<CBot &>(bot));
 
 	std::vector<Candidate> items;
 	ScanItems(bot, mesh, items);
 
-	std::vector<float> costs;
-	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
-		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot));
+	if (DebugEnabled())
+		DumpScan(bot, mesh, costs, items, nullptr);
 
-	const Candidate *best = nullptr;
-	float bestCost = 0.f;
 	for (const Candidate &cand : items)
 	{
-		if (cand.reason != SCAN_OK)
+		if (cand.reason != SCAN_OK || !cand.hasArea)
 			continue;
 
-		float cost = ItemCost(bot, mesh, costs, cand);
-		if (cost >= Nav::kUnreachableSeconds)
-			continue;
-
-		if (!best || cost < bestCost)
-		{
-			best = &cand;
-			bestCost = cost;
-		}
+		BotGoal::Candidate one;
+		one.tier = BotGoal::GOAL_GATHER;
+		one.ent = cand.ent;
+		one.areaId = cand.areaId;
+		one.point = cand.point;
+		one.payload = static_cast<int>(cand.kind);
+		out.push_back(one);
 	}
+}
 
-	if (DebugEnabled())
-		DumpScan(bot, mesh, costs, items, best);
-
-	if (!best)
-	{
-		bot.nextSelectTime = gpGlobals->time + kSelectRetryInterval;
-		return false;
-	}
-
+void Accept(CBot &bot, const BotGoal::Candidate &cand)
+{
 	ForgetGoalItem(bot);
 
-	bot.goalItem.Set(best->ent);
-	bot.goalItemKind = best->kind;
-	bot.goalItemArea = static_cast<int>(best->areaId);
+	bot.goalItem.Set(cand.ent);
+	bot.goalItemKind = static_cast<ItemKind>(cand.payload);
+	bot.goalItemArea = static_cast<int>(cand.areaId);
 	bot.goalItemSelectTime = gpGlobals->time;
+}
 
-	bot.goalPoint = best->point;
-	bot.hasGoal = true;
-
-	size_t open = 0;
-	for (const Candidate &cand : items)
-		if (cand.reason == SCAN_OK)
-			++open;
-
-	BOT_VLOG("CrossBot: %s wants %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
-		bot.name, CBotClassOf(best->ent), best->point.x, best->point.y, best->point.z,
-		best->areaId, bestCost, open);
-
-	return true;
+void DropGoalItem(CBot &bot)
+{
+	ForgetGoalItem(bot);
+	BotGoal::Advance(bot);
 }
 
 bool UpdateGoalItem(CBot &bot)
 {
 	if (bot.goalItemDone)
 	{
-		ClearGoalItem(bot);
+		DropGoalItem(bot);
 		return true;
 	}
 
@@ -642,7 +631,7 @@ bool UpdateGoalItem(CBot &bot)
 
 	if (!ent)
 	{
-		ClearGoalItem(bot);
+		DropGoalItem(bot);
 		return true;
 	}
 
@@ -655,7 +644,7 @@ bool UpdateGoalItem(CBot &bot)
 		BOT_VLOG("CrossBot: %s %s %s, now at %.0f\n", bot.name,
 			ItemKindIsVolume(bot.goalItemKind) ? "found switched off" : "drained",
 			CBotClassOf(ent), g_pGameProfile->ChargerValue(bot.goalItemKind, bot.pEdict));
-		ClearGoalItem(bot);
+		DropGoalItem(bot);
 		return true;
 	}
 
@@ -664,7 +653,7 @@ bool UpdateGoalItem(CBot &bot)
 		BOT_VLOG("CrossBot: %s arrived to find %s already taken\n", bot.name,
 			CBotClassOf(ent));
 		NoteRespawning(bot, ent, bot.goalItemKind);
-		ClearGoalItem(bot);
+		DropGoalItem(bot);
 		return true;
 	}
 
@@ -681,7 +670,7 @@ bool UpdateGoalItem(CBot &bot)
 	BOT_VLOG("CrossBot: %s saw %s was already taken, giving up on it\n", bot.name,
 		CBotClassOf(ent));
 	NoteRespawning(bot, ent, bot.goalItemKind);
-	ClearGoalItem(bot);
+	DropGoalItem(bot);
 	return true;
 }
 
@@ -760,7 +749,7 @@ void OnBlocked(CBot &bot, const char *what)
 		NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
 	}
 
-	ClearGoalItem(bot);
+	ForgetGoalItem(bot);
 }
 
 void OnRespawn(CBot &bot)
@@ -768,7 +757,7 @@ void OnRespawn(CBot &bot)
 	bot.fullMemo.clear();
 
 	if (bot.goalItemKind != ITEM_NONE)
-		ClearGoalItem(bot);
+		ForgetGoalItem(bot);
 }
 
 void PrintCandidates(const Nav::NavMesh &mesh)

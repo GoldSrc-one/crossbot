@@ -13,6 +13,10 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_list_spawns` / `crossbot_list_targets` — entity positions, for picking a goal by hand
 - `crossbot_list_items` — every pickup and charger with its kind, resolved nav area, `frame`, `solid`
   and state; see `doc/bot.md`, `bot_items.cpp`
+- `crossbot_list_fun` — the fun goal tier's whole inventory for this map: kind (`switch`/`tank`),
+  action (`use`/`touch`/`shoot`), brush centre, every resolved nav area, the chain terminal it fires,
+  and why it was skipped (`no nav area`, `taken or locked`, `not ready`) or `ready`. Ends with a
+  count; see `doc/bot.md`, `bot_fun.cpp`
 - `crossbot_list_gates` — every walk gate that could hold a mine: the mesh width, the *measured*
   opening, the chosen surface, the mount point and the rejection reason. A gate that failed only at
   the surface or coverage stage is printed too, so the near misses are visible; ones filtered earlier
@@ -112,6 +116,13 @@ penalty table is not, and it dies with the map.
 the gather goals cannot see at all, and that is a mesh gap rather than a bot bug. Run it first on any
 map where the bots seem to ignore something.
 
+`crossbot_list_fun` is the same idea one tier up, and it is the *first* thing to run when bots ignore
+a map's gimmick, because it separates the two failures that look identical from the bot side: an
+entity absent from the list was never detected (its chain does not reach an interesting terminal, or
+it dangles), while one that is listed but reads `no nav area` was detected and is unreachable. It is
+also the negative control — on `datacore` it must print `0 fun entities`, and on `crossfire` the nuke
+trigger must read `no nav area` until `strike_ready_door` opens at t=180.
+
 `crossbot_weapons` ends with a line comparing the walked weapon mask against `pev->weapons`. That is
 the only self-check the offsets have, so read it before believing any other number on the dump — see
 `doc/bot.md`, `bot_weapons.cpp`. `crossbot_equip` exists to reach a weapon state that gathering would
@@ -125,6 +136,17 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   back to the pre-`BotBreak` behaviour: it avoids the breakable, or gives up on the goal behind it
 - `crossbot_gather` — item gathering goals. Default 1. `test_nav_goal.ps1` sets it to 0, because a bot
   that picks a new goal a frame after arriving never shows the harness the `hasGoal=0` it polls for
+- `crossbot_fun` — the fun goal tier. Default 1. With it off `BotGoal::Select` reduces exactly to the
+  old gather-only behaviour, which is what makes it the regression control: **the nav sweep sets it
+  to 0** alongside `crossbot_gather 0`, so route behaviour stays comparable against transcripts taken
+  before the tier existed
+- `crossbot_fun_debug` — per-frame arrival diagnostics while a bot is at a switch or mounting a tank
+- `crossbot_goal_bias` — exponent in the fun/strategic weight `1 / (cost + 2)^bias`. Default 2. 0 is
+  uniform random across candidates, which is how you tell a selection problem from a distance-weighting
+  one; large values collapse to nearest-first. Does not affect gather, which is always cheapest-first
+- `crossbot_detour_budget` — seconds of extra travel a bot will accept to pick something up on the way
+  to a distant goal. Default 6. 0 disables detours entirely without disabling the tier, so a bot walks
+  straight at its target; see `doc/bot.md`, `bot_goal.cpp`
 - `crossbot_combat` — the combat state. Default 1. With it on, a bot that sees an enemy (or is shot
   by one) drops whatever it was walking to and repositions locally instead, until the enemy dies,
   vanishes, stops being sensed, or goes 5s unseen. With it off the bot never enters the state and

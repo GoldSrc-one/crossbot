@@ -9,6 +9,7 @@
 #include "bot_aim.h"
 #include "bot_break.h"
 #include "bot_deploy.h"
+#include "bot_fun.h"
 #include "bot_weapons.h"
 #include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
@@ -1425,6 +1426,20 @@ void Think(CBot &bot)
 	{
 		fire.idleReloadId = 0;
 		Idle(fire, "deploying");
+		return;
+	}
+
+	if (BotFun::Mounted(bot))
+	{
+		fire.idleReloadId = 0;
+		Idle(fire, "on a tank");
+		return;
+	}
+
+	if (BotFun::Pressing(bot))
+	{
+		fire.idleReloadId = 0;
+		Idle(fire, "pressing");
 		return;
 	}
 

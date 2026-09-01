@@ -32,4 +32,9 @@ public:
 
 	bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 		float &speed) const override;
+
+	bool IsFunTerminal(edict_t *ent) const override;
+
+	void CollectStrategicGoals(const CBot &bot, const Nav::NavMesh &mesh,
+		std::vector<BotGoal::Candidate> &out) const override;
 };

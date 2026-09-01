@@ -6,6 +6,8 @@
 #include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fire.h"
+#include "bot_fun.h"
+#include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
 #include "bot_move.h"
@@ -93,6 +95,7 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	BotSense::ResetBoneCache();
 	Bot_ResetAirmoveCache();
+	BotFun::ResetMap();
 
 	g_pGameProfile = GameProfile_Detect();
 
@@ -114,6 +117,7 @@ void ServerDeactivate()
 
 	BotSense::ResetBoneCache();
 	Bot_ResetAirmoveCache();
+	BotFun::ResetMap();
 
 	g_pGameProfile = nullptr;
 	Nav::Unload();
@@ -174,7 +178,7 @@ void StartFrame()
 			BOTPERF_SCOPE(ZONE_RESPAWN);
 			bot.wasDead = false;
 			bot.gravity = 1.f;
-			BotItems::OnRespawn(bot);
+			BotGoal::OnRespawn(bot);
 			BotSense::OnRespawn(bot);
 			BotCombat::OnRespawn(bot);
 			BotFire::Reset(bot);
@@ -839,6 +843,22 @@ void PrintNavStatus()
 			goalItem ? CBotClassOf(goalItem) : "-", static_cast<int>(bot.goalItemKind),
 			bot.goalItemArea, bot.itemMemo.size(), bot.fullMemo.size());
 		msg += line;
+
+		edict_t *targetEnt = bot.goal.target.ent.Get();
+		snprintf(line, sizeof(line), " tier=%s stopTier=%s detour=%d target=%s targetArea=%d",
+			BotGoal::TierName(bot.goal.target.tier), BotGoal::TierName(bot.goal.stop.tier),
+			bot.goal.onDetour ? 1 : 0, targetEnt ? CBotClassOf(targetEnt) : "-",
+			bot.goal.target.areaId);
+		msg += line;
+
+		if (bot.fun.mounted || bot.fun.goal.Get())
+		{
+			edict_t *funEnt = bot.fun.goal.Get();
+			snprintf(line, sizeof(line), " fun=%s funKind=%s funAct=%s mounted=%d shots=%d",
+				funEnt ? CBotClassOf(funEnt) : "-", BotFun::KindName(bot.fun.kind),
+				BotFun::ActionName(bot.fun.action), bot.fun.mounted ? 1 : 0, bot.fun.shots);
+			msg += line;
+		}
 
 		edict_t *enemy = bot.sense.enemy.Get();
 		snprintf(line, sizeof(line), " combat=%d enemy=%s enemyAge=%.1fs ready=%.2f",

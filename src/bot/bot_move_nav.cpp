@@ -14,6 +14,8 @@
 #include "bot_break.h"
 #include "bot_combat.h"
 #include "bot_deploy.h"
+#include "bot_fun.h"
+#include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_opportunist.h"
 #include "bot_log.h"
@@ -2015,8 +2017,7 @@ namespace
 		if (!Repath(bot, mesh, pEdict))
 		{
 			WriteTraceLog(bot);
-			BotItems::OnRepathFailed(bot);
-			bot.hasGoal = false;
+			BotGoal::OnRepathFailed(bot);
 			return false;
 		}
 		bot.nextRepathTime = 0.f;
@@ -2071,7 +2072,8 @@ const NavPlan::AirmoveCache &Bot_AirmoveCache()
 bool Bot_ManeuverActive(const CBot &bot)
 {
 	return bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive ||
-		bot.chargerActive || bot.brk.active || bot.deploy.active;
+		bot.chargerActive || bot.brk.active || bot.deploy.active || bot.fun.mounted ||
+		bot.fun.arrival;
 }
 
 void Bot_ResetNavPath(CBot &bot)
@@ -2136,6 +2138,9 @@ void Bot_MoveNav(CBot &bot)
 			return;
 	}
 
+	if (BotFun::Run(bot))
+		return;
+
 	{
 		BOTPERF_SCOPE(ZONE_COMBAT);
 		if (BotCombat::Run(bot, *mesh))
@@ -2155,7 +2160,7 @@ void Bot_MoveNav(CBot &bot)
 
 	{
 		BOTPERF_SCOPE(ZONE_ITEM_SELECT);
-		if (!bot.hasGoal && !BotItems::SelectGoal(bot, *mesh))
+		if (!bot.hasGoal && !BotGoal::Select(bot, *mesh))
 		{
 			BotSense::ApplyLook(bot);
 			Vector angles = Bot_UpdateFacing(bot);
@@ -2175,7 +2180,7 @@ void Bot_MoveNav(CBot &bot)
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
 	if (stalled && !forcedRepath && gpGlobals->time < bot.avoid.blockedUntil)
 	{
-		BotItems::OnBlocked(bot, bot.avoid.lastHit);
+		BotGoal::OnBlocked(bot, bot.avoid.lastHit);
 		BotSense::ApplyLook(bot);
 		Vector angles = Bot_UpdateFacing(bot);
 		RunIdleMove(bot, angles);
@@ -2288,11 +2293,19 @@ void Bot_MoveNav(CBot &bot)
 
 	if (follow.done)
 	{
-		if (ItemKindIsCharger(bot.goalItemKind) && RunChargerUse(bot))
-			return;
+		if (BotGoal::StopTier(bot) == BotGoal::GOAL_FUN)
+		{
+			if (BotFun::RunArrival(bot))
+				return;
+		}
+		else
+		{
+			if (ItemKindIsCharger(bot.goalItemKind) && RunChargerUse(bot))
+				return;
 
-		if (ItemKindIsVolume(bot.goalItemKind) && RunHealVolume(bot))
-			return;
+			if (ItemKindIsVolume(bot.goalItemKind) && RunHealVolume(bot))
+				return;
+		}
 
 		Vector miss = pEdict->v.origin - bot.goalPoint;
 		char msg[224];
@@ -2303,9 +2316,7 @@ void Bot_MoveNav(CBot &bot)
 		SERVER_PRINT(msg);
 
 		WriteTraceLog(bot);
-		BotItems::OnArrived(bot);
-		bot.hasGoal = false;
-		ResetPath(bot);
+		BotGoal::OnArrived(bot);
 		return;
 	}
 

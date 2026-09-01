@@ -129,6 +129,77 @@ bot**, and on `test56_recharger` the health charger and both batteries do exactl
 17 of that map's 20 areas as unreachable from the single spawn, so the upper floor has no mesh. That is
 a map/mesh gap, not a gather bug, and no amount of staring at the bot will show it.
 
+## scripts/test_fun.ps1
+
+The `test_items.ps1` of the fun goal tier, and built the same way: no pass/fail verdict, a decision
+log to read. It runs navgen, boots HLDS, prints `crossbot_list_fun`, adds bots, polls
+`crossbot_nav_status` every 10 s, prints `crossbot_list_fun` again at the end, and tails the
+decisions out of `nav_debug/logs/<map>_fun.log`.
+
+    pwsh -File scripts/test_fun.ps1 -Map hlds\valve\maps\stalkyard.bsp -Bots 3 -Seconds 120
+
+`-FunDebug` sets `crossbot_fun_debug 1`; `-NoGather` sets `crossbot_gather 0`, which strips the
+detour lines out and leaves only the tier's own decisions.
+
+**Read the inventory before the behaviour.** The first `crossbot_list_fun` is a per-map assertion,
+and it catches chain-analysis bugs that the bots would only show you as vague listlessness:
+
+| map | must list | must **not** list |
+| --- | --- | --- |
+| crossfire | 2 tank controls → `func_tankmortar`; the `trigger_multiple` at `(0,-2219,-1846)` | the 4 `lift*` buttons, the 4 inert tower buttons |
+| doublecross | 2 tanks; the `fire_button_texture` button | the fan-lift and access-panel buttons |
+| stalkyard | 2 tanks (`biggun`, `biggun2`) | `armorall`, the `lift_1` button |
+| undertow | the `wait 142` button at `(1640,152,184)` | the `bunker_door` button |
+| snark_pit | the `wait 120` snark button at `(304,-640,48)` | the four door/lift buttons |
+| datacore | nothing — `0 fun entities` | — |
+
+crossfire's trigger is also the reachability assertion: it sits behind `strike_ready_door`, which
+opens 180 s into the map, so before t=180 it must read `no nav area` and must not be offered as a
+candidate.
+
+**A healthy run is a cycle**, and it takes more than one bot to see all of it:
+
+```
+Player1 wants fun func_tankcontrols ... 7 candidates
+Player1 detours to item_healthkit ... 18.3s left after
+Player1 detours to ammo_rpgclip   ... 18.0s left after
+Player1 reached the tank func_tankcontrols, going to use it
+Player1 mounted the tank func_tankmortar
+Player1 is bored of the tank, nobody around for 10.0s, readiness 0.45
+```
+
+The other legitimate exit is `is shot from behind the tank by X, bailing out`, and it must be
+followed by the bot entering combat rather than re-selecting a goal. **A lone bot never sees an
+enemy, so it hits boredom every time and the damage exit is never exercised** — use at least three.
+
+Three failure signatures are worth naming, because each looks like something else:
+
+- **A mount immediately followed by a dismount with no reason logged** is the bot moving and breaking
+  the 30-unit `m_vecControllerUsePos` leash. It is not an aiming or a gamedata problem.
+- **A fresh `wants` line where a `detours to` should be** is broken target stickiness — run it again
+  with `-Bots 1`, where combat cannot be the explanation, and the `wants`/`detour` alternation is
+  unambiguous.
+- **`could not aim at` or `got nothing out of` at a tank, with every gamedata read correct** is the
+  `UTIL_ClampVectorToBox` trap (`doc/bot.md`, `bot_fun.cpp`). Small brushes hide it entirely, so
+  undertow passing proves nothing about stalkyard.
+
+`undertow` is the map for the long-`wait` switch: the bot presses once, logs `leaving it for 142s`,
+and the tier must then stay empty for the rest of the run. `datacore` is the negative control — the
+tier must be empty and gather behaviour untouched.
+
+**Regression.** `test_nav_goal.ps1` sets `crossbot_fun 0` alongside `crossbot_gather 0`, so the
+51-map sweep is unaffected by the tier and stays comparable against transcripts taken before it
+existed. Four maps fail that sweep — `test19_water` and `test54_window` abandon the goal, `test39_skybox`
+and `test41_skydrop` hit the deadline — and all four fail identically with the plugin sources stashed,
+so they are pre-existing and not a tier regression.
+
+**Perf.** Measured on crossfire, 8 bots, `-DCROSSBOT_PERF=ON`: `item_select` self time is
+0.0288 ms/f with the tier on against 0.0264 ms/f with `crossbot_fun 0`, which is inside the
+run-to-run spread — the cached `toTargetCosts` is what buys that, since a repath costs one
+`AreaCosts` rather than two. The worst *frame* does move, 1.6–2.9 ms to 3.1–6.8 ms, and that is the
+retarget: one extra `AreaCostsToGoal` plus the hull-3 reachability traces (0.19–1.01 traces/frame).
+Amortised cost nil, peak selection frame roughly doubled.
+
 ## scripts/test_sense.ps1
 
 Drives the sense system and the aim delay queue, which nothing else can. `test_nav_goal.ps1` spawns

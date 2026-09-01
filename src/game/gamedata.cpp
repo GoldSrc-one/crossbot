@@ -52,6 +52,31 @@ const Request kRequests[] = {
 	{ "CBasePlayer",       "m_pActiveItem",           CB_OFF(plr_pActiveItem) },
 	{ "CBasePlayer",       "m_rgpPlayerItems",        CB_OFF(plr_rgpPlayerItems) },
 	{ "CBasePlayer",       "m_rgAmmo",                CB_OFF(plr_rgAmmo) },
+	{ "CBasePlayer",       "m_pTank",                 CB_OFF(plr_pTank) },
+
+	{ "CBaseToggle",       "m_toggle_state",          CB_OFF(tog_toggleState) },
+	{ "CBaseToggle",       "m_flWait",                CB_OFF(tog_flWait) },
+
+	{ "CBaseButton",       "m_fStayPushed",           CB_OFF(btn_fStayPushed) },
+
+	{ "CFuncTank",         "m_pController",           CB_OFF(tank_pController) },
+	{ "CFuncTank",         "m_vecControllerUsePos",   CB_OFF(tank_vecControllerUsePos) },
+	{ "CFuncTank",         "m_yawCenter",             CB_OFF(tank_yawCenter) },
+	{ "CFuncTank",         "m_yawRange",              CB_OFF(tank_yawRange) },
+	{ "CFuncTank",         "m_yawRate",               CB_OFF(tank_yawRate) },
+	{ "CFuncTank",         "m_pitchCenter",           CB_OFF(tank_pitchCenter) },
+	{ "CFuncTank",         "m_pitchRange",            CB_OFF(tank_pitchRange) },
+	{ "CFuncTank",         "m_pitchRate",             CB_OFF(tank_pitchRate) },
+	{ "CFuncTank",         "m_fireRate",              CB_OFF(tank_fireRate) },
+	{ "CFuncTank",         "m_iszMaster",             CB_OFF(tank_iszMaster) },
+
+	{ "CFuncTankControls", "m_pTank",                 CB_OFF(tankctl_pTank) },
+
+	{ "CMultiManager",     "m_cTargets",              CB_OFF(mm_cTargets) },
+	{ "CMultiManager",     "m_iTargetName",           CB_OFF(mm_iTargetName) },
+
+	{ "CMultiSource",      "m_rgTriggered",           CB_OFF(ms_rgTriggered) },
+	{ "CMultiSource",      "m_iTotal",                CB_OFF(ms_iTotal) },
 };
 
 constexpr size_t kRequestCount = sizeof(kRequests) / sizeof(kRequests[0]);
