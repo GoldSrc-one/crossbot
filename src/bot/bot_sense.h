@@ -69,9 +69,6 @@ struct State
 	CBotEntHandle enemy;
 	Vector enemyPos;
 	float enemyTime = 0.f;
-	bool hadSight = false;
-	bool rescore = false;
-	float nextRescoreTime = 0.f;
 
 	unsigned int rngState = 0;
 	bool rngSeeded = false;
@@ -118,6 +115,8 @@ int LiveCount(const CBot &bot);
 int LiveCounts(const CBot &bot, int counts[KIND_COUNT]);
 
 const Suspicion *Freshest(const CBot &bot);
+
+bool Senses(const CBot &bot, const edict_t *ent);
 
 const Suspicion *NearestLive(const CBot &bot, const Vector &point, float radius, bool livingOnly,
 	float *distOut = nullptr);

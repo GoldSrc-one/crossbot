@@ -3,6 +3,7 @@
 #include <pm_defs.h>
 
 #include "../bot/bot_manager.h"
+#include "../bot/bot_perf.h"
 #include "../bot/bot_sense.h"
 #include "../bot/bot_timing.h"
 #include "../console/commands.h"
@@ -32,9 +33,15 @@ cvar_t g_gatherCvar = {
 	FCVAR_SERVER
 };
 
-cvar_t g_chaseCvar = {
-	"crossbot_chase",
+cvar_t g_combatCvar = {
+	"crossbot_combat",
 	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_combatDebugCvar = {
+	"crossbot_combat_debug",
+	"0",
 	FCVAR_SERVER
 };
 
@@ -128,21 +135,45 @@ cvar_t g_deploySurfaceCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_airmoveVerifyCvar = {
+	"crossbot_airmove_verify",
+	"0",
+	FCVAR_SERVER
+};
+
 cvar_t g_timeDebugCvar = {
 	"crossbot_time_debug",
 	"0",
 	FCVAR_SERVER
 };
 
+#ifdef CROSSBOT_PERF
+
+cvar_t g_perfCvar = {
+	"crossbot_perf",
+	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_perfSpikeCvar = {
+	"crossbot_perf_spike",
+	"5",
+	FCVAR_SERVER
+};
+
+#endif
+
 void GameDLLInit()
 {
+	BotPerf::InstallTraceWrappers();
 	GameData::Load();
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navBreakCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_chaseCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_combatCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_combatDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
@@ -159,6 +190,11 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_airmoveVerifyCvar);
+#ifdef CROSSBOT_PERF
+	g_engfuncs.pfnCvar_RegisterVariable(&g_perfCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_perfSpikeCvar);
+#endif
 	RETURN_META(MRES_IGNORED);
 }
 

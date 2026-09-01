@@ -13,7 +13,7 @@ public:
 	float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const override;
 	void Respawn(edict_t *pEdict) const override;
 
-	ItemKind ClassifyItem(const char *classname) const override;
+	ItemKind ClassifyItem(edict_t *ent) const override;
 	float ItemRespawnDelay(ItemKind kind) const override;
 	float ItemFullTimeout() const override;
 	float ItemUnreachableTimeout() const override;

@@ -32,6 +32,8 @@ namespace BotManager
 
 	void PrintVantageStatus(const Vector *at);
 
+	void PrintCombatStatus();
+
 	void PrintFireStatus();
 
 	void PrintDeployStatus();

@@ -19,11 +19,27 @@ enum ItemKind
 	ITEM_PICKUP,
 	ITEM_HEALTHCHARGER,
 	ITEM_RECHARGE,
+	ITEM_HEALVOLUME,
 };
 
 inline bool ItemKindIsCharger(ItemKind kind)
 {
 	return kind == ITEM_HEALTHCHARGER || kind == ITEM_RECHARGE;
+}
+
+inline bool ItemKindIsVolume(ItemKind kind)
+{
+	return kind == ITEM_HEALVOLUME;
+}
+
+inline bool ItemKindIsBrush(ItemKind kind)
+{
+	return ItemKindIsCharger(kind) || ItemKindIsVolume(kind);
+}
+
+inline bool ItemKindUsesValue(ItemKind kind)
+{
+	return ItemKindIsCharger(kind) || ItemKindIsVolume(kind);
 }
 
 enum DeployKind
@@ -51,7 +67,7 @@ public:
 
 	virtual void Respawn(edict_t *pEdict) const = 0;
 
-	virtual ItemKind ClassifyItem(const char *classname) const = 0;
+	virtual ItemKind ClassifyItem(edict_t *ent) const = 0;
 
 	virtual float ItemRespawnDelay(ItemKind kind) const = 0;
 

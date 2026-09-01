@@ -15,6 +15,7 @@ struct PmTrace
 	float fraction = 1.f;
 	bool allsolid = false;
 	bool startsolid = false;
+	bool hitEntity = false;
 };
 
 using PmTraceFn = std::function<PmTrace(const Vector &start, const Vector &end)>;
@@ -50,6 +51,8 @@ constexpr float kGroundTraceDist = 2.f;
 constexpr float kEdgeProbeAhead = 16.f;
 constexpr float kEdgeProbeDrop = 34.f;
 
+constexpr float kPlanSimFrameTime = 1.f / 60.f;
+
 constexpr float kPlayerFatalFallSpeed = 1024.f;
 constexpr float kPlayerMaxSafeFallSpeed = 580.f;
 constexpr float kDamageForFallSpeed = 100.f / (kPlayerFatalFallSpeed - kPlayerMaxSafeFallSpeed);
@@ -73,6 +76,7 @@ public:
 	float Time() const { return m_time; }
 	float FallSpeed() const { return m_fallSpeed; }
 	void ResetFallSpeed() { m_fallSpeed = 0.f; }
+	bool TouchedEntity() const { return m_touchedEntity; }
 
 private:
 	void Reset(const Vector &origin, const Vector &velocity, float yawDegrees, float commandedSpeed,
@@ -98,6 +102,7 @@ private:
 	bool m_onGround = true;
 	bool m_jumpPending = false;
 	float m_fallSpeed = 0.f;
+	mutable bool m_touchedEntity = false;
 	float m_time = 0.f;
 };
 

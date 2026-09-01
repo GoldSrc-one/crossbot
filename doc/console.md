@@ -125,12 +125,15 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   back to the pre-`BotBreak` behaviour: it avoids the breakable, or gives up on the goal behind it
 - `crossbot_gather` — item gathering goals. Default 1. `test_nav_goal.ps1` sets it to 0, because a bot
   that picks a new goal a frame after arriving never shows the harness the `hasGoal=0` it polls for
-- `crossbot_chase` — whether the position a bot last saw an enemy at competes in goal selection.
-  Default 1. It is a candidate priced by the same Dijkstra as every item, divided by the bot's own
-  `EvaluateCombat` readiness, so a hurt or unarmed bot keeps gathering and a well-armed one hunts;
-  see `doc/bot.md`, `bot_items.cpp`. Inert without `crossbot_sense`, which is what supplies the
-  sighting, and disabled by `crossbot_gather 0` as well, because the candidate lives inside
-  `SelectGoal`
+- `crossbot_combat` — the combat state. Default 1. With it on, a bot that sees an enemy (or is shot
+  by one) drops whatever it was walking to and repositions locally instead, until the enemy dies,
+  vanishes, stops being sensed, or goes 5s unseen. With it off the bot never enters the state and
+  keeps gathering through a firefight — it still shoots, since aim and the trigger are
+  `crossbot_fire`'s. Inert without `crossbot_sense`, which is what supplies the sighting. Unlike the
+  `crossbot_chase` it replaces, it is **not** disabled by `crossbot_gather 0`: combat is no longer a
+  goal, so it does not live inside `SelectGoal`
+- `crossbot_combat_debug` — one line per probe: which way the bot decided to shuffle, the area it
+  resolved to, and the exposure there against the exposure where it stands
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`

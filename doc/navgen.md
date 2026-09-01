@@ -756,6 +756,11 @@ Volumes are extracted at `kHullDuck`, so a floor already inside the trigger repo
 and is dropped without a trace. `SF_TRIGGER_HURT_START_OFF` and `SF_TRIGGER_HURT_NO_CLIENTS` triggers are
 skipped; negative `dmg` (healing) never qualifies.
 
+Healing volumes stay entirely out of navgen. They are not solid in any hull, so they carve nothing
+and split nothing, and the runtime finds them by edict scan with no baked data at all — see
+`ITEM_HEALVOLUME` in `doc/bot.md`. `pool_party` is the map to check this on: its `dmg 200` volume is
+the one lethal trigger navgen reports, and its `dmg -40` pool never appears.
+
 **Why the leaf stage and not reachability.** The obvious place for this is a connection cut plus the
 existing unreachable-area prune, and that is what was tried first: it removed 550 connections on xen_dm
 and pruned nothing. `MergeAreas` had already fused the void-floor leaf with real ledges above it — area

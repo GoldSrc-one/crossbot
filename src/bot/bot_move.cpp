@@ -7,8 +7,10 @@
 
 #include "bot_move.h"
 #include "bot_fire.h"
+#include "bot_perf.h"
 #include "bot_timing.h"
 #include "../game/game_profile.h"
+#include "../nav/baked_blockers.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
 
@@ -65,6 +67,8 @@ byte Bot_FrameMsec()
 void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
 	unsigned short buttons, bool allowLongJump)
 {
+	BOTPERF_SCOPE(ZONE_RUNMOVE);
+
 	edict_t *pEdict = bot.pEdict;
 	byte msec = Bot_FrameMsec();
 
@@ -114,6 +118,17 @@ Vector Bot_YawDir(float yawDeg)
 	return Vector(cosf(r), sinf(r), 0.f);
 }
 
+static bool TraceHitEntity(const TraceResult &tr)
+{
+	edict_t *hit = tr.pHit;
+	if (!hit || g_engfuncs.pfnIndexOfEdict(hit) == 0)
+		return false;
+	if (hit->v.solid == SOLID_BSP && (hit->v.flags & FL_WORLDBRUSH) != 0)
+		return false;
+	return !crossbot_nav::IsBakedBlocker(STRING(hit->v.classname),
+		static_cast<int>(hit->v.spawnflags));
+}
+
 PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
 {
 	return [ignore, hull](const Vector &start, const Vector &end)
@@ -127,6 +142,7 @@ PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
 		out.fraction = tr.flFraction;
 		out.allsolid = tr.fAllSolid != 0;
 		out.startsolid = tr.fStartSolid != 0;
+		out.hitEntity = TraceHitEntity(tr);
 		return out;
 	};
 }

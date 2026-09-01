@@ -8,6 +8,7 @@
 #include "../bot/bot_fire.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
+#include "../bot/bot_move_nav.h"
 #include "../bot/bot_weapons.h"
 #include "../game/ent_handle.h"
 #include "../game/game_profile.h"
@@ -198,6 +199,11 @@ namespace
 		Vector at(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
 			static_cast<float>(atof(CMD_ARGV(3))));
 		BotManager::PrintVantageStatus(&at);
+	}
+
+	void Cmd_CrossBotCombatStatus()
+	{
+		BotManager::PrintCombatStatus();
 	}
 
 	void Cmd_CrossBotFireStatus()
@@ -560,6 +566,30 @@ namespace
 		BotDeploy::PrintGates(*mesh);
 	}
 
+	void Cmd_CrossBotAirmoveCache()
+	{
+		const NavPlan::AirmoveCache &cache = Bot_AirmoveCache();
+
+		uint64_t hits = cache.Hits();
+		uint64_t misses = cache.Misses();
+		uint64_t queries = hits + misses;
+		float rate = queries ? (100.f * static_cast<float>(hits) / static_cast<float>(queries)) : 0.f;
+
+		char msg[288];
+		snprintf(msg, sizeof(msg),
+			"CrossBot: airmove cache %zu/%zu slots | %llu hit / %llu miss (%.1f%%) | "
+			"%llu inserts / %llu evicted / %llu uncacheable | %llu verified / %llu MISMATCH (%llu ent)\n",
+			cache.Occupancy(), cache.Capacity(),
+			static_cast<unsigned long long>(hits), static_cast<unsigned long long>(misses), rate,
+			static_cast<unsigned long long>(cache.Inserts()),
+			static_cast<unsigned long long>(cache.Evictions()),
+			static_cast<unsigned long long>(cache.Uncacheable()),
+			static_cast<unsigned long long>(cache.Verified()),
+			static_cast<unsigned long long>(cache.Mismatches()),
+			static_cast<unsigned long long>(cache.MismatchEntity()));
+		SERVER_PRINT(msg);
+	}
+
 	void Cmd_CrossBotDeployStatus()
 	{
 		BotManager::PrintDeployStatus();
@@ -613,6 +643,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
 	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
+	ADD_SERVER_COMMAND("crossbot_airmove_cache_stats", Cmd_CrossBotAirmoveCache);
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
 	ADD_SERVER_COMMAND("crossbot_weaponspec", Cmd_CrossBotWeaponSpec);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);
@@ -620,6 +651,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_vantage_status", Cmd_CrossBotVantageStatus);
+	ADD_SERVER_COMMAND("crossbot_combat_status", Cmd_CrossBotCombatStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
 	ADD_SERVER_COMMAND("crossbot_weapon_usage", Cmd_CrossBotWeaponUsage);

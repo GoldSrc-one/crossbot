@@ -530,14 +530,16 @@ try {
     $seconds = [int]($ProjectileSeconds / $pins.Count)
     if ($seconds -lt 15) { $seconds = 15 }
 
-    # Chasing off for the pinned phases, for the same reason test_nav_goal.ps1
-    # turns gathering off: a second goal source changes what is being measured.
-    # A bot that walks to where it last saw someone closes the range, and the
-    # crossbow only picks primaryZoomed at long range -- so with chasing on,
-    # "aim=target never appeared" fires on a bot that is working correctly and
-    # simply never took a long shot. DUEL keeps it on, since that phase wants
-    # the bots to find each other.
-    Invoke-Rcon "crossbot_chase 0" | Out-Null
+    # Combat off for the pinned phases, for the same reason test_nav_goal.ps1
+    # turns gathering off: a second movement source changes what is being
+    # measured. This used to be crossbot_chase, where a bot walked all the way to
+    # where it last saw someone and closed the range -- the crossbow only picks
+    # primaryZoomed at long range, so "aim=target never appeared" fired on a bot
+    # that was working correctly and simply never took a long shot. BotCombat
+    # only shuffles inside the current area, so the range it costs is far
+    # smaller, but it is still movement the phase did not ask for. DUEL keeps it
+    # on, since that phase wants the bots to find each other.
+    Invoke-Rcon "crossbot_combat 0" | Out-Null
 
     foreach ($entry in $pins) {
         $pin = $entry.Weapon

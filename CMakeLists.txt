@@ -82,11 +82,25 @@ if(CROSSBOT_LADDER_DEBUG)
     message(STATUS "crossbot: ladder state trace ENABLED")
 endif()
 
+option(CROSSBOT_VERBOSE "Per-bot narration of movement, planning and item choice" ON)
+if(CROSSBOT_VERBOSE)
+    target_compile_definitions(crossbot_mm PRIVATE CROSSBOT_VERBOSE)
+else()
+    message(STATUS "crossbot: verbose bot logging DISABLED")
+endif()
+
+option(CROSSBOT_PERF "Zone/trace profiler and its crossbot_perf cvars" OFF)
+if(CROSSBOT_PERF)
+    target_compile_definitions(crossbot_mm PRIVATE CROSSBOT_PERF)
+    message(STATUS "crossbot: zone profiler ENABLED")
+endif()
+
 file(GLOB NAVGEN_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/navgen/*.cpp
 )
 
 add_executable(navgen ${NAVGEN_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/nav/airmove_cache.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/funnel_graph.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/plan_search.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/waypoint_plan.cpp

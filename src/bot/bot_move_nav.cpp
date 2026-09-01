@@ -12,9 +12,12 @@
 #include "bot_sense.h"
 #include "bot_avoid.h"
 #include "bot_break.h"
+#include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_items.h"
 #include "bot_opportunist.h"
+#include "bot_log.h"
+#include "bot_perf.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
@@ -27,6 +30,11 @@ namespace
 	using NavMath::kPiF;
 	using NavMath::Norm2D;
 
+	int AreaIdOf(const Nav::Area *area)
+	{
+		return area ? static_cast<int>(area->id) : -1;
+	}
+
 	constexpr float kFullDrive = 1000.f;
 	constexpr float kAimVelocitySpeed = 20.f;
 	constexpr int kHullPoint = 0;
@@ -36,6 +44,8 @@ namespace
 	constexpr float kAirmoveApproachLead = 32.f;
 	constexpr float kAirmoveMinAirTime = 0.1f;
 	constexpr float kAirmoveMaxAirTime = 6.f;
+
+	NavPlan::AirmoveCache g_airmoveCache;
 	constexpr float kAirmoveTimeFactor = 2.f;
 	constexpr float kAirmoveTimeMargin = 1.f;
 	constexpr float kAirmoveOverrunGrace = 0.5f;
@@ -96,13 +106,19 @@ namespace
 
 	NavPlan::PlanTraceContext MakePlanTraces(edict_t *pEdict)
 	{
+		BOTPERF_SCOPE(ZONE_PLANTRACES);
 		NavPlan::PlanTraceContext traces;
 		traces.standTrace = Bot_EngineTraceFn(pEdict, kHullHuman);
 		traces.duckTrace = Bot_EngineTraceFn(pEdict, kHullDuck);
-		traces.standPush = Bot_PushFields(kHullHuman);
-		traces.duckPush = Bot_PushFields(kHullDuck);
+		{
+			BOTPERF_SCOPE(ZONE_PUSHFIELDS);
+			traces.standPush = Bot_PushFields(kHullHuman);
+			traces.duckPush = Bot_PushFields(kHullDuck);
+		}
 		traces.physics = Bot_Physics(pEdict);
 		traces.gravityMultiplier = Bot_GravityMultiplier(pEdict);
+		g_airmoveCache.SetVerify(g_engfuncs.pfnCVarGetFloat("crossbot_airmove_verify") > 0.f);
+		traces.airmoveCache = &g_airmoveCache;
 		return traces;
 	}
 
@@ -117,6 +133,13 @@ namespace
 	constexpr float kChargerUseRange = 64.f;
 	constexpr float kChargerNoGainGrace = 0.5f;
 	constexpr float kChargerTimeout = 15.f;
+	// HurtTouch only re-applies every 0.5s (pev->dmgtime), so a healing pool looks stalled for
+	// half a second at a time even while it is working.
+	constexpr float kHealNoGainGrace = 1.2f;
+	// Split in two: a slow pool can legitimately take half a minute to fill the bot, but if the
+	// bot never gets in at all there is nothing to wait for.
+	constexpr float kHealApproachTimeout = 5.f;
+	constexpr float kHealTimeout = 30.f;
 	constexpr float kActivationSameRadius = 8.f;
 	constexpr float kTriggerTouchRadius = 20.f;
 	constexpr float kTriggerTouchHeight = 40.f;
@@ -421,13 +444,10 @@ namespace
 			if (wp.connIndex >= 0)
 				Nav::PenalizeConnection(static_cast<uint32_t>(wp.connIndex));
 
-			char msg[256];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s airmove aborted at (%.1f,%.1f,%.1f) plan speed %.0f actual %.0f "
+			BOT_VLOG("CrossBot: %s airmove aborted at (%.1f,%.1f,%.1f) plan speed %.0f actual %.0f "
 				"(%.0f%% of design) conn %d, repathing\n",
 				bot.name, origin.x, origin.y, origin.z, drive, speed,
 				(drive > 1.f) ? (100.f * speed / drive) : 0.f, wp.connIndex);
-			SERVER_PRINT(msg);
 
 			bot.nextRepathTime = gpGlobals->time;
 			RunAirmoveDrive(bot, launchDir, 0.f, wp.launchYaw, false, false);
@@ -451,16 +471,13 @@ namespace
 			Vector offTrack(toLaunch.x - launchDir.x * remaining,
 				toLaunch.y - launchDir.y * remaining, 0.f);
 
-			char msg[256];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s airmove launch at (%.1f,%.1f,%.1f) plan yaw %.0f speed %.0f "
+			BOT_VLOG("CrossBot: %s airmove launch at (%.1f,%.1f,%.1f) plan yaw %.0f speed %.0f "
 				"jump %d crouch %d | actual yaw %.0f speed %.0f (%.0f%%) lateral %.1f early %.1f\n",
 				bot.name, origin.x, origin.y, origin.z, wp.launchYaw, drive, wp.requiresJump ? 1 : 0,
 				wp.requiresCrouch ? 1 : 0,
 				(speed > kAimVelocitySpeed) ? atan2f(vel.y, vel.x) * (180.f / kPiF) : wp.launchYaw, speed,
 				(drive > 1.f) ? (100.f * speed / drive) : 0.f,
 				sqrtf(offTrack.x * offTrack.x + offTrack.y * offTrack.y), remaining);
-			SERVER_PRINT(msg);
 
 			RunAirmoveDrive(bot, launchDir, drive, wp.launchYaw, wp.requiresCrouch,
 				wp.requiresJump && onGround);
@@ -512,11 +529,8 @@ namespace
 		if (!plug || !BotBreak::Engage(bot, plug))
 			return false;
 
-		char msg[288];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s cannot land in area %d, it is plugged by %s\n", bot.name,
+		BOT_VLOG("CrossBot: %s cannot land in area %d, it is plugged by %s\n", bot.name,
 			bot.airmoveTargetArea, CBotClassOf(plug));
-		SERVER_PRINT(msg);
 
 		return true;
 	}
@@ -557,9 +571,7 @@ namespace
 					Nav::RewardConnection(connIndex);
 			}
 
-			char msg[384];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s %s %s after %.2fs (planned %.2fs limit %.2fs) at (%.1f,%.1f,%.1f) "
+			BOT_VLOG("CrossBot: %s %s %s after %.2fs (planned %.2fs limit %.2fs) at (%.1f,%.1f,%.1f) "
 				"area %d (wanted %d) miss %.1f conn %d penalty %.1f%s\n", bot.name,
 				oppo ? "oppo" : "airmove", AirmoveEndReason(pEdict), airTime,
 				bot.airmovePlannedTime, bot.airmoveMaxTime,
@@ -569,7 +581,6 @@ namespace
 					? Nav::ConnectionPenalty(static_cast<uint32_t>(bot.airmoveConnIndex))
 					: 0.f,
 				decided ? "" : " undecided");
-			SERVER_PRINT(msg);
 
 			if (failed && BreakBlockedAirmove(bot, mesh))
 				return false;
@@ -585,19 +596,15 @@ namespace
 		{
 			bot.airmoveOverrunLogged = true;
 
-			const Nav::Area *hereArea = Nav::FindAreaNearest(mesh, pEdict->v.origin);
-			char msg[352];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s airmove overrunning at %.2fs (planned %.2fs limit %.2fs) at "
+			BOT_VLOG("CrossBot: %s airmove overrunning at %.2fs (planned %.2fs limit %.2fs) at "
 				"(%.1f,%.1f,%.1f) vel=(%.0f,%.0f,%.0f) onground=%d water=%d movetype=%d duck=%d "
 				"area %d (wanted %d) conn %d\n", bot.name, airTime, bot.airmovePlannedTime,
 				bot.airmoveMaxTime, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				pEdict->v.velocity.x, pEdict->v.velocity.y, pEdict->v.velocity.z,
 				(pEdict->v.flags & FL_ONGROUND) != 0 ? 1 : 0, pEdict->v.waterlevel,
 				pEdict->v.movetype, (pEdict->v.flags & FL_DUCKING) != 0 ? 1 : 0,
-				hereArea ? static_cast<int>(hereArea->id) : -1, bot.airmoveTargetArea,
+				AreaIdOf(Nav::FindAreaNearest(mesh, pEdict->v.origin)), bot.airmoveTargetArea,
 				bot.airmoveConnIndex);
-			SERVER_PRINT(msg);
 		}
 
 		Vector breakAngles;
@@ -614,11 +621,8 @@ namespace
 				{
 					breakButtons |= IN_ATTACK;
 
-					char msg[288];
-					snprintf(msg, sizeof(msg),
-						"CrossBot: %s swings at %s mid-flight, it plugs area %d\n", bot.name,
+					BOT_VLOG("CrossBot: %s swings at %s mid-flight, it plugs area %d\n", bot.name,
 						CBotClassOf(plug), bot.airmoveTargetArea);
-					SERVER_PRINT(msg);
 				}
 			}
 		}
@@ -845,13 +849,10 @@ namespace
 				Nav::RewardConnection(connIndex);
 		}
 
-		char msg[320];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s ladder %s %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d %s\n",
+		BOT_VLOG("CrossBot: %s ladder %s %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d %s\n",
 			bot.name, bot.ladderUp ? "climb" : "descent", why, gpGlobals->time - bot.ladderStartTime,
 			pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, landedId, bot.ladderTargetArea,
 			bot.ladderConnIndex, undecided ? "undecided" : (failed ? "failed" : "ok"));
-		SERVER_PRINT(msg);
 
 		if (failed)
 			bot.nextRepathTime = gpGlobals->time;
@@ -930,10 +931,8 @@ namespace
 			bot.ladderGrabbed = true;
 			bot.ladderMoveTime = gpGlobals->time;
 
-			char msg[192];
-			snprintf(msg, sizeof(msg), "CrossBot: %s caught the ladder at (%.1f,%.1f,%.1f) after %.2fs\n",
+			BOT_VLOG("CrossBot: %s caught the ladder at (%.1f,%.1f,%.1f) after %.2fs\n",
 				bot.name, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, elapsed);
-			SERVER_PRINT(msg);
 		}
 
 		if (!bot.ladderUp)
@@ -1010,11 +1009,8 @@ namespace
 			bot.ladderMoveTime = gpGlobals->time;
 			aim = ResolveLadderAim(bot, plane, kLadderPushOff, bot.ladderDismountYaw);
 
-			char msg[192];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s wedged on the ladder at (%.1f,%.1f,%.1f), pushing off\n", bot.name,
+			BOT_VLOG("CrossBot: %s wedged on the ladder at (%.1f,%.1f,%.1f), pushing off\n", bot.name,
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z);
-			SERVER_PRINT(msg);
 		}
 
 		RunLadderDrive(bot, aim.drive ? kFullDrive : 0.f, aim.yaw, aim.pitch, bot.ladderCrouch,
@@ -1074,15 +1070,12 @@ namespace
 			bot.ladderConnIndex = wp.connIndex;
 			++bot.waypointIndex;
 
-			char msg[320];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s ladder %s at (%.1f,%.1f,%.1f) entry yaw %.0f speed %.0f | climb yaw %.0f "
+			BOT_VLOG("CrossBot: %s ladder %s at (%.1f,%.1f,%.1f) entry yaw %.0f speed %.0f | climb yaw %.0f "
 				"speed %.0f | off z %.1f yaw %.0f jump %d | targArea %d conn %d\n",
 				bot.name, wp.ladderUp ? "climb" : "descent", origin.x, origin.y, origin.z,
 				wp.ladderEntryYaw, wp.ladderEntrySpeed, wp.ladderYaw, wp.ladderSpeed,
 				wp.ladderDismount.z, wp.ladderDismountYaw, wp.ladderJumpOff ? 1 : 0, wp.targetAreaId,
 				wp.connIndex);
-			SERVER_PRINT(msg);
 
 			RunLadderMove(bot, *Nav::Get());
 			return true;
@@ -1206,14 +1199,11 @@ namespace
 				Nav::RewardConnection(connIndex);
 		}
 
-		char msg[288];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s elevator %s after %.2fs at (%.1f,%.1f,%.1f) navz %.1f (stop %.1f) "
+		BOT_VLOG("CrossBot: %s elevator %s after %.2fs at (%.1f,%.1f,%.1f) navz %.1f (stop %.1f) "
 			"area %d (wanted %d) conn %d%s\n",
 			bot.name, why, gpGlobals->time - bot.rideStartTime, pEdict->v.origin.x, pEdict->v.origin.y,
 			pEdict->v.origin.z, navZ, bot.rideArriveZ, landedId, bot.rideTargetArea, bot.rideConnIndex,
 			decided ? "" : " undecided");
-		SERVER_PRINT(msg);
 
 		if (bot.rideWpIndex < bot.waypoints.size())
 			bot.waypoints[bot.rideWpIndex].requiresElevatorRide = false;
@@ -1296,13 +1286,10 @@ namespace
 			bot.rideTargetArea = wp.targetAreaId;
 			bot.rideConnIndex = wp.connIndex;
 
-			char msg[320];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s boarded the elevator at (%.1f,%.1f,%.1f) for nav z %.1f (%s), travel %.2fs "
+			BOT_VLOG("CrossBot: %s boarded the elevator at (%.1f,%.1f,%.1f) for nav z %.1f (%s), travel %.2fs "
 				"wait %.2fs, exit yaw %.0f, targArea %d conn %d\n",
 				bot.name, origin.x, origin.y, origin.z, bot.rideArriveZ, bot.rideUp ? "up" : "down",
 				wp.elevatorTravelTime, wp.elevatorWaitTime, bot.rideExitYaw, wp.targetAreaId, wp.connIndex);
-			SERVER_PRINT(msg);
 
 			RunElevatorRide(bot, *Nav::Get());
 			return true;
@@ -1380,10 +1367,8 @@ namespace
 		bot.activationPressed = false;
 		NoteActivated(bot, wp);
 
-		char msg[224];
-		snprintf(msg, sizeof(msg), "CrossBot: %s %s the activator at (%.1f,%.1f,%.1f)\n", bot.name, why,
+		BOT_VLOG("CrossBot: %s %s the activator at (%.1f,%.1f,%.1f)\n", bot.name, why,
 			wp.activatorCenter.x, wp.activatorCenter.y, wp.activatorCenter.z);
-		SERVER_PRINT(msg);
 	}
 
 	bool RunActivation(CBot &bot, size_t index)
@@ -1407,13 +1392,10 @@ namespace
 			bot.activationStartTime = gpGlobals->time;
 			bot.activationHoldUntil = 0.f;
 
-			char msg[288];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s reached the service point (%.1f,%.1f,%.1f) for the activator at "
+			BOT_VLOG("CrossBot: %s reached the service point (%.1f,%.1f,%.1f) for the activator at "
 				"(%.1f,%.1f,%.1f), wp %zu/%zu, wait %.1fs\n", bot.name, wp.point.x, wp.point.y,
 				wp.point.z, wp.activatorCenter.x, wp.activatorCenter.y, wp.activatorCenter.z, index,
 				bot.waypoints.size(), wp.buttonWaitTime);
-			SERVER_PRINT(msg);
 		}
 
 		bot.lastProgressTime = gpGlobals->time;
@@ -1441,12 +1423,9 @@ namespace
 			bot.activationHoldUntil = gpGlobals->time +
 				std::max(kActivationMinHold, std::min(wp.buttonWaitTime, kActivationMaxHold));
 
-			char msg[224];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s pressed USE at (%.1f,%.1f,%.1f), %.1f from the activator, holding %.1fs\n",
+			BOT_VLOG("CrossBot: %s pressed USE at (%.1f,%.1f,%.1f), %.1f from the activator, holding %.1fs\n",
 				bot.name, origin.x, origin.y, origin.z, useDist,
 				bot.activationHoldUntil - gpGlobals->time);
-			SERVER_PRINT(msg);
 		}
 
 		if (bot.activationPressed && gpGlobals->time >= bot.activationHoldUntil)
@@ -1498,10 +1477,8 @@ namespace
 
 	void FinishCharger(CBot &bot, edict_t *ent, const char *why)
 	{
-		char msg[224];
-		snprintf(msg, sizeof(msg), "CrossBot: %s %s at %s after %.1fs, now at %.0f\n", bot.name, why,
+		BOT_VLOG("CrossBot: %s %s at %s after %.1fs, now at %.0f\n", bot.name, why,
 			CBotClassOf(ent), gpGlobals->time - bot.chargerStartTime, bot.chargerLastValue);
-		SERVER_PRINT(msg);
 
 		bot.chargerActive = false;
 		bot.chargerPressed = false;
@@ -1526,10 +1503,8 @@ namespace
 			bot.chargerLastGainTime = gpGlobals->time;
 			bot.chargerLastValue = value;
 
-			char msg[224];
-			snprintf(msg, sizeof(msg), "CrossBot: %s reached %s at %.0f, starting to charge\n",
+			BOT_VLOG("CrossBot: %s reached %s at %.0f, starting to charge\n",
 				bot.name, CBotClassOf(ent), value);
-			SERVER_PRINT(msg);
 		}
 
 		bot.lastProgressTime = gpGlobals->time;
@@ -1614,6 +1589,122 @@ namespace
 		bot.moveForward = fmove;
 		bot.moveSide = smove;
 
+		if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
+		else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
+		if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
+		else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
+
+		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
+		return true;
+	}
+
+	// A healing trigger_hurt has no fixture to face and no button to press: the bot just has to
+	// be standing in the brush. It reuses the charger bookkeeping, where chargerPressed means
+	// "was inside" rather than "held +use".
+	bool RunHealVolume(CBot &bot)
+	{
+		edict_t *pEdict = bot.pEdict;
+		edict_t *ent = bot.goalItem.Get();
+		if (!ent)
+			return false;
+
+		ItemKind kind = bot.goalItemKind;
+		float value = g_pGameProfile->ChargerValue(kind, pEdict);
+
+		if (!bot.chargerActive)
+		{
+			bot.chargerActive = true;
+			bot.chargerPressed = false;
+			bot.chargerStartTime = gpGlobals->time;
+			bot.chargerLastGainTime = gpGlobals->time;
+			bot.chargerLastValue = value;
+
+			BOT_VLOG("CrossBot: %s reached %s at %.0f, wading in\n",
+				bot.name, CBotClassOf(ent), value);
+		}
+
+		bot.lastProgressTime = gpGlobals->time;
+
+		if (value > bot.chargerLastValue)
+			bot.chargerLastGainTime = gpGlobals->time;
+		bot.chargerLastValue = value;
+
+		// Exactly the test SV_TouchLinks runs before it calls HurtTouch.
+		bool ducking = (pEdict->v.flags & FL_DUCKING) != 0;
+		bool inside = BotItems::OriginInsideVolume(ent, pEdict->v.origin,
+			ducking ? kHullDuck : kHullHuman);
+		if (inside)
+			bot.chargerPressed = true;
+
+		// Nothing to aim at, so leave the view to the sense system and keep watching the room.
+		BotSense::ApplyLook(bot);
+		Vector angles = Bot_UpdateFacing(bot);
+
+		if (bot.chargerPressed && gpGlobals->time - bot.chargerLastGainTime > kHealNoGainGrace)
+		{
+			if (BotItems::IsVolumeInactive(ent))
+				FinishCharger(bot, ent, "saw the pool switch off");
+			else if (!inside)
+			{
+				// Drifted back out rather than discovering the pool is useless; a short
+				// blacklist, not the 120s one that says "this classname gives me nothing".
+				BotItems::NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
+				FinishCharger(bot, ent, "could not stay in the pool");
+			}
+			else
+			{
+				BotItems::NoteFull(bot, CBotClassOf(ent));
+				FinishCharger(bot, ent, "is already full");
+			}
+			return false;
+		}
+
+		if (value >= g_pGameProfile->ChargerFullValue(kind))
+		{
+			BotItems::NoteFull(bot, CBotClassOf(ent));
+			FinishCharger(bot, ent, "topped up");
+			return false;
+		}
+
+		float waited = gpGlobals->time - bot.chargerStartTime;
+		if ((!bot.chargerPressed && waited > kHealApproachTimeout) || waited > kHealTimeout)
+		{
+			BotItems::NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
+			FinishCharger(bot, ent, bot.chargerPressed ? "soaked too long"
+				: "could not reach the pool");
+			return false;
+		}
+
+		Vector origin = pEdict->v.origin;
+		float drive = 0.f;
+		Vector moveDir(0.f, 0.f, 0.f);
+		// Head for the resolved spot inside the volume, not its centre: a large pool can have
+		// its middle sitting inside geometry the bot cannot walk through.
+		Vector to(bot.goalPoint.x - origin.x, bot.goalPoint.y - origin.y, 0.f);
+		float dist = sqrtf(to.x * to.x + to.y * to.y);
+		if (!inside && dist > 1.f)
+		{
+			moveDir = Norm2D(to);
+			drive = Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
+
+			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
+				Bot_DrivePhysics(pEdict));
+			if (solved.wishSpeed > 0.f)
+			{
+				moveDir = solved.wishDir;
+				drive = solved.wishSpeed;
+			}
+		}
+
+		if ((pEdict->v.flags & FL_DUCKING) != 0)
+			drive /= PmSim::kDuckingMultiplier;
+
+		float fmove = 0.f, smove = 0.f;
+		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+
+		unsigned short buttons = 0;
 		if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
 		else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
 		if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
@@ -1722,7 +1813,9 @@ namespace
 		bot.rideFloorWp = 0;
 
 		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
+		BotPerf::Enter(BotPerf::ZONE_RP_PROFILE);
 		bot.followProfile = NavPlan::BuildPathProfile(bot.waypoints, traces.physics, &traces);
+		BotPerf::Leave(BotPerf::ZONE_RP_PROFILE);
 		bot.trackState = NavFollow::TrackState();
 		bot.lastProgressS = 0.f;
 		bot.lastProgressTime = gpGlobals->time;
@@ -1784,20 +1877,19 @@ namespace
 		NavPlan::PlanStats planStats;
 		float careful = Bot_Carefulness(bot);
 		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
+		BotPerf::Enter(BotPerf::ZONE_RP_PLAN);
 		Nav::PlannedPath path = Nav::PlanPath(mesh, startArea->id, goalArea->id, pEdict->v.origin,
 			clampedGoal, &traces, &planStats, careful);
+		BotPerf::Leave(BotPerf::ZONE_RP_PLAN);
 		float planMs = std::chrono::duration<float, std::milli>(
 			std::chrono::steady_clock::now() - planBegin).count();
 		if (!path.found)
 		{
-			char failMsg[288];
-			snprintf(failMsg, sizeof(failMsg),
-				"CrossBot: %s found no route area %u -> %u from (%.1f,%.1f,%.1f) to (%.1f,%.1f,%.1f) | "
+			BOT_VLOG("CrossBot: %s found no route area %u -> %u from (%.1f,%.1f,%.1f) to (%.1f,%.1f,%.1f) | "
 				"search %zu areas/%zu sims, %zu air moves rejected\n",
 				bot.name, startArea->id, goalArea->id, pEdict->v.origin.x, pEdict->v.origin.y,
 				pEdict->v.origin.z, clampedGoal.x, clampedGoal.y, clampedGoal.z, path.expansions,
 				path.airmovesTried, path.airmovesRejected);
-			SERVER_PRINT(failMsg);
 			return false;
 		}
 
@@ -1814,15 +1906,21 @@ namespace
 		bot.avoid.detourHit = 0;
 		bot.avoid.detourExpire = 0.f;
 
+		BotPerf::Enter(BotPerf::ZONE_RP_PROFILE);
 		bot.followProfile = NavPlan::BuildPathProfile(bot.waypoints, traces.physics, &traces);
+		BotPerf::Leave(BotPerf::ZONE_RP_PROFILE);
 		bot.trackState = NavFollow::TrackState();
 		bot.lastProgressS = 0.f;
 		BotOppo::OnRepath(bot);
 
 		size_t penalizedOnRoute = 0;
+#if BOT_VLOG_ON
 		for (uint32_t connIndex : path.connPath)
 			if (Nav::ConnectionPenalty(connIndex) > 0.f)
 				++penalizedOnRoute;
+#endif
+
+		BOTPERF_SCOPE(ZONE_RP_LOG);
 
 		if (freshAttempt)
 		{
@@ -1831,9 +1929,7 @@ namespace
 			bot.visitedAreaPath.clear();
 			bot.visitedAreaPath.push_back(startArea->id);
 
-			char wpMsg[640];
-			snprintf(wpMsg, sizeof(wpMsg),
-				"CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
+			BOT_VLOG("CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
 				"airmoves=%zu simulated/%zu rescaled/%zu runup-ext/%zu respeeded/%zu kept/%zu retracted/%zu retract-kept/%zu rejected | search %zu areas/%zu sims "
 				"in %.1fms | careful=%.2f route=%.1fs score=%.1f | profile segs=%zu len=%.0f "
 				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu | penalized=%zu\n",
@@ -1848,7 +1944,7 @@ namespace
 				bot.followProfile.segs.size(), bot.followProfile.totalLength,
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,
 				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk, penalizedOnRoute);
-			SERVER_PRINT(wpMsg);
+#if BOT_VLOG_ON
 			for (size_t i = 0; i < bot.plannedConnPath.size(); ++i)
 			{
 				uint32_t ci = bot.plannedConnPath[i];
@@ -1856,26 +1952,22 @@ namespace
 					continue;
 
 				const Nav::Connection &c = mesh.conns[ci];
-				snprintf(wpMsg, sizeof(wpMsg),
-					"CrossBot: conn[%zu]=%u %s %u<->%u cost=%.2f travel=%.2f\n", i, ci,
+				BOT_VLOG("CrossBot: conn[%zu]=%u %s %u<->%u cost=%.2f travel=%.2f\n", i, ci,
 					ConnTypeName(c.connType), c.areaA, c.areaB, c.costSeconds, c.travelSeconds);
-				SERVER_PRINT(wpMsg);
 			}
 			for (size_t i = 0; i < bot.waypoints.size(); ++i)
 			{
 				const Nav::Waypoint &wp = bot.waypoints[i];
 				if (wp.airmoveLaunch)
 				{
-					snprintf(wpMsg, sizeof(wpMsg),
-						"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) AIRMOVE jump=%d crouch=%d yaw=%.0f speed=%.0f "
+					BOT_VLOG("CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) AIRMOVE jump=%d crouch=%d yaw=%.0f speed=%.0f "
 						"sim=%d targArea=%d\n",
 						i, wp.point.x, wp.point.y, wp.point.z, wp.requiresJump, wp.requiresCrouch,
 						wp.launchYaw, wp.launchSpeed, wp.launchSimulated, wp.targetAreaId);
 				}
 				else if (wp.requiresLadder)
 				{
-					snprintf(wpMsg, sizeof(wpMsg),
-						"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) LADDER up=%d crouch=%d entry yaw=%.0f "
+					BOT_VLOG("CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) LADDER up=%d crouch=%d entry yaw=%.0f "
 						"speed=%.0f climb yaw=%.0f speed=%.0f off z=%.1f yaw=%.0f jump=%d targArea=%d\n",
 						i, wp.point.x, wp.point.y, wp.point.z, wp.ladderUp, wp.requiresCrouch,
 						wp.ladderEntryYaw, wp.ladderEntrySpeed, wp.ladderYaw, wp.ladderSpeed,
@@ -1883,38 +1975,27 @@ namespace
 				}
 				else if (wp.requiresElevatorRide)
 				{
-					snprintf(wpMsg, sizeof(wpMsg),
-						"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) ELEVATOR travel=%.2fs wait=%.2fs crouch=%d "
+					BOT_VLOG("CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) ELEVATOR travel=%.2fs wait=%.2fs crouch=%d "
 						"targArea=%d conn=%d\n",
 						i, wp.point.x, wp.point.y, wp.point.z, wp.elevatorTravelTime, wp.elevatorWaitTime,
 						wp.requiresCrouch, wp.targetAreaId, wp.connIndex);
 				}
 				else
 				{
-					snprintf(wpMsg, sizeof(wpMsg),
-						"CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d\n",
+					BOT_VLOG("CrossBot: wp[%zu]=(%.1f,%.1f,%.1f) jump=%d crouch=%d targArea=%d\n",
 						i, wp.point.x, wp.point.y, wp.point.z,
 						wp.requiresJump, wp.requiresCrouch, wp.targetAreaId);
 				}
-				SERVER_PRINT(wpMsg);
 			}
+#endif
 		}
 		else
 		{
-			char wpMsg[256];
-			snprintf(wpMsg, sizeof(wpMsg),
-				"CrossBot: Replan from=(%.1f,%.1f,%.1f) waypoints=%zu areas=%zu eta=%.1fs | penalized=%zu\n",
+			BOT_VLOG("CrossBot: Replan from=(%.1f,%.1f,%.1f) waypoints=%zu areas=%zu eta=%.1fs | penalized=%zu\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.waypoints.size(),
 				path.areaPath.size(), bot.followProfile.totalTime, penalizedOnRoute);
-			SERVER_PRINT(wpMsg);
 		}
 		return true;
-	}
-
-	bool ManeuverActive(const CBot &bot)
-	{
-		return bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive ||
-			bot.chargerActive || bot.brk.active || bot.deploy.active;
 	}
 
 	bool RepathDue(const CBot &bot)
@@ -1924,13 +2005,12 @@ namespace
 
 	bool TryRepath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict, const char *why)
 	{
+		BOTPERF_SCOPE(ZONE_REPATH);
 		if (!bot.waypoints.empty())
 		{
-			char msg[160];
-			snprintf(msg, sizeof(msg), "CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
+			BOT_VLOG("CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
 				bot.name, why, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				bot.waypointIndex, bot.waypoints.size());
-			SERVER_PRINT(msg);
 		}
 		if (!Repath(bot, mesh, pEdict))
 		{
@@ -1969,16 +2049,29 @@ bool Bot_PenalizeCurrentConnection(CBot &bot)
 
 		Nav::PenalizeConnection(bot.plannedConnPath[i]);
 
-		char msg[192];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s penalizing conn %u (area %u->%u) after a blocked detour, penalty %.1f\n",
+		BOT_VLOG("CrossBot: %s penalizing conn %u (area %u->%u) after a blocked detour, penalty %.1f\n",
 			bot.name, bot.plannedConnPath[i], cur, bot.plannedAreaPath[i + 1],
 			Nav::ConnectionPenalty(bot.plannedConnPath[i]));
-		SERVER_PRINT(msg);
 		return true;
 	}
 
 	return false;
+}
+
+void Bot_ResetAirmoveCache()
+{
+	g_airmoveCache.Clear();
+}
+
+const NavPlan::AirmoveCache &Bot_AirmoveCache()
+{
+	return g_airmoveCache;
+}
+
+bool Bot_ManeuverActive(const CBot &bot)
+{
+	return bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive ||
+		bot.chargerActive || bot.brk.active || bot.deploy.active;
 }
 
 void Bot_ResetNavPath(CBot &bot)
@@ -1999,49 +2092,76 @@ void Bot_MoveNav(CBot &bot)
 	bot.lastOrigin = pEdict->v.origin;
 	bot.hasLastOrigin = true;
 
-	const Nav::Area *curArea = Nav::FindAreaNearest(*mesh, pEdict->v.origin);
+	const Nav::Area *curArea = nullptr;
+	{
+		BOTPERF_SCOPE(ZONE_FINDAREA);
+		curArea = Nav::FindAreaNearest(*mesh, pEdict->v.origin);
+	}
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
-	BotSense::Update(bot);
-	BotFire::Think(bot);
-
-	if (bot.sense.rescore)
 	{
-		if (!BotItems::ChaseEnabled())
-			bot.sense.rescore = false;
-		else if (!ManeuverActive(bot))
+		BOTPERF_SCOPE(ZONE_SENSE);
+		BotSense::Update(bot);
+	}
+	{
+		BOTPERF_SCOPE(ZONE_FIRE);
+		BotFire::Think(bot);
+	}
+
+	{
+		BOTPERF_SCOPE(ZONE_COMBAT);
+		BotCombat::Update(bot);
+	}
+
+	{
+		BOTPERF_SCOPE(ZONE_MEMOS);
+		BotItems::RefreshMemos(bot);
+	}
+
+	{
+		BOTPERF_SCOPE(ZONE_BREAK);
+		if (BotBreak::Run(bot))
+			return;
+	}
+
+	if (!Bot_ManeuverActive(bot))
+	{
+		BOTPERF_SCOPE(ZONE_DEPLOY_TRY);
+		BotDeploy::TryStart(bot, *mesh);
+	}
+
+	{
+		BOTPERF_SCOPE(ZONE_DEPLOY_RUN);
+		if (BotDeploy::Run(bot))
+			return;
+	}
+
+	{
+		BOTPERF_SCOPE(ZONE_COMBAT);
+		if (BotCombat::Run(bot, *mesh))
+			return;
+	}
+
+	{
+		BOTPERF_SCOPE(ZONE_ITEM_GOAL);
+		if (BotItems::UpdateGoalItem(bot))
 		{
-			bot.sense.rescore = false;
-			BotItems::ClearGoalItem(bot);
-			bot.nextSelectTime = 0.f;
+			BotSense::ApplyLook(bot);
+			Vector angles = Bot_UpdateFacing(bot);
+			RunIdleMove(bot, angles);
+			return;
 		}
 	}
 
-	BotItems::RefreshMemos(bot);
-
-	if (BotBreak::Run(bot))
-		return;
-
-	if (!ManeuverActive(bot))
-		BotDeploy::TryStart(bot, *mesh);
-
-	if (BotDeploy::Run(bot))
-		return;
-
-	if (BotItems::UpdateGoalItem(bot))
 	{
-		BotSense::ApplyLook(bot);
-		Vector angles = Bot_UpdateFacing(bot);
-		RunIdleMove(bot, angles);
-		return;
-	}
-
-	if (!bot.hasGoal && !BotItems::SelectGoal(bot, *mesh))
-	{
-		BotSense::ApplyLook(bot);
-		Vector angles = Bot_UpdateFacing(bot);
-		RunIdleMove(bot, angles);
-		return;
+		BOTPERF_SCOPE(ZONE_ITEM_SELECT);
+		if (!bot.hasGoal && !BotItems::SelectGoal(bot, *mesh))
+		{
+			BotSense::ApplyLook(bot);
+			Vector angles = Bot_UpdateFacing(bot);
+			RunIdleMove(bot, angles);
+			return;
+		}
 	}
 
 	if (bot.trackState.progressS > bot.lastProgressS + kProgressEpsilon)
@@ -2074,8 +2194,11 @@ void Bot_MoveNav(CBot &bot)
 		bot.visitedAreaPath.push_back(curArea->id);
 	}
 
-	if (bot.traceLog.size() < 100000)
-		bot.traceLog.push_back(pEdict->v.origin);
+	{
+		BOTPERF_SCOPE(ZONE_TRACELOG);
+		if (bot.traceLog.size() < 100000)
+			bot.traceLog.push_back(pEdict->v.origin);
+	}
 
 	if (bot.airmoveActive)
 	{
@@ -2103,14 +2226,20 @@ void Bot_MoveNav(CBot &bot)
 			return;
 	}
 
-	if (BotOppo::TryJump(bot, *mesh))
+	BotPerf::Enter(BotPerf::ZONE_OPPO);
+	bool oppoJumped = BotOppo::TryJump(bot, *mesh);
+	BotPerf::Leave(BotPerf::ZONE_OPPO);
+
+	if (oppoJumped)
 	{
 		RunAirmoveDrive(bot, Bot_YawDir(bot.airmoveYaw), bot.airmoveSpeed, bot.airmoveYaw,
 			bot.airmoveCrouch, true, true);
 		return;
 	}
 
+	BotPerf::Enter(BotPerf::ZONE_DRIVE);
 	PmSim::PmPhysics physics = Bot_DrivePhysics(pEdict);
+	BotPerf::Leave(BotPerf::ZONE_DRIVE);
 
 	size_t activationWp = NextActivation(bot);
 	while (activationWp < bot.waypoints.size() && TriggerTouched(bot, bot.waypoints[activationWp]))
@@ -2149,8 +2278,10 @@ void Bot_MoveNav(CBot &bot)
 		followCfg.sFloor = std::max(followCfg.sFloor,
 			NavPlan::ProfileWaypointS(bot.followProfile, bot.rideFloorWp));
 
+	BotPerf::Enter(BotPerf::ZONE_FOLLOW);
 	NavFollow::Decision follow = NavFollow::Track(bot.followProfile, pEdict->v.origin,
 		pEdict->v.velocity, physics, bot.trackState, followCfg);
+	BotPerf::Leave(BotPerf::ZONE_FOLLOW);
 
 	if (follow.wpIndex < bot.waypoints.size())
 		bot.waypointIndex = follow.wpIndex;
@@ -2158,6 +2289,9 @@ void Bot_MoveNav(CBot &bot)
 	if (follow.done)
 	{
 		if (ItemKindIsCharger(bot.goalItemKind) && RunChargerUse(bot))
+			return;
+
+		if (ItemKindIsVolume(bot.goalItemKind) && RunHealVolume(bot))
 			return;
 
 		Vector miss = pEdict->v.origin - bot.goalPoint;
@@ -2177,11 +2311,8 @@ void Bot_MoveNav(CBot &bot)
 
 	if (follow.needRepath && bot.nextRepathTime <= 0.f)
 	{
-		char msg[192];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s strayed %.1f from the plan at (%.1f,%.1f,%.1f), repathing\n", bot.name,
+		BOT_VLOG("CrossBot: %s strayed %.1f from the plan at (%.1f,%.1f,%.1f), repathing\n", bot.name,
 			follow.lateral, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z);
-		SERVER_PRINT(msg);
 		bot.nextRepathTime = gpGlobals->time;
 	}
 
@@ -2228,12 +2359,9 @@ void Bot_MoveNav(CBot &bot)
 		}
 		else if (!bot.fallTelemetryLogged && pEdict->v.velocity.z < -120.f && !wp->requiresJump)
 		{
-			char fallMsg[192];
-			snprintf(fallMsg, sizeof(fallMsg),
-				"CrossBot: %s falling at (%.1f,%.1f,%.1f) heading to wp %zu/%zu (%.1f,%.1f,%.1f)\n", bot.name,
+			BOT_VLOG("CrossBot: %s falling at (%.1f,%.1f,%.1f) heading to wp %zu/%zu (%.1f,%.1f,%.1f)\n", bot.name,
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.waypointIndex,
 				bot.waypoints.size(), wp->point.x, wp->point.y, wp->point.z);
-			SERVER_PRINT(fallMsg);
 			bot.fallTelemetryLogged = true;
 		}
 	}
@@ -2269,13 +2397,16 @@ void Bot_MoveNav(CBot &bot)
 			bot.desiredAngles = Vector(0.f, atan2f(vel.y, vel.x) * (180.f / kPiF), 0.f);
 	}
 
+	BotPerf::Enter(BotPerf::ZONE_LOOK);
 	BotSense::ApplyLook(bot);
 
 	Vector angles = Bot_UpdateFacing(bot);
+	BotPerf::Leave(BotPerf::ZONE_LOOK);
 
 	BotAvoid::Decision avoid;
 	if (BotAvoid::Enabled())
 	{
+		BOTPERF_SCOPE(ZONE_AVOID);
 		Vector pathDir = Norm2D(follow.aimPoint - pEdict->v.origin);
 		if (pathDir.x == 0.f && pathDir.y == 0.f)
 			pathDir = moveDir;

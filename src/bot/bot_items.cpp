@@ -7,24 +7,31 @@
 #include "../game/game_profile.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
+#include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
 #include "../nav/nav_query.h"
 #include "bot.h"
 #include "bot_items.h"
+#include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
-#include "bot_sense.h"
 
 extern IGameProfile *g_pGameProfile;
 
 namespace
 {
+	using NavMath::BoxesOverlap;
+
 	constexpr float kItemAreaLift = 18.f;
 	constexpr float kChargerUseRadius = 48.f;
 	constexpr float kChargerSpotSearch = 96.f;
 	constexpr float kGoalItemSeenInterval = 0.25f;
 	constexpr float kSelectRetryInterval = 0.5f;
-	constexpr float kMinReadiness = 0.01f;
+	constexpr float kHealReachMargin = 48.f;
+	constexpr float kStandOriginLift = 18.f;
+	constexpr int kHullHuman = 1;
+	constexpr int kHullDuck = 3;
+	constexpr size_t kHealAreaCandidates = 8;
 
 	float AxisDistance(float value, float lo, float hi)
 	{
@@ -86,19 +93,104 @@ namespace
 		return best;
 	}
 
-	const Nav::Area *ResolveItemArea(const Nav::NavMesh &mesh, edict_t *ent, ItemKind kind,
-		Vector &point)
+	struct Placement
 	{
-		if (!ItemKindIsCharger(kind))
+		uint32_t areaId = 0;
+		Vector point;
+	};
+
+	// A healing trigger_hurt is a room-sized brush the bot stands inside, not a fixture it walks
+	// up to, so every area overlapping it is a way in. Offering them all lets the cost field in
+	// SelectGoal pick the cheapest entrance instead of guessing one here.
+	void ResolveVolumeAreas(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
+		std::vector<Placement> &out)
+	{
+		Vector volMins = ent->v.absmin;
+		Vector volMaxs = ent->v.absmax;
+
+		Vector reachMins(volMins.x - kHealReachMargin, volMins.y - kHealReachMargin,
+			volMins.z - kHealReachMargin);
+		Vector reachMaxs(volMaxs.x + kHealReachMargin, volMaxs.y + kHealReachMargin,
+			volMaxs.z + kHealReachMargin);
+
+		for (const Nav::Area &area : mesh.areas)
 		{
-			point = ent->v.origin;
-			return ResolvePickupArea(mesh, ent->v.origin);
+			if (!BoxesOverlap(area.mins, area.maxs, reachMins, reachMaxs))
+				continue;
+
+			Vector spot = area.centroid;
+			spot.x = std::max(volMins.x, std::min(volMaxs.x, spot.x));
+			spot.y = std::max(volMins.y, std::min(volMaxs.y, spot.y));
+			spot = ClampIntoArea(area, spot);
+
+			// Areas merge into non-convex prisms, so the box clamp alone can land outside one.
+			if (!Nav::AreaContainsPoint(area, spot))
+				spot = area.centroid;
+			if (!Nav::AreaContainsPoint(area, spot))
+				continue;
+
+			// Nav areas are in duck-origin space, but the bot stands unless the area says
+			// otherwise, and SV_TouchLinks tests the toucher's origin. Probe where the bot's
+			// origin will actually be.
+			bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
+			Vector probe = crouch ? spot : spot + Vector(0.f, 0.f, kStandOriginLift);
+			if (!BotItems::OriginInsideVolume(ent, probe, crouch ? kHullDuck : kHullHuman))
+				continue;
+
+			Placement place;
+			place.areaId = area.id;
+			place.point = spot;
+			out.push_back(place);
 		}
 
-		Vector center = BotItems::ItemCenter(ent, kind);
-		const Nav::Area *area = ResolveChargerArea(mesh, center);
-		point = area ? ClampIntoArea(*area, center) : center;
-		return area;
+		if (out.size() <= kHealAreaCandidates)
+			return;
+
+		// A map-sized volume must not flood the candidate list; the near entrances are the
+		// only ones that could ever win on travel time anyway.
+		std::partial_sort(out.begin(), out.begin() + kHealAreaCandidates, out.end(),
+			[&from](const Placement &a, const Placement &b) {
+				return (a.point - from).LengthSquared() < (b.point - from).LengthSquared();
+			});
+		out.resize(kHealAreaCandidates);
+	}
+
+	// Fills one placement per nav area the bot can service the item from: at most one for a
+	// pickup or a charger, one per overlapping area for a healing volume. Returns the item's
+	// own point regardless, so a candidate with no nav area still has somewhere to report.
+	Vector ResolveItemPlacements(const Nav::NavMesh &mesh, edict_t *ent, ItemKind kind,
+		const Vector &from, std::vector<Placement> &out)
+	{
+		if (ItemKindIsVolume(kind))
+		{
+			ResolveVolumeAreas(mesh, ent, from, out);
+			return BotItems::ItemCenter(ent, kind);
+		}
+
+		Vector point;
+		const Nav::Area *area = nullptr;
+
+		if (ItemKindIsCharger(kind))
+		{
+			Vector center = BotItems::ItemCenter(ent, kind);
+			area = ResolveChargerArea(mesh, center);
+			point = area ? ClampIntoArea(*area, center) : center;
+		}
+		else
+		{
+			point = ent->v.origin;
+			area = ResolvePickupArea(mesh, ent->v.origin);
+		}
+
+		if (area)
+		{
+			Placement place;
+			place.areaId = area->id;
+			place.point = point;
+			out.push_back(place);
+		}
+
+		return point;
 	}
 
 	enum ScanReason
@@ -108,6 +200,7 @@ namespace
 		SCAN_RESPAWNING,
 		SCAN_IGNORED,
 		SCAN_FULL,
+		SCAN_SATED,
 		SCAN_NO_AREA,
 	};
 
@@ -118,7 +211,6 @@ namespace
 		ItemKind kind = ITEM_NONE;
 		uint32_t areaId = 0;
 		bool hasArea = false;
-		bool isEnemy = false;
 		Vector point;
 		ScanReason reason = SCAN_OK;
 		float seconds = 0.f;
@@ -138,6 +230,14 @@ namespace
 			if (memo.expireTime > gpGlobals->time && strcmp(memo.classname, classname) == 0)
 				return &memo;
 		return nullptr;
+	}
+
+	// Health and armour sources are worth nothing to a bot already at the cap, and walking to
+	// one only to gain nothing costs it a 120s classname blacklist. Ask before travelling.
+	bool Sated(const CBot &bot, ItemKind kind)
+	{
+		return g_pGameProfile->ChargerValue(kind, bot.pEdict) >=
+			g_pGameProfile->ChargerFullValue(kind);
 	}
 
 	void PruneMemos(CBot &bot)
@@ -161,7 +261,7 @@ namespace
 				continue;
 
 			const char *classname = CBotClassOf(ent);
-			ItemKind kind = g_pGameProfile->ClassifyItem(classname);
+			ItemKind kind = g_pGameProfile->ClassifyItem(ent);
 			if (kind == ITEM_NONE)
 				continue;
 
@@ -170,13 +270,13 @@ namespace
 			cand.index = i;
 			cand.kind = kind;
 
-			const Nav::Area *area = ResolveItemArea(mesh, ent, kind, cand.point);
-			cand.hasArea = area != nullptr;
-			if (area)
-				cand.areaId = area->id;
+			std::vector<Placement> places;
+			cand.point = ResolveItemPlacements(mesh, ent, kind, bot.pEdict->v.origin, places);
 
 			if (BotItems::IsUnavailable(ent, kind))
 				cand.reason = SCAN_GONE;
+			else if (ItemKindUsesValue(kind) && Sated(bot, kind))
+				cand.reason = SCAN_SATED;
 			else if (const BotItemMemo *memo = MemoFor(bot, ent))
 			{
 				cand.reason = memo->respawning ? SCAN_RESPAWNING : SCAN_IGNORED;
@@ -187,10 +287,26 @@ namespace
 				cand.reason = SCAN_FULL;
 				cand.seconds = full->expireTime - gpGlobals->time;
 			}
-			else if (!area)
+			else if (places.empty())
 				cand.reason = SCAN_NO_AREA;
 
-			out.push_back(cand);
+			if (places.empty())
+			{
+				out.push_back(cand);
+				continue;
+			}
+
+			// Only a selectable item is worth offering from several entrances; a skipped one
+			// says the same thing from all of them, so report it once.
+			size_t count = (cand.reason == SCAN_OK) ? places.size() : 1;
+			for (size_t p = 0; p < count; ++p)
+			{
+				Candidate one = cand;
+				one.areaId = places[p].areaId;
+				one.hasArea = true;
+				one.point = places[p].point;
+				out.push_back(one);
+			}
 		}
 	}
 
@@ -199,31 +315,6 @@ namespace
 		if (!g_pGameProfile)
 			return 0.f;
 		return g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory);
-	}
-
-	void AppendEnemy(const CBot &bot, const Nav::NavMesh &mesh, std::vector<Candidate> &out)
-	{
-		if (!BotItems::ChaseEnabled())
-			return;
-
-		edict_t *enemy = bot.sense.enemy.Get();
-		if (!enemy)
-			return;
-
-		Candidate cand;
-		cand.ent = enemy;
-		cand.index = g_engfuncs.pfnIndexOfEdict(enemy);
-		cand.isEnemy = true;
-		cand.point = bot.sense.enemyPos;
-
-		const Nav::Area *area = ResolvePickupArea(mesh, bot.sense.enemyPos);
-		cand.hasArea = area != nullptr;
-		if (area)
-			cand.areaId = area->id;
-		else
-			cand.reason = SCAN_NO_AREA;
-
-		out.push_back(cand);
 	}
 
 	float ItemCost(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
@@ -235,22 +326,17 @@ namespace
 		Vector from = (static_cast<int>(cand.areaId) == bot.currentAreaId)
 			? bot.pEdict->v.origin : mesh.areas[cand.areaId].centroid;
 
-		float cost = costs[cand.areaId] + (cand.point - from).Length() / NavAStar::kNavRunSpeed;
-
-		if (!cand.isEnemy)
-			return cost;
-
-		float readiness = Readiness(bot);
-		if (readiness < kMinReadiness)
-			return Nav::kUnreachableSeconds;
-
-		return cost / readiness;
+		return costs[cand.areaId] + (cand.point - from).Length() / NavAStar::kNavRunSpeed;
 	}
 
 	bool DebugEnabled()
 	{
+#if BOT_VLOG_ON
 		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_gather_debug");
 		return cvar && cvar->value != 0.f;
+#else
+		return false;
+#endif
 	}
 
 	void DumpScan(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
@@ -261,11 +347,8 @@ namespace
 			if (cand.reason == SCAN_OK)
 				++open;
 
-		char msg[256];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s scanning from area %d: %zu items, %zu selectable, readiness %.2f\n",
+		BOT_VLOG("CrossBot: %s scanning from area %d: %zu items, %zu selectable, readiness %.2f\n",
 			bot.name, bot.currentAreaId, items.size(), open, Readiness(bot));
-		SERVER_PRINT(msg);
 
 		for (const Candidate &cand : items)
 		{
@@ -280,7 +363,11 @@ namespace
 			switch (cand.reason)
 			{
 			case SCAN_GONE:
-				snprintf(why, sizeof(why), "%s", ItemKindIsCharger(cand.kind) ? "empty" : "taken");
+				if (ItemKindIsVolume(cand.kind))
+					snprintf(why, sizeof(why), "switched off");
+				else
+					snprintf(why, sizeof(why), "%s",
+						ItemKindIsCharger(cand.kind) ? "empty" : "taken");
 				break;
 			case SCAN_RESPAWNING:
 				snprintf(why, sizeof(why), "respawning for %.0fs", cand.seconds);
@@ -290,6 +377,9 @@ namespace
 				break;
 			case SCAN_FULL:
 				snprintf(why, sizeof(why), "full for %.0fs", cand.seconds);
+				break;
+			case SCAN_SATED:
+				snprintf(why, sizeof(why), "no need");
 				break;
 			case SCAN_NO_AREA:
 				snprintf(why, sizeof(why), "no nav area");
@@ -306,10 +396,8 @@ namespace
 			}
 			}
 
-			snprintf(msg, sizeof(msg), "CrossBot:   #%d %s%s at (%.0f,%.0f,%.0f) %s, %s\n", cand.index,
-				cand.isEnemy ? "ENEMY " : "", CBotClassOf(cand.ent), cand.point.x, cand.point.y,
-				cand.point.z, where, why);
-			SERVER_PRINT(msg);
+			BOT_VLOG("CrossBot:   #%d %s at (%.0f,%.0f,%.0f) %s, %s\n", cand.index,
+				CBotClassOf(cand.ent), cand.point.x, cand.point.y, cand.point.z, where, why);
 		}
 	}
 }
@@ -330,8 +418,33 @@ bool IsChargerEmpty(edict_t *ent)
 	return !ent || ent->free || ent->v.frame != 0.f;
 }
 
+// SV_TouchLinks does not settle for a box overlap: it point-tests the toucher's origin against
+// the trigger's clip hull, so a spot merely near the brush never fires HurtTouch. A pool brush is
+// also free to be a scatter of separate basins inside one roomy bounding box, which is exactly
+// where a box test goes wrong.
+bool OriginInsideVolume(edict_t *ent, const Vector &origin, int hull)
+{
+	if (!ent || ent->free)
+		return false;
+
+	TraceResult tr;
+	g_engfuncs.pfnTraceModel(origin, origin, hull, ent, &tr);
+	return tr.fStartSolid != 0 || tr.fAllSolid != 0;
+}
+
+// START_OFF spawns the trigger SOLID_NOT, and a trigger with a targetname can be toggled either
+// way mid-map, so solidity is the live answer to whether the pool is running.
+bool IsVolumeInactive(edict_t *ent)
+{
+	if (!ent || ent->free)
+		return true;
+	return ent->v.solid == SOLID_NOT || (ent->v.flags & FL_KILLME) != 0;
+}
+
 bool IsUnavailable(edict_t *ent, ItemKind kind)
 {
+	if (ItemKindIsVolume(kind))
+		return IsVolumeInactive(ent);
 	return ItemKindIsCharger(kind) ? IsChargerEmpty(ent) : IsPickupGone(ent);
 }
 
@@ -339,7 +452,7 @@ Vector ItemCenter(edict_t *ent, ItemKind kind)
 {
 	if (!ent)
 		return Vector(0.f, 0.f, 0.f);
-	if (!ItemKindIsCharger(kind))
+	if (!ItemKindIsBrush(kind))
 		return ent->v.origin;
 	return (ent->v.absmin + ent->v.absmax) * 0.5f;
 }
@@ -362,7 +475,7 @@ void NoteMemo(CBot &bot, edict_t *ent, float seconds, bool respawning)
 
 	BotItemMemo memo;
 	memo.ent.Set(ent);
-	memo.kind = bot.goalItem.Is(ent) ? bot.goalItemKind : g_pGameProfile->ClassifyItem(CBotClassOf(ent));
+	memo.kind = bot.goalItem.Is(ent) ? bot.goalItemKind : g_pGameProfile->ClassifyItem(ent);
 	memo.areaId = bot.goalItem.Is(ent) ? bot.goalItemArea : bot.currentAreaId;
 	memo.readyTime = ready;
 	memo.respawning = respawning;
@@ -395,10 +508,8 @@ void RefreshMemos(CBot &bot)
 			continue;
 		}
 
-		char msg[192];
-		snprintf(msg, sizeof(msg), "CrossBot: %s finds %s back already, forgetting it was taken\n",
+		BOT_VLOG("CrossBot: %s finds %s back already, forgetting it was taken\n",
 			bot.name, CBotClassOf(ent));
-		SERVER_PRINT(msg);
 
 		bot.itemMemo.erase(bot.itemMemo.begin() + i);
 	}
@@ -428,7 +539,6 @@ void NoteFull(CBot &bot, const char *classname)
 
 void ForgetGoalItem(CBot &bot)
 {
-	bot.goalIsEnemy = false;
 	bot.goalItem.Clear();
 	bot.goalItemKind = ITEM_NONE;
 	bot.goalItemArea = -1;
@@ -452,12 +562,6 @@ bool Enabled()
 	return !cvar || cvar->value != 0.f;
 }
 
-bool ChaseEnabled()
-{
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_chase");
-	return !cvar || cvar->value != 0.f;
-}
-
 bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 {
 	if (!g_pGameProfile || bot.currentAreaId < 0 || !Enabled())
@@ -470,7 +574,6 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 
 	std::vector<Candidate> items;
 	ScanItems(bot, mesh, items);
-	AppendEnemy(bot, mesh, items);
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
@@ -505,15 +608,11 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 
 	ForgetGoalItem(bot);
 
-	if (!best->isEnemy)
-	{
-		bot.goalItem.Set(best->ent);
-		bot.goalItemKind = best->kind;
-		bot.goalItemArea = static_cast<int>(best->areaId);
-		bot.goalItemSelectTime = gpGlobals->time;
-	}
+	bot.goalItem.Set(best->ent);
+	bot.goalItemKind = best->kind;
+	bot.goalItemArea = static_cast<int>(best->areaId);
+	bot.goalItemSelectTime = gpGlobals->time;
 
-	bot.goalIsEnemy = best->isEnemy;
 	bot.goalPoint = best->point;
 	bot.hasGoal = true;
 
@@ -522,12 +621,9 @@ bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh)
 		if (cand.reason == SCAN_OK)
 			++open;
 
-	char msg[224];
-	snprintf(msg, sizeof(msg),
-		"CrossBot: %s wants %s%s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
-		bot.name, best->isEnemy ? "enemy " : "", CBotClassOf(best->ent), best->point.x,
-		best->point.y, best->point.z, best->areaId, bestCost, open);
-	SERVER_PRINT(msg);
+	BOT_VLOG("CrossBot: %s wants %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
+		bot.name, CBotClassOf(best->ent), best->point.x, best->point.y, best->point.z,
+		best->areaId, bestCost, open);
 
 	return true;
 }
@@ -553,22 +649,20 @@ bool UpdateGoalItem(CBot &bot)
 	if (!IsUnavailable(ent, bot.goalItemKind))
 		return false;
 
-	char msg[192];
 
-	if (ItemKindIsCharger(bot.goalItemKind))
+	if (ItemKindUsesValue(bot.goalItemKind))
 	{
-		snprintf(msg, sizeof(msg), "CrossBot: %s drained %s, now at %.0f\n", bot.name,
+		BOT_VLOG("CrossBot: %s %s %s, now at %.0f\n", bot.name,
+			ItemKindIsVolume(bot.goalItemKind) ? "found switched off" : "drained",
 			CBotClassOf(ent), g_pGameProfile->ChargerValue(bot.goalItemKind, bot.pEdict));
-		SERVER_PRINT(msg);
 		ClearGoalItem(bot);
 		return true;
 	}
 
 	if (bot.currentAreaId == bot.goalItemArea)
 	{
-		snprintf(msg, sizeof(msg), "CrossBot: %s arrived to find %s already taken\n", bot.name,
+		BOT_VLOG("CrossBot: %s arrived to find %s already taken\n", bot.name,
 			CBotClassOf(ent));
-		SERVER_PRINT(msg);
 		NoteRespawning(bot, ent, bot.goalItemKind);
 		ClearGoalItem(bot);
 		return true;
@@ -584,9 +678,8 @@ bool UpdateGoalItem(CBot &bot)
 	if (tr.pHit != bot.pEdict)
 		return false;
 
-	snprintf(msg, sizeof(msg), "CrossBot: %s saw %s was already taken, giving up on it\n", bot.name,
+	BOT_VLOG("CrossBot: %s saw %s was already taken, giving up on it\n", bot.name,
 		CBotClassOf(ent));
-	SERVER_PRINT(msg);
 	NoteRespawning(bot, ent, bot.goalItemKind);
 	ClearGoalItem(bot);
 	return true;
@@ -594,25 +687,22 @@ bool UpdateGoalItem(CBot &bot)
 
 void OnTouch(CBot &bot, edict_t *ent)
 {
-	if (bot.goalItemDone || !bot.goalItem.Is(ent) || ItemKindIsCharger(bot.goalItemKind))
+	if (bot.goalItemDone || !bot.goalItem.Is(ent) || ItemKindUsesValue(bot.goalItemKind))
 		return;
 
 	bot.goalItemTouched = true;
 
-	char msg[192];
 	if (IsPickupGone(ent))
 	{
-		snprintf(msg, sizeof(msg), "CrossBot: %s picked up %s, back in %.0fs\n", bot.name,
+		BOT_VLOG("CrossBot: %s picked up %s, back in %.0fs\n", bot.name,
 			CBotClassOf(ent), g_pGameProfile->ItemRespawnDelay(bot.goalItemKind));
-		SERVER_PRINT(msg);
 		NoteRespawning(bot, ent, bot.goalItemKind);
 	}
 	else
 	{
 		const char *classname = CBotClassOf(ent);
-		snprintf(msg, sizeof(msg), "CrossBot: %s is full of %s, ignoring it for %.0fs\n", bot.name,
+		BOT_VLOG("CrossBot: %s is full of %s, ignoring it for %.0fs\n", bot.name,
 			classname, g_pGameProfile->ItemFullTimeout());
-		SERVER_PRINT(msg);
 		NoteFull(bot, classname);
 	}
 
@@ -621,18 +711,8 @@ void OnTouch(CBot &bot, edict_t *ent)
 
 void OnArrived(CBot &bot)
 {
-	if (bot.goalIsEnemy)
-	{
-		char msg[192];
-		snprintf(msg, sizeof(msg), "CrossBot: %s reached where it last saw the enemy, resuming\n",
-			bot.name);
-		SERVER_PRINT(msg);
-		BotSense::ForgetEnemy(bot);
-		return;
-	}
-
 	edict_t *ent = bot.goalItem.Get();
-	if (!ent || ItemKindIsCharger(bot.goalItemKind))
+	if (!ent || ItemKindUsesValue(bot.goalItemKind))
 	{
 		ForgetGoalItem(bot);
 		return;
@@ -640,10 +720,8 @@ void OnArrived(CBot &bot)
 
 	if (IsPickupGone(ent))
 	{
-		char msg[192];
-		snprintf(msg, sizeof(msg), "CrossBot: %s arrived to find %s taken, back in %.0fs\n", bot.name,
+		BOT_VLOG("CrossBot: %s arrived to find %s taken, back in %.0fs\n", bot.name,
 			CBotClassOf(ent), g_pGameProfile->ItemRespawnDelay(bot.goalItemKind));
-		SERVER_PRINT(msg);
 		NoteRespawning(bot, ent, bot.goalItemKind);
 		ForgetGoalItem(bot);
 		return;
@@ -651,11 +729,8 @@ void OnArrived(CBot &bot)
 
 	if (!bot.goalItemTouched)
 	{
-		char msg[208];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s reached %s without touching it, ignoring it for %.0fs\n", bot.name,
+		BOT_VLOG("CrossBot: %s reached %s without touching it, ignoring it for %.0fs\n", bot.name,
 			CBotClassOf(ent), g_pGameProfile->ItemUnreachableTimeout());
-		SERVER_PRINT(msg);
 		NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
 	}
 
@@ -664,23 +739,11 @@ void OnArrived(CBot &bot)
 
 void OnRepathFailed(CBot &bot)
 {
-	if (bot.goalIsEnemy)
-	{
-		char msg[192];
-		snprintf(msg, sizeof(msg), "CrossBot: %s could not plan a route to the enemy, forgetting it\n",
-			bot.name);
-		SERVER_PRINT(msg);
-		BotSense::ForgetEnemy(bot);
-		return;
-	}
-
 	edict_t *ent = bot.goalItem.Get();
 	if (ent)
 	{
-		char msg[208];
-		snprintf(msg, sizeof(msg), "CrossBot: %s could not plan a route to %s, ignoring it for %.0fs\n",
+		BOT_VLOG("CrossBot: %s could not plan a route to %s, ignoring it for %.0fs\n",
 			bot.name, CBotClassOf(ent), g_pGameProfile->ItemUnreachableTimeout());
-		SERVER_PRINT(msg);
 		NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
 	}
 
@@ -689,24 +752,11 @@ void OnRepathFailed(CBot &bot)
 
 void OnBlocked(CBot &bot, const char *what)
 {
-	if (bot.goalIsEnemy)
-	{
-		char msg[208];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s could not get past %s reaching the enemy, forgetting it\n", bot.name, what);
-		SERVER_PRINT(msg);
-		BotSense::ForgetEnemy(bot);
-		return;
-	}
-
 	edict_t *ent = bot.goalItem.Get();
 	if (ent)
 	{
-		char msg[224];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s could not get past %s reaching %s, ignoring it for %.0fs\n",
+		BOT_VLOG("CrossBot: %s could not get past %s reaching %s, ignoring it for %.0fs\n",
 			bot.name, what, CBotClassOf(ent), g_pGameProfile->ItemUnreachableTimeout());
-		SERVER_PRINT(msg);
 		NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
 	}
 
@@ -732,24 +782,28 @@ void PrintCandidates(const Nav::NavMesh &mesh)
 			continue;
 
 		const char *classname = CBotClassOf(ent);
-		ItemKind kind = g_pGameProfile->ClassifyItem(classname);
+		ItemKind kind = g_pGameProfile->ClassifyItem(ent);
 		if (kind == ITEM_NONE)
 			continue;
 
-		Vector center;
-		const Nav::Area *area = ResolveItemArea(mesh, ent, kind, center);
+		std::vector<Placement> places;
+		Vector center = ResolveItemPlacements(mesh, ent, kind, ItemCenter(ent, kind), places);
 
 		const char *state = "live";
-		if (ItemKindIsCharger(kind))
+		if (ItemKindIsVolume(kind))
+			state = IsVolumeInactive(ent) ? "volume off" : "live";
+		else if (ItemKindIsCharger(kind))
 			state = IsChargerEmpty(ent) ? "charger empty" : "live";
 		else if (IsPickupGone(ent))
 			state = "gone";
 
-		char areaBuf[16] = "none";
-		if (area)
-			snprintf(areaBuf, sizeof(areaBuf), "%u", area->id);
+		char areaBuf[64] = "none";
+		int written = 0;
+		for (size_t p = 0; p < places.size() && written >= 0 && written + 8 < (int)sizeof(areaBuf); ++p)
+			written += snprintf(areaBuf + written, sizeof(areaBuf) - written, "%s%u",
+				p == 0 ? "" : ",", places[p].areaId);
 
-		char msg[256];
+		char msg[320];
 		snprintf(msg, sizeof(msg),
 			"CrossBot: item %s kind %d at (%.1f,%.1f,%.1f) area %s frame %.0f solid %d %s\n",
 			classname, static_cast<int>(kind), center.x, center.y, center.z, areaBuf, ent->v.frame,

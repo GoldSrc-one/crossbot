@@ -648,6 +648,170 @@ Frame-by-frame HL player movement simulation:
 - Fatal fall speed: 1024
 - Damage per fall speed unit: 100/(1024-580)
 
+## airmove_cache.cpp
+
+### Why the planner caches whole simulations
+
+`PlanWalker::JumpLandsIn` is the single most expensive thing the plugin does. Each call builds a
+`PmSimulator` and steps it for up to `kAirmoveSimMaxTime`, and every step costs one engine `pfnTraceHull`
+through `Bot_EngineTraceFn` -- 1 to 5 traces per step, roughly 2 typical, over 30 to 360 steps. Most of
+those sims are *rejections*: A* relaxes an air move edge, the jump misses the destination area, the edge
+is dropped. The same connection gets rejected over and over, by every bot, on every repath.
+
+Measured on a 32-bot crossfire server before the cache: 18,000 hull traces per frame charged to
+`ZONE_RP_PLAN`, 53% of all engine trace time. Plan cost tracks sim count almost exactly -- plans with no
+sims average 0.5 ms, plans with 200+ sims average 27 ms and peak past 60 ms.
+
+The unit that gets cached is the whole simulation, not the individual traces. A single trace is only
+0.0008 ms; the win is in never running the 200 of them again.
+
+### The key
+
+A simulation's trajectory is determined by the state `sim.Begin` receives plus the physics the stepper
+reads, so `AirmoveKey` is exactly that and nothing else:
+
+- the **sim start origin** -- `launchFloor` lifted by `launchLift + kPlanLaunchLift`. Folding the lift in
+  means `fromAreaId` drops out of the key: it only ever mattered through `PlanArea::crouch` picking that
+  lift.
+- `yaw`, `speed`, `jump`
+- `crouch` (`needsCrouch`), which selects the duck vs stand hull and push function
+- a hash of the four physics fields that vary *and* are read by the stepper: `maxSpeed`, `gravity`,
+  `airAccelerate`, `maxVelocity`. `accelerate`, `groundFriction`, `stopSpeed` and `edgeFriction` are read
+  by the profile and run-up maths, never by `PmSimulator`, so they are not in the key. `friction` is
+  forced to 1 and `frameTime` is pinned (below).
+
+`destAreaId` is deliberately **not** in the key. The cache stores the landing point and how the sim
+terminated; `ApplyAirmoveResult` runs `PointInArea` against the destination afterwards. One cached
+trajectory therefore answers the question for every destination anyone asks about it.
+
+Keys are matched on exact float equality -- there is no quantisation and no tolerance. That was a
+deliberate choice: it means a cache hit returns bit-for-bit what the simulation would have returned, so
+the cache cannot change a plan. It works because the launch point, while continuous in principle, is
+`NearestPointOnGate` of the funnel-pulled line against a fixed gate, and that clamps to the same values
+far more often than it looks like it should. Measured hit rate is 94% on crossfire and 56% on xen_dm from a
+4096-slot table.
+
+### Pinned frame time
+
+`JumpLandsIn` overrides `physics.frameTime` with `PmSim::kPlanSimFrameTime` (1/60) on its local copy.
+Two reasons, and the caching one is the lesser:
+
+1. `PlanTraceContext::physics.frameTime` is `Bot_FrameTime()`, the latched live server frame time. It
+   jitters every frame, so without the pin no plan-time simulation would ever be repeatable and the cache
+   could never hit.
+2. navgen sampled every `CONN_AIRMOVE` at a fixed 1/60 (`AirmoveParams::frameTime`). The runtime sim was
+   therefore integrating at a different step from the data it was validating against, and drifting further
+   the more loaded the server got. Pinning makes plan-time agree with the baked connection data.
+
+The pin is scoped to the simulation. `BuildPathProfile` and `AirmoveLaunchLead` keep the live frame time,
+because those model how many real frames of acceleration the bot actually gets.
+
+The pin is a no-op inside navgen, whose `PlanTraceContext.physics` already comes from
+`PM_MoveSimulator::Physics()` at the sampler's 1/60.
+
+### What may be cached, and the one case it gets wrong
+
+`PmTrace` carries `hitEntity`, set by `Bot_EngineTraceFn` from `tr.pHit`. Three things make a hit count as
+world rather than as an entity:
+
+- `tr.pHit` is null or is edict 0 (worldspawn).
+- it is a `SOLID_BSP` brush carrying `FL_WORLDBRUSH` — a brush the engine merged into the world, which can
+  never move or be removed.
+- `crossbot_nav::IsBakedBlocker` accepts it. This is the **same predicate navgen used to bake the entity
+  into the mesh** in the first place (`baked_blockers.h`, called from both `navgen::IsBlockingEntity` and
+  the runtime trace). `func_wall`, `func_healthcharger`, `func_recharge`, plus `func_wall_toggle` that does
+  not start off and `func_conveyor` that is not flagged non-solid. The argument is that the nav data is
+  *already* committed to these being solid — navgen carved the areas and sampled the air moves with them
+  in place — so treating them as world at plan time is consistent with the mesh, not a new assumption.
+
+  Keeping the two in one function matters. If navgen's list ever gains or loses a classname and the
+  runtime does not follow, the planner starts caching against geometry the mesh does not agree about.
+
+The trace is `ignore_monsters`, so players and monsters never appear in it at all. Doors, plats, trains and
+breakables are what is left, and they are what makes a sim uncacheable.
+
+`PmSimulator` ORs the flag across every trace it makes into `m_touchedEntity`, and also sets it when the
+`trigger_push` lookup returns a non-zero vector — `Bot_PushFields` snapshots live entities and does a
+`pfnTraceModel` per overlapping field, so a sim that entered a push field depends on entity state too.
+`JumpLandsIn` inserts only when `TouchedEntity()` is false.
+
+That rule is not quite "safe for the rest of the map", and it is worth being precise about why. It
+guarantees the *recorded* trajectory did not depend on a moving entity. It does not guarantee no entity
+will later move *into* that trajectory: a jump that flew over an empty shaft when it was recorded gives a
+stale answer once the lift rises into the path.
+
+`crossbot_airmove_verify 1` re-simulates every hit and compares. Measured mismatch rates, and **every
+single mismatch on every run was this one case** — the fresh sim touched an entity, the cached one had
+not. No mismatch has ever come from any other cause, which is what establishes that the key above is
+sufficient for static geometry:
+
+| map       | mismatches | of hits  | rate  |
+|-----------|-----------:|---------:|------:|
+| crossfire |        106 |  271,339 | 0.04% |
+| xen_dm    |      2,519 |  254,147 | 0.99% |
+
+Two things push that rate up, and both are deliberate choices made elsewhere in this design. Accepting
+navgen's baked blockers means caching trajectories that touch brush entities, and the aging-LFU eviction
+below keeps hot entries alive far longer than the old fixed-victim policy did — a longer-lived entry has
+more time for the world to move underneath it. xen_dm is the worst case in the map set by a wide margin.
+
+The divergence is left in. A wrong answer means the planner believes a jump clears when a moving platform
+now blocks it; the bot attempts it, the follower reports `airmove aborted` and repaths — an existing,
+routine path that already fires far more often from ordinary run-up speed shortfall. If it ever needs to
+go lower, the levers are a staleness TTL on entries or refusing to cache trajectories whose bounds pass
+near a mover; both buy freshness by giving back hit rate.
+
+### Structure and eviction
+
+Fixed 4096-slot table, `kAirmoveCacheSlots` in `airmove_cache.h`. It is a **compile-time constant, not a
+cvar** — the table is a plain member array, so there is no allocation, no resize path, and the whole thing
+is about 210 KB and stays in L2. A larger table wins a few points of hit rate but pays for it in locality
+on every probe.
+
+Lookup is a hash, never a scan: FNV-1a-style mix over the five float bit patterns, the physics hash and the
+jump/crouch byte, masked to the table. Open addressing with a linear probe of up to `kAirmoveCacheProbe`
+(8) slots, so every operation touches at most 8 entries in one or two cache lines. Lookup stops at the
+first unused slot, which is sound because entries are never deleted individually — only wiped wholesale by
+`Clear()` on map change.
+
+Eviction only happens when all 8 probe slots are occupied by different keys. Each slot carries a saturating
+`freq` (bumped on every hit) and a `stamp` (the global lookup tick at its last hit), and the victim is the
+slot minimising
+
+```
+score = freq >> ((now - stamp) / kAirmoveAgeStep)     // 0 once the shift reaches kAirmoveMaxDecay
+```
+
+ties broken by the older stamp. This is aging LFU evaluated lazily: nothing decays on a timer, the decay
+falls out of the comparison. It protects entries that are used a lot *and* entries used recently, while an
+entry that was hot early and has gone cold loses its protection exponentially instead of squatting forever
+the way plain LFU would. A freshly inserted entry starts at `freq = 1`, so it is the first thing thrown out
+if it never gets a second hit — that is what keeps a burst of one-off launch positions from flushing the
+working set.
+
+The predecessor policy always clobbered slot `base`, which let two hot keys sharing a base ping-pong
+forever. Measured at the same 4096 slots, on 2-minute 32-bot runs:
+
+| map           | fixed victim   | aging LFU      |
+|---------------|----------------|----------------|
+| crossfire     | 86.2% / 47,021 | 93.6% / 13,300 |
+| xen_dm        | 42.1% / 204,364| 55.7% / 119,702|
+| rocket_frenzy | 31.3% / 245,222| 43.0% / 196,835|
+
+(hit rate / evictions). For scale, crossfire at 4096 slots with this policy reaches 93.6%, against 95.1%
+for a 65536-slot table using the old policy — a sixteenth of the memory for one and a half points.
+
+On the harder maps the ceiling is not capacity and not eviction, it is `uncacheable`: sims refused because
+they touched a real mover. Accepting navgen's baked blockers already cut that share of misses roughly in
+half on xen_dm and rocket_frenzy. What is left is genuine door, plat and train geometry.
+
+### Ownership
+
+The cache instance is `g_airmoveCache` in `bot_move_nav.cpp`, attached to `PlanTraceContext::airmoveCache`
+by `MakePlanTraces`. navgen leaves that pointer null, which is what keeps its multi-threaded sampler
+race-free -- `waypoint_plan.cpp` is compiled into both targets. `Bot_ResetAirmoveCache()` is called from
+both `BotManager::ServerActivate` and `ServerDeactivate`, mirroring `BotSense::ResetBoneCache()`.
+
 ## waypoint_plan.cpp
 
 ### NavPlan::PlanWalker

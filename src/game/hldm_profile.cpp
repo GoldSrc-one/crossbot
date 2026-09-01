@@ -29,6 +29,9 @@ namespace
 	constexpr float kHLDMUnreachableTimeout = 30.f;
 	constexpr float kHLDMMaxNormal = 100.f;
 
+	// SF_TRIGGER_HURT_NO_CLIENTS, hlsdk dlls/triggers.cpp
+	constexpr int kSfHurtNoClients = 8;
+
 	constexpr float kHLDMThrowTilt = 10.f;
 	constexpr float kHLDMThrowRate = 4.f;
 	constexpr float kHLDMThrowSpeedMax = 500.f;
@@ -37,6 +40,17 @@ namespace
 	bool HasPrefix(const char *s, const char *prefix)
 	{
 		return strncmp(s, prefix, strlen(prefix)) == 0;
+	}
+
+	// A trigger_hurt with negative damage heals whoever stands in it, so maps use it as a
+	// healing pool. Nothing but pev tells the two apart, which is why ClassifyItem takes an
+	// edict. START_OFF is not tested here: it only flips pev->solid, and a targetname lets
+	// the map toggle it back on later, so availability is checked at scan time instead.
+	bool IsHealingHurt(edict_t *ent)
+	{
+		if (ent->v.dmg >= 0.f)
+			return false;
+		return (ent->v.spawnflags & kSfHurtNoClients) == 0;
 	}
 
 	float Saturate(float v)
@@ -114,8 +128,12 @@ void CHLDMProfile::Respawn(edict_t *pEdict) const
 	BotTiming::EndMove(pEdict);
 }
 
-ItemKind CHLDMProfile::ClassifyItem(const char *classname) const
+ItemKind CHLDMProfile::ClassifyItem(edict_t *ent) const
 {
+	if (!ent || ent->free)
+		return ITEM_NONE;
+
+	const char *classname = CBotClassOf(ent);
 	if (!classname || !classname[0])
 		return ITEM_NONE;
 
@@ -129,6 +147,8 @@ ItemKind CHLDMProfile::ClassifyItem(const char *classname) const
 		return ITEM_HEALTHCHARGER;
 	if (strcmp(classname, "func_recharge") == 0)
 		return ITEM_RECHARGE;
+	if (strcmp(classname, "trigger_hurt") == 0)
+		return IsHealingHurt(ent) ? ITEM_HEALVOLUME : ITEM_NONE;
 
 	return ITEM_NONE;
 }
@@ -166,7 +186,7 @@ float CHLDMProfile::ChargerValue(ItemKind kind, edict_t *pEdict) const
 {
 	if (!pEdict)
 		return 0.f;
-	return (kind == ITEM_HEALTHCHARGER) ? pEdict->v.health : pEdict->v.armorvalue;
+	return (kind == ITEM_RECHARGE) ? pEdict->v.armorvalue : pEdict->v.health;
 }
 
 const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const

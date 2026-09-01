@@ -48,45 +48,16 @@ reference is the bot's own origin for its current area and the area centroid els
 area alone leaves ties between every item in the winning area, and the tie in the bot's *own* area
 is exactly the "it is right next to me" case that matters most.
 
-### The enemy is a candidate, not a mode
+### Gathering never competes with fighting
 
-There is no chase behaviour and no priority rule deciding between fighting and looting. The position
-where a bot last saw an enemy (`doc/bot.md`, "The enemy handle outlives the sight of it") is appended
-to the same scan as one more `Candidate`, resolved to an area by the same `ResolvePickupArea` used for
-pickups, and priced by the same `ItemCost`. Whether a bot goes after a distant enemy or the battery at
-its feet falls out of one comparison.
+Only items are candidates. An enemy used to be appended to the same scan as one more `Candidate`,
+priced by the same Dijkstra and divided by an `EvaluateCombat` readiness, so a bot that saw someone
+across the map planned a full A* route at them. That is gone: fighting is a state, not a goal, and
+`BotCombat` takes movement away from the planner entirely for as long as it lasts (`bot_combat.h`
+below). `SelectGoal` runs only when the bot is not in combat.
 
-That works because phase 1 is already a Dijkstra from the bot's own area over every area on the map.
-The enemy costs one extra row in a scan that was happening anyway -- no second search, no separate
-goal type, and every existing exit (arrival, repath failure, blocked detour) already routes through
-code that only had to learn one new branch.
-
-### Readiness is what makes the comparison mean anything
-
-Raw seconds would make the enemy win whenever it happened to be nearer, which is not how anyone plays.
-`IGameProfile::EvaluateCombat` scores the bot itself in `[0,1]` and the enemy's cost is divided by it:
-
-    enemyScore = seconds / readiness
-
-At `1.0` the enemy wins if it is even slightly closer than the nearest item. At `0.1` the bot prefers
-an item up to ten times further away. A bot that just spawned with a crowbar and a glock evaluates to
-`0.1` and goes shopping; one carrying gauss and egon at full health evaluates to `1.0` and hunts.
-
-**Reachability is decided before the division, not after.** A low readiness multiplies the cost by ten
-or more, and a perfectly routable enemy across a large map would cross `kUnreachableSeconds` and read
-as `no route` in the debug dump -- a reachability verdict invented by the scoring. The raw cost is
-tested first and only then scaled.
-
-Readiness of zero -- nothing the bot can fire -- is not a division, it is a skip: the candidate is
-dropped at `kMinReadiness`.
-
-`crossbot_chase` gates the enemy candidate alone. Note that it lives inside `SelectGoal`, so
-`crossbot_gather 0` disables it too, which is what keeps `test_nav_goal.ps1` measuring what it always
-measured.
-
-`crossbot_gather_debug` prints the bot's readiness in the scan header and marks the enemy row `ENEMY`.
-Those two numbers together are the only way to see why a bot chose what it chose: the same enemy at
-the same distance is picked or ignored purely on the health and guns the bot is holding.
+`crossbot_gather_debug` still prints the bot's readiness in the scan header, because `EvaluateCombat`
+still drives carefulness.
 
 ### Carefulness
 
@@ -208,7 +179,8 @@ player died and the bot cannot reach them.
 exact half-space test it falls back to nearest-centroid-with-AABB and then to global nearest
 centroid, so it essentially never returns null. An item inside a wall would snap to whatever area
 happened to be closest and the bot would route confidently to nothing.
-`Nav::FindAreaExact` is the strict half of it, added for this.
+`Nav::FindAreaExact` is the strict half of it, added for this. A healing volume takes a different
+route again — see "Healing volumes give one entity several candidates" below.
 
 Area z-space is duck-origin based (navgen builds in hull 3) and an item's `v.origin` is at its base,
 so the probe is `origin + 18` first and the raw origin as a fallback.
@@ -221,6 +193,62 @@ because `NavFollow` stops within `goalRadius` (12) of the goal *horizontally* an
 side, and 64 + 12 is out of range — the bot would stand there pressing USE at nothing until the
 15 s timeout.
 
+### Healing volumes give one entity several candidates
+
+A `trigger_hurt` with negative `dmg` heals whoever stands in it, and maps use it as a pool —
+`pool_party` has one at `dmg -40`, which is 40 hp/s. It is a gather goal like a charger, but the
+geometry is the other way round. A charger is a fixture the bot walks *up to*, so one area beside it
+is the answer. A pool is a room-sized brush the bot stands *inside*, so every area overlapping it is
+a way in, and `ResolveVolumeAreas` emits a `Placement` for each — one `Candidate` per entrance,
+sharing the entity. `ItemCost`'s Dijkstra field then picks the cheapest way in for free, instead of
+this function guessing which side the bot will approach from. Capped at 8, nearest to the bot, so a
+map-sized trigger cannot flood the scan.
+
+**Its bounding box is not the pool.** This is the whole difficulty. A brush entity's `absmin`/`absmax`
+is one box around every brush in the model, and `pool_party`'s heal volume is 674 x 733 x 80 units of
+box holding basins that do not fill it. Worse, `SV_TouchLinks` does not settle for a box overlap
+either — before calling `pfnTouch` it point-tests the *toucher's origin* against the trigger's clip
+hull. A box test therefore fails twice over, and it fails quietly: the bot walks to a spot near the
+pool, stands in it for the grace period, gains nothing, and blacklists every healing trigger on the
+map for 120 s. Five of nine arrivals ended that way before `OriginInsideVolume`, which runs the
+engine's own predicate through `pfnTraceModel` — the same call `Bot_PushFields` already uses on
+`trigger_push`.
+
+The probe point is where the bot's origin will *be*, not where the goal point is: area z-space is
+duck-origin based, the bot stands unless the area is flagged `NAV_AREA_CROUCH`, so a standing probe
+sits 18 units higher and uses hull 1 instead of hull 3. Skipping that lift is how the failures above
+looked: spots at area z −768 and −780 sat under a pool whose top is −776, so the *duck* origin was
+inside and the standing origin the bot actually arrived with was above it.
+
+### RunHealVolume is RunChargerUse minus the aiming
+
+No `IN_USE`, nothing to face — presence is the entire interaction. It reuses the charger fields on
+`CBot` (`chargerActive`, `chargerStartTime`, `chargerLastGainTime`, `chargerLastValue`), with
+`chargerPressed` meaning "has been inside" rather than "held USE", so `ManeuverActive` and the
+`lastProgressTime` stamp keep working unchanged.
+
+Two constants differ. The no-gain grace is 1.2 s, not 0.5: `HurtTouch` only re-applies every 0.5 s
+(`pev->dmgtime`), so a working pool looks stalled for half a second at a time and the charger's grace
+would abandon it mid-heal. And the timeout is split — `kHealApproachTimeout` (5 s) only runs while
+the bot has never been inside, while `kHealTimeout` (30 s) is the hard stop, because a pool at
+`dmg -5` legitimately takes twenty seconds to fill a bot and a single timer cannot serve both.
+
+Because the view is not hijacked, the runner calls `BotSense::ApplyLook` before `Bot_UpdateFacing`
+exactly as the idle branch does. A bot topping up in a pool keeps scanning the room and can track an
+enemy while it heals, which a charger user cannot.
+
+### Sated: asking before travelling, not on arrival
+
+`ItemCost` prices goals on travel time alone, so nothing stopped a bot at full health from choosing a
+charger — it walked there, gained nothing, and `NoteFull` blacklisted the classname for 120 s. That
+was tolerable for chargers and much worse for pools, whose 120 s ban covers every healing trigger on
+the map. `BotItems::Sated` compares `ChargerValue` against `ChargerFullValue` during the scan and
+marks the candidate `SCAN_SATED`, printed as `no need`. It applies to chargers as well as pools;
+this is the one place the change alters behaviour that already existed.
+
+It is not health-need weighting. A hurt bot still has no extra pull toward health — a pool competes
+with a shotgun on seconds of travel and nothing else.
+
 ### Why the nav sweep disables it
 
 `test_nav_goal.ps1` polls `crossbot_nav_status` every 2 s and treats `hasGoal=0` as arrival. Gather
@@ -232,8 +260,10 @@ measuring what it measured before. Use `scripts/test_items.ps1` to exercise gath
 
 `crossbot_gather_debug 1` makes every selection print the whole scan: one line per item entity with
 its resolved area and either its cost in seconds or why it was skipped (`taken`, `empty`,
-`respawning for Ns`, `ignored for Ns`, `full for Ns`, `no nav area`, `no route`), with `PICKED` on
-the winner. It is the only view that distinguishes the four ways an item can be invisible to a bot,
+`respawning for Ns`, `ignored for Ns`, `full for Ns`, `no need`, `switched off`, `no nav area`,
+`no route`), with `PICKED` on the winner. A healing volume is the one entity that prints several
+lines, one per entrance, but only while it is selectable — a skipped one says the same thing from
+every area, so it is reported once. It is the only view that distinguishes the four ways an item can be invisible to a bot,
 and the costs are what proves the phase-1 search is sane — if far items read `0.0s away`, the cost
 model is broken, not the mesh.
 
@@ -1205,32 +1235,121 @@ updating its `Suspicion` slot and keep steering the head, but they do not move t
 position. So the bot walks to where it last *saw* someone rather than where it last heard a footstep,
 and the goal holds still while it walks there.
 
-### Losing sight arms one re-score, not a chase
+### Sense reports, it does not decide
 
-`BotItems::SelectGoal` only runs when `hasGoal` is false, so without a nudge a bot that spots someone
-while walking to a battery would not reconsider until it arrived. The sight-loss *edge* sets
-`sense.rescore`, and `Bot_MoveNav` consumes it by clearing the current goal and zeroing
-`nextSelectTime` so the throttle cannot swallow the re-selection. The scan then runs with the enemy in
-it and the cost decides -- frequently in favour of the battery, which is the point.
+`sense.enemy` used to reach forward into navigation: `ForgetEnemy` cleared `bot.goalIsEnemy` and reset
+the path, and a sight-loss edge armed a `rescore` flag that `Bot_MoveNav` consumed by dropping the
+goal. Both are gone. Sense answers questions and owns nothing downstream; `BotCombat` reads the
+answers and makes every transition (`bot_combat.cpp` below).
 
-Two guards, both load-bearing.
-
-**It defers while a maneuver owns the frame.** Clearing the path out from under an airmove, ladder,
-elevator ride, activation, charger or break leaves the runner mid-commitment with nothing to steer
-along. The flag is held until all of them are clear.
-
-**It is throttled to one re-score a second.** The edge fires on a transition, and sight transitions
-constantly in a real fight -- an enemy strafing behind a pillar breaks and restores line of sight
-several times a second, and each edge would otherwise force a full A* replan.
-
-The enemy is forgotten on arrival, and that is not tidiness. The remembered position would win the
-next scan from zero distance away, so the bot would re-select the spot it is standing on, arrive
-instantly, and spin at full framerate -- the same failure `bot_items.cpp` documents as outcome D.
-Forgetting also happens when the route cannot be planned or a detour is blocked, which is the give-up
-condition for a position that is simply not reachable.
+`Senses(bot, ent)` is the one question the table could not answer before: is there still *any* live
+entry pointing at this entity? Sight, sound, damage and events all count, so a bot that can hear its
+enemy has not lost it. Entries expire on `crossbot_sense_decay` in the same sweep every other reader
+uses, which is what makes this "have I lost every trace of it" rather than "did I ever see it".
 
 `bot.sense` is not covered by anything that resets on death, so `BotSense::OnRespawn` clears the enemy
-alongside `BotItems::OnRespawn` and `BotFire::Reset`.
+alongside `BotItems::OnRespawn`, `BotFire::Reset` and `BotCombat::OnRespawn`.
+
+## bot_combat.cpp
+
+### Combat is a state, not a goal
+
+The question "is this bot fighting someone?" used to have five different answers living in five
+files: `sense.enemy` aged on `crossbot_sense_decay`, `bot_fire`'s own 3s `kCombatMemory` on
+`targetTime`, `bot_deploy`'s `enemy || target`, `bot_items`' readiness-gated enemy candidate, and the
+`sense.rescore` pulse. Nothing owned the transition, and `BotSense::ForgetEnemy` reached forward into
+navigation to reset the path -- the wrong direction of dependency.
+
+`BotCombat` is the one owner. `Update` runs immediately after `BotSense::Update` and makes every
+entry and exit; `Run` is the behaviour, and it is what stops the path follower.
+
+The old behaviour was a **chase**: the last-seen position competed in `SelectGoal` and won a full A*
+route across the map. Replacing it with a local shuffle is the point of the whole change -- a bot in a
+firefight should be sidestepping, not commuting.
+
+### Two ways in, five ways out
+
+Entry is sight (`sense.target`, which is line of sight *this frame*) or damage from a player.
+
+`DamageSource` is the damage half, and its job is almost entirely rejection. `pev->dmg_inflictor` is
+not the attacker: for a bullet it is the player, but for a rocket or a grenade it is the projectile,
+which carries the shooter in `pev->owner` -- so the inflictor is resolved through `owner` when it is
+not itself a player. Everything the bot should *not* pick a fight with falls out of that same
+resolution rather than needing a list: falling, drowning and crush damage are inflicted by worldspawn
+at edict index 0, a `trigger_hurt` is a brush entity no player owns, and a rocket the bot fired at its
+own feet resolves back to the bot.
+
+Exit, checked every frame:
+
+| Rule | Reason string |
+| --- | --- |
+| `enemy.Get()` is null | `the enemy handle went stale` |
+| `IGameProfile::IsDead` | `the enemy died` |
+| `BotSense::Senses` finds nothing | `lost every trace of the enemy` |
+| 5s without line of sight | `went too long without line of sight` |
+| the bot died | `respawned`, from `BotManager` |
+
+The last two overlap on stock settings: suspicion entries expire on `crossbot_sense_decay`, which
+also defaults to 5, so either rule may be the one that logs a given exit. Raising the cvar makes the
+sight rule authoritative; lowering it makes `Senses` fire first. That is deliberate -- the sight rule
+is a fixed promise about *this* behaviour, not a second name for the sense decay.
+
+**A new opponent retargets rather than re-entering.** Exiting and re-entering would throw away the
+probe and re-drop a goal the bot had already given up. It is the same fight.
+
+**Damage entry stamps `lastSightTime` even though the bot has seen nothing.** Shot in the back, the
+bot gets the same 5s everyone else gets to turn around and find whoever did it; if it never does, the
+sight rule ends the state on schedule.
+
+### The takeover waits for maneuvers, the state does not
+
+`Run` returns false while `Bot_ManeuverActive` -- airmove, ladder, elevator ride, activation, charger,
+break, deploy. Those runners live below goal selection and steer along the waypoint list, so calling
+`ClearGoalItem` mid-flight would drop a bot into whatever is under it. The state is still entered on
+time, and `driving` records whether the movement half has actually started.
+
+The first frame `Run` does drive, it calls `BotItems::ClearGoalItem` once. That is what "path
+following is terminated" means concretely: goal cleared, `hasGoal` false, waypoints gone. On exit,
+`nextSelectTime` is zeroed so gathering picks something new on the next frame instead of idling out
+the retry interval.
+
+### The shuffle: one random direction, judged on exposure alone
+
+Every `kProbeInterval` (0.7s), or on arrival at the last probe, the bot picks a random yaw, resolves a
+standable point that way, and compares its `exposure` to the exposure where it stands. Lower wins. If
+the probe is no better, the bot goes the *opposite* way instead -- unscored, by design: the algorithm
+is a random walk biased toward cover, not a search.
+
+**`focus[]` is not part of the score and cannot be.** It measures the fraction of the visible set
+inside a cone around `watch[0]` (`doc/navgen.md`), so it describes one facing rather than the spot.
+A high `focus[3]` says "if you look *there*, you cover nearly every sightline in" -- a fine thing to
+know once you have chosen a spot, and not a way to choose between spots. `exposure` is the only field
+that scores a position independent of where the bot is looking.
+
+**The enemy is deliberately not consulted.** No line-of-sight trace from the probe to whoever the bot
+is fighting. The bot can shuffle itself out of the fight, and when it does, the 5s rule ends the state
+and it goes back to gathering -- which is a reasonable outcome, not a failure.
+
+`hereExposure` is read from `bot.sense.vantage`, the blend `RefreshVantage` already maintains every
+0.1s. Only the probe costs a `BlendVantage`.
+
+### Local means the current area and its walk neighbours
+
+`ResolveSpot` accepts the area the bot occupies and any area joined to it by a `CONN_WALK` connection,
+honouring `CONN_FLAG_ONE_WAY`. Jumps, ladders, lifts and teleports are route-building, which is
+exactly what combat drops. Containment is `Nav::AreaContainsPoint` -- areas merge into non-convex
+prisms, so the bound-plane test is required and an AABB clamp would be wrong.
+
+**A single full-length step is not enough.** Measured on crossfire, a plain `origin + dir * 160`
+resolved to nothing **73%** of the time: the map's areas are routinely narrower than the step, and a
+walk neighbour at a different height fails the z test because the probe is placed at that area's
+centroid z. The direction was fine; the distance was not. `ResolveAlongRay` retries the same ray at
+0.7, 0.45 and 0.25 of the step, so `walled off` now means the bot really is against something rather
+than merely that it aimed long.
+
+**With no vantage field** -- a nav built `--no-vantage`, or `crossbot_vantage 0` -- there is nothing
+to compare, so the bot takes the random direction unscored and the reason reads `no vantage`. Moving
+unpredictably beats standing still.
 
 ## bot_fire.cpp
 
@@ -2015,6 +2134,26 @@ survives into the air, pressed one frame later it finishes on the press itself. 
 - kFullDrive: Over maxspeed on purpose: PM_CheckParamters rescales the forward/side pair down to maxspeed, so this just means "full speed in exactly the commanded direction".
 - kAimVelocitySpeed: Below this the velocity carries no usable heading, so the aim holds where it is rather than snapping about on numerical noise.
 - kEdgeProbeAhead / kEdgeProbeDrop / kStandHullMinsZ / kDuckHullMinsZ: `PM_Friction`'s edge test, copied literally — 16 units ahead along the 3D velocity, dropped 34 from foot height. They are the engine's numbers, not tuning knobs; changing one desynchronises `AtFrictionEdge` from the friction it is trying to predict.
+
+### Airmove simulation cache
+
+`MakePlanTraces` attaches the process-wide `g_airmoveCache` to every `PlanTraceContext` it builds, so all
+plan-time `JumpLandsIn` calls share one table. The cache itself, its key, the world-only rule that decides
+what may be stored and the sizing measurements all live in `doc/nav.md` under `airmove_cache.cpp`; what
+belongs here is the wiring.
+
+`Bot_ResetAirmoveCache()` clears the table. It is called from both `BotManager::ServerActivate` and
+`ServerDeactivate`, alongside `BotSense::ResetBoneCache()` — that pair is the only per-map clear site in
+the plugin, and anything holding map-scoped state has to hook it. There is no sizing cvar: the table is a
+fixed member array sized by `kAirmoveCacheSlots`, so changing it means a rebuild. `MakePlanTraces` reads
+`crossbot_airmove_verify` into `SetVerify` on every plan.
+
+`Bot_EngineTraceFn` fills `PmTrace::hitEntity` for this: `tr.pHit` non-null, `pfnIndexOfEdict` non-zero,
+not a `SOLID_BSP` brush flagged `FL_WORLDBRUSH`, and not accepted by `crossbot_nav::IsBakedBlocker`. The
+first two are the `HitQualifies` idiom from `bot_avoid.cpp` minus the solid-class filter, which the
+`ignore_monsters` flag on the trace already covers. The last is the shared predicate in
+`nav/baked_blockers.h` that navgen uses to decide what gets baked into the mesh as permanent geometry —
+runtime and navgen must agree on that list, which is why it is one function and not two.
 
 ### WriteTraceLog
 Writes bot trajectory trace to file specified by crossbot_trace_path cvar (defaults to valve/addons/crossbot/trace/nav_trace.txt).
@@ -3219,8 +3358,8 @@ aim, drive, buttons and `Bot_RunPlayerMove` all come from here and `Bot_MoveNav`
 break: `Buttons` would otherwise fight the weapon switch every half second.
 
 It is called from `Bot_MoveNav` immediately after `BotBreak::Run`, before goal selection.
-`ManeuverActive` includes `deploy.active`, which is what stops `TryStart` re-entering and what keeps
-the rescore path off its back.
+`Bot_ManeuverActive` includes `deploy.active`, which is what stops `TryStart` re-entering and what
+keeps `BotCombat::Run` from tearing the mine placement out from under it.
 
 ### Why the deployables never fit in BotFire
 
@@ -3443,12 +3582,13 @@ The pairs that carry the diagnosis:
   area it resolved to, and how many entries are in each memo. `item=-` with `hasGoal=1` is a
   commanded `crossbot_nav_goal`, not a gathered one. `charging=` appears only while the charger
   runner owns the frame, and carries the value it is watching.
-- `chase=` with `enemy=`, `enemyAge=` and `ready=` — whether the current goal is the enemy's last
-  known position, who that enemy is, how stale the sighting is, and the bot's `EvaluateCombat` score.
-  `chase=0` next to a live `enemy=` is the normal case and not a contradiction: the bot remembers
-  someone and the scan priced an item better. `ready=` is the number that explains that choice, and
-  it is the pair to watch — the same `enemy=` at the same distance flips to `chase=1` as `ready=`
-  climbs. `enemyAge=` above `crossbot_sense_decay` should never be seen; the record is dropped there.
+- `combat=` with `enemy=`, `enemyAge=` and `ready=` — whether `BotCombat` owns the bot, who sense
+  remembers, how stale the sighting is, and the bot's `EvaluateCombat` score. `combat=0` next to a
+  live `enemy=` is normal and not a contradiction: sense remembers someone the bot never saw well
+  enough to fight, or combat already exited on one of its own rules while the suspicion lingers.
+  `ready=` no longer selects anything — it survives because carefulness still routes by it.
+  `enemyAge=` above `crossbot_sense_decay` should never be seen; the record is dropped there.
+  `crossbot_combat_status` is the fuller view.
 - `breaking=` with `health=`, `swings=` and `for=` — present only while `BotBreak` owns the frame.
   `health` not falling across two samples while `swings` climbs is the unbreakable-glass signature; the
   no-damage grace will abort it a moment later.
@@ -3460,6 +3600,119 @@ The pairs that carry the diagnosis:
   new decision also prints its own line to the server console with distance, speed and trace count,
   which is what makes this tunable from one run — note those lines go to `qconsole.log`, not to the
   RCON transcript the test scripts capture.
+
+## bot_perf.cpp
+
+A nested wall-clock zone profiler, compiled out unless `CROSSBOT_PERF` is defined. It exists because
+neither of the obvious alternatives answers the question "which frame was slow and why":
+
+**A sampling profiler cannot see into the plugin.** AMD uProf attributes work by module fine --
+`swds.dll` 76%, `crossbot_mm.dll` 7%, `ntoskrnl` 7% at 32 bots on crossfire -- but the call graph
+dead-ends. `swds.dll` ships without symbols and FPO unwinding fails there, so every engine leaf hangs
+off one address in `hlds.exe`'s main loop and none of the engine time attributes back to the plugin
+call that caused it. Since most of what crossbot costs *is* engine time it asked for, the module split
+alone reads as "the engine is slow".
+
+**CPU sampling under-counts stalls.** A blocking `WriteFile` on the server's stdout is off-CPU, so it
+barely samples, and console logging measured at a fifth of all crossbot time was nearly invisible to
+uProf. Wall-clock zones charge it.
+
+`Enter`/`Leave` push a `StackEntry` and subtract child time from the parent, so a zone reports both
+inclusive and self time; `BOTPERF_SCOPE(ZONE_X)` is the RAII form and is what most call sites use.
+Depth is capped at 24 with no dynamic allocation on the timing path.
+
+### Trace attribution needs the plugin's own table, not a metamod hook
+
+Metamod's `GetEngineFunctions` hooks the *game DLL's* calls into the engine. A plugin's `g_engfuncs` is
+a plain `memcpy` of the real engine table taken in `GiveFnptrsToDll` (`h_export.cpp`), so crossbot's own
+`TRACE_LINE` never passes through metamod at all. The first version of this counted zero traces inside
+`sn_los`, a zone that is nothing but traces.
+
+`InstallTraceWrappers` fixes it by saving the four trace pointers out of the plugin's own `g_engfuncs`
+and overwriting them with wrappers. The metamod hooks in `engine_hooks.cpp` stay -- they catch hl.dll's
+traces, which is how the `runmove` zone accounts for the engine's own movement traces -- and the two
+paths cannot double count because they are different function tables.
+
+A trace is charged to whichever zone is on top of the stack when it starts, along with its ray length
+and whether it clips entities, which is what makes a per-purpose breakdown possible. Only the outermost
+trace is timed (`g_traceDepth`), so a wrapper calling into another cannot double count.
+
+### Reporting
+
+`crossbot_perf <seconds>` starts a window and reports every N seconds; `crossbot_perf_spike <ms>` logs
+any frame over that threshold with its worst bot and its four heaviest zones, capped at 8 per window so
+a bad window cannot itself become the bottleneck. The window keeps every frame's duration for
+percentiles and a full zone snapshot of the single worst frame. Both cvars only exist in a
+`CROSSBOT_PERF` build.
+
+## bot_log.cpp
+
+One function, `BotLog::Verbosef`, reached only through the `BOT_VLOG` macro in `bot_log.h`. With
+`CROSSBOT_VERBOSE` defined the macro forwards to it; without, it expands to `((void)0)` and the
+compiler drops the call, the arguments and every expression that only fed them.
+
+### Why the logging is compiled out rather than gated at runtime
+
+A `SERVER_PRINT` on this harness costs roughly 700us -- the server's stdout is a redirected pipe and
+the write blocks (`profile_hlds.ps1` in `doc/testing.md` measures this). `Repath` emitted one print per
+connection *and* one per waypoint, so a single 20-waypoint route paid about 40 of them. That showed up
+in the profiler as the `rp_log` zone at 11--15ms per call, and it was the largest single contributor to
+the worst frames: one 115ms spike on crossfire was `rp_log=56.01ms` over 5 calls, another 105ms frame
+was `rp_log=45.85ms` over 3.
+
+A cvar would not have fixed it. The cost is in the `snprintf` fan-out and the blocking write, both of
+which happen before any runtime check could help unless every call site were individually guarded --
+which is what the macro does, for free, at compile time. Measured at 32 bots, 60s windows, interleaved
+in one sitting:
+
+| map | verbose | frames | p99 | max |
+| --- | --- | ---: | ---: | ---: |
+| crossfire | on | 926 | 186.6ms | 273.9ms |
+| crossfire | off | 1108 | 119.3ms | 171.6ms |
+| crossfire | on | 796 | 209.7ms | 293.2ms |
+| xen_dm | on | 608 | 403.9ms | 614.9ms |
+| xen_dm | off | 1010 | 259.7ms | 473.3ms |
+
+`rp_log` falls to 0.0ms and stops appearing in any spike breakdown.
+
+### What is verbose and what is not
+
+Verbose means **per-bot narration**: what a bot is doing and why. All of `bot_move_nav.cpp` bar two
+exceptions, the item narration in `bot_items.cpp`, and the touch dump in `bot_manager.cpp`.
+
+Four categories deliberately stay unconditional, because something other than a human reading the
+console depends on them:
+
+- **Console command output.** Everything in `commands.cpp`, and the `Print*` handlers in
+  `bot_manager.cpp`, `bot_items.cpp` and `bot_deploy.cpp` that they call. These are answers to an rcon
+  question; a build that answered nothing would be broken, and they cost nothing when nobody asks.
+- **Server lifecycle and fatal errors.** `gamedata.cpp`, `AddBot`, `ServerActivate`, `nav_loader.cpp`.
+- **Event lines the test suite asserts on.** `reached goal` in `bot_move_nav.cpp` is
+  `nav_target_test.ps1`'s primary pass signal; `test_deploy.ps1` counts `placed a mine`, `detonated a
+  satchel`, `avoid jump`, `is shooting`, `destroyed`, `blocked by` and `reached goal`. That is why all
+  of `bot_avoid.cpp`, `bot_break.cpp` and `bot_deploy.cpp` stay as they are. They are event-level, not
+  per-frame, so they were never the problem.
+- **`WriteTraceLog`.** Once per goal, and `test_nav_goal.ps1` reads the file it names.
+
+The split is not "cheap vs expensive" but **"who reads it"**: a human debugging one bot, or a script.
+
+### The flag defaults on
+
+```
+build.bat -DCROSSBOT_VERBOSE=OFF
+```
+
+turns it off; the value caches in `build/CMakeCache.txt`, so plain `build.bat` keeps whatever was last
+set and `-DCROSSBOT_VERBOSE=ON` puts it back. CMake prints `crossbot: verbose bot logging DISABLED`
+when it is off, which is the only way to tell from the build output.
+
+On by default is the deliberate choice: these lines are how nav work gets debugged, and most of
+`doc/nav.md` and this file quote them. The flag exists so a profiling or saturated-server run can drop
+them, not so the normal build goes quiet. Pair it with `-DCROSSBOT_PERF=ON` for a profiling build.
+
+Two cvars follow the flag rather than surviving it: `crossbot_gather_debug` (both the item scan dump
+and the touch dump) reports disabled in a non-verbose build instead of doing the work and printing
+nothing.
 
 ## bot_weapons.cpp
 

@@ -108,6 +108,17 @@ the ignore table exists to break.
 candidate scan — every item, its area, its cost in seconds or why it was skipped — into the same log.
 That is the view that answers "why did it go *there*"; the outcome lines only say what happened.
 
+**`pool_party` is the map for healing volumes**, and the only one in `hlds/valve/maps` that has one:
+
+    pwsh -File scripts/test_items.ps1 -Map hldsalve\maps\pool_party.bsp -Bots 5 -Seconds 180 -GatherDebug
+
+Five bots, because nothing selects a pool until something has hurt it — a lone bot stays at 100 and
+every scan line reads `no need`. The cycle to look for is `reached trigger_hurt at 66, wading in`
+followed by `topped up at trigger_hurt after 1.7s, now at 100`. `is already full at trigger_hurt` on
+a bot that arrived hurt is the failure mode, not an outcome: it means the bot stopped somewhere the
+engine does not count as inside the brush. `crossbot_list_items` should show `kind 6` with a comma-
+separated list of areas, and the map's *other* `trigger_hurt` — the `dmg 200` one — must not appear.
+
 `-Bots N` is how the contested cases get tested. One bot never races anyone, so case C (seeing from a
 distance that an item is already taken) needs at least two. Three on `test56_recharger` also kill each
 other, which is the only way `weaponbox` handling and the respawn `fullMemo` clear get exercised at all.
@@ -368,6 +379,44 @@ frame and no 2-second poll would ever see it. Reload is the behaviour the SDK re
 to get wrong — hold the trigger through an empty clip and the weapon clicks forever — so it needs a
 witness that does not depend on sampling luck.
 
+## Combat state
+
+There is no dedicated script. `BotCombat` needs several bots fighting on a real map, which is what
+`test_fire.ps1` already arranges -- but the transitions are easier to read straight out of a server
+log than through that script's assertions:
+
+```powershell
+$log = "hlds\logs\combat.log"
+.\scripts\test_server_start.ps1 -Map crossfire -Port 29015 -LogFile $log -Commands @(
+  "crossbot_combat_debug 1",
+  "crossbot_add bot1","crossbot_add bot2","crossbot_add bot3","crossbot_add bot4")
+```
+
+Two minutes of that is enough for every rule to fire at least once. What to check in the log:
+
+- **Every exit reason appears.** `the enemy died`, `respawned`, `lost every trace of the enemy` and
+  `went too long without line of sight` should all be present, and `entered combat` should be within
+  a few of `left combat` -- the difference is the fights still running when the server stopped.
+- **Both entries appear.** `(sight)` dominates; `(damage)` is rarer and needs someone to be shot from
+  outside their own view cone. If `(damage)` never fires, that is worth chasing -- it is the half that
+  no amount of roaming guarantees.
+- **`walled off` is a minority of probes.** It was 73% before `ResolveAlongRay` existed, which is what
+  found that bug; healthy is around 20% on crossfire, with `less exposed` the largest share.
+- **Fights end.** The longest `left combat after Ns` should be in the teens. A fight that never ends
+  is the failure mode this state is most exposed to.
+
+Exposure should trend down across a fight. It is a biased random walk, not a search, so judge it in
+aggregate rather than per fight -- on a stock crossfire run roughly three quarters of fights end less
+exposed than they began.
+
+`crossbot_combat_status` is the live view: who each bot is fighting, how long for, how long unseen,
+whether the movement half has taken over (`driving=`), and the current probe with its exposure
+against the exposure where the bot stands.
+
+**`crossbot_vantage 0` is the no-vantage rehearsal.** It makes the blend invalid without regenerating
+a `--no-vantage` nav, which drives the probe down the same unscored branch. Bots must still fight and
+still move, with every probe reading `no vantage`.
+
 ## scripts/test_deploy.ps1
 
 Four phases, each on its own server, each asserting something only it can show. `-Phase` runs one;
@@ -488,6 +537,180 @@ crossfire. `targets` falling with them would mean the change is suppressing enga
 **The `0 90` shape cannot report a rest error and never could.** A 90 degree pitch flick from level clamps
 to `kPitchLimit`, and `BeginTest` clamps the target the same way, so the view and the target are both pinned
 at 89 and the error is identically zero. That row's settle time is still meaningful; its rest error is not.
+
+## scripts/profile_hlds.ps1
+
+Brings up a dedicated server at `maxplayers 32`, adds N bots over rcon, warms up, turns the zone
+profiler on, and optionally runs `AMDuProfCLI collect` against the live pid.
+
+**It needs a profiler build.** The instrumentation and the `crossbot_perf` cvars are behind
+`CROSSBOT_PERF`, off by default:
+
+```
+build.bat -DCROSSBOT_PERF=ON
+```
+
+(the value caches in `build/CMakeCache.txt`, so plain `build.bat` keeps whatever was last set, and
+`-DCROSSBOT_PERF=OFF` puts it back). Against a default build the rcon commands come back as unknown
+and the run produces no `CrossBot PERF` lines at all -- which looks exactly like a server that had
+nothing to report.
+
+`-NoProfiler` skips uProf and just sleeps, which is the usual mode: the zone report is the part that
+attributes, and uProf only adds the module split. `-NullStdout` sends the server's stdout to `NUL` and
+reads readiness and results from `hlds\qconsole.log` instead. That is not a convenience -- a blocking
+`WriteFile` on the redirected stdout pipe costs roughly 700us per `SERVER_PRINT`, enough to dominate
+any zone that logs, so a run measuring a chatty code path has to say which of the two it is measuring.
+`-NoConDebug` drops `-condebug`, which by contrast changes almost nothing.
+
+Output lands in `nav_debug/perf/<map>_<stamp>.log` (the server's whole console) next to the uProf
+session directory. The interesting lines:
+
+| line | what it is |
+| --- | --- |
+| `CrossBot PERF SPIKE` | one frame over `-SpikeMs`, with its worst bot and four heaviest zones |
+| `CrossBot PERF <zone>` | per-zone self time for the window, sorted, with calls/frame and worst frame |
+| `CrossBot PERF traces` | trace totals for the window |
+| `CrossBot PERF  T <zone>` | traces charged to that zone: count, ms each, mean ray length, how many clip entities |
+
+The `T` table is the one that answers "what are all these traces *for*", since a trace is charged to
+whichever zone was running when it started.
+
+### Profile with `-DCROSSBOT_VERBOSE=OFF` unless you are measuring the logging
+
+A `SERVER_PRINT` costs ~700us on the redirected pipe, so a chatty path measures its own logging. The
+`rp_log` zone was the worst offender until it was compiled out (`doc/bot.md`, `bot_log.cpp`). A
+profiling build wants both flags:
+
+```
+build.bat -DCROSSBOT_PERF=ON -DCROSSBOT_VERBOSE=OFF
+```
+
+Neither is a default, and neither prints anything reassuring when it is *missing* -- check for
+`crossbot: zone profiler ENABLED` and `crossbot: verbose bot logging DISABLED` in the CMake output.
+
+### What AMD uProf can and cannot tell you about spikes
+
+uProf finds *hot*, never *bursty*, and on Windows there is no CLI path to the latter. Checked against
+uProf 5.3:
+
+- **`report` has no time dimension.** `--time-slice`, `--timeline`, `--time-range` and `--start-time`
+  are all rejected as invalid options. `--interval`, `--sort-by`, `--cutoff`, `--view` and `--detail`
+  exist but every one of them aggregates the whole session. A 150ms spike in a 60s run is 0.25% of the
+  samples and is indistinguishable from noise in a flat profile.
+- **OS Runtime Tracing is Linux-only.** `--osrt-event` / `--osrt-threshold` / `--trace osrt` are the
+  one feature that would catch a stall by duration threshold, and the Windows CLI answers `Error:
+  Invalid option --trace`. (The option strings are present in `AMDApplicationViews.dll`, which is
+  shared with the Linux build -- their presence in the binary is not evidence they work here.)
+- **Windowing exists only at collect time.** `--start-delay`, `--duration` and `--start-paused` are
+  accepted, but they require knowing *when* the spike will happen, which is the thing you are trying to
+  find out.
+- **The translated database does carry time buckets, and that is the way in.** See below.
+
+uProf still cannot see a frame boundary, and per `doc/bot.md` its call graph dead-ends in unsymbolised
+`swds.dll`, so engine time never attributes back to the plugin call that asked for it.
+`crossbot_perf_spike` remains the tool for attributing a frame. What uProf adds is the one thing the
+zone profiler structurally cannot see: time the game thread spent **not running at all**.
+
+## scripts/uprof_timeline.ps1
+
+Reads a uProf session as a 1ms timeline. Needs `duckdb.exe` (the plain Windows CLI from duckdb.org)
+next to `AMDuProfCLI.exe`; the script fails with that instruction if it is missing.
+
+```powershell
+.\scripts\profile_hlds.ps1 -Map rocket_frenzy -WarmupSeconds 25 -ProfileSeconds 60
+.\scripts\uprof_timeline.ps1
+```
+
+With no `-Session` it takes the newest `nav_debug/perf/uprof_*`, translating it if needed.
+
+### Why a 1ms timeline exists at all
+
+`AMDuProfCLI translate -i <session>` writes `cpu.db` and `callstack.db` in **DuckDB** format, not
+SQLite (magic `DUCK` at offset 8). `UnifiedSampleSeries` carries a **`windowId`** column, indexed as
+`timeSeriesIdx`, and `session.uprof` records `"interval": 1` / `"isTimeSeriesData": true` -- so
+**`windowId` is a millisecond index from the start of collection**. The GUI timeline reads it; nothing
+in the CLI does.
+
+The dedicated server's game loop is a single thread, so one row per `windowId` for the busiest thread
+is a per-millisecond trace of the loop. On a saturated 32-bot run that thread has a sample in ~90% of
+all milliseconds.
+
+### Runs and gaps are different bugs
+
+The script reports both, and they need opposite fixes:
+
+- **Runs** -- consecutive milliseconds in one module. The thread was on-CPU. The module and RVA say
+  where the compute went.
+- **Gaps** -- milliseconds with **no sample at all**. The thread was off-CPU: blocked on I/O, a lock,
+  a page fault. Optimising the surrounding code does nothing for these, and the zone profiler cannot
+  tell them apart from slow code because wall-clock time passes either way.
+
+### What it actually found, and the honest limit
+
+On a saturated map there is often **no stall to find**. crossfire at 32 bots has no run longer than
+8ms: the loop bounces between two `swds.dll` regions thousands of times a frame. That is the correct
+answer -- the frame-time variance is *how many* traces a frame issued, not a different code path -- but
+it means a sampling profiler has nothing to say. rocket_frenzy's longest run is 37ms.
+
+The gaps are where it earns its keep. rocket_frenzy showed an 18ms off-CPU gap immediately after
+`NavPlan::PlanRoute`, then a 60ms gap 97ms later, and a 55ms gap in `ntdll.dll` elsewhere in the run --
+a stall cluster nothing in the zone report distinguishes from ordinary planning cost.
+
+Two limits worth knowing before trusting a session:
+
+- **The spike log caps at 8 entries per window**, so the worst frame is frequently not in it. That same
+  rocket_frenzy run reported `max 652.565ms` in its `PERF window` line while the largest logged
+  `PERF SPIKE` was 22.86ms. Do not assume the spike list contains the worst frame.
+- **A collect whose target died looks like a quiet server.** Check the raw `.prd` size -- the script
+  warns under 100KB. A 32-bot `xen_dm` run that hits `FATAL ERROR (shutting down): ED_Alloc: no free
+  edicts` leaves a 528-byte `.prd`, an empty database and a server log with no `PERF window` line at
+  all.
+
+## Airmove cache: correctness and tuning
+
+One cvar and one command, both available in a **stock** build (neither is behind `CROSSBOT_PERF`):
+
+- `crossbot_airmove_verify 1` — re-simulate on every cache hit and compare against the stored result.
+  Costs the entire speedup, so this is a correctness harness, not something to leave on. On a mismatch the
+  *fresh* result is the one returned, so verify mode is self-correcting.
+- `crossbot_airmove_cache_stats` — occupancy/capacity, hits, misses, hit rate, inserts, evictions,
+  uncacheable, and (under verify) verified and MISMATCH counts. `MISMATCH (N ent)` splits out the ones
+  where the fresh sim touched an entity, which is the known and accepted divergence — see `doc/nav.md`.
+
+Counters reset on map change. `profile_hlds.ps1` prints the stats line before it stops the server, so any
+profile run doubles as a cache measurement.
+
+There is **no sizing cvar**. Capacity is `kAirmoveCacheSlots` in `nav/airmove_cache.h`, a compile-time
+constant, because the table is a plain member array. Changing it, or the eviction tunables
+`kAirmoveAgeStep` / `kAirmoveMaxDecay`, means a rebuild.
+
+### Reading the stats
+
+Occupancy is not the interesting number — it pins at capacity within a minute on any real map and stays
+there. Judge a change on **hit rate and evictions together**: a policy that raises the hit rate while
+lowering evictions is keeping the right entries.
+
+If `uncacheable` dominates the misses, neither capacity nor eviction is the problem — that map hangs
+doors, plats or trains in its flight paths and those sims are refused outright by the purity rule.
+
+### Judging a change to the cache
+
+Interleave the A/B on one map in a single sitting. Absolute frame times on this box drift by ±50% over an
+hour — `sn_los` per-trace cost alone swings that much between runs — so a run taken now compared against
+one taken twenty minutes later will tell you nothing. Since capacity is compile-time, an A/B means two
+builds; do them back to back and alternate the runs:
+
+```powershell
+.\scripts\profile_hlds.ps1 -Map crossfire -NoProfiler -WarmupSeconds 20 -ProfileSeconds 60 `
+    -PerfInterval 60 -SpikeMs 8
+```
+
+Read `PERF window` (frames, avg, p50/p90/p99) and `PERF  T rp_plan` from each log. The server is fully
+saturated at 32 bots — `crossbot` is ~98% of wall in every configuration — so freed planning time shows up
+as **more frames and a shorter tail**, not as less total trace time.
+
+Always check more than crossfire. `xen_dm` and `rocket_frenzy` are the air-move-heavy maps and they behave
+nothing like it: crossfire caches at 94% while xen_dm sits at 56% with the table thrashing.
 
 ## Sweeping a change
 

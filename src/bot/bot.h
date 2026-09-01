@@ -11,6 +11,7 @@
 #include "bot_aim.h"
 #include "bot_avoid.h"
 #include "bot_break.h"
+#include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fire.h"
 #include "bot_sense.h"
@@ -45,7 +46,6 @@ struct CBot
 
 	bool hasGoal = false;
 	Vector goalPoint;
-	bool goalIsEnemy = false;
 
 	CBotEntHandle goalItem;
 	ItemKind goalItemKind = ITEM_NONE;
@@ -138,6 +138,7 @@ struct CBot
 	BotAim::State aim;
 	BotAvoid::State avoid;
 	BotBreak::State brk;
+	BotCombat::State combat;
 	BotDeploy::State deploy;
 	BotSense::State sense;
 	BotFire::State fire;

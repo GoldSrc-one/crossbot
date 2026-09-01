@@ -17,6 +17,14 @@ V Norm2D(const V &v)
 	return V(v.x / len, v.y / len, 0.f);
 }
 
+template <typename V>
+bool BoxesOverlap(const V &aMins, const V &aMaxs, const V &bMins, const V &bMaxs)
+{
+	return aMins.x <= bMaxs.x && aMaxs.x >= bMins.x &&
+		aMins.y <= bMaxs.y && aMaxs.y >= bMins.y &&
+		aMins.z <= bMaxs.z && aMaxs.z >= bMins.z;
+}
+
 template <typename Point, typename PlaneRange, typename Epsilon>
 bool PointInsidePlanes(const Point &p, const PlaneRange &planes, Epsilon epsilon)
 {

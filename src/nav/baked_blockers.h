@@ -1,0 +1,29 @@
+#pragma once
+
+#include <string.h>
+
+namespace crossbot_nav
+{
+
+constexpr int kSfWallStartOff = 1;
+constexpr int kSfConveyorNotSolid = 2;
+
+inline bool IsBakedBlocker(const char *classname, int spawnflags)
+{
+	if (!classname)
+		return false;
+
+	if (strcmp(classname, "func_wall") == 0 || strcmp(classname, "func_healthcharger") == 0 ||
+		strcmp(classname, "func_recharge") == 0)
+		return true;
+
+	if (strcmp(classname, "func_wall_toggle") == 0)
+		return (spawnflags & kSfWallStartOff) == 0;
+
+	if (strcmp(classname, "func_conveyor") == 0)
+		return (spawnflags & kSfConveyorNotSolid) == 0;
+
+	return false;
+}
+
+}

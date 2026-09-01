@@ -3,12 +3,15 @@
 
 #include "bot_manager.h"
 #include "bot.h"
+#include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fire.h"
 #include "bot_items.h"
+#include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_opportunist.h"
+#include "bot_perf.h"
 #include "bot_sense.h"
 #include "bot_timing.h"
 #include "bot_weapons.h"
@@ -22,7 +25,7 @@ IGameProfile *g_pGameProfile = nullptr;
 
 namespace
 {
-	constexpr int kMaxBots = 16;
+	constexpr int kMaxBots = 32;
 
 	constexpr float kBeamRefresh = 0.25f;
 
@@ -45,23 +48,24 @@ namespace
 
 	bool TouchDebugEnabled()
 	{
+#if BOT_VLOG_ON
 		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_gather_debug");
 		return cvar && cvar->value != 0.f;
+#else
+		return false;
+#endif
 	}
 
 	void DumpTouch(const CBot &bot, edict_t *ent)
 	{
 		edict_t *goal = bot.goalItem.Get();
-		char msg[288];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: TOUCH %s at (%.1f,%.1f,%.1f) <- #%d %s at (%.1f,%.1f,%.1f) "
+		BOT_VLOG("CrossBot: TOUCH %s at (%.1f,%.1f,%.1f) <- #%d %s at (%.1f,%.1f,%.1f) "
 			"solid=%d effects=0x%x flags=0x%x free=%d | goal #%d %s done=%d\n",
 			bot.name, bot.pEdict->v.origin.x, bot.pEdict->v.origin.y, bot.pEdict->v.origin.z,
 			g_engfuncs.pfnIndexOfEdict(ent), CBotClassOf(ent), ent->v.origin.x, ent->v.origin.y,
 			ent->v.origin.z, ent->v.solid, ent->v.effects, ent->v.flags, ent->free ? 1 : 0,
 			goal ? g_engfuncs.pfnIndexOfEdict(goal) : -1, goal ? CBotClassOf(goal) : "-",
 			bot.goalItemDone ? 1 : 0);
-		SERVER_PRINT(msg);
 	}
 }
 
@@ -88,6 +92,7 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 		bot = CBot();
 
 	BotSense::ResetBoneCache();
+	Bot_ResetAirmoveCache();
 
 	g_pGameProfile = GameProfile_Detect();
 
@@ -108,6 +113,7 @@ void ServerDeactivate()
 		bot = CBot();
 
 	BotSense::ResetBoneCache();
+	Bot_ResetAirmoveCache();
 
 	g_pGameProfile = nullptr;
 	Nav::Unload();
@@ -134,11 +140,14 @@ void StartFrame()
 	if (!g_pGameProfile)
 		return;
 
+	BotPerf::FrameBegin();
+
 	Bot_BeginFrame();
 	BotTiming::BeginFrame();
 
 	if (gpGlobals->time >= g_nextBeamRefresh || gpGlobals->time < g_nextBeamRefresh - kBeamRefresh)
 	{
+		BOTPERF_SCOPE(ZONE_BEAMS);
 		g_nextBeamRefresh = gpGlobals->time + kBeamRefresh;
 		BotDeploy::RefreshBeams();
 	}
@@ -148,9 +157,12 @@ void StartFrame()
 		if (!bot.inUse)
 			continue;
 
+		BotPerf::NoteBot(bot.name);
+
 		bool dead = g_pGameProfile->IsDead(bot.pEdict);
 		if (dead)
 		{
+			BOTPERF_SCOPE(ZONE_RESPAWN);
 			g_pGameProfile->Respawn(bot.pEdict);
 			bot.wasDead = true;
 			BotTiming::EndBot(bot);
@@ -159,23 +171,33 @@ void StartFrame()
 
 		if (bot.wasDead)
 		{
+			BOTPERF_SCOPE(ZONE_RESPAWN);
 			bot.wasDead = false;
 			bot.gravity = 1.f;
 			BotItems::OnRespawn(bot);
 			BotSense::OnRespawn(bot);
+			BotCombat::OnRespawn(bot);
 			BotFire::Reset(bot);
 			BotDeploy::OnRespawn(bot);
 			bot.brk = BotBreak::State();
 		}
 
-		BotWeapons::Refresh(bot);
+		{
+			BOTPERF_SCOPE(ZONE_WEAPONS);
+			BotWeapons::Refresh(bot);
+		}
 
-		Bot_MoveNav(bot);
+		{
+			BOTPERF_SCOPE(ZONE_MOVENAV);
+			Bot_MoveNav(bot);
+		}
 
 		BotTiming::EndBot(bot);
 	}
 
 	BotTiming::EndFrame();
+
+	BotPerf::FrameEnd();
 }
 
 namespace
@@ -188,10 +210,8 @@ namespace
 
 		if (TouchDebugEnabled())
 		{
-			char msg[160];
-			snprintf(msg, sizeof(msg), "CrossBot: %s gravity x%.2f -> x%.2f, repathing\n",
+			BOT_VLOG("CrossBot: %s gravity x%.2f -> x%.2f, repathing\n",
 				bot.name, bot.gravity, gravity);
-			SERVER_PRINT(msg);
 		}
 
 		bot.gravity = gravity;
@@ -460,6 +480,48 @@ void PrintSenseStatus()
 		"CrossBot: %d bot(s), sense=%d sense_decay=%.2f\n", shown,
 		BotSense::Enabled() ? 1 : 0, BotSense::Decay());
 	SERVER_PRINT(summary);
+}
+
+void PrintCombatStatus()
+{
+	char head[128];
+	snprintf(head, sizeof(head), "CrossBot: crossbot_combat=%d crossbot_combat_debug=%d\n",
+		BotCombat::Enabled() ? 1 : 0, BotCombat::DebugEnabled() ? 1 : 0);
+	SERVER_PRINT(head);
+
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		const BotCombat::State &st = bot.combat;
+		edict_t *enemy = st.enemy.Get();
+
+		char line[320];
+		if (!st.active)
+		{
+			snprintf(line, sizeof(line), "CrossBot: %s not in combat (%s)\n", bot.name,
+				st.lastReason);
+			SERVER_PRINT(line);
+			continue;
+		}
+
+		snprintf(line, sizeof(line),
+			"CrossBot: %s fighting %s for %.1fs, unseen %.1fs, driving=%d area %d\n", bot.name,
+			enemy ? CBotPlayerNameOf(enemy) : "-", gpGlobals->time - st.startTime,
+			gpGlobals->time - st.lastSightTime, st.driving ? 1 : 0, bot.currentAreaId);
+		SERVER_PRINT(line);
+
+		if (st.haveProbe)
+			snprintf(line, sizeof(line),
+				"CrossBot:   probe (%.0f,%.0f,%.0f) area %d exposure %.4f, here %.4f, %s\n",
+				st.probePoint.x, st.probePoint.y, st.probePoint.z, st.probeArea,
+				st.probeExposure, st.hereExposure, st.lastReason);
+		else
+			snprintf(line, sizeof(line), "CrossBot:   no probe, here %.4f, %s\n", st.hereExposure,
+				st.lastReason);
+		SERVER_PRINT(line);
+	}
 }
 
 void PrintVantageStatus(const Vector *at)
@@ -779,8 +841,8 @@ void PrintNavStatus()
 		msg += line;
 
 		edict_t *enemy = bot.sense.enemy.Get();
-		snprintf(line, sizeof(line), " chase=%d enemy=%s enemyAge=%.1fs ready=%.2f",
-			bot.goalIsEnemy ? 1 : 0, enemy ? CBotPlayerNameOf(enemy) : "-",
+		snprintf(line, sizeof(line), " combat=%d enemy=%s enemyAge=%.1fs ready=%.2f",
+			bot.combat.active ? 1 : 0, enemy ? CBotPlayerNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f,
 			g_pGameProfile ? g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory) : 0.f);
 		msg += line;

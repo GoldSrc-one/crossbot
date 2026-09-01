@@ -1,5 +1,7 @@
 #include "blocking_entities.h"
 
+#include "baked_blockers.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -26,8 +28,6 @@ constexpr int kSfBreakTriggerOnly = 1;
 constexpr int kSfDoorStartOpen = 1;
 constexpr int kSfDoorPassable = 8;
 constexpr int kSfDoorUseOnly = 256;
-constexpr int kSfWallStartOff = 1;
-constexpr int kSfConveyorNotSolid = 2;
 constexpr int kSfPushStartOff = 1;
 constexpr int kSfHurtStartOff = 2;
 constexpr int kSfHurtNoClients = 8;
@@ -45,16 +45,7 @@ constexpr double kBreakSecondsPerHealth = 0.1;
 bool IsBlockingEntity(const Entity &ent)
 {
 	std::string classname = ent.Get("classname");
-	if (classname == "func_wall" || classname == "func_healthcharger" || classname == "func_recharge")
-		return true;
-
-	int spawnflags = ParseInt(ent.Get("spawnflags"), 0);
-	if (classname == "func_wall_toggle")
-		return (spawnflags & kSfWallStartOff) == 0;
-	if (classname == "func_conveyor")
-		return (spawnflags & kSfConveyorNotSolid) == 0;
-
-	return false;
+	return crossbot_nav::IsBakedBlocker(classname.c_str(), ParseInt(ent.Get("spawnflags"), 0));
 }
 
 bool IsDoorClassname(const std::string &classname)

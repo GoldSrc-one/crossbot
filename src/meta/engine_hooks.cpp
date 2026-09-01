@@ -2,7 +2,54 @@
 #include <meta_api.h>
 
 #include "../bot/bot_manager.h"
+#include "../bot/bot_perf.h"
 #include "../game/fake_cmd.h"
+
+#ifdef CROSSBOT_PERF
+
+void PerfTraceLine(const float *v1, const float *v2, int fNoMonsters, edict_t *pentToSkip,
+	TraceResult *ptr)
+{
+	BotPerf::TraceBegin(BotPerf::TRACE_LINE_T, v1, v2, fNoMonsters);
+	RETURN_META(MRES_IGNORED);
+}
+
+void PerfTraceLine_Post(const float *v1, const float *v2, int fNoMonsters, edict_t *pentToSkip,
+	TraceResult *ptr)
+{
+	BotPerf::TraceEnd();
+	RETURN_META(MRES_IGNORED);
+}
+
+void PerfTraceHull(const float *v1, const float *v2, int fNoMonsters, int hullNumber,
+	edict_t *pentToSkip, TraceResult *ptr)
+{
+	BotPerf::TraceBegin(BotPerf::TRACE_HULL_T, v1, v2, fNoMonsters);
+	RETURN_META(MRES_IGNORED);
+}
+
+void PerfTraceHull_Post(const float *v1, const float *v2, int fNoMonsters, int hullNumber,
+	edict_t *pentToSkip, TraceResult *ptr)
+{
+	BotPerf::TraceEnd();
+	RETURN_META(MRES_IGNORED);
+}
+
+int PerfTraceMonsterHull(edict_t *pEdict, const float *v1, const float *v2, int fNoMonsters,
+	edict_t *pentToSkip, TraceResult *ptr)
+{
+	BotPerf::TraceBegin(BotPerf::TRACE_MONSTER_T, v1, v2, fNoMonsters);
+	RETURN_META_VALUE(MRES_IGNORED, 0);
+}
+
+int PerfTraceMonsterHull_Post(edict_t *pEdict, const float *v1, const float *v2, int fNoMonsters,
+	edict_t *pentToSkip, TraceResult *ptr)
+{
+	BotPerf::TraceEnd();
+	RETURN_META_VALUE(MRES_IGNORED, 0);
+}
+
+#endif
 
 void EmitSound(edict_t *entity, int channel, const char *sample, float volume, float attenuation,
 	int fFlags, int pitch)
@@ -35,6 +82,11 @@ C_DLLEXPORT int GetEngineFunctions(enginefuncs_t *pengfuncsFromEngine, int *inte
 	pengfuncsFromEngine->pfnCmd_Args = FakeCmd::Args;
 	pengfuncsFromEngine->pfnCmd_Argv = FakeCmd::Argv;
 	pengfuncsFromEngine->pfnCmd_Argc = FakeCmd::Argc;
+#ifdef CROSSBOT_PERF
+	pengfuncsFromEngine->pfnTraceLine = PerfTraceLine;
+	pengfuncsFromEngine->pfnTraceHull = PerfTraceHull;
+	pengfuncsFromEngine->pfnTraceMonsterHull = PerfTraceMonsterHull;
+#endif
 	return TRUE;
 }
 
@@ -53,5 +105,10 @@ C_DLLEXPORT int GetEngineFunctions_Post(enginefuncs_t *pengfuncsFromEngine, int 
 	memset(pengfuncsFromEngine, 0, sizeof(enginefuncs_t));
 	pengfuncsFromEngine->pfnEmitSound = EmitSound;
 	pengfuncsFromEngine->pfnPlaybackEvent = PlaybackEvent;
+#ifdef CROSSBOT_PERF
+	pengfuncsFromEngine->pfnTraceLine = PerfTraceLine_Post;
+	pengfuncsFromEngine->pfnTraceHull = PerfTraceHull_Post;
+	pengfuncsFromEngine->pfnTraceMonsterHull = PerfTraceMonsterHull_Post;
+#endif
 	return TRUE;
 }

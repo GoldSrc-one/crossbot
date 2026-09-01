@@ -11,6 +11,8 @@ namespace BotItems
 {
 	bool IsPickupGone(edict_t *ent);
 	bool IsChargerEmpty(edict_t *ent);
+	bool IsVolumeInactive(edict_t *ent);
+	bool OriginInsideVolume(edict_t *ent, const Vector &origin, int hull);
 	bool IsUnavailable(edict_t *ent, ItemKind kind);
 
 	Vector ItemCenter(edict_t *ent, ItemKind kind);
@@ -25,8 +27,6 @@ namespace BotItems
 	void ClearGoalItem(CBot &bot);
 
 	bool Enabled();
-
-	bool ChaseEnabled();
 
 	bool SelectGoal(CBot &bot, const Nav::NavMesh &mesh);
 

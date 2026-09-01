@@ -760,6 +760,28 @@ void PlanWalker::UpdateFrontier()
 	m_pendingLength = len;
 }
 
+bool PlanWalker::ApplyAirmoveResult(const AirmoveResult &result, uint32_t destAreaId,
+	Vector &endOut, const char **whyOut) const
+{
+	endOut = result.end;
+
+	if (result.outcome == AIRMOVE_WEDGED)
+	{
+		if (whyOut) *whyOut = "wedged";
+		return false;
+	}
+
+	if (result.outcome == AIRMOVE_TIMEOUT)
+	{
+		if (whyOut) *whyOut = "timed out";
+		return false;
+	}
+
+	bool in = PointInArea(endOut, (*m_areas)[destAreaId], 1.f);
+	if (whyOut) *whyOut = in ? "landed in area" : "landed elsewhere";
+	return in;
+}
+
 bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, bool jump,
 	uint32_t fromAreaId, uint32_t destAreaId, bool needsCrouch, Vector &endOut,
 	const char **whyOut) const
@@ -782,26 +804,47 @@ bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, 
 	float zAdjust = needsCrouch ? 0.f : kPlanStandHeight;
 
 	PmSim::PmPhysics physics = m_traces->physics;
-	PmSim::PmSimulator sim(trace, physics, push);
-	sim.Begin(Vector(launchFloor.x, launchFloor.y, launchFloor.z + launchLift + kPlanLaunchLift),
-		yaw, speed, false);
+	physics.frameTime = PmSim::kPlanSimFrameTime;
 
-	auto record = [&]()
+	Vector simStart(launchFloor.x, launchFloor.y, launchFloor.z + launchLift + kPlanLaunchLift);
+
+	AirmoveCache *cache = m_traces->airmoveCache;
+	bool caching = cache != nullptr;
+	AirmoveKey key;
+
+	if (caching)
 	{
-		const Vector &p = sim.Origin();
-		endOut = Vector(p.x, p.y, p.z - zAdjust);
-	};
+		key.x = simStart.x;
+		key.y = simStart.y;
+		key.z = simStart.z;
+		key.yaw = yaw;
+		key.speed = speed;
+		key.physics = AirmovePhysicsKey(physics.maxSpeed, physics.gravity, physics.airAccelerate,
+			physics.maxVelocity);
+		key.jump = jump ? 1 : 0;
+		key.crouch = needsCrouch ? 1 : 0;
+	}
+
+	AirmoveResult cached;
+	bool haveCached = caching && cache->Lookup(key, cached);
+	if (haveCached && !cache->Verify())
+		return ApplyAirmoveResult(cached, destAreaId, endOut, whyOut);
+
+	PmSim::PmSimulator sim(trace, physics, push);
+	sim.Begin(simStart, yaw, speed, false);
 
 	if (jump)
 		sim.RequestJump();
+
+	AirmoveResult result;
+	result.outcome = AIRMOVE_TIMEOUT;
 
 	while (sim.Time() < kAirmoveSimMaxTime)
 	{
 		if (!sim.Step())
 		{
-			record();
-			if (whyOut) *whyOut = "wedged";
-			return false;
+			result.outcome = AIRMOVE_WEDGED;
+			break;
 		}
 
 		if (!sim.OnGround())
@@ -813,15 +856,24 @@ bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, 
 			continue;
 		}
 
-		record();
-		bool in = PointInArea(endOut, (*m_areas)[destAreaId], 1.f);
-		if (whyOut) *whyOut = in ? "landed in area" : "landed elsewhere";
-		return in;
+		result.outcome = AIRMOVE_LANDED;
+		break;
 	}
 
-	record();
-	if (whyOut) *whyOut = "timed out";
-	return false;
+	const Vector &landed = sim.Origin();
+	result.end = Vector(landed.x, landed.y, landed.z - zAdjust);
+
+	if (haveCached)
+		cache->NoteVerified(cached, result, sim.TouchedEntity());
+	else if (caching)
+	{
+		if (sim.TouchedEntity())
+			cache->NoteUncacheable();
+		else
+			cache->Insert(key, result);
+	}
+
+	return ApplyAirmoveResult(result, destAreaId, endOut, whyOut);
 }
 
 bool PlanWalker::LaunchAtEdge(const Vector &launchFloor, const Vector &launchDir,

@@ -71,13 +71,22 @@ counting as armed on the strength of its zoom toggle.
 The classification the gather goals key off. `ITEM_WEAPON`/`ITEM_AMMO`/`ITEM_PICKUP` are touched to
 collect; `ITEM_HEALTHCHARGER`/`ITEM_RECHARGE` are used with `IN_USE` and never touched at all, which
 is why `ItemKindIsCharger` exists rather than a comparison at each site — the two families share
-almost no code path.
+almost no code path. `ITEM_HEALVOLUME` is a third family: a healing `trigger_hurt` the bot only has
+to stand in.
+
+Three predicates rather than one, because the families group differently at different sites.
+`ItemKindIsCharger` still means "aim at it and hold `IN_USE`". `ItemKindIsBrush` means "read the
+absbox midpoint, `pev->origin` is `0 0 0`" and covers chargers and volumes. `ItemKindUsesValue`
+means "there is a `ChargerValue` to watch instead of a touch to wait for", and is what `OnTouch`,
+`OnArrived` and `UpdateGoalItem` branch on. `OnTouch` is the one that had to change: a trigger is
+`SOLID_TRIGGER` and really does fire `pfnTouch` on the bot, so the old charger-only test would have
+ended the goal the instant the bot waded in.
 
 ## hldm_profile.cpp
 
 ### ClassifyItem
-Prefix match on `weapon_`, `ammo_`, `item_`, plus exact `weaponbox`, `func_healthcharger` and
-`func_recharge`. Prefix matching rather than a table of every HLDM classname is what lets the bot
+Prefix match on `weapon_`, `ammo_`, `item_`, plus exact `weaponbox`, `func_healthcharger`,
+`func_recharge` and `trigger_hurt`. Prefix matching rather than a table of every HLDM classname is what lets the bot
 pick up mod items it has never heard of; the cost is that `SelectGoal` has to walk the whole edict
 array instead of using `FIND_ENTITY_BY_STRING`, since that engine call takes an exact name.
 
@@ -86,6 +95,15 @@ classifies every HEV charger as `ITEM_NONE` and the bot ignores them all.
 
 `item_` catches `item_suit`, `item_antidote` and `item_security` as well. They are harmless: the bot
 touches one, nothing happens, and the full list keeps it away for 60 s.
+
+**Why it takes an edict and not a classname.** A `trigger_hurt` is a healing pool or a death trap
+depending on the sign of `pev->dmg`, and `pool_party` ships one of each (`dmg -40` and `dmg 200`).
+Nothing in the classname separates them, so the signature had to widen; `CHLDMProfile` is the only
+implementation and every call site already held the edict. `IsHealingHurt` wants `dmg < 0` and no
+`SF_TRIGGER_HURT_NO_CLIENTS`. It deliberately does not test `SF_TRIGGER_HURT_START_OFF`: that flag
+only spawns the trigger `SOLID_NOT`, and a trigger with a targetname can be toggled either way
+mid-map, so whether the pool is *running* is a live question — `BotItems::IsVolumeInactive` asks it
+at scan time — and not a fixed property of the entity.
 
 ### The respawn constants
 20 s weapons and ammo, 30 s items, 30 s HEV charger, 60 s health charger. These are HLDM's own
@@ -96,9 +114,13 @@ short simply walks up to an empty spot and learns from it (see `doc/bot.md`, cas
 
 ### ChargerValue / ChargerFullValue
 The charger runner needs one number to watch and one ceiling to stop at, and which `pev` field that
-is depends on the charger. Health chargers read `v.health`, HEV chargers read `v.armorvalue`; both
-cap at 100. Keeping this behind the profile is what stops `bot_move_nav.cpp` from having to know
-which is which.
+is depends on the charger. HEV chargers read `v.armorvalue`, health chargers and healing pools read
+`v.health`; all cap at 100. Keeping this behind the profile is what stops `bot_move_nav.cpp` from
+having to know which is which. 100 happens to be the right ceiling for a pool for a different
+reason: `CBaseEntity::TakeHealth` refuses to heal past `pev->max_health`, which HLDM leaves at 100.
+
+These two are also now asked *before* travelling and not only on arrival — see `BotItems::Sated` in
+`doc/bot.md`.
 
 ## gamedata.cpp
 

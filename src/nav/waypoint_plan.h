@@ -7,6 +7,7 @@
 #include "mathlib.h"
 #include "vector.h"
 
+#include "airmove_cache.h"
 #include "funnel_graph.h"
 #include "nav_format.h"
 #include "pm_sim.h"
@@ -164,6 +165,7 @@ struct PlanTraceContext
 	float gravityMultiplier = 1.f;
 	bool dumpAirmoves = false;
 	bool collectRunupTraces = false;
+	AirmoveCache *airmoveCache = nullptr;
 };
 
 struct PlanStats
@@ -249,6 +251,9 @@ private:
 	bool PushActivationDetour(const PlanArea &fromArea, const PlanArea &toArea, uint32_t fromId);
 	void PushWaypoint(const PlanWaypoint &wp, bool countLength = true);
 	void UpdateFrontier();
+
+	bool ApplyAirmoveResult(const AirmoveResult &result, uint32_t destAreaId, Vector &endOut,
+		const char **whyOut) const;
 
 	bool JumpLandsIn(const Vector &launchFloor, float yaw, float speed, bool jump, uint32_t fromAreaId,
 		uint32_t destAreaId, bool needsCrouch, Vector &endOut, const char **whyOut) const;

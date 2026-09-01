@@ -9,7 +9,7 @@
 #include "bot_aim.h"
 #include "bot_fire.h"
 #include "bot_move.h"
-#include "bot_move_nav.h"
+#include "bot_perf.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
@@ -21,7 +21,6 @@ namespace
 
 	constexpr float kDefaultDecay = 5.f;
 	constexpr float kMaxDecay = 60.f;
-	constexpr float kRescoreInterval = 1.f;
 
 	constexpr float kViewCone = 90.f;
 	constexpr float kViewRange = 4096.f;
@@ -287,10 +286,17 @@ namespace
 				continue;
 
 			int bone = -1;
-			Vector point = SamplePoint(bot, ent, bone);
+			Vector point;
+			{
+				BOTPERF_SCOPE(ZONE_SN_BONE);
+				point = SamplePoint(bot, ent, bone);
+			}
 
 			TraceResult tr;
-			TRACE_LINE(eye, point, dont_ignore_monsters, pEdict, &tr);
+			{
+				BOTPERF_SCOPE(ZONE_SN_LOS);
+				TRACE_LINE(eye, point, dont_ignore_monsters, pEdict, &tr);
+			}
 			if (tr.flFraction < 1.f && tr.pHit != ent)
 				continue;
 
@@ -330,7 +336,10 @@ namespace
 		if (offset.LengthSquared() > kLeadEpsilonSq)
 		{
 			TraceResult leadTrace;
-			TRACE_LINE(eye, lead, ignore_monsters, pEdict, &leadTrace);
+			{
+				BOTPERF_SCOPE(ZONE_SN_LOS);
+				TRACE_LINE(eye, lead, ignore_monsters, pEdict, &leadTrace);
+			}
 			if (leadTrace.flFraction < 1.f)
 			{
 				++sense.leadVetoes;
@@ -356,15 +365,6 @@ namespace
 		{
 			BotSense::ForgetEnemy(bot);
 		}
-
-		bool sight = sense.target.Get() != nullptr;
-		if (sense.hadSight && !sight && sense.enemy.Get() &&
-			gpGlobals->time >= sense.nextRescoreTime)
-		{
-			sense.rescore = true;
-			sense.nextRescoreTime = gpGlobals->time + kRescoreInterval;
-		}
-		sense.hadSight = sight;
 	}
 
 	bool ApplyVantageLook(CBot &bot)
@@ -702,6 +702,29 @@ const BotSense::Suspicion *BotSense::NearestLive(const CBot &bot, const Vector &
 	return best;
 }
 
+// Does anything in the table still point at this entity? Entries expire on Decay() like every
+// other read of the table, so this answers "have I lost every trace of it", not "did I ever see
+// it". Sight, sound, damage and events all count -- a bot that can hear its enemy has not lost it.
+bool BotSense::Senses(const CBot &bot, const edict_t *ent)
+{
+	if (!ent)
+		return false;
+
+	const State &sense = bot.sense;
+	float decay = Decay();
+
+	for (size_t i = 0; i < sense.count; ++i)
+	{
+		const Suspicion &entry = sense.slots[i];
+		if (gpGlobals->time - entry.time > decay)
+			continue;
+		if (entry.ent.Is(ent))
+			return true;
+	}
+
+	return false;
+}
+
 void BotSense::Update(CBot &bot)
 {
 	State &sense = bot.sense;
@@ -717,18 +740,30 @@ void BotSense::Update(CBot &bot)
 			BotAim::ClearDelayQueue(bot);
 		sense.target.Clear();
 		sense.targetBone = -1;
-		sense.hadSight = false;
 		ForgetEnemy(bot);
 		return;
 	}
 
 	SeedSense(bot);
-	RefreshVantage(bot);
+	{
+		BOTPERF_SCOPE(ZONE_SN_VANTAGE);
+		RefreshVantage(bot);
+	}
 
-	UpdateDamage(bot);
-	UpdateVision(bot);
-	UpdateEnemy(bot);
+	{
+		BOTPERF_SCOPE(ZONE_SN_DAMAGE);
+		UpdateDamage(bot);
+	}
+	{
+		BOTPERF_SCOPE(ZONE_SN_VISION);
+		UpdateVision(bot);
+	}
+	{
+		BOTPERF_SCOPE(ZONE_SN_ENEMY);
+		UpdateEnemy(bot);
+	}
 
+	BOTPERF_SCOPE(ZONE_SN_LOOK);
 	Vector dir;
 	float authority = 0.f;
 	int entries = 0;
@@ -748,20 +783,11 @@ void BotSense::ForgetEnemy(CBot &bot)
 	State &sense = bot.sense;
 	sense.enemy.Clear();
 	sense.enemyTime = 0.f;
-	sense.rescore = false;
-
-	if (bot.goalIsEnemy)
-	{
-		bot.goalIsEnemy = false;
-		bot.hasGoal = false;
-		Bot_ResetNavPath(bot);
-	}
 }
 
 void BotSense::OnRespawn(CBot &bot)
 {
 	State &sense = bot.sense;
-	sense.hadSight = false;
 	sense.vantage = Nav::VantageBlend();
 	sense.nextVantageTime = 0.f;
 	ForgetEnemy(bot);

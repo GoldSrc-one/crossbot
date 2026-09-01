@@ -90,6 +90,7 @@ void PmSimulator::Reset(const Vector &origin, const Vector &velocity, float yawD
 	m_onGround = onGround;
 	m_jumpPending = jump;
 	m_fallSpeed = 0.f;
+	m_touchedEntity = false;
 	m_time = 0.f;
 }
 
@@ -192,6 +193,7 @@ int PmSimulator::FlyMove(float *origin, float *velocity, float dt) const
 			end[i] = origin[i] + time_left * velocity[i];
 
 		PmTrace trace = m_trace(Vector(origin[0], origin[1], origin[2]), Vector(end[0], end[1], end[2]));
+		m_touchedEntity = m_touchedEntity || trace.hitEntity;
 
 		if (trace.allsolid)
 		{
@@ -287,6 +289,8 @@ bool PmSimulator::CatagorizePosition(const float *origin, const float *velocity)
 	PmTrace trace = m_trace(Vector(origin[0], origin[1], origin[2]),
 		Vector(origin[0], origin[1], origin[2] - kGroundTraceDist));
 
+	m_touchedEntity = m_touchedEntity || trace.hitEntity;
+
 	if (trace.fraction >= 1.0f)
 		return false;
 
@@ -305,6 +309,8 @@ bool PmSimulator::Step()
 		base[0] = push.x;
 		base[1] = push.y;
 		base[2] = push.z;
+		if (push.x != 0.f || push.y != 0.f || push.z != 0.f)
+			m_touchedEntity = true;
 	}
 
 	AddCorrectGravity(m_vel, base);
