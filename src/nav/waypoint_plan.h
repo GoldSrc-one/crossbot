@@ -284,6 +284,8 @@ private:
 
 	bool LegIsWalkable(const Vector &from, const Vector &to, uint32_t fromId) const;
 
+	bool AreaUnderWater(int areaId) const;
+
 	int AreaContaining(const Vector &point) const;
 
 	const std::vector<PlanArea> *m_areas = nullptr;
@@ -299,6 +301,7 @@ private:
 	bool m_anchorFromAirmove = false;
 	Vector m_frontier;
 	float m_committedLength = 0.f;
+	float m_committedSwimLength = 0.f;
 	float m_pendingLength = 0.f;
 	float m_extraTime = 0.f;
 };

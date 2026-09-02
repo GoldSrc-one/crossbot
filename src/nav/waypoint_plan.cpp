@@ -655,6 +655,7 @@ void PlanWalker::Reset(const Vector &startPoint)
 	m_anchorFromAirmove = false;
 	m_frontier = startPoint;
 	m_committedLength = 0.f;
+	m_committedSwimLength = 0.f;
 	m_pendingLength = 0.f;
 	m_extraTime = 0.f;
 	m_stats = PlanStats();
@@ -664,7 +665,21 @@ void PlanWalker::Reset(const Vector &startPoint)
 
 float PlanWalker::Time() const
 {
-	return (m_committedLength + m_pendingLength) / NavAStar::kNavRunSpeed + m_extraTime;
+	float onFoot = m_committedLength - m_committedSwimLength + m_pendingLength;
+
+	return onFoot / NavAStar::kNavRunSpeed + m_committedSwimLength / NavAStar::kNavSwimSpeed +
+		m_extraTime;
+}
+
+bool PlanWalker::AreaUnderWater(int areaId) const
+{
+	if (areaId < 0 || static_cast<size_t>(areaId) >= m_areas->size())
+		return false;
+
+	const PlanArea &area = (*m_areas)[static_cast<size_t>(areaId)];
+
+	return SubmergedAt(m_traces ? m_traces->waterSurfaces : nullptr, area.waterVolume,
+		area.submergeZ);
 }
 
 Vector PlanWalker::AtPlayerHeight(const Vector &floorPoint, uint32_t areaId) const
@@ -733,7 +748,17 @@ std::vector<NavFunnel::PulledPoint> PlanWalker::PeekFunnel(const Vector &target)
 void PlanWalker::PushWaypoint(const PlanWaypoint &wp, bool countLength)
 {
 	if (countLength && !m_result.empty())
-		m_committedLength += (wp.point - m_result.back().point).Length();
+	{
+		float len = (wp.point - m_result.back().point).Length();
+		m_committedLength += len;
+
+		// Either end under water prices the whole leg as a swim. That over-charges the seam legs
+		// that enter or leave a pool, which is the direction to be wrong in: a land route that
+		// loses to water should lose by a margin.
+		if (AreaUnderWater(m_result.back().targetAreaId) || AreaUnderWater(wp.targetAreaId))
+			m_committedSwimLength += len;
+	}
+
 	m_result.push_back(wp);
 }
 
