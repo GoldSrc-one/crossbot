@@ -199,11 +199,11 @@ tier must be empty and gather behaviour untouched.
 
 **Regression.** `test_nav_goal.ps1` sets `crossbot_fun 0` alongside `crossbot_gather 0`, so the
 51-map sweep is unaffected by the tier and stays comparable against transcripts taken before it
-existed. One map fails that sweep: `test54_window` abandons the goal, because navgen cannot route to
-it at all (`no route from area 1 to area 18`). It fails identically with the plugin sources stashed,
-so it is pre-existing and not a tier regression. `test19_water` also used to abandon, and
-`test39_skybox` and `test41_skydrop` used to hit the deadline; the skybox pair was the sky prune (see
-`DropSkyFloorLeaves` in `doc/navgen.md`), not the follower.
+existed. All 51 maps pass. `test54_window` used to abandon the goal because navgen could not route to
+it at all (`no route from area 1 to area 18`) — that was the launch rescale, see "Rescaling a missed
+launch" in `doc/nav.md`. `test19_water` also used to abandon, and `test39_skybox` and `test41_skydrop`
+used to hit the deadline; the skybox pair was the sky prune (see `DropSkyFloorLeaves` in
+`doc/navgen.md`), not the follower.
 
 **Perf.** Measured on crossfire, 8 bots, `-DCROSSBOT_PERF=ON`: `item_select` self time is
 0.0288 ms/f with the tier on against 0.0264 ms/f with `crossbot_fun 0`, which is inside the

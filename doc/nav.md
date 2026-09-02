@@ -1237,17 +1237,34 @@ yaw/speed there come from a one-sided local regression, so at `t` 0 or 1 the pla
 An overshoot or undershoot of a few tens of units is routine, and refusing the edge on it loses genuine
 connectivity.
 
-So a miss gets exactly one retry. Horizontal range on a jump is close to linear in launch speed —
-air time barely depends on it — so the correction is one division: multiply `candSpeed` by
-`|entryPoint - exitPoint| / |end - exitPoint|`, both measured in XY, and re-simulate at that. The aim
-point is the funnel's own crossing of the arrival gate, so the retry lands where the string pull wanted
-to enter, not at the area centroid.
+So a miss gets exactly one retry, and the correction is one division: `want / conn.flightTime`, where
+`want` is the destination centroid projected onto the candidate heading. `flightTime` is the air time
+of the sampled trajectory the connection was built from — a flight that really did land in the
+destination — so the division asks the only question that matters: how fast must the bot leave the gate
+to cover `want` in the time the geometry allows.
 
-Nothing iterates. A second miss refuses the edge exactly as before, and the retry is skipped when either
-distance is under `kPlanAirmoveRangeEps` or the correction moves the speed by less than
-`kPlanAirmoveRespeedEps`. The rescaled speed is clamped to `physics.maxSpeed`, which is what bounds the
-degenerate case: a first sim that wedges immediately travels ~0 units and the ratio blows up, so it
-retries at full speed and almost always misses again — one wasted simulation, never an unbounded one.
+Scaling `candSpeed` by `want / |end - exitPoint|` instead is the obvious correction, and it is the
+*same number* whenever the miss ends at the destination's height, because there `|end - exitPoint|` is
+`candSpeed * flightTime` and the two forms cancel. They diverge exactly where the assumption behind the
+ratio — that air time barely depends on launch speed — breaks: when the missed flight ends somewhere
+else vertically, its horizontal reach carries a different air time and the correction inherits it.
+`test54_window`'s `1->2` is the extreme case: a 51-unit hop up onto a window sill whose first attempt
+clears the sill, misses the 16-unit lip past it and falls 224 units into a pit — 192 units of travel
+over 1.16 s. The ratio folds that fall in and answers 44 for a jump that needs 90. Dividing by the
+connection's own 0.57 s answers 91, and it lands.
+
+**The aim point is the destination centroid, not the funnel's own crossing of the arrival gate.** The
+crossing is where the string pull wanted to enter, which is by construction the *nearest* corner of that
+gate, and aiming a rescaled jump at the edge of the landing area is how you land just outside it. On
+`test54_window` the `1->3` crossing asks for 207 and sails over the 16-unit lip into the pit; the
+centroid asks for 152 and lands.
+
+Nothing iterates. A second miss refuses the edge exactly as before, and the retry is skipped when `want`
+is under `kPlanAirmoveRangeEps` or the correction moves the speed by less than `kPlanAirmoveRespeedEps`.
+The rescaled speed is clamped to `physics.maxSpeed`. A connection whose `flightTime` is under
+`kPlanAirmoveFlightEps` falls back to the old ratio, where that clamp is also what bounds the degenerate
+case: a first sim that wedges immediately travels ~0 units and the ratio blows up, so it retries at full
+speed and almost always misses again — one wasted simulation, never an unbounded one.
 
 **Correcting downward composes with `Respeed`; correcting upward does not.** A retry that raises the
 speed can assert a launch the run-up cannot deliver, and `Respeed` will then knock it back down and keep
@@ -1258,10 +1275,14 @@ because the extrapolated gate speed is biased toward the cloud's interior mean a
 24 units up the wall, so navgen finds no launch edge there at all (`FilterLaunchEdges` needs void ahead
 at running height) and every jump out of it is reverse-seeded from the landing spread of the jumps back
 in — a 2D blob squashed into a segment, the worst case for the end regression. Both edges out of the
-room missed and the map had no route. The retry corrects `1->2` from 185 to 117 and it lands.
+room miss, and area 1's only other exits drop into the pit, which cannot climb back to the sill level —
+so until the retry corrects `1->2` to 91 and `1->3` to 152, the map has no route at all.
 
-Across the test maps it removes rejections without moving a single waypoint: `test5_jump` 2 rejections
-to 0, `test24_precise2` 1 to 0, `test38_islands` 1 to 0, all with byte-identical routes.
+Across the 19 stock deathmatch maps the flight-time form converts 8 more retries from `landed elsewhere`
+to `landed in area` (161 of 582 to 169 of 586) and moves three routes — `contamination` 28 waypoints to
+25, `disposal` 11 connections to 10, `datacore` 14 to 16 — leaving every other route byte-identical. On
+the test maps `test28_slopecase` trades four corners for a crouch jump (22 waypoints to 21) and
+`test31_push` shifts a few waypoints; nothing else moves, and all 51 pass.
 
 ### Re-speeding a launch
 The stored `exitSpeed` is what the air-move sampler launched at, not what the route can deliver. A

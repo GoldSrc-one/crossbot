@@ -43,6 +43,7 @@ constexpr float kPlanAirmoveRunupEps = 1.f;
 constexpr float kPlanRunupSeamStep = 18.f;
 constexpr float kPlanAirmoveRespeedEps = 1.f;
 constexpr float kPlanAirmoveRangeEps = 1.f;
+constexpr float kPlanAirmoveFlightEps = 0.01f;
 constexpr float kPlanAirmoveRetractAlign = 0.5f;
 
 float HorizontalDistance(const Vector &a, const Vector &b)
@@ -1371,9 +1372,14 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 				float want = (toCentroid.x - exitPoint.x) * candDir.x +
 					(toCentroid.y - exitPoint.y) * candDir.y;
 				float got = HorizontalDistance(exitPoint, end);
-				float rescaled = (want > kPlanAirmoveRangeEps && got > kPlanAirmoveRangeEps)
-					? std::min(candSpeed * (want / got), m_traces->physics.maxSpeed)
-					: 0.f;
+				float rescaled = 0.f;
+				if (want > kPlanAirmoveRangeEps)
+				{
+					if (conn.flightTime > kPlanAirmoveFlightEps)
+						rescaled = std::min(want / conn.flightTime, m_traces->physics.maxSpeed);
+					else if (got > kPlanAirmoveRangeEps)
+						rescaled = std::min(candSpeed * (want / got), m_traces->physics.maxSpeed);
+				}
 
 				if (rescaled > kPlanAirmoveRangeEps &&
 					std::fabs(rescaled - candSpeed) > kPlanAirmoveRespeedEps)
