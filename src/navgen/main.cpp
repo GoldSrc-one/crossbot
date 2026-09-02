@@ -191,6 +191,8 @@ void PrintUsage(const char *argv0)
 		"  --no-lethal       keep floors and routes that only a fall through a lethal trigger_hurt\n"
 		"                    can reach (debug: isolate what the lethal prune removes). Also keeps\n"
 		"                    floors and routes inside slime and lava\n"
+		"  --no-sky-prune    keep floors whose underside is sky (debug: isolate what the sky prune\n"
+		"                    removes, e.g. the skybox shell a test map is built inside)\n"
 		"  --no-blockers     ignore func_wall/func_wall_toggle/func_conveyor/charger brushes\n"
 		"                    (debug: isolate how much of the leaf explosion the blocker carve owns)\n"
 		"  --no-passables    ignore func_door/func_door_rotating/func_breakable brushes (debug:\n"
@@ -809,6 +811,7 @@ int main(int argc, char **argv)
 	bool dumpWater = false;
 	bool noBlockers = false;
 	bool noLethal = false;
+	bool noSkyPrune = false;
 	bool noPassables = false;
 	bool noFloorSplit = false;
 	bool noPrune = false;
@@ -901,6 +904,10 @@ int main(int argc, char **argv)
 		else if (arg == "--no-lethal")
 		{
 			noLethal = true;
+		}
+		else if (arg == "--no-sky-prune")
+		{
+			noSkyPrune = true;
 		}
 		else if (arg == "--no-blockers")
 		{
@@ -1499,6 +1506,13 @@ int main(int argc, char **argv)
 				"pieces (%zu -> %zu leaves)\n",
 				bspPath.c_str(), floorStats.split, floorStats.absorbed, floorStats.waterColumns,
 				floorStats.dropped, floorStats.noFloor, beforeFloorSplit, leaves.size());
+		}
+
+		if (!noSkyPrune)
+		{
+			size_t skyLeaves = navgen::DropSkyFloorLeaves(bsp, leaves);
+			if (skyLeaves > 0)
+				std::printf("%s: dropped %zu leaves standing on sky\n", bspPath.c_str(), skyLeaves);
 		}
 
 		std::vector<navgen::BlockingVolume> hurtVolumes =

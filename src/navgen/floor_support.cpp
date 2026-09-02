@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <utility>
 
+#include "bsp_vis.h"
 #include "clipnode_tree.h"
+#include "hull_defs.h"
 
 namespace navgen
 {
@@ -18,6 +20,7 @@ constexpr double kMinRimLength = 0.1;
 constexpr double kPlaneNormalEpsilon = 1e-4;
 constexpr double kPlaneDistEpsilon = 0.01;
 constexpr double kLethalProbeLift = 1.0;
+constexpr double kSkyProbeDrop = 2.0;
 constexpr double kOnBoundaryEpsilon = 0.1;
 constexpr double kMinNotchArea = 1.0;
 constexpr double kMinFragmentVolume = 1.0;
@@ -953,6 +956,42 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 		*statsOut = stats;
 
 	return out;
+}
+
+
+size_t DropSkyFloorLeaves(const BspFile &bsp, std::vector<ExtractedLeaf> &leaves)
+{
+	if (leaves.empty())
+		return 0;
+
+	VisIndex index(bsp);
+	const std::vector<dleaf_t> &worldLeafs = bsp.Leafs();
+
+	std::vector<ExtractedLeaf> kept;
+	kept.reserve(leaves.size());
+
+	for (const ExtractedLeaf &leaf : leaves)
+	{
+		const Face *floorFace = LowestFloorFace(leaf.polytope);
+		bool onSky = false;
+
+		if (floorFace)
+		{
+			Vec3 probe = WindingCentroid(floorFace->winding);
+			probe.z += kDuckClipHullMinZ - kSkyProbeDrop;
+
+			int worldLeaf = index.LeafForPoint(probe);
+			if (worldLeaf >= 0 && static_cast<size_t>(worldLeaf) < worldLeafs.size())
+				onSky = worldLeafs[static_cast<size_t>(worldLeaf)].contents == CONTENTS_SKY;
+		}
+
+		if (!onSky)
+			kept.push_back(leaf);
+	}
+
+	size_t dropped = leaves.size() - kept.size();
+	leaves.swap(kept);
+	return dropped;
 }
 
 

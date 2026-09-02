@@ -22,6 +22,13 @@
 .PARAMETER TimeoutMultiplier
     Multiplier on bot's reported ETA (default: 6.0)
 
+.PARAMETER Overhead
+    Seconds the child is allowed on top of -Timeout before it is killed as wedged (default:
+    120). This covers everything outside the goal poll: the navgen run that builds the .nav,
+    HLDS boot, and the second navgen that draws the SVG. The big open maps spend over a
+    minute in navgen's vantage pass alone, so a budget that fits the small maps kills them
+    mid-SVG and reports a failure the navigation never had.
+
 .PARAMETER NavGenPath
     Path to navgen.exe (default: build\tools\navgen\navgen.exe)
 
@@ -48,6 +55,7 @@ param(
     [int]$MaxParallel = 6,
     [int]$Timeout = 60,
     [double]$TimeoutMultiplier = 6.0,
+    [int]$Overhead = 120,
     [string]$NavGenPath = "build\tools\navgen\navgen.exe",
     [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
     [string]$OutputDir = "nav_debug",
@@ -175,7 +183,7 @@ for ($i = 0; $i -lt $mapFiles.Count; $i++) {
         ErrLog     = $errLog
         ResultFile = $resultFile
         StartTime  = Get-Date
-        Deadline   = (Get-Date).AddSeconds($Timeout + 90)
+        Deadline   = (Get-Date).AddSeconds($Timeout + $Overhead)
         Killed     = $false
     })
 
@@ -225,7 +233,10 @@ foreach ($t in $tracked) {
         $line = Select-String -Path $t.Log -Pattern '=== RESULT: ' | Select-Object -Last 1
         if ($line) { $reason = ($line.Line -replace '^.*=== RESULT: ', '') -replace ' ===$', '' }
     }
-    if ($t.Killed) { $reason = "killed at deadline ($([int]($Timeout + 90))s)" }
+    if ($t.Killed) {
+        $reason = if ($reason) { "killed at deadline ($([int]($Timeout + $Overhead))s) after: $reason" }
+                  else { "killed at deadline ($([int]($Timeout + $Overhead))s)" }
+    }
     if (-not $reason) { $reason = "no verdict recorded (exit $exitCode), see $($t.Log)" }
 
     $results.Add([pscustomobject]@{

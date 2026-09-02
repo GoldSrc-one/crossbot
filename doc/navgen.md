@@ -87,6 +87,8 @@ Command-line tool with extensive debug flags:
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
 - `--no-lethal` - keep floors and routes that only a fall through a lethal `trigger_hurt` can
   reach (debug: isolate what the lethal prune removes; see `floor_support.cpp`)
+- `--no-sky-prune` - keep floors whose underside is sky (debug: isolate what the sky prune removes,
+  e.g. the skybox shell a test map is built inside; see `floor_support.cpp`)
 - `--max-merge-group <n>` - most leaf groups one merge may fuse (default 64). `1` blocks the first
   absorption, so nothing merges at all and each BSP hull-3 leaf becomes its own area — this replaces the
   old `--no-merge`, whose output it reproduces exactly
@@ -739,6 +741,27 @@ Every floor face of the leaf, not just the lowest one. A leaf beside a ramp hold
 
 ### Patch Cutting
 A supported patch only has to be cut out where it stops being supported, so an edge it shares with another supported patch is a seam and stays uncut. There is no such thing as a patch supported by ground a step below any more: a floor face is supported where solid is directly under it and nowhere else, and the space over the ground below is reunited with that ground by absorption rather than by inventing floor at the upper height.
+
+### DropSkyFloorLeaves
+Sky is solid in the clip hulls, so the inside of a map's skybox shell extracts as ordinary walkable
+floor. Nothing downstream objects: the shell is a genuine standing surface, a bot that walks off a
+platform lands on it, and because that fall is a real air move the reachability prune keeps the whole
+thing. It is still not a place a bot should ever be — it is the outside of the level.
+
+The test is per leaf, on its lowest floor face's centroid, probed 2 units under the real surface
+(`kDuckClipHullMinZ - 2`, since floor faces sit in the duck hull) and classified by the hull-0 world
+leaf there. Contents `CONTENTS_SKY` means the leaf is standing on the shell, and it goes. There is no
+trace and no volume list — the BSP already answers the question.
+
+It runs at the leaf stage, immediately before the lethal prune, for the reason given below: `MergeAreas`
+would otherwise fuse shell floor with the real ledges standing over it.
+
+**What it is worth.** Only the two synthetic skybox maps have any: test39_skybox (2 leaves) and
+test41_skydrop (3). In both, the shell was ~98.4% of the map's walkable footprint — 8.05M of 8.19M sq
+units on test39 — which the vantage sampler pays for quadratically: 36k lattice points and 664M pair
+checks, 71s of a 71s run. After the prune it is 660 points, 217k pairs, and navgen finishes in 0.9s.
+All 19 HLDM maps report 0% sky floor, so the prune is a no-op on real maps; `--no-sky-prune` restores
+the old behaviour for comparison.
 
 ### DropLethalFloorLeaves
 `trigger_hurt` with `dmg >= 100` is not an obstacle, it is a floor deleter. One tick of it takes a full

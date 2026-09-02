@@ -461,7 +461,7 @@ try {
         "" | Set-Content -Path $traceOut
     }
 
-    $navgenArgs = @($mapPath, "--dump-svg", $svgOut, "--trace", $traceOut, "-o", $navOut)
+    $navgenArgs = @($mapPath, "--dump-svg", $svgOut, "--trace", $traceOut, "--no-vantage")
     Write-Host "Running: navgen.exe $($navgenArgs -join ' ')"
     $svgRun = Invoke-Native -Exe $navGenExe -Arguments $navgenArgs
     Write-Host $svgRun.Output
@@ -471,7 +471,13 @@ try {
     } else {
         Write-Host "SVG written: $svgOut"
     }
-    if (Test-Path $navOut) { Write-Host "NAV written: $navOut" }
+
+    if (Test-Path $botNavPath) {
+        Copy-Item -Path $botNavPath -Destination $navOut -Force
+        Write-Host "NAV written: $navOut"
+    } else {
+        Write-Warning "no nav file to copy from $botNavPath"
+    }
 
     "$result`t$reason" | Set-Content -Path $resultOut
 

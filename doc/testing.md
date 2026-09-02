@@ -14,9 +14,12 @@ What it does per run:
   therefore the same start/goal pair `navgen --dump-path` uses, and usually *not* the pair a live bot
   gets from `crossbot_nav_goal`.
 - Polls the bot over RCON rather than parsing the shared `qconsole.log`.
-- Collects the movement trace, then runs `navgen --dump-svg ... --trace ...` to write
-  `nav_debug/<map>.svg` and `<map>.nav`, so the failure is inspectable afterwards. A run that never
-  produced a trace still draws — an empty or missing trace file draws nothing rather than failing.
+- Collects the movement trace, then runs `navgen --dump-svg ... --trace ... --no-vantage` to write
+  `nav_debug/<map>.svg`, so the failure is inspectable afterwards. A run that never produced a trace
+  still draws — an empty or missing trace file draws nothing rather than failing. `--dump-svg` never
+  reads the visibility field (only `--dump-vantage-svg` does), so computing one here bought nothing
+  and doubled the run's navgen cost. `nav_debug/<map>.nav` is copied from the file the bot actually
+  ran on rather than regenerated, so it still has its vantage section.
 - Updates `nav_debug/index.html` with the pass/fail mark.
 
 Options: `-Timeout` (absolute cap, default 60s), `-TimeoutMultiplier` (on the bot's reported ETA,
@@ -55,6 +58,13 @@ instances and appended to, so prefer the per-map log and read qconsole by tail i
 The same test over every `maps/*.bsp`, at most `-MaxParallel` at a time. Each map runs as its own
 PowerShell child process, so its verdict is a real process exit code and its whole transcript lands in
 `nav_debug/logs/<map>.log`. Summary prints map, PASS/FAIL, elapsed and reason; exit 1 if anything failed.
+
+**`-Overhead` (default 120s) is the child's budget outside the goal poll**, and the kill deadline is
+`-Timeout` plus it. It covers the navgen run that builds the `.nav`, HLDS boot and the navgen run that
+draws the SVG. It exists because a child killed here reports FAIL no matter what the bot did: the two
+skybox maps used to blow the old fixed 90s budget in navgen alone and were reported as failures whose
+transcripts said `RESULT: PASS`. When a killed child had already recorded a verdict, the summary now
+prints it — `killed at deadline (180s) after: goal reached, ...` is a harness problem, not a nav one.
 
 **Run it under `pwsh` 7, not Windows PowerShell 5.1.** Because the verdict is the child's exit code
 rather than anything the child printed, a broken `Start-Process -PassThru` handle fails every map at
@@ -189,9 +199,11 @@ tier must be empty and gather behaviour untouched.
 
 **Regression.** `test_nav_goal.ps1` sets `crossbot_fun 0` alongside `crossbot_gather 0`, so the
 51-map sweep is unaffected by the tier and stays comparable against transcripts taken before it
-existed. Four maps fail that sweep — `test19_water` and `test54_window` abandon the goal, `test39_skybox`
-and `test41_skydrop` hit the deadline — and all four fail identically with the plugin sources stashed,
-so they are pre-existing and not a tier regression.
+existed. One map fails that sweep: `test54_window` abandons the goal, because navgen cannot route to
+it at all (`no route from area 1 to area 18`). It fails identically with the plugin sources stashed,
+so it is pre-existing and not a tier regression. `test19_water` also used to abandon, and
+`test39_skybox` and `test41_skydrop` used to hit the deadline; the skybox pair was the sky prune (see
+`DropSkyFloorLeaves` in `doc/navgen.md`), not the follower.
 
 **Perf.** Measured on crossfire, 8 bots, `-DCROSSBOT_PERF=ON`: `item_select` self time is
 0.0288 ms/f with the tier on against 0.0264 ms/f with `crossbot_fun 0`, which is inside the

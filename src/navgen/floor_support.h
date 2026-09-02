@@ -51,6 +51,8 @@ struct FloorSupportStats
 	size_t waterColumns = 0;
 };
 
+size_t DropSkyFloorLeaves(const BspFile &bsp, std::vector<ExtractedLeaf> &leaves);
+
 size_t DropLethalFloorLeaves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 	const std::vector<BlockingVolume> &hurtVolumes, std::vector<ExtractedLeaf> &leaves);
 
