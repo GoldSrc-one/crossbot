@@ -40,6 +40,9 @@ struct HullTree
 
 HullTree WorldHull(const BspFile &bsp);
 
+void WalkHullTree(const HullTree &hull, int headnode, const ContentsFilter &filter,
+	const LeafCallback &callback);
+
 struct TraceResult
 {
     Vec3 start;

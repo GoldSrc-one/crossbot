@@ -27,6 +27,21 @@ struct Area
 
 	std::vector<AreaPlane> planes;
 
+	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
+	float submergeZ = crossbot_nav::kNavSubmergeNever;
+};
+
+struct WaterVolume
+{
+	uint32_t modelIndex = 0;
+	Vector mins, maxs;
+	float surfaceZ = 0.f;
+	Vector travel;
+	bool moving = false;
+
+	mutable int cachedEntIndex = -1;
+	mutable float spawnOriginZ = 0.f;
+	mutable bool resolved = false;
 };
 
 struct Connection
@@ -52,6 +67,9 @@ struct Connection
 
 	float gravity = 1.f;
 
+	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
+	float submergeZ = crossbot_nav::kNavSubmergeNever;
+
 	NavPlan::PlanGate gateA, gateB;
 	float gateAYaw[2] = {0.f, 0.f};
 	float gateASpeed[2] = {0.f, 0.f};
@@ -67,6 +85,8 @@ struct NavMesh
 
 	std::vector<NavPlan::PlanArea> planAreas;
 	std::vector<NavPlan::PlanConnection> planConns;
+
+	std::vector<WaterVolume> waterVolumes;
 
 	VantageField vantageField;
 };

@@ -11,6 +11,8 @@ namespace NavAStar
 
 constexpr float kNavRunSpeed = 250.f;
 
+constexpr float kNavSwimSpeed = kNavRunSpeed * 0.8f;
+
 struct Connection
 {
 	uint32_t areaA = 0, areaB = 0;

@@ -67,7 +67,8 @@ void WriteRaw(FILE *f, const void *data, size_t bytes, const char *what)
 
 void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t bspChecksum,
 	const std::vector<Area> &areas, const std::vector<MergedConnection> &conns, float designMaxSpeed,
-	const std::vector<Vantage> &vantages, float vantageSpacing, float maxExposure)
+	const std::vector<Vantage> &vantages, float vantageSpacing, float maxExposure,
+	const std::vector<LiquidVolume> &waterVolumes)
 {
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
@@ -95,6 +96,9 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.activation = areas[i].activation;
 		rec.pad0[0] = rec.pad0[1] = rec.pad0[2] = 0;
 		rec.openSeconds = static_cast<float>(areas[i].openSeconds);
+		rec.waterVolume = areas[i].waterVolume;
+		rec.pad1[0] = rec.pad1[1] = rec.pad1[2] = 0;
+		rec.submergeZ = static_cast<float>(areas[i].submergeZ);
 
 		rec.detourOffset = static_cast<uint32_t>(detourRecords.size());
 		rec.detourCount = static_cast<uint32_t>(areas[i].detours.size());
@@ -183,6 +187,9 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 
 		rec.costSeconds = ConnectionCostSeconds(c);
 		rec.travelSeconds = ConnectionTravelSeconds(areas, c);
+		rec.waterVolume = c.waterVolume;
+		rec.pad2[0] = rec.pad2[1] = rec.pad2[2] = 0;
+		rec.submergeZ = static_cast<float>(c.submergeZ);
 
 		rec.exitSpeed = static_cast<float>(c.exitSpeed);
 		rec.exitAngle = static_cast<float>(c.exitAngle);
@@ -230,6 +237,25 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		}
 	}
 
+	std::vector<NavWaterVolumeRecord> waterRecords(waterVolumes.size());
+	for (size_t i = 0; i < waterVolumes.size(); ++i)
+	{
+		const LiquidVolume &vol = waterVolumes[i];
+		NavWaterVolumeRecord &rec = waterRecords[i];
+		rec.modelIndex = static_cast<uint32_t>(vol.modelIndex);
+		rec.mins[0] = static_cast<float>(vol.mins.x);
+		rec.mins[1] = static_cast<float>(vol.mins.y);
+		rec.mins[2] = static_cast<float>(vol.mins.z);
+		rec.maxs[0] = static_cast<float>(vol.maxs.x);
+		rec.maxs[1] = static_cast<float>(vol.maxs.y);
+		rec.maxs[2] = static_cast<float>(vol.maxs.z);
+		rec.surfaceZ = static_cast<float>(vol.surfaceZ);
+		rec.travel[0] = static_cast<float>(vol.travel.x);
+		rec.travel[1] = static_cast<float>(vol.travel.y);
+		rec.travel[2] = static_cast<float>(vol.travel.z);
+		rec.flags = vol.moving ? crossbot_nav::WATERVOL_MOVING : crossbot_nav::WATERVOL_NONE;
+	}
+
 	NavHeader header{};
 	std::memcpy(header.magic, kNavMagic, sizeof(header.magic));
 	header.version = kNavVersion;
@@ -247,6 +273,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	header.vantageCount = static_cast<uint32_t>(vantageRecords.size());
 	header.vantageSpacing = vantageSpacing;
 	header.maxExposure = maxExposure;
+	header.waterVolumeCount = static_cast<uint32_t>(waterRecords.size());
 
 	WriteRaw(f, &header, sizeof(header), "header");
 	WriteRaw(f, areaRecords.data(), areaRecords.size() * sizeof(NavAreaRecord), "area records");
@@ -257,6 +284,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		"activation detours");
 	WriteRaw(f, detourPoints.data(), detourPoints.size() * sizeof(NavDetourPointRecord), "detour points");
 	WriteRaw(f, vantageRecords.data(), vantageRecords.size() * sizeof(NavVantageRecord), "vantages");
+	WriteRaw(f, waterRecords.data(), waterRecords.size() * sizeof(NavWaterVolumeRecord), "water volumes");
 
 	std::fclose(f);
 }

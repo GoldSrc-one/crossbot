@@ -102,6 +102,7 @@ std::vector<ExtractedLeaf> SplitLeavesByStandClearance(const BspFile &bsp, int s
 		piece.polytope = std::move(poly);
 		piece.passableIndex = from.passableIndex;
 		piece.elevatorStopId = from.elevatorStopId;
+		piece.waterColumn = from.waterColumn;
 		out.push_back(std::move(piece));
 		isCrouchLeafOut.push_back(crouch);
 	};

@@ -25,6 +25,7 @@
 #include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
 #include "../nav/nav_query.h"
+#include "../nav/nav_water.h"
 #include "../nav/path_follower.h"
 
 namespace
@@ -119,6 +120,8 @@ namespace
 		}
 		traces.physics = Bot_Physics(pEdict);
 		traces.gravityMultiplier = Bot_GravityMultiplier(pEdict);
+		if (const Nav::NavMesh *mesh = Nav::Get())
+			traces.waterSurfaces = &Nav::WaterSurfaces(*mesh);
 		g_airmoveCache.SetVerify(g_engfuncs.pfnCVarGetFloat("crossbot_airmove_verify") > 0.f);
 		traces.airmoveCache = &g_airmoveCache;
 		return traces;
@@ -2081,6 +2084,80 @@ void Bot_ResetNavPath(CBot &bot)
 	ResetPath(bot);
 }
 
+namespace
+{
+	constexpr float kSwimReach = 40.f;
+	constexpr float kSwimUpDrive = 320.f;
+	constexpr float kSwimClimbSlack = 8.f;
+	constexpr float kSwimAirPanic = 3.f;
+	constexpr int kWaterlevelEyes = 3;
+
+	bool RunSwimMove(CBot &bot)
+	{
+		edict_t *pEdict = bot.pEdict;
+
+		if (pEdict->v.waterlevel < kWaterlevelSwimming)
+			return false;
+
+		if ((pEdict->v.flags & FL_WATERJUMP) != 0)
+		{
+			Vector angles = Bot_UpdateFacing(bot);
+			Bot_RunPlayerMove(bot, angles, 0.f, 0.f, 0);
+			return true;
+		}
+
+		if (bot.waypoints.empty())
+			return false;
+
+		size_t wasIndex = bot.waypointIndex;
+		while (bot.waypointIndex < bot.waypoints.size() &&
+			(bot.waypoints[bot.waypointIndex].point - pEdict->v.origin).Length() < kSwimReach)
+			++bot.waypointIndex;
+
+		if (bot.waypointIndex != wasIndex)
+			bot.lastProgressTime = gpGlobals->time;
+
+		if (bot.waypointIndex >= bot.waypoints.size())
+			return false;
+
+		Vector to = bot.waypoints[bot.waypointIndex].point - pEdict->v.origin;
+		float flat = sqrtf(to.x * to.x + to.y * to.y);
+
+		float yaw = (flat > 0.1f) ? atan2f(to.y, to.x) * (180.f / kPiF) : pEdict->v.v_angle.y;
+		float pitch = -atan2f(to.z, std::max(flat, 1.f)) * (180.f / kPiF);
+		if (pitch > 89.f)
+			pitch = 89.f;
+		else if (pitch < -89.f)
+			pitch = -89.f;
+
+		bot.desiredAngles = Vector(pitch, yaw, 0.f);
+		Vector angles = Bot_UpdateFacing(bot);
+
+		float drive = Bot_MaxSpeed(pEdict);
+		float upmove = 0.f;
+
+		if (to.z > kSwimClimbSlack)
+			upmove = kSwimUpDrive;
+		else if (to.z < -kSwimClimbSlack)
+			upmove = -kSwimUpDrive;
+
+		bool lowOnAir = pEdict->v.waterlevel >= kWaterlevelEyes &&
+			pEdict->v.air_finished > 0.f &&
+			(pEdict->v.air_finished - gpGlobals->time) < kSwimAirPanic;
+		if (lowOnAir)
+			upmove = kSwimUpDrive;
+
+		if (upmove == 0.f && drive == 0.f)
+			upmove = 1.f;
+
+		bot.moveForward = drive;
+		bot.moveSide = 0.f;
+
+		Bot_RunPlayerMove(bot, angles, drive, 0.f, 0, false, upmove);
+		return true;
+	}
+}
+
 void Bot_MoveNav(CBot &bot)
 {
 	edict_t *pEdict = bot.pEdict;
@@ -2175,8 +2252,11 @@ void Bot_MoveNav(CBot &bot)
 		bot.lastProgressTime = gpGlobals->time;
 	}
 
-	bool forcedRepath = RepathDue(bot);
-	bool stalled = !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
+	bool swimming = pEdict->v.waterlevel >= kWaterlevelSwimming &&
+		bot.waypointIndex < bot.waypoints.size();
+
+	bool forcedRepath = RepathDue(bot) && !swimming;
+	bool stalled = !swimming && !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
 	if (stalled && !forcedRepath && gpGlobals->time < bot.avoid.blockedUntil)
 	{
@@ -2229,6 +2309,12 @@ void Bot_MoveNav(CBot &bot)
 			return;
 		if (RepathDue(bot) && !TryRepath(bot, *mesh, pEdict, "elevator ride ended off-plan"))
 			return;
+	}
+
+	if (RunSwimMove(bot))
+	{
+		bot.trackState.started = false;
+		return;
 	}
 
 	BotPerf::Enter(BotPerf::ZONE_OPPO);

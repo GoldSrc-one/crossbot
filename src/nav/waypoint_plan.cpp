@@ -526,7 +526,8 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 		const PlanArea &a = areas[conn.areaA];
 		const PlanArea &b = areas[conn.areaB];
 
-		if (conn.connType == crossbot_nav::CONN_AIRMOVE || conn.connType == crossbot_nav::CONN_LADDER)
+		if (conn.connType == crossbot_nav::CONN_AIRMOVE || conn.connType == crossbot_nav::CONN_LADDER ||
+			conn.connType == crossbot_nav::CONN_SWIM)
 			continue;
 
 		EdgeLine shared = EdgeOfPlane(a, conn.planeA);
@@ -1065,6 +1066,16 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 	const PlanArea &fromArea = (*m_areas)[fromId];
 	const PlanArea &toArea = (*m_areas)[toId];
 
+	{
+		const std::vector<float> *surfaces = m_traces ? m_traces->waterSurfaces : nullptr;
+		if (crossbot_nav::ConnBlockedByWater(conn.connType,
+				SubmergedAt(surfaces, conn.waterVolume, conn.submergeZ)))
+		{
+			++m_stats.waterRejected;
+			return false;
+		}
+	}
+
 	if (toArea.activation != crossbot_nav::ACT_NONE &&
 		conn.connType != crossbot_nav::CONN_WALK &&
 		conn.connType != crossbot_nav::CONN_ELEVATOR)
@@ -1100,6 +1111,41 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 		PushWaypoint(arriveWp, false);
 
 		m_anchor = arriveWp.point;
+		m_anchorFromAirmove = false;
+		UpdateFrontier();
+		return true;
+	}
+
+	if (conn.connType == crossbot_nav::CONN_SWIM)
+	{
+		const std::vector<float> *surfaces = m_traces ? m_traces->waterSurfaces : nullptr;
+
+		bool fromA = (fromId == conn.areaA);
+		Vector entryFloor = fromA ? conn.launchPos : conn.landingPos;
+		Vector exitFloor = fromA ? conn.landingPos : conn.launchPos;
+
+		Vector entry = SubmergedAt(surfaces, fromArea.waterVolume, fromArea.submergeZ)
+			? entryFloor : AtPlayerHeight(entryFloor, fromId);
+		Vector exit = SubmergedAt(surfaces, toArea.waterVolume, toArea.submergeZ)
+			? exitFloor : AtPlayerHeight(exitFloor, toId);
+
+		bool tailCrouch = FlushFunnelTo(entry);
+
+		PlanWaypoint entryWp;
+		entryWp.point = entry;
+		entryWp.targetAreaId = static_cast<int>(fromId);
+		entryWp.connIndex = static_cast<int>(connIndex);
+		entryWp.requiresCrouch = tailCrouch || fromArea.crouch;
+		PushWaypoint(entryWp);
+
+		PlanWaypoint exitWp;
+		exitWp.point = exit;
+		exitWp.targetAreaId = static_cast<int>(toId);
+		exitWp.connIndex = static_cast<int>(connIndex);
+		exitWp.requiresCrouch = toArea.crouch;
+		PushWaypoint(exitWp);
+
+		m_anchor = exitWp.point;
 		m_anchorFromAirmove = false;
 		UpdateFrontier();
 		return true;

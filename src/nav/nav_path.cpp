@@ -5,6 +5,7 @@
 #include <queue>
 
 #include "astar_graph.h"
+#include "nav_water.h"
 
 namespace Nav
 {
@@ -12,12 +13,27 @@ namespace Nav
 namespace
 {
 
+bool WaterBlocks(const NavMesh &mesh, const Connection &c)
+{
+	return crossbot_nav::ConnBlockedByWater(c.connType, ConnSubmerged(mesh, c));
+}
+
 void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaConnIndices,
 	std::vector<NavAStar::Connection> &conns)
 {
 	areaConnIndices.assign(mesh.areas.size(), std::vector<uint32_t>());
 	for (size_t i = 0; i < mesh.areas.size(); ++i)
-		areaConnIndices[i] = mesh.areas[i].connIndices;
+	{
+		const std::vector<uint32_t> &src = mesh.areas[i].connIndices;
+		std::vector<uint32_t> &dst = areaConnIndices[i];
+		dst.reserve(src.size());
+		for (uint32_t idx : src)
+		{
+			if (idx < mesh.conns.size() && WaterBlocks(mesh, mesh.conns[idx]))
+				continue;
+			dst.push_back(idx);
+		}
+	}
 
 	conns.assign(mesh.conns.size(), NavAStar::Connection());
 	for (size_t i = 0; i < mesh.conns.size(); ++i)
@@ -114,6 +130,8 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 				continue;
 			if (c.connType == crossbot_nav::CONN_AIRMOVE &&
 				std::fabs(c.gravity - gravityMultiplier) > kGravityEpsilon)
+				continue;
+			if (WaterBlocks(mesh, c))
 				continue;
 
 			float base = c.travelSeconds + c.costSeconds + c.runtimePenalty;

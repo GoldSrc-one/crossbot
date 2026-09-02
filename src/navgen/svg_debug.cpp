@@ -20,8 +20,20 @@ struct Pt2
 
 std::vector<Pt2> AreaFootprint(const Area &area)
 {
+	Winding winding;
+	if (area.alwaysSubmerged)
+	{
+		std::vector<Vec3> pts;
+		for (const Face &fc : area.waterCeiling)
+			for (const Vec3 &v : fc.winding)
+				pts.push_back(v);
+		winding = ConvexHullXY(pts);
+	}
+	else
+		winding = WalkableFootprint(area.polytope);
+
 	std::vector<Pt2> poly;
-	for (const Vec3 &v : WalkableFootprint(area.polytope))
+	for (const Vec3 &v : winding)
 		poly.push_back({v.x, -v.y});
 	return poly;
 }
@@ -32,14 +44,18 @@ constexpr const char *kAreaCrouch = "#93b3cf";
 constexpr const char *kAreaDoor = "#b99a5b";
 constexpr const char *kAreaBreakable = "#a8705f";
 constexpr const char *kAreaElevator = "#6fa8a0";
+constexpr const char *kAreaWater = "#1f6f8b";
+constexpr const char *kAreaFloodable = "#4d7f8f";
 constexpr const char *kConnWalk = "#e8eef4";
 constexpr const char *kConnAirmove = "#e74c3c";
 constexpr const char *kConnTeleport = "#27ae60";
 constexpr const char *kConnLadder = "#f1c40f";
 constexpr const char *kConnElevator = "#4aa3df";
+constexpr const char *kConnSwim = "#00d0ff";
 constexpr const char *kGate = "#8e6fc4";
 constexpr const char *kGateJump = "#e74c3c";
 constexpr const char *kRoute = "#f39c12";
+constexpr const char *kWaterSurface = "#57e0ff";
 
 constexpr const char *kRouteAirmoveSim = "#2ecc71";
 constexpr const char *kRouteAirmoveStored = "#ff3b30";
@@ -85,6 +101,15 @@ void ExposureColor(double t, char *out, size_t outSize)
 
 double AreaFloorZ(const Area &area)
 {
+	if (area.alwaysSubmerged && !area.waterCeiling.empty())
+	{
+		double highest = -1e30;
+		for (const Face &fc : area.waterCeiling)
+			for (const Vec3 &v : fc.winding)
+				highest = std::max(highest, v.z);
+		return highest;
+	}
+
 	double lowest = 1e30;
 	for (const Face &f : area.polytope.faces)
 	{
@@ -119,6 +144,9 @@ ConnStyle StyleForConn(uint8_t connType)
 
 	case CONN_ELEVATOR:
 		return {kConnElevator, "6,3", 1.8};
+
+	case CONN_SWIM:
+		return {kConnSwim, "1,3", 1.4};
 	case CONN_WALK:
 	default:
 		return {kConnWalk, nullptr, 1.0};
@@ -127,6 +155,10 @@ ConnStyle StyleForConn(uint8_t connType)
 
 const char *FillForArea(const Area &area)
 {
+	if (area.alwaysSubmerged)
+		return kAreaWater;
+	if (area.areaFlags & crossbot_nav::NAV_AREA_WATER)
+		return kAreaFloodable;
 	if (area.areaFlags & crossbot_nav::NAV_AREA_DOOR)
 		return kAreaDoor;
 	if (area.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE)
@@ -155,7 +187,8 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 	const std::vector<MergedConnection> &conns, const std::vector<Vec3> &pathPoints,
 	const std::vector<Vec3> &targetPoints, const std::vector<uint8_t> &pathSegmentKinds,
 	const std::vector<FailedAirmove> &failedAirmoves, const std::vector<Vec3> &tracePoints,
-	const std::vector<std::vector<Vec3>> &runupTraces, const std::vector<float> &pathSpeeds)
+	const std::vector<std::vector<Vec3>> &runupTraces, const std::vector<float> &pathSpeeds,
+	const std::vector<LiquidVolume> &waterVolumes)
 {
 	FILE *f = std::fopen(path.c_str(), "w");
 	if (!f)
@@ -233,6 +266,38 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		std::fprintf(f, "\"/>\n");
 	}
 	std::fprintf(f, "</g>\n");
+
+	if (!waterVolumes.empty())
+	{
+		std::fprintf(f, "<g fill=\"%s\" fill-opacity=\"0.10\" stroke=\"%s\" stroke-opacity=\"0.80\" "
+			"stroke-width=\"%.2f\" stroke-dasharray=\"%.1f %.1f\">\n",
+			kWaterSurface, kWaterSurface, unit * 0.3, unit * 1.2, unit * 0.8);
+
+		for (const LiquidVolume &vol : waterVolumes)
+		{
+			for (const Polytope &piece : vol.pieces)
+			{
+				std::vector<Vec3> pts;
+				for (const Face &fc : piece.faces)
+					for (const Vec3 &v : fc.winding)
+						pts.push_back(v);
+
+				Winding hull = ConvexHullXY(pts);
+				if (hull.size() < 3)
+					continue;
+
+				std::fprintf(f, "<polygon points=\"");
+				for (const Vec3 &v : hull)
+					std::fprintf(f, "%.1f,%.1f ", v.x, -v.y);
+				std::fprintf(f, "\"><title>water surface %.0f", vol.LowSurfaceZ());
+				if (vol.moving)
+					std::fprintf(f, " rising to %.0f", vol.HighSurfaceZ());
+				std::fprintf(f, "</title></polygon>\n");
+			}
+		}
+
+		std::fprintf(f, "</g>\n");
+	}
 
 	std::fprintf(f, "<g stroke-linecap=\"round\" stroke-opacity=\"0.85\">\n");
 	for (const MergedConnection &c : conns)
@@ -410,7 +475,7 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		double lh = unit * 3.4;
 		double panelW = unit * 30.0;
 
-		constexpr int kLegendRows = 14;
+		constexpr int kLegendRows = 18;
 		double panelH = lh * (kLegendRows + 1.6);
 		double swatchW = unit * 3.0;
 		double fontSize = unit * 2.6;
@@ -470,10 +535,14 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 		SwatchRow(kAreaDoor, "area (door)");
 		SwatchRow(kAreaBreakable, "area (breakable)");
 		SwatchRow(kAreaElevator, "area (elevator stop)");
+		SwatchRow(kAreaWater, "area (under water)");
+		SwatchRow(kAreaFloodable, "area (floods)");
 		LineRow(kConnWalk, nullptr, 1.0, "walk");
 		LineRow(kConnAirmove, "4,2", 1.3, "air move");
 		LineRow(kConnLadder, "2,3", 1.6, "ladder");
 		LineRow(kConnElevator, "6,3", 1.8, "elevator ride");
+		LineRow(kConnSwim, "1,3", 1.4, "swim");
+		LineRow(kWaterSurface, "3,2", 0.6, "water surface");
 		LineRow(kGate, "3,2", 0.5, "funnel gate");
 		LineRow(kGateJump, "3,2", 0.5, "funnel gate (air move)");
 		LineRow(kRoute, nullptr, 1.8, "planned route");

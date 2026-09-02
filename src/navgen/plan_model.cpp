@@ -30,6 +30,8 @@ PlanModel BuildPlanModel(const MergeResult &merged, bool walkOnly)
 		pa.elevator = (area.areaFlags & crossbot_nav::NAV_AREA_ELEVATOR) != 0;
 		pa.activation = area.activation;
 		pa.doorWaitTime = static_cast<float>(area.openSeconds);
+		pa.waterVolume = area.waterVolume;
+		pa.submergeZ = static_cast<float>(area.submergeZ);
 
 		pa.detours.reserve(area.detours.size());
 		for (const ActivationDetour &d : area.detours)
@@ -110,6 +112,8 @@ PlanModel BuildPlanModel(const MergeResult &merged, bool walkOnly)
 		pc.rideSeconds = static_cast<float>(c.rideSeconds);
 		pc.rideSecondsMax = static_cast<float>(c.rideSecondsMax);
 		pc.rideWaitSeconds = static_cast<float>(c.rideWaitSeconds);
+		pc.waterVolume = c.waterVolume;
+		pc.submergeZ = static_cast<float>(c.submergeZ);
 
 		if (walkOnly && c.connType != crossbot_nav::CONN_WALK)
 			continue;

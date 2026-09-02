@@ -6,6 +6,7 @@
 #include "bsp_file.h"
 #include "leaf_extractor.h"
 #include "polytope.h"
+#include "water_volumes.h"
 
 namespace navgen
 {
@@ -38,12 +39,16 @@ double FloorHeightAt(const Face &floorFace, double x, double y);
 std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const Face &floorFace);
 
+std::vector<Winding> ComputeSupportedCeiling(const BspFile &bsp, int headnode,
+	const std::vector<BlockingVolume> &blockers, const Face &ceilingFace);
+
 struct FloorSupportStats
 {
 	size_t dropped = 0;
 	size_t split = 0;
 	size_t noFloor = 0;
 	size_t absorbed = 0;
+	size_t waterColumns = 0;
 };
 
 size_t DropLethalFloorLeaves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
@@ -51,7 +56,8 @@ size_t DropLethalFloorLeaves(const BspFile &bsp, int headnode, const std::vector
 
 std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const std::vector<ExtractedLeaf> &leaves, double mapRadius,
-	FloorSupportStats *statsOut = nullptr, bool dump = false);
+	FloorSupportStats *statsOut = nullptr, bool dump = false,
+	const std::vector<LiquidVolume> *waterVolumes = nullptr);
 
 }
 

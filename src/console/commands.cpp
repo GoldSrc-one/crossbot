@@ -16,6 +16,7 @@
 #include "../game/give_item.h"
 #include "../game/hldm_weapons.h"
 #include "../nav/nav.h"
+#include "../nav/nav_water.h"
 
 #if defined(_WIN32)
 #define CB_STRICMP _stricmp
@@ -637,6 +638,61 @@ namespace
 			mesh->conns.size());
 		SERVER_PRINT(summary);
 	}
+
+	void Cmd_CrossBotNavWater()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+			return;
+		}
+
+		if (mesh->waterVolumes.empty())
+		{
+			SERVER_PRINT("CrossBot: this map has no water\n");
+			return;
+		}
+
+		const std::vector<float> &surfaces = Nav::WaterSurfaces(*mesh);
+
+		for (size_t i = 0; i < mesh->waterVolumes.size(); ++i)
+		{
+			const Nav::WaterVolume &vol = mesh->waterVolumes[i];
+			float live = (i < surfaces.size()) ? surfaces[i] : vol.surfaceZ;
+
+			char msg[240];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: water %zu model *%u surface %.1f (baked %.1f, travel %.1f)%s\n", i,
+				vol.modelIndex, live, vol.surfaceZ, vol.travel.z, vol.moving ? " moving" : "");
+			SERVER_PRINT(msg);
+		}
+
+		size_t wetAreas = 0;
+		for (const Nav::Area &area : mesh->areas)
+		{
+			if (Nav::AreaSubmerged(*mesh, area))
+				++wetAreas;
+		}
+
+		size_t blocked = 0;
+		size_t swimLive = 0;
+		for (const Nav::Connection &c : mesh->conns)
+		{
+			bool submerged = Nav::ConnSubmerged(*mesh, c);
+			if (crossbot_nav::ConnBlockedByWater(c.connType, submerged))
+				++blocked;
+			else if (c.connType == crossbot_nav::CONN_SWIM)
+				++swimLive;
+		}
+
+		char summary[200];
+		snprintf(summary, sizeof(summary),
+			"CrossBot: %zu/%zu areas submerged, %zu/%zu connections switched off by water, "
+			"%zu swim links live\n",
+			wetAreas, mesh->areas.size(), blocked, mesh->conns.size(), swimLive);
+		SERVER_PRINT(summary);
+	}
 }
 
 namespace CrossBotCommands
@@ -653,6 +709,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_targets", Cmd_CrossBotListTargets);
 	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
 	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
+	ADD_SERVER_COMMAND("crossbot_nav_water", Cmd_CrossBotNavWater);
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 	ADD_SERVER_COMMAND("crossbot_list_fun", Cmd_CrossBotListFun);
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);

@@ -16,6 +16,8 @@
 namespace navgen
 {
 
+constexpr float kWaterJumpCommitSeconds = 1.0f;
+
 float ConnectionCostSeconds(const MergedConnection &conn)
 {
 	float seconds = 0.0f;
@@ -34,6 +36,10 @@ float ConnectionCostSeconds(const MergedConnection &conn)
 
 	if (conn.connType == crossbot_nav::CONN_ELEVATOR)
 		seconds += static_cast<float>(conn.rideSeconds + conn.rideWaitSeconds);
+
+	if (conn.connType == crossbot_nav::CONN_SWIM &&
+		(conn.connFlags & crossbot_nav::CONN_FLAG_WATERJUMP) != 0)
+		seconds += kWaterJumpCommitSeconds;
 
 	return seconds;
 }
@@ -76,6 +82,10 @@ float ConnectionTravelSeconds(const std::vector<Area> &areas, const MergedConnec
 
 	Vec3 from = areas[static_cast<size_t>(conn.areaA)].polytope.Centroid();
 	Vec3 to = areas[static_cast<size_t>(conn.areaB)].polytope.Centroid();
+
+	if (conn.connType == crossbot_nav::CONN_SWIM)
+		return static_cast<float>(((conn.pointA - from).Length() + (conn.pointB - conn.pointA).Length() +
+			(to - conn.pointB).Length()) / NavAStar::kNavSwimSpeed);
 
 	if (conn.connType != crossbot_nav::CONN_WALK)
 		return static_cast<float>(((conn.pointA - from).Length() + (to - conn.pointB).Length()) /
@@ -780,6 +790,12 @@ int LeafElevatorStop(const std::vector<ExtractedLeaf> &leaves, int leafId)
 		? leaves[static_cast<size_t>(leafId)].elevatorStopId : -1;
 }
 
+uint8_t LeafWaterVolume(const std::vector<ExtractedLeaf> &leaves, int leafId)
+{
+	return (static_cast<size_t>(leafId) < leaves.size())
+		? leaves[static_cast<size_t>(leafId)].waterVolume : crossbot_nav::kNoWaterVolume;
+}
+
 void ApplyPassable(Area &area, const std::vector<PassableVolume> &passables, int passableIndex)
 {
 	if (passableIndex < 0 || static_cast<size_t>(passableIndex) >= passables.size())
@@ -816,6 +832,45 @@ bool PortalSharesWholeFace(double portalArea, double faceAreaA, double faceAreaB
 		return false;
 	return std::fabs(portalArea - faceAreaA) <= kCoverageTolerance * faceAreaA &&
 		std::fabs(portalArea - faceAreaB) <= kCoverageTolerance * faceAreaB;
+}
+
+constexpr double kCeilingFlushEpsilon = 1.0;
+
+bool CeilingHeightAt(const std::vector<Face> &faces, double x, double y, double &zOut)
+{
+	bool found = false;
+	double best = -1e30;
+
+	for (const Face &f : faces)
+	{
+		if (f.winding.size() < 3 || std::fabs(f.plane.normal.z) < 1e-6)
+			continue;
+		if (Distance2DToWinding(f.winding, x, y) > kCeilingFlushEpsilon)
+			continue;
+
+		double z = (f.plane.dist - f.plane.normal.x * x - f.plane.normal.y * y) / f.plane.normal.z;
+		if (!found || z > best)
+		{
+			best = z;
+			found = true;
+		}
+	}
+
+	zOut = best;
+	return found;
+}
+
+bool SeamIsFlush(const std::vector<Face> &a, const std::vector<Face> &b, const Vec3 &pointA,
+	const Vec3 &pointB)
+{
+	double midX = (pointA.x + pointB.x) * 0.5;
+	double midY = (pointA.y + pointB.y) * 0.5;
+
+	double za = 0.0, zb = 0.0;
+	if (!CeilingHeightAt(a, midX, midY, za) || !CeilingHeightAt(b, midX, midY, zb))
+		return false;
+
+	return std::fabs(za - zb) <= kCeilingFlushEpsilon;
 }
 
 bool SeamIsWalkable(const Polytope &a, const Polytope &b, const Vec3 &pointA, const Vec3 &pointB,
@@ -884,6 +939,39 @@ bool MergedFloorStaysWalkable(const std::vector<const Face *> &facesA, const std
 			if (!IsFloorFace(*g))
 				continue;
 			if (!FloorsAreWalkable(*f, *g, maxStep) || !FloorsAreWalkable(*g, *f, maxStep))
+				return false;
+		}
+	}
+	return true;
+}
+
+bool CeilingsAreFlush(const Face &f, const Face &g, double epsilon)
+{
+	if (std::fabs(f.plane.normal.z) < 1e-6)
+		return true;
+
+	for (const Vec3 &v : g.winding)
+	{
+		if (Distance2DToWinding(f.winding, v.x, v.y) > kFloorAdjacencyEpsilon)
+			continue;
+		if (std::fabs(FloorHeightAt(f, v.x, v.y) - v.z) > epsilon)
+			return false;
+	}
+	return true;
+}
+
+bool MergedCeilingStaysFlush(const std::vector<Face> &facesA, const std::vector<Face> &facesB,
+	double epsilon)
+{
+	for (const Face &f : facesA)
+	{
+		if (f.winding.size() < 3)
+			continue;
+		for (const Face &g : facesB)
+		{
+			if (g.winding.size() < 3)
+				continue;
+			if (!CeilingsAreFlush(f, g, epsilon) || !CeilingsAreFlush(g, f, epsilon))
 				return false;
 		}
 	}
@@ -995,15 +1083,15 @@ struct SeamSegment
 	double length = 0.0;
 };
 
-std::vector<SeamSegment> CollectFloorSeams(const std::vector<const Polytope *> &polys)
+std::vector<SeamSegment> CollectSeams(const std::vector<std::vector<Face>> &faceSets)
 {
 	std::unordered_map<LineKey, std::vector<FloorEdge>, LineKeyHash> lines;
 
-	for (size_t pi = 0; pi < polys.size(); ++pi)
+	for (size_t pi = 0; pi < faceSets.size(); ++pi)
 	{
-		for (const Face &f : polys[pi]->faces)
+		for (const Face &f : faceSets[pi])
 		{
-			if (!IsFloorFace(f))
+			if (f.winding.size() < 3)
 				continue;
 
 			for (size_t i = 0; i < f.winding.size(); ++i)
@@ -1073,6 +1161,21 @@ std::vector<SeamSegment> CollectFloorSeams(const std::vector<const Polytope *> &
 	}
 
 	return out;
+}
+
+std::vector<SeamSegment> CollectFloorSeams(const std::vector<const Polytope *> &polys)
+{
+	std::vector<std::vector<Face>> faceSets(polys.size());
+	for (size_t pi = 0; pi < polys.size(); ++pi)
+	{
+		for (const Face &f : polys[pi]->faces)
+		{
+			if (IsFloorFace(f))
+				faceSets[pi].push_back(f);
+		}
+	}
+
+	return CollectSeams(faceSets);
 }
 
 struct MergeCandidate
@@ -1175,7 +1278,19 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 	std::vector<Winding> leafFootprint(static_cast<size_t>(n));
 	for (int i = 0; i < n; ++i)
-		leafFootprint[static_cast<size_t>(i)] = WalkableFootprint(leaves[static_cast<size_t>(i)].polytope);
+	{
+		const ExtractedLeaf &leaf = leaves[static_cast<size_t>(i)];
+		if (leaf.alwaysSubmerged)
+		{
+			std::vector<Vec3> pts;
+			for (const Face &f : leaf.waterCeiling)
+				for (const Vec3 &v : f.winding)
+					pts.push_back(v);
+			leafFootprint[static_cast<size_t>(i)] = ConvexHullXY(pts);
+		}
+		else
+			leafFootprint[static_cast<size_t>(i)] = WalkableFootprint(leaf.polytope);
+	}
 
 	std::vector<Winding> footprint = leafFootprint;
 
@@ -1253,7 +1368,24 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 	for (const ExtractedLeaf &leaf : leaves)
 		polys.push_back(&leaf.polytope);
 
-	std::vector<SeamSegment> seams = CollectFloorSeams(polys);
+	std::vector<std::vector<Face>> seamFaces(leaves.size());
+	for (size_t li = 0; li < leaves.size(); ++li)
+	{
+		const ExtractedLeaf &leaf = leaves[li];
+		if (leaf.alwaysSubmerged)
+		{
+			seamFaces[li] = leaf.waterCeiling;
+			continue;
+		}
+
+		for (const Face &f : leaf.polytope.faces)
+		{
+			if (IsFloorFace(f))
+				seamFaces[li].push_back(f);
+		}
+	}
+
+	std::vector<SeamSegment> seams = CollectSeams(seamFaces);
 	if (seamsOut)
 		*seamsOut = seams.size();
 
@@ -1269,7 +1401,19 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		if (LeafElevatorStop(leaves, seam.a) != LeafElevatorStop(leaves, seam.b))
 			continue;
 
-		if (!SeamIsWalkable(leaves[static_cast<size_t>(seam.a)].polytope,
+		if (LeafWaterVolume(leaves, seam.a) != LeafWaterVolume(leaves, seam.b))
+			continue;
+
+		bool wetA = leaves[static_cast<size_t>(seam.a)].alwaysSubmerged;
+		bool wetB = leaves[static_cast<size_t>(seam.b)].alwaysSubmerged;
+		if (wetA != wetB)
+			continue;
+
+		if (wetA && !SeamIsFlush(leaves[static_cast<size_t>(seam.a)].waterCeiling,
+				leaves[static_cast<size_t>(seam.b)].waterCeiling, seam.pointA, seam.pointB))
+			continue;
+
+		if (!wetA && !SeamIsWalkable(leaves[static_cast<size_t>(seam.a)].polytope,
 				leaves[static_cast<size_t>(seam.b)].polytope, seam.pointA, seam.pointB, kStepHeight))
 			continue;
 
@@ -1321,6 +1465,20 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 			Winding footprintU = footprint[static_cast<size_t>(rootA)];
 			Bounds boundsU = bounds[static_cast<size_t>(rootA)];
 			bool isPrismU = isPrism[static_cast<size_t>(rootA)];
+			bool wetGroup = leaves[static_cast<size_t>(cand.leafA)].alwaysSubmerged;
+
+			auto groupCeiling = [&](int root)
+			{
+				std::vector<Face> out;
+				for (int leafId : members[static_cast<size_t>(root)])
+				{
+					const std::vector<Face> &src = leaves[static_cast<size_t>(leafId)].waterCeiling;
+					out.insert(out.end(), src.begin(), src.end());
+				}
+				return out;
+			};
+
+			std::vector<Face> ceilU = wetGroup ? groupCeiling(rootA) : std::vector<Face>();
 
 			int next = rootB;
 			bool accepted = false;
@@ -1365,11 +1523,19 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 				bool stays3DConvex = MergeStaysConvex(facesU, facesNext, kConvexEpsilon);
 				bool resultIsPrism = !stays3DConvex || isPrismU || isPrism[static_cast<size_t>(next)];
 
-				if (!MergedFloorStaysWalkable(floorU, floorNext, kStepHeight))
+				std::vector<Face> ceilNext = wetGroup ? groupCeiling(next) : std::vector<Face>();
+
+				if (wetGroup)
+				{
+					if (!MergedCeilingStaysFlush(ceilU, ceilNext, kCeilingFlushEpsilon))
+						break;
+				}
+				else if (!MergedFloorStaysWalkable(floorU, floorNext, kStepHeight))
 					break;
 
 				facesU.insert(facesU.end(), facesNext.begin(), facesNext.end());
 				floorU.insert(floorU.end(), floorNext.begin(), floorNext.end());
+				ceilU.insert(ceilU.end(), ceilNext.begin(), ceilNext.end());
 				internal.insert(internal.end(), seam.begin(), seam.end());
 				footprintU = std::move(footprintNew);
 				boundsU.Add(bounds[static_cast<size_t>(next)]);
@@ -1462,6 +1628,25 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 				area.elevatorStopId = stopId;
 				area.areaFlags |= crossbot_nav::NAV_AREA_ELEVATOR;
 			}
+			const ExtractedLeaf &member = leaves[static_cast<size_t>(leafId)];
+			if (member.alwaysSubmerged)
+			{
+				area.alwaysSubmerged = true;
+				area.waterCeiling.insert(area.waterCeiling.end(), member.waterCeiling.begin(),
+					member.waterCeiling.end());
+			}
+			if (member.waterColumn)
+				area.hasFloor = false;
+			uint8_t waterId = LeafWaterVolume(leaves, leafId);
+			if (waterId != crossbot_nav::kNoWaterVolume)
+			{
+				area.waterVolume = waterId;
+				area.areaFlags |= crossbot_nav::NAV_AREA_WATER;
+				double leafSubmerge = leaves[static_cast<size_t>(leafId)].submergeZ;
+				if (area.submergeZ >= crossbot_nav::kNavSubmergeNever ||
+					leafSubmerge > area.submergeZ)
+					area.submergeZ = leafSubmerge;
+			}
 			std::vector<const Face *> faces;
 			facesExcluding(leafId, removedFaces, faces);
 			for (const Face *f : faces)
@@ -1510,6 +1695,9 @@ size_t ValidateAreaFootprints(const std::vector<Area> &areas)
 
 	for (const Area &area : areas)
 	{
+		if ((area.areaFlags & crossbot_nav::NAV_AREA_WATER) != 0 && !area.hasFloor)
+			continue;
+
 		Winding footprint = WalkableFootprint(area.polytope);
 		double hull = WindingAreaXY(footprint);
 		Vec3 c = area.polytope.Centroid();

@@ -31,6 +31,30 @@ void WalkRecursive(const BspFile &bsp, int nodeIndex, bool includeWater,
 	chain.pop_back();
 }
 
+void WalkHullRecursive(const HullTree &hull, int nodeIndex, std::vector<PlaneChainEntry> &chain,
+	const LeafCallback &callback, const ContentsFilter &filter)
+{
+	if (nodeIndex < 0)
+	{
+		if (filter(nodeIndex))
+			callback(nodeIndex, chain);
+		return;
+	}
+
+	if (static_cast<size_t>(nodeIndex) >= hull.clipnodeCount)
+		return;
+
+	const dclipnode_t &node = hull.clipnodes[static_cast<size_t>(nodeIndex)];
+
+	chain.push_back({node.planenum, true});
+	WalkHullRecursive(hull, node.children[0], chain, callback, filter);
+	chain.pop_back();
+
+	chain.push_back({node.planenum, false});
+	WalkHullRecursive(hull, node.children[1], chain, callback, filter);
+	chain.pop_back();
+}
+
 }
 
 void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const LeafCallback &callback,
@@ -38,6 +62,16 @@ void WalkClipnodeTree(const BspFile &bsp, int headnode, bool includeWater, const
 {
 	std::vector<PlaneChainEntry> chain;
 	WalkRecursive(bsp, headnode, includeWater, chain, callback, filter);
+}
+
+void WalkHullTree(const HullTree &hull, int headnode, const ContentsFilter &filter,
+	const LeafCallback &callback)
+{
+	if (!filter || !callback)
+		return;
+
+	std::vector<PlaneChainEntry> chain;
+	WalkHullRecursive(hull, headnode, chain, callback, filter);
 }
 
 namespace

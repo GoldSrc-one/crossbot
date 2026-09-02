@@ -8,12 +8,16 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 18;
+constexpr uint32_t kNavVersion = 19;
 
 constexpr size_t kNavFocusLevels = 4;
 constexpr size_t kNavWatchDirs = 4;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
+
+constexpr uint8_t kNoWaterVolume = 0xFF;
+
+constexpr float kNavSubmergeNever = 1.0e9f;
 
 constexpr float kNavDefaultDesignSpeed = 320.f;
 
@@ -36,6 +40,7 @@ enum ConnType : uint8_t
 	CONN_AIRMOVE  = 2,
 	CONN_LADDER   = 3,
 	CONN_ELEVATOR = 4,
+	CONN_SWIM     = 5,
 };
 
 enum ConnFlags : uint8_t
@@ -44,6 +49,13 @@ enum ConnFlags : uint8_t
 	CONN_FLAG_ONE_WAY      = 1u << 0,
 	CONN_FLAG_NEEDS_CROUCH = 1u << 1,
 	CONN_FLAG_JUMP         = 1u << 2,
+	CONN_FLAG_WATERJUMP    = 1u << 3,
+};
+
+enum WaterVolumeFlags : uint32_t
+{
+	WATERVOL_NONE   = 0,
+	WATERVOL_MOVING = 1u << 0,
 };
 
 enum ActivationKind : uint8_t
@@ -66,6 +78,15 @@ enum DetourPointFlags : uint8_t
 	DETOUR_PT_CROUCH = 1u << 0,
 };
 
+inline bool ConnBlockedByWater(uint8_t connType, bool submerged)
+{
+	if (connType == CONN_SWIM)
+		return !submerged;
+	if (connType == CONN_WALK || connType == CONN_AIRMOVE)
+		return submerged;
+	return false;
+}
+
 struct NavHeader
 {
 	char magic[4];
@@ -83,9 +104,10 @@ struct NavHeader
 	uint32_t vantageCount;
 	float vantageSpacing;
 	float maxExposure;
+	uint32_t waterVolumeCount;
 };
 
-static_assert(sizeof(NavHeader) == 120, "NavHeader layout changed without a version bump");
+static_assert(sizeof(NavHeader) == 124, "NavHeader layout changed without a version bump");
 
 struct NavAreaRecord
 {
@@ -104,6 +126,20 @@ struct NavAreaRecord
 	float openSeconds;
 	uint32_t detourOffset;
 	uint32_t detourCount;
+
+	uint8_t waterVolume;
+	uint8_t pad1[3];
+	float submergeZ;
+};
+
+struct NavWaterVolumeRecord
+{
+	uint32_t modelIndex;
+	float mins[3];
+	float maxs[3];
+	float surfaceZ;
+	float travel[3];
+	uint32_t flags;
 };
 
 struct NavActivationDetourRecord
@@ -129,7 +165,8 @@ struct NavDetourPointRecord
 	uint8_t pad[3];
 };
 
-static_assert(sizeof(NavAreaRecord) == 68, "NavAreaRecord layout changed without a version bump");
+static_assert(sizeof(NavAreaRecord) == 76, "NavAreaRecord layout changed without a version bump");
+static_assert(sizeof(NavWaterVolumeRecord) == 48, "NavWaterVolumeRecord layout changed");
 static_assert(sizeof(NavActivationDetourRecord) == 40, "NavActivationDetourRecord layout changed");
 static_assert(sizeof(NavDetourPointRecord) == 24, "NavDetourPointRecord layout changed");
 
@@ -168,9 +205,13 @@ struct NavConnectionRecord
 	float rideWaitSeconds;
 
 	float gravity;
+
+	uint8_t waterVolume;
+	uint8_t pad2[3];
+	float submergeZ;
 };
 
-static_assert(sizeof(NavConnectionRecord) == 144, "NavConnectionRecord layout changed without a version bump");
+static_assert(sizeof(NavConnectionRecord) == 152, "NavConnectionRecord layout changed without a version bump");
 
 struct NavWatchDir
 {

@@ -29,6 +29,15 @@ struct PlanPlane
 	float dist = 0.f;
 };
 
+inline bool SubmergedAt(const std::vector<float> *surfaces, uint8_t volumeIndex, float submergeZ)
+{
+	if (volumeIndex == crossbot_nav::kNoWaterVolume || !surfaces ||
+		volumeIndex >= surfaces->size())
+		return false;
+
+	return (*surfaces)[volumeIndex] >= submergeZ;
+}
+
 struct PlanGate
 {
 	Vector left, right;
@@ -67,6 +76,9 @@ struct PlanArea
 	float doorWaitTime = 0.f;
 	std::vector<PlanDetour> detours;
 
+	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
+	float submergeZ = crossbot_nav::kNavSubmergeNever;
+
 	std::vector<PlanPlane> boundPlanes;
 
 	std::vector<PlanGate> edgeGates;
@@ -94,6 +106,9 @@ struct PlanConnection
 	float rideWaitSeconds = 0.f;
 
 	float gravity = 1.f;
+
+	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
+	float submergeZ = crossbot_nav::kNavSubmergeNever;
 
 	PlanGate gateA, gateB;
 
@@ -163,6 +178,7 @@ struct PlanTraceContext
 	PmSim::PmPushFn standPush;
 	PmSim::PmPhysics physics;
 	float gravityMultiplier = 1.f;
+	const std::vector<float> *waterSurfaces = nullptr;
 	bool dumpAirmoves = false;
 	bool collectRunupTraces = false;
 	AirmoveCache *airmoveCache = nullptr;
@@ -180,6 +196,7 @@ struct PlanStats
 	size_t airmovesRetractKept = 0;
 	size_t corners = 0;
 	size_t gatedRejected = 0;
+	size_t waterRejected = 0;
 		std::vector<std::vector<Vector>> runupTraces;
 		size_t gatesClamped = 0;
 	};

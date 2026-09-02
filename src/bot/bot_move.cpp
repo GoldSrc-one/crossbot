@@ -65,7 +65,7 @@ byte Bot_FrameMsec()
 }
 
 void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
-	unsigned short buttons, bool allowLongJump)
+	unsigned short buttons, bool allowLongJump, float upmove)
 {
 	BOTPERF_SCOPE(ZONE_RUNMOVE);
 
@@ -81,7 +81,7 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 	if ((buttons & IN_JUMP) != 0 && msec > kMaxJumpCommandMsec)
 	{
 		BotTiming::BeginMove(pEdict, kMaxJumpCommandMsec);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0,
+		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, upmove, buttons, 0,
 			kMaxJumpCommandMsec);
 		BotTiming::EndMove(pEdict);
 		buttons &= ~IN_JUMP;
@@ -89,7 +89,7 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 	}
 
 	BotTiming::BeginMove(pEdict, msec);
-	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, 0.f, buttons, 0, msec);
+	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, upmove, buttons, 0, msec);
 	BotTiming::EndMove(pEdict);
 }
 

@@ -31,8 +31,11 @@
 #include "reachability.h"
 #include "stand_classifier.h"
 #include "svg_debug.h"
+#include "swim_connections.h"
 #include "teleport_connections.h"
 #include "vantage_sampler.h"
+#include "water_classifier.h"
+#include "water_volumes.h"
 #include "work_pool.h"
 #include "path_profile.h"
 #include "waypoint_plan.h"
@@ -183,8 +186,11 @@ void PrintUsage(const char *argv0)
 		"                    without removing any volume from it\n"
 		"  --dump-sky        classify every merged area's floor by the BSP leaf contents just\n"
 		"                    below it, reporting how much walkable footprint stands on sky\n"
+		"  --dump-water      every liquid volume found: type, brush model, bounds, both surface\n"
+		"                    levels, travel and speed, and which areas each one can submerge\n"
 		"  --no-lethal       keep floors and routes that only a fall through a lethal trigger_hurt\n"
-		"                    can reach (debug: isolate what the lethal prune removes)\n"
+		"                    can reach (debug: isolate what the lethal prune removes). Also keeps\n"
+		"                    floors and routes inside slime and lava\n"
 		"  --no-blockers     ignore func_wall/func_wall_toggle/func_conveyor/charger brushes\n"
 		"                    (debug: isolate how much of the leaf explosion the blocker carve owns)\n"
 		"  --no-passables    ignore func_door/func_door_rotating/func_breakable brushes (debug:\n"
@@ -206,12 +212,15 @@ struct ObjMaterial
 {
 	const char *name;
 	double r, g, b;
+	double alpha;
 };
 
 const ObjMaterial kObjMaterials[] = {
-	{"nav_floor", 0.35, 0.55, 0.78},
-	{"nav_floor_crouch", 0.92, 0.58, 0.18},
-	{"nav_path", 0.20, 0.85, 0.35},
+	{"nav_floor", 0.35, 0.55, 0.78, 1.0},
+	{"nav_floor_crouch", 0.92, 0.58, 0.18, 1.0},
+	{"nav_path", 0.20, 0.85, 0.35, 1.0},
+	{"nav_water_ceiling", 0.10, 0.72, 0.86, 1.0},
+	{"nav_water_surface", 0.34, 0.88, 1.00, 0.30},
 };
 
 std::string ReplaceExtension(const std::string &path, const char *ext)
@@ -240,7 +249,7 @@ void WriteObjMaterialLib(const std::string &path)
 		std::fprintf(f, "newmtl %s\n", m.name);
 		std::fprintf(f, "Ka %.3f %.3f %.3f\n", m.r * 0.3, m.g * 0.3, m.b * 0.3);
 		std::fprintf(f, "Kd %.3f %.3f %.3f\n", m.r, m.g, m.b);
-		std::fprintf(f, "Ks 0.000 0.000 0.000\nd 1.0\nillum 1\n\n");
+		std::fprintf(f, "Ks 0.000 0.000 0.000\nd %.2f\nillum 1\n\n", m.alpha);
 	}
 
 	std::fclose(f);
@@ -263,10 +272,13 @@ struct ObjStats
 	size_t floorFaces = 0;
 	size_t crouchAreas = 0;
 	size_t pathSegments = 0;
+	size_t waterCeilingFaces = 0;
+	size_t waterSurfaceFaces = 0;
 };
 
 ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> &areas,
-	const std::vector<navgen::Vec3> &pathPoints)
+	const std::vector<navgen::Vec3> &pathPoints,
+	const std::vector<navgen::LiquidVolume> &waterVolumes)
 {
 	std::string mtlPath = ReplaceExtension(path, ".mtl");
 	WriteObjMaterialLib(mtlPath);
@@ -280,10 +292,48 @@ ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> 
 	ObjStats stats;
 	int nextVertexIndex = 1;
 
+	auto emitFace = [&](const navgen::Face &face)
+	{
+		for (const navgen::Vec3 &v : face.winding)
+			std::fprintf(f, "v %.3f %.3f %.3f\n", v.x, v.y, v.z);
+
+		bool flip = WindingOpposesNormal(face);
+		size_t count = face.winding.size();
+		std::fprintf(f, "f");
+		for (size_t i = 0; i < count; ++i)
+		{
+			size_t idx = flip ? count - 1 - i : i;
+			std::fprintf(f, " %d", nextVertexIndex + static_cast<int>(idx));
+		}
+		std::fprintf(f, "\n");
+
+		nextVertexIndex += static_cast<int>(count);
+	};
+
 	for (const navgen::Area &area : areas)
 	{
 		bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 		bool opened = false;
+
+		if (area.alwaysSubmerged)
+		{
+			for (const navgen::Face &face : area.waterCeiling)
+			{
+				if (face.winding.size() < 3)
+					continue;
+
+				if (!opened)
+				{
+					std::fprintf(f, "g area_%d_water\nusemtl nav_water_ceiling\n", area.id);
+					opened = true;
+				}
+
+				emitFace(face);
+				++stats.waterCeilingFaces;
+			}
+
+			continue;
+		}
 
 		for (const navgen::Face &face : area.polytope.faces)
 		{
@@ -299,21 +349,38 @@ ObjStats WriteFloorObj(const std::string &path, const std::vector<navgen::Area> 
 					++stats.crouchAreas;
 			}
 
-			for (const navgen::Vec3 &v : face.winding)
-				std::fprintf(f, "v %.3f %.3f %.3f\n", v.x, v.y, v.z);
-
-			bool flip = WindingOpposesNormal(face);
-			size_t count = face.winding.size();
-			std::fprintf(f, "f");
-			for (size_t i = 0; i < count; ++i)
-			{
-				size_t idx = flip ? count - 1 - i : i;
-				std::fprintf(f, " %d", nextVertexIndex + static_cast<int>(idx));
-			}
-			std::fprintf(f, "\n");
-
-			nextVertexIndex += static_cast<int>(count);
+			emitFace(face);
 			++stats.floorFaces;
+		}
+	}
+
+	for (size_t vi = 0; vi < waterVolumes.size(); ++vi)
+	{
+		const navgen::LiquidVolume &vol = waterVolumes[vi];
+		bool opened = false;
+
+		for (const navgen::Polytope &piece : vol.pieces)
+		{
+			for (const navgen::Face &face : piece.faces)
+			{
+				if (!navgen::IsCeilingFace(face))
+					continue;
+
+				bool atSurface = true;
+				for (const navgen::Vec3 &v : face.winding)
+					atSurface = atSurface && std::fabs(v.z - vol.surfaceZ) <= 1.0;
+				if (!atSurface)
+					continue;
+
+				if (!opened)
+				{
+					std::fprintf(f, "g water_%zu\nusemtl nav_water_surface\n", vi);
+					opened = true;
+				}
+
+				emitFace(face);
+				++stats.waterSurfaceFaces;
+			}
 		}
 	}
 
@@ -739,6 +806,7 @@ int main(int argc, char **argv)
 	bool dumpAirmove = false;
 	bool dumpCarve = false;
 	bool dumpSky = false;
+	bool dumpWater = false;
 	bool noBlockers = false;
 	bool noLethal = false;
 	bool noPassables = false;
@@ -825,6 +893,10 @@ int main(int argc, char **argv)
 		else if (arg == "--dump-sky")
 		{
 			dumpSky = true;
+		}
+		else if (arg == "--dump-water")
+		{
+			dumpWater = true;
 		}
 		else if (arg == "--no-lethal")
 		{
@@ -1161,6 +1233,14 @@ int main(int argc, char **argv)
 		}
 
 		std::vector<navgen::Entity> entities = navgen::ParseEntities(bsp.EntityText());
+
+		navgen::LiquidSet liquids = navgen::ExtractLiquidVolumes(bsp, entities, kMapRadius);
+		if (!liquids.water.empty() || !liquids.hazard.empty())
+			std::printf("%s: %zu water volume(s), %zu slime/lava volume(s)\n",
+				bspPath.c_str(), liquids.water.size(), liquids.hazard.size());
+		if (dumpWater)
+			navgen::DumpLiquidVolumes(bspPath, liquids);
+
 		navgen::ElevatorSet elevators = navgen::ExtractElevators(bsp, entities, kMapRadius, dumpElevators);
 
 		std::vector<navgen::BlockingVolume> blockers = noBlockers
@@ -1413,11 +1493,12 @@ int main(int argc, char **argv)
 			navgen::FloorSupportStats floorStats;
 			size_t beforeFloorSplit = leaves.size();
 			leaves = navgen::SplitLeavesByFloorSupport(bsp, worldModel.headnode[navgen::kHullDuck],
-				supportBlockers, leaves, kMapRadius, &floorStats, dumpSupport);
+				supportBlockers, leaves, kMapRadius, &floorStats, dumpSupport, &liquids.water);
 			std::printf("%s: floor support split %zu leaves, absorbed %zu floorless pieces into the leaf "
-				"below, dropped %zu unsupported and %zu steep-bottomed pieces (%zu -> %zu leaves)\n",
-				bspPath.c_str(), floorStats.split, floorStats.absorbed, floorStats.dropped,
-				floorStats.noFloor, beforeFloorSplit, leaves.size());
+				"below, kept %zu submerged water columns, dropped %zu unsupported and %zu steep-bottomed "
+				"pieces (%zu -> %zu leaves)\n",
+				bspPath.c_str(), floorStats.split, floorStats.absorbed, floorStats.waterColumns,
+				floorStats.dropped, floorStats.noFloor, beforeFloorSplit, leaves.size());
 		}
 
 		std::vector<navgen::BlockingVolume> hurtVolumes =
@@ -1429,6 +1510,13 @@ int main(int argc, char **argv)
 			std::printf("%s: %zu lethal trigger_hurt volume(s) dropped %zu leaves reachable "
 				"only by falling through them\n",
 				bspPath.c_str(), hurtVolumes.size(), lethalLeaves);
+		}
+
+		if (!liquids.hazard.empty() && !noLethal)
+		{
+			size_t hazardLeaves = navgen::DropLiquidHazardLeaves(liquids.hazard, leaves);
+			std::printf("%s: %zu slime/lava volume(s) dropped %zu leaves standing inside them\n",
+				bspPath.c_str(), liquids.hazard.size(), hazardLeaves);
 		}
 
 		std::vector<bool> isCrouchLeaf;
@@ -1443,6 +1531,19 @@ int main(int argc, char **argv)
 					++crouchLeaves;
 			std::printf("%s: stand clearance split %zu leaves (%zu -> %zu leaves), %zu crouch-only\n",
 				bspPath.c_str(), standSplitLeaves, beforeStandSplit, leaves.size(), crouchLeaves);
+		}
+
+		if (!liquids.water.empty())
+		{
+			size_t waterSplitLeaves = 0;
+			size_t waterTagged = 0;
+			size_t beforeWaterSplit = leaves.size();
+			if (dumpWater)
+				std::printf("%s: water leaf classification\n", bspPath.c_str());
+			leaves = navgen::SplitLeavesByWaterLevels(liquids.water, leaves, isCrouchLeaf, kMapRadius,
+				&waterSplitLeaves, &waterTagged, dumpWater);
+			std::printf("%s: water footprints split %zu leaves (%zu -> %zu leaves), %zu leaves under water\n",
+				bspPath.c_str(), waterSplitLeaves, beforeWaterSplit, leaves.size(), waterTagged);
 		}
 
 		double totalLeafVolume = 0.0;
@@ -1472,6 +1573,21 @@ int main(int argc, char **argv)
 					leaf.id, leaf.polytope.faces.size(), leaf.polytope.Volume(), c.x, c.y, c.z,
 					mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
 			}
+		}
+
+		if (!liquids.water.empty())
+		{
+			size_t wetLeaves = navgen::BuildLeafWaterCeilings(bsp,
+				worldModel.headnode[navgen::kHullDuck], supportBlockers, liquids.water, leaves);
+			size_t ceilingless = 0;
+			for (const navgen::ExtractedLeaf &leaf : leaves)
+			{
+				if (leaf.alwaysSubmerged && leaf.waterCeiling.empty())
+					++ceilingless;
+			}
+			std::printf("%s: %zu of %zu leaves are under water at every level "
+				"(%zu have no supported ceiling)\n",
+				bspPath.c_str(), wetLeaves, leaves.size(), ceilingless);
 		}
 
 		size_t leafSeams = 0;
@@ -1587,11 +1703,47 @@ int main(int argc, char **argv)
 			std::printf("%s: floor-snapped %zu of %zu connection endpoints pairs (%zu had no floor beneath)\n",
 				bspPath.c_str(), snappedConns, merged.conns.size(), merged.conns.size() - snappedConns);
 
+		if (!liquids.water.empty())
+		{
+			size_t submergedAreas = 0;
+			size_t ceilingless = 0;
+			for (const navgen::Area &area : merged.areas)
+			{
+				if (!area.alwaysSubmerged)
+					continue;
+				++submergedAreas;
+				if (area.waterCeiling.empty())
+					++ceilingless;
+			}
+			std::printf("%s: %zu of %zu areas are under water at every level "
+				"(%zu have no supported ceiling)\n",
+				bspPath.c_str(), submergedAreas, merged.areas.size(), ceilingless);
+
+			size_t waterConns = navgen::TagConnectionsByWater(liquids.water, merged.conns);
+			std::printf("%s: %zu of %zu connections can be submerged\n",
+				bspPath.c_str(), waterConns, merged.conns.size());
+
+			navgen::SwimStats swimStats;
+			size_t swimConns = navgen::BuildSwimConnections(bsp, worldModel.headnode[navgen::kHullDuck],
+				blockers, liquids.water, merged.areas, merged.conns, &swimStats, dumpWater);
+			std::printf("%s: %zu swim connections (%zu swim, %zu beach exits, %zu waterjump exits, "
+				"%zu plunges, %zu pairs walled off)\n",
+				bspPath.c_str(), swimConns, swimStats.swim, swimStats.beach, swimStats.waterjump,
+				swimStats.plunge, swimStats.blockedByGeometry);
+		}
+
 		if (!hurtVolumes.empty() && !noLethal)
 		{
 			size_t lethalConns = navgen::PruneLethalConnections(bsp, hurtVolumes, merged.conns);
 			std::printf("%s: %zu lethal trigger_hurt volume(s) cut %zu connections\n",
 				bspPath.c_str(), hurtVolumes.size(), lethalConns);
+		}
+
+		if (!liquids.hazard.empty() && !noLethal)
+		{
+			size_t hazardConns = navgen::PruneLiquidHazardConnections(liquids.hazard, merged.conns);
+			std::printf("%s: %zu slime/lava volume(s) cut %zu connections\n",
+				bspPath.c_str(), liquids.hazard.size(), hazardConns);
 		}
 
 		size_t rawAreaCount = merged.areas.size();
@@ -1966,9 +2118,16 @@ int main(int argc, char **argv)
 						mx.x = std::max(mx.x, v.x); mx.y = std::max(mx.y, v.y); mx.z = std::max(mx.z, v.z);
 					}
 				}
-				std::printf("  area %4d: %2zu leaves, %2zu faces, volume %10.0f, centroid (%.1f, %.1f, %.1f), "
+				std::string leafList;
+				for (int leafId : area.memberLeafIds)
+				{
+					char buf[16];
+					std::snprintf(buf, sizeof(buf), "%s%d", leafList.empty() ? "" : ",", leafId);
+					leafList += buf;
+				}
+				std::printf("  area %4d: leaves [%s], %2zu faces, volume %10.0f, centroid (%.1f, %.1f, %.1f), "
 					"mins (%.1f, %.1f, %.1f) maxs (%.1f, %.1f, %.1f)%s\n",
-					area.id, area.memberLeafIds.size(), area.polytope.faces.size(),
+					area.id, leafList.c_str(), area.polytope.faces.size(),
 					area.polytope.Volume(), c.x, c.y, c.z, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z, areaKind.c_str());
 			}
 		}
@@ -2033,16 +2192,24 @@ int main(int argc, char **argv)
 				traces.physics.maxSpeed = planSpeed;
 			traces.dumpAirmoves = dumpAirmove;
 
+			std::vector<float> spawnWaterSurfaces;
+			spawnWaterSurfaces.reserve(liquids.water.size());
+			for (const navgen::LiquidVolume &vol : liquids.water)
+				spawnWaterSurfaces.push_back(static_cast<float>(vol.surfaceZ));
+			traces.waterSurfaces = &spawnWaterSurfaces;
+
 			pathPoints = BuildDebugPath(entities, merged, &traces, &pathSegmentKinds, &failedAirmoves,
 				&pathSegmentSpeeds, dumpPath, &pathProfile);
 		}
 
 		if (!objPath.empty())
 		{
-			ObjStats stats = WriteFloorObj(objPath, merged.areas, pathPoints);
-			std::printf("wrote %s (+ %s): %zu floor faces, %zu crouch areas, %zu path segments\n",
+			ObjStats stats = WriteFloorObj(objPath, merged.areas, pathPoints, liquids.water);
+			std::printf("wrote %s (+ %s): %zu floor faces, %zu crouch areas, "
+				"%zu water ceiling faces, %zu water surface faces, %zu path segments\n",
 				objPath.c_str(), BaseName(ReplaceExtension(objPath, ".mtl")).c_str(),
-				stats.floorFaces, stats.crouchAreas, stats.pathSegments);
+				stats.floorFaces, stats.crouchAreas, stats.waterCeilingFaces, stats.waterSurfaceFaces,
+				stats.pathSegments);
 		}
 
 		if (!svgPath.empty())
@@ -2059,7 +2226,7 @@ int main(int argc, char **argv)
 					std::string mapName = DeriveMapName(bspPath);
 					navgen::WriteDebugSvg(svgPath, mapName, merged.areas, merged.conns, pathPoints,
 									CollectTargetPoints(entities), pathSegmentKinds, failedAirmoves, tracePoints, runupTraces,
-								pathSegmentSpeeds);
+								pathSegmentSpeeds, liquids.water);
 					std::printf("wrote %s\n", svgPath.c_str());
 				}
 
@@ -2075,9 +2242,10 @@ int main(int argc, char **argv)
 			std::string mapName = DeriveMapName(bspPath);
 			navgen::WriteNavFile(navPath, mapName, bsp.Checksum(), merged.areas, merged.conns,
 				physics.maxSpeed, vantages, static_cast<float>(vantageParams.targetSpacing),
-				static_cast<float>(vantageStats.maxExposure));
-			std::printf("wrote %s (map \"%s\", checksum 0x%08X, %zu vantages)\n", navPath.c_str(),
-				mapName.c_str(), bsp.Checksum(), vantages.size());
+				static_cast<float>(vantageStats.maxExposure), liquids.water);
+			std::printf("wrote %s (map \"%s\", checksum 0x%08X, %zu vantages, %zu water volumes)\n",
+				navPath.c_str(), mapName.c_str(), bsp.Checksum(), vantages.size(),
+				liquids.water.size());
 		}
 	}
 	catch (const std::exception &e)

@@ -65,6 +65,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	std::vector<NavActivationDetourRecord> detourRecords;
 	std::vector<NavDetourPointRecord> detourPoints;
 	std::vector<NavVantageRecord> vantageRecords;
+	std::vector<NavWaterVolumeRecord> waterRecords;
 
 	bool ok = ReadArray(f, header.areaCount, areaRecords) &&
 		ReadArray(f, header.connCount, connRecords) &&
@@ -72,7 +73,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		ReadArray(f, header.areaPlaneCount, areaPlanes) &&
 		ReadArray(f, header.detourCount, detourRecords) &&
 		ReadArray(f, header.detourPointCount, detourPoints) &&
-		ReadArray(f, header.vantageCount, vantageRecords);
+		ReadArray(f, header.vantageCount, vantageRecords) &&
+		ReadArray(f, header.waterVolumeCount, waterRecords);
 	std::fclose(f);
 
 	if (!ok)
@@ -115,6 +117,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		area.maxs = Vector(rec.maxs[0], rec.maxs[1], rec.maxs[2]);
 		area.centroid = Vector(rec.centroid[0], rec.centroid[1], rec.centroid[2]);
 		area.areaFlags = rec.areaFlags;
+		area.waterVolume = rec.waterVolume;
+		area.submergeZ = rec.submergeZ;
 		area.connIndices.reserve(rec.connCount);
 		for (uint32_t k = 0; k < rec.connCount; ++k)
 			area.connIndices.push_back(areaConnIndex[rec.connOffset + k]);
@@ -151,6 +155,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.rideSecondsMax = rec.rideSecondsMax;
 		conn.rideWaitSeconds = rec.rideWaitSeconds;
 		conn.gravity = rec.gravity;
+		conn.waterVolume = rec.waterVolume;
+		conn.submergeZ = rec.submergeZ;
 
 		conn.gateA.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_A) != 0;
 		conn.gateB.clamped = (rec.gateValid & crossbot_nav::GATE_CLAMPED_B) != 0;
@@ -180,6 +186,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		pa.elevator = (a.areaFlags & crossbot_nav::NAV_AREA_ELEVATOR) != 0;
 		pa.activation = rec.activation;
 		pa.doorWaitTime = rec.openSeconds;
+		pa.waterVolume = rec.waterVolume;
+		pa.submergeZ = rec.submergeZ;
 
 		pa.detours.reserve(rec.detourCount);
 		for (uint32_t k = 0; k < rec.detourCount; ++k)
@@ -238,6 +246,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		pc.rideSecondsMax = c.rideSecondsMax;
 		pc.rideWaitSeconds = c.rideWaitSeconds;
 		pc.gravity = c.gravity;
+		pc.waterVolume = c.waterVolume;
+		pc.submergeZ = c.submergeZ;
 		pc.gateA = c.gateA;
 		pc.gateB = c.gateB;
 		for (int k = 0; k < 2; ++k)
@@ -246,6 +256,19 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 			pc.gateASpeed[k] = c.gateASpeed[k];
 		}
 
+	}
+
+	mesh->waterVolumes.resize(waterRecords.size());
+	for (size_t i = 0; i < waterRecords.size(); ++i)
+	{
+		const NavWaterVolumeRecord &rec = waterRecords[i];
+		WaterVolume &vol = mesh->waterVolumes[i];
+		vol.modelIndex = rec.modelIndex;
+		vol.mins = Vector(rec.mins[0], rec.mins[1], rec.mins[2]);
+		vol.maxs = Vector(rec.maxs[0], rec.maxs[1], rec.maxs[2]);
+		vol.surfaceZ = rec.surfaceZ;
+		vol.travel = Vector(rec.travel[0], rec.travel[1], rec.travel[2]);
+		vol.moving = (rec.flags & crossbot_nav::WATERVOL_MOVING) != 0;
 	}
 
 	mesh->vantageField.spacing = header.vantageSpacing;

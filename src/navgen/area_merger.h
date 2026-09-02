@@ -46,6 +46,12 @@ struct Area
 	int activationEntity = -1;
 	std::vector<ActivatorVolume> activators;
 	std::vector<ActivationDetour> detours;
+
+	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
+	double submergeZ = crossbot_nav::kNavSubmergeNever;
+	bool hasFloor = true;
+	bool alwaysSubmerged = false;
+	std::vector<Face> waterCeiling;
 };
 
 struct MergedConnection
@@ -82,6 +88,9 @@ struct MergedConnection
 	double rideWaitSeconds = 0.0;
 
 	double gravity = 1.0;
+
+	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
+	double submergeZ = crossbot_nav::kNavSubmergeNever;
 };
 
 struct MergeResult

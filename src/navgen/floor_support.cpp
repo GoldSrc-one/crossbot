@@ -567,6 +567,60 @@ struct FloorlessPiece
 	bool hadFloor = false;
 };
 
+bool ClaimSubmergedColumn(ExtractedLeaf &leaf, const std::vector<LiquidVolume> *waterVolumes,
+	double mapRadius, std::vector<ExtractedLeaf> &out, bool dump)
+{
+	if (!waterVolumes || waterVolumes->empty() || leaf.polytope.Empty())
+		return false;
+
+	Bounds bounds = PolytopeBounds(leaf.polytope);
+
+	for (const LiquidVolume &vol : *waterVolumes)
+	{
+		double surfaceZ = vol.HighSurfaceZ();
+		if (bounds.mins.z >= surfaceZ)
+			continue;
+		if (!vol.OverlapsColumn(bounds.mins, bounds.maxs))
+			continue;
+
+		Vec3 probe((bounds.mins.x + bounds.maxs.x) * 0.5, (bounds.mins.y + bounds.maxs.y) * 0.5,
+			std::min(bounds.mins.z + 1.0, surfaceZ - 1.0));
+		if (!vol.ContainsPoint(probe, 1.0))
+			continue;
+
+		Polytope kept = leaf.polytope;
+		if (bounds.maxs.z > surfaceZ)
+		{
+			Plane cap;
+			cap.normal = Vec3(0.0, 0.0, -1.0);
+			cap.dist = -surfaceZ;
+			kept = ClipPolytope(kept, cap, true, mapRadius);
+		}
+
+		if (kept.Empty() || kept.Volume() <= kMinFragmentVolume)
+			continue;
+
+		ExtractedLeaf piece;
+		piece.id = static_cast<int>(out.size());
+		piece.polytope = std::move(kept);
+		piece.passableIndex = leaf.passableIndex;
+		piece.elevatorStopId = leaf.elevatorStopId;
+		piece.waterColumn = true;
+
+		if (dump)
+		{
+			Vec3 c = piece.polytope.Centroid();
+			std::printf("  water column kept at (%.1f, %.1f, %.1f) volume %.0f, capped at surface %.1f\n",
+				c.x, c.y, c.z, piece.polytope.Volume(), surfaceZ);
+		}
+
+		out.push_back(std::move(piece));
+		return true;
+	}
+
+	return false;
+}
+
 size_t AbsorbFloorlessPieces(std::vector<ExtractedLeaf> &pieces, std::vector<FloorlessPiece> &floorless,
 	double mapRadius)
 {
@@ -706,9 +760,20 @@ std::vector<Winding> ComputeSupportedFloor(const BspFile &bsp, int headnode,
 	return supported;
 }
 
+std::vector<Winding> ComputeSupportedCeiling(const BspFile &bsp, int headnode,
+	const std::vector<BlockingVolume> &blockers, const Face &ceilingFace)
+{
+	std::vector<Winding> covered;
+	std::vector<Winding> open;
+	CarveAgainstSolids(bsp, headnode, blockers, ceilingFace.winding, ceilingFace.plane.normal * -1.0,
+		covered, open);
+
+	return covered;
+}
+
 std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int headnode,
 	const std::vector<BlockingVolume> &blockers, const std::vector<ExtractedLeaf> &leaves, double mapRadius,
-	FloorSupportStats *statsOut, bool dump)
+	FloorSupportStats *statsOut, bool dump, const std::vector<LiquidVolume> *waterVolumes)
 {
 	std::vector<ExtractedLeaf> out;
 	std::vector<FloorlessPiece> floorless;
@@ -843,10 +908,17 @@ std::vector<ExtractedLeaf> SplitLeavesByFloorSupport(const BspFile &bsp, int hea
 
 	stats.absorbed = AbsorbFloorlessPieces(out, floorless, mapRadius);
 
-	for (const FloorlessPiece &frag : floorless)
+
+	for (FloorlessPiece &frag : floorless)
 	{
 		if (frag.leaf.polytope.Empty())
 			continue;
+
+		if (ClaimSubmergedColumn(frag.leaf, waterVolumes, mapRadius, out, dump))
+		{
+			++stats.waterColumns;
+			continue;
+		}
 
 		if (!frag.hadFloor)
 		{

@@ -136,6 +136,37 @@ Winding WalkableFootprint(const Polytope &poly)
 	return ConvexHullXY(pts);
 }
 
+bool IsCeilingFace(const Face &face)
+{
+	return face.plane.normal.z < kCeilingNormalZ && face.winding.size() >= 3;
+}
+
+Winding CeilingFootprint(const Polytope &poly)
+{
+	std::vector<Vec3> pts;
+	for (const Face &f : poly.faces)
+	{
+		if (!IsCeilingFace(f))
+			continue;
+		for (const Vec3 &v : f.winding)
+			pts.push_back(v);
+	}
+	return ConvexHullXY(pts);
+}
+
+double PolytopeCeilingZ(const Polytope &poly)
+{
+	double highest = -1e30;
+	for (const Face &f : poly.faces)
+	{
+		if (!IsCeilingFace(f))
+			continue;
+		for (const Vec3 &v : f.winding)
+			highest = std::max(highest, v.z);
+	}
+	return highest > -1e29 ? highest : 0.0;
+}
+
 namespace
 {
 

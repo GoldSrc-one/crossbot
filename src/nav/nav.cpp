@@ -1,6 +1,7 @@
 #include "nav.h"
 
 #include "nav_loader.h"
+#include "nav_water.h"
 
 namespace Nav
 {
@@ -12,11 +13,13 @@ std::unique_ptr<NavMesh> g_mesh;
 
 void LoadForMap(const char *mapName)
 {
+	ResetWaterCache();
 	g_mesh = LoadNavFile(mapName);
 }
 
 void Unload()
 {
+	ResetWaterCache();
 	g_mesh.reset();
 }
 

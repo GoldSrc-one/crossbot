@@ -56,6 +56,10 @@ struct Face
 
 bool IsFloorFace(const Face &face);
 
+constexpr double kCeilingNormalZ = -0.001;
+
+bool IsCeilingFace(const Face &face);
+
 struct Polytope
 {
 	std::vector<Face> faces;
@@ -67,6 +71,10 @@ struct Polytope
 };
 
 Winding WalkableFootprint(const Polytope &poly);
+
+Winding CeilingFootprint(const Polytope &poly);
+
+double PolytopeCeilingZ(const Polytope &poly);
 
 double WalkableFootprintGapArea(const Polytope &poly);
 
