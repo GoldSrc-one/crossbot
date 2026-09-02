@@ -16,9 +16,15 @@ namespace
 {
 
 constexpr double kSeamSlop = 2.0;
-constexpr double kSwimDepth = 24.0;
 constexpr double kMinSeamOverlap = 8.0;
 constexpr double kLedgeInset = 17.0;
+constexpr double kWallNormalZ = 0.3;
+constexpr double kNoCeilingZ = 1.0e9;
+
+// A swimmer hangs a hull under the ceiling the way a walker stands a hull on the floor, but with
+// nothing to rest on: leave a little slack so a crossing point on a seam plane is not also touching
+// the solid the seam runs along.
+constexpr double kSwimCeilingSlack = 2.0;
 
 struct AreaInfo
 {
@@ -59,7 +65,7 @@ bool OverlapsZ(const AreaInfo &a, const AreaInfo &b)
 	return !(a.maxs.z + kSeamSlop < b.mins.z || b.maxs.z + kSeamSlop < a.mins.z);
 }
 
-bool SharesFace(const AreaInfo &a, const AreaInfo &b)
+int SharedFaceAxis(const AreaInfo &a, const AreaInfo &b)
 {
 	const double aMin[3] = {a.mins.x, a.mins.y, a.mins.z};
 	const double aMax[3] = {a.maxs.x, a.maxs.y, a.maxs.z};
@@ -83,10 +89,10 @@ bool SharesFace(const AreaInfo &a, const AreaInfo &b)
 		}
 
 		if (spanOk)
-			return true;
+			return axis;
 	}
 
-	return false;
+	return -1;
 }
 
 Vec3 ContactPoint(const AreaInfo &a, const AreaInfo &b)
@@ -141,10 +147,71 @@ void CollectEdgeCandidates(const AreaInfo &dry, const AreaInfo &wet, std::vector
 	}
 }
 
-double SwimHeight(const AreaInfo &info, double surfaceZ)
+double AreaCeilingZ(const Area &area, double x, double y)
 {
-	double want = std::min(info.maxs.z, surfaceZ - kSwimDepth);
-	return std::max(info.mins.z, std::min(want, info.maxs.z));
+	bool any = false;
+	double best = 0.0;
+
+	for (const Plane &pl : area.boundPlanes)
+	{
+		if (pl.normal.z >= -kWallNormalZ)
+			continue;
+
+		double z = (pl.dist - pl.normal.x * x - pl.normal.y * y) / pl.normal.z;
+		if (!any || z < best)
+		{
+			best = z;
+			any = true;
+		}
+	}
+
+	return any ? best : kNoCeilingZ;
+}
+
+double AreaFloorZ(const Area &area, double x, double y)
+{
+	bool any = false;
+	double best = 0.0;
+
+	for (const Plane &pl : area.boundPlanes)
+	{
+		if (pl.normal.z <= kWallNormalZ)
+			continue;
+
+		double z = (pl.dist - pl.normal.x * x - pl.normal.y * y) / pl.normal.z;
+		if (!any || z > best)
+		{
+			best = z;
+			any = true;
+		}
+	}
+
+	return any ? best : 0.0;
+}
+
+double SwimHeightUnder(double ceiling, double floorZ)
+{
+	double z = ceiling - kNavFloorToStandOrigin - kSwimCeilingSlack;
+	if (z < floorZ)
+		z = std::min(ceiling, floorZ + kNavFloorToStandOrigin);
+
+	return z;
+}
+
+double SwimHeight(const Area &area, double x, double y, double surfaceZ)
+{
+	return SwimHeightUnder(std::min(AreaCeilingZ(area, x, y), surfaceZ), AreaFloorZ(area, x, y));
+}
+
+// A swim link across a shared wall is a window both areas have to fit through, so its crossing
+// height hangs under the lower of the two ceilings -- the mirror of a walk gate sitting on the
+// shared floor seam. Stacked areas get no common height: the link is there to change depth.
+double SwimHeightShared(const Area &a, const Area &b, double x, double y, double surfaceZ)
+{
+	double ceiling = std::min(std::min(AreaCeilingZ(a, x, y), AreaCeilingZ(b, x, y)), surfaceZ);
+	double floorZ = std::max(AreaFloorZ(a, x, y), AreaFloorZ(b, x, y));
+
+	return SwimHeightUnder(ceiling, floorZ);
 }
 
 Vec3 ClampIntoArea(const AreaInfo &info, const Vec3 &point)
@@ -243,7 +310,8 @@ size_t BuildSwimConnections(const BspFile &bsp, int duckHeadnode,
 			if (!TouchesXY(info[i], info[j]))
 				continue;
 
-			if (otherWet && !SharesFace(info[i], info[j]))
+			int seamAxis = otherWet ? SharedFaceAxis(info[i], info[j]) : -1;
+			if (otherWet && seamAxis < 0)
 				continue;
 
 			double overlapX = std::min(info[i].maxs.x, info[j].maxs.x) -
@@ -257,14 +325,25 @@ size_t BuildSwimConnections(const BspFile &bsp, int duckHeadnode,
 
 			Vec3 contact = ContactPoint(info[i], info[j]);
 
-			Vec3 pointA = ClampIntoArea(info[i], Vec3(contact.x, contact.y, SwimHeight(info[i], surfaceZ)));
+			Vec3 pointA = ClampIntoArea(info[i],
+				Vec3(contact.x, contact.y, SwimHeight(wet, contact.x, contact.y, surfaceZ)));
 
 			if (otherWet)
 			{
-				Vec3 pointB =
-					ClampIntoArea(info[j], Vec3(contact.x, contact.y, SwimHeight(info[j], surfaceZ)));
+				Vec3 pointB = ClampIntoArea(info[j],
+					Vec3(contact.x, contact.y, SwimHeight(other, contact.x, contact.y, surfaceZ)));
 
-				if (!reachable(pointA, pointB))
+				// Stacked areas meet at a horizontal seam and each endpoint already sits in its own
+				// area. Across a shared wall the swimmer has to fit through a window hanging under
+				// the lower of the two ceilings, so check the crossing there, not point to point.
+				Vec3 window(contact.x, contact.y,
+					SwimHeightShared(wet, other, contact.x, contact.y, surfaceZ));
+
+				bool crossable = (seamAxis == 2)
+					? reachable(pointA, pointB)
+					: (reachable(pointA, window) && reachable(window, pointB));
+
+				if (!crossable)
 				{
 					++stats.blockedByGeometry;
 					continue;
@@ -300,7 +379,8 @@ size_t BuildSwimConnections(const BspFile &bsp, int duckHeadnode,
 
 				Vec3 tryB = ClampIntoArea(info[j], Vec3(cand.dryXY.x, cand.dryXY.y, dryFloor));
 				Vec3 tryA = ClampIntoArea(info[i],
-					Vec3(cand.wetXY.x, cand.wetXY.y, SwimHeight(info[i], surfaceZ)));
+					Vec3(cand.wetXY.x, cand.wetXY.y,
+						SwimHeight(wet, cand.wetXY.x, cand.wetXY.y, surfaceZ)));
 
 				if (!reachableOverLedge(tryB, tryA))
 					continue;

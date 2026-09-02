@@ -17,6 +17,12 @@ namespace
 
 constexpr float kWallNormalZ = 0.3f;
 
+constexpr float kPlanNoCeiling = 1.0e9f;
+
+constexpr float kPlanSwimMergeDist = 1.f;
+
+constexpr float kPlanSwimCeilingSlack = 2.f;
+
 constexpr float kInsideEpsilon = -0.01f;
 
 constexpr float kLaunchInset = 2.f;
@@ -278,6 +284,40 @@ float AreaFloorZ(const PlanArea &area, float x, float y)
 	}
 
 	return any ? best : 0.f;
+}
+
+float AreaCeilingZ(const PlanArea &area, float x, float y)
+{
+	bool any = false;
+	float best = 0.f;
+
+	for (const PlanPlane &pl : area.boundPlanes)
+	{
+		if (pl.normal.z >= -kWallNormalZ)
+			continue;
+
+		float z = (pl.dist - pl.normal.x * x - pl.normal.y * y) / pl.normal.z;
+		if (!any || z < best)
+		{
+			best = z;
+			any = true;
+		}
+	}
+
+	return any ? best : kPlanNoCeiling;
+}
+
+float SwimOriginZ(const PlanArea &area, float x, float y, float surfaceZ)
+{
+	float ceiling = std::min(AreaCeilingZ(area, x, y), surfaceZ);
+	float floorZ = AreaFloorZ(area, x, y);
+	float lift = area.crouch ? 0.f : kPlanStandHeight;
+
+	float z = ceiling - lift - kPlanSwimCeilingSlack;
+	if (z < floorZ)
+		z = std::min(ceiling, floorZ + lift);
+
+	return z;
 }
 
 bool FloorsMeetAt(const PlanArea &here, const PlanArea &there, const Vector &seam, float tolerance)
@@ -629,8 +669,21 @@ float PlanWalker::Time() const
 
 Vector PlanWalker::AtPlayerHeight(const Vector &floorPoint, uint32_t areaId) const
 {
-	bool crouch = (areaId < m_areas->size()) && (*m_areas)[areaId].crouch;
-	return Vector(floorPoint.x, floorPoint.y, floorPoint.z + (crouch ? 0.f : kPlanStandHeight));
+	if (areaId >= m_areas->size())
+		return Vector(floorPoint.x, floorPoint.y, floorPoint.z + kPlanStandHeight);
+
+	const PlanArea &area = (*m_areas)[areaId];
+	const std::vector<float> *surfaces = m_traces ? m_traces->waterSurfaces : nullptr;
+
+	if (SubmergedAt(surfaces, area.waterVolume, area.submergeZ))
+	{
+		float surfaceZ = (*surfaces)[area.waterVolume];
+		return Vector(floorPoint.x, floorPoint.y,
+			SwimOriginZ(area, floorPoint.x, floorPoint.y, surfaceZ));
+	}
+
+	return Vector(floorPoint.x, floorPoint.y,
+		floorPoint.z + (area.crouch ? 0.f : kPlanStandHeight));
 }
 
 const PlanGate *PlanWalker::GateFor(const PlanConnection &conn, uint32_t insideId) const
@@ -1118,34 +1171,47 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 
 	if (conn.connType == crossbot_nav::CONN_SWIM)
 	{
-		const std::vector<float> *surfaces = m_traces ? m_traces->waterSurfaces : nullptr;
-
 		bool fromA = (fromId == conn.areaA);
-		Vector entryFloor = fromA ? conn.launchPos : conn.landingPos;
-		Vector exitFloor = fromA ? conn.landingPos : conn.launchPos;
 
-		Vector entry = SubmergedAt(surfaces, fromArea.waterVolume, fromArea.submergeZ)
-			? entryFloor : AtPlayerHeight(entryFloor, fromId);
-		Vector exit = SubmergedAt(surfaces, toArea.waterVolume, toArea.submergeZ)
-			? exitFloor : AtPlayerHeight(exitFloor, toId);
+		Vector entry = AtPlayerHeight(fromA ? conn.launchPos : conn.landingPos, fromId);
+		Vector exit = AtPlayerHeight(fromA ? conn.landingPos : conn.launchPos, toId);
 
 		bool tailCrouch = FlushFunnelTo(entry);
 
-		PlanWaypoint entryWp;
-		entryWp.point = entry;
-		entryWp.targetAreaId = static_cast<int>(fromId);
-		entryWp.connIndex = static_cast<int>(connIndex);
-		entryWp.requiresCrouch = tailCrouch || fromArea.crouch;
-		PushWaypoint(entryWp);
+		auto atTail = [&](const Vector &p)
+		{
+			return !m_result.empty() && (m_result.back().point - p).Length() <= kPlanSwimMergeDist;
+		};
 
-		PlanWaypoint exitWp;
-		exitWp.point = exit;
-		exitWp.targetAreaId = static_cast<int>(toId);
-		exitWp.connIndex = static_cast<int>(connIndex);
-		exitWp.requiresCrouch = toArea.crouch;
-		PushWaypoint(exitWp);
+		if (!atTail(entry) && (exit - entry).Length() > kPlanSwimMergeDist)
+		{
+			PlanWaypoint entryWp;
+			entryWp.point = entry;
+			entryWp.targetAreaId = static_cast<int>(fromId);
+			entryWp.connIndex = static_cast<int>(connIndex);
+			entryWp.requiresCrouch = tailCrouch || fromArea.crouch;
+			PushWaypoint(entryWp);
+			tailCrouch = false;
+		}
 
-		m_anchor = exitWp.point;
+		if (atTail(exit))
+		{
+			PlanWaypoint &tail = m_result.back();
+			tail.targetAreaId = static_cast<int>(toId);
+			tail.connIndex = static_cast<int>(connIndex);
+			tail.requiresCrouch = tail.requiresCrouch || tailCrouch || toArea.crouch;
+		}
+		else
+		{
+			PlanWaypoint exitWp;
+			exitWp.point = exit;
+			exitWp.targetAreaId = static_cast<int>(toId);
+			exitWp.connIndex = static_cast<int>(connIndex);
+			exitWp.requiresCrouch = tailCrouch || toArea.crouch;
+			PushWaypoint(exitWp);
+		}
+
+		m_anchor = m_result.back().point;
 		m_anchorFromAirmove = false;
 		UpdateFrontier();
 		return true;
