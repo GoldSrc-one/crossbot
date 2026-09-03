@@ -2078,7 +2078,7 @@ bool Bot_ManeuverActive(const CBot &bot)
 {
 	return bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive ||
 		bot.chargerActive || bot.brk.active || bot.deploy.active || bot.fun.mounted ||
-		bot.fun.arrival;
+		bot.fun.aboard || bot.fun.arrival;
 }
 
 void Bot_ResetNavPath(CBot &bot)
@@ -2167,7 +2167,7 @@ void Bot_MoveNav(CBot &bot)
 		if (!mesh)
 			return;
 
-		if (bot.hasLastOrigin && !bot.rideActive &&
+		if (bot.hasLastOrigin && !bot.rideActive && !bot.fun.aboard &&
 			(pEdict->v.origin - bot.lastOrigin).Length() > kTeleportJumpThreshold)
 			ResetPath(bot);
 	bot.lastOrigin = pEdict->v.origin;

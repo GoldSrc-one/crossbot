@@ -168,10 +168,10 @@ that on a small map with several bots, fun goals get re-selected often. Fighting
 
 ## bot_fun.cpp
 
-The middle tier: the map gimmicks that make an HLDM map what it is. Two kinds ship —
-`FUN_SWITCH` (a button or trigger whose chain reaches something that hurts people) and `FUN_TANK` (a
-mounted gun). `crossbot_fun 0` empties the tier, at which point `BotGoal::Select` reduces exactly to
-the old gather-only behaviour.
+The middle tier: the map gimmicks that make an HLDM map what it is. Three kinds ship —
+`FUN_SWITCH` (a button or trigger whose chain reaches something that hurts people), `FUN_TANK` (a
+mounted gun) and `FUN_TRAIN` (a drivable `func_tracktrain`). `crossbot_fun 0` empties the tier, at
+which point `BotGoal::Select` reduces exactly to the old gather-only behaviour.
 
 **This is entirely a runtime feature. No nav format change, no `kNavVersion` bump, no navgen work.**
 Everything a fun goal needs is either a plain `entvars_t` field or an offset already present in
@@ -342,11 +342,118 @@ the bot that pressed it. `m_fControl` is not in `gamedata/valve-win.json` and ca
 the others can. No stock DM map puts one behind a switch, so it is treated as interesting and left
 alone.
 
-The drivable-train tier is deferred, and the map survey argues for deferring it further: **no stock
-DM map has a `func_traincontrols` at all**, and `func_vehicle`, `func_tanklaser`, `func_tankrocket`
-and `momentary_rot_button` have zero occurrences across all 19 DM maps. subtransit's single
-`func_tracktrain` runs its 43-node `path_track` loop autonomously and is a `dmg 1000` crusher, not a
-vehicle.
+`func_vehicle`, `func_tanklaser`, `func_tankrocket` and `momentary_rot_button` have zero occurrences
+across all 19 DM maps, so none of them is handled. **No stock DM map has a `func_traincontrols`
+either** — but that turns out not to matter, because a `func_tracktrain` is driven from its own deck,
+not from a control panel. See `FUN_TRAIN` below.
+
+After the first ride the subtransit trench is lethal on a ~25 s cycle and the mesh says nothing about
+it. Modelling that needs time-varying area costs, which the nav format has no room for. This is the
+same decision as the crossfire nuke: the bot does not reason about surviving its own gimmick, and a
+bot that mistimes a catch and is crushed is an accepted outcome.
+
+navgen ignores `func_tracktrain` entirely, so the parked tram is a solid brush the mesh does not know
+about. It matters little on subtransit — the tram's underside sits 48 units above the trench floor, a
+duck-height slot, and its deck is above the walkable ledge rather than in it. **If it is ever fixed,
+the blocker must not go in `crossbot_nav::IsBakedBlocker`**: `TraceHitEntity`
+([bot_move.cpp:128](../src/bot/bot_move.cpp:128)) reads that predicate as "permanent world geometry",
+which stops being true the moment the tram is driven. It would need a navgen-only case resolving the
+runtime origin from `target` → `path_track` origin rather than the editor `origin` key that
+`ExtractBlockingVolumes` uses — on subtransit those differ by `(+64,+704,+496)`.
+
+### FUN_TRAIN: the subtransit tram
+
+**The tram does not start on its own, and it is not a crusher patrolling a route.** `startspeed` is
+`0`, so `CFuncTrackTrain::Find` ends with `pev->speed = 0` and `Next()` returns on its first tick
+without rescheduling its think. Nothing in the map targets `train`, and the `speed 0` keys on
+`trainpath05`, `05.5` and `20.1` are inert — `Next()` skips zero speeds explicitly, and that branch is
+gated on `SF_TRACKTRAIN_NOCONTROL` anyway. The 43-node loop is authored but never runs until a player
+drives it. Once driven it circles forever: the track is closed, so it never reaches a dead end.
+
+**Taking the controls is not the `PlayerUse` search loop.** `PlayerUse` handles trains *before* the
+`FindEntityInSphere` sweep: if `m_afButtonPressed & IN_USE` and the player's `pev->groundentity` has
+`FCAP_DIRECTIONAL_USE`, `FL_ONGROUND` is set, `IN_JUMP` is not held, and `OnControls(pev)` passes, the
+player gets `PFLAG_ONTRAIN`. None of the `FUN_TANK` aim work applies — there is no cone, no 64-unit
+radius, no `UTIL_ClampVectorToBox`. Stand on it, look anywhere, press `+USE`.
+
+**`OnControls` is not "standing on it" — it is a box test on the origin.** `Spawn` caches
+`m_controlMins = pev->mins` and `m_controlMaxs = pev->maxs` with `m_controlMaxs.z += 72`, and the test
+is on the player's *origin* transformed into tram-local space. A bot resting on the deck **edge** has
+the tram as its ground entity while its origin is up to half a hull outside that box: measured on
+subtransit, `local.y = 80` against `y[-65,65]`, and `+USE` silently did nothing for the full timeout.
+So the mount phase walks to the deck centre first and only pulses `+USE` once inside
+`kTrainCentreRadius`. This is the single most confusing failure in the module, because every visible
+precondition looks satisfied.
+
+**Firing blocks `+USE`.** `PlayerUse` is reachable only through `ImpulseCommands()` ←
+`ItemPostFrame()`, which returns early while `gpGlobals->time < m_flNextAttack`. A bot shooting on the
+deck can never take the controls. `BotFun::Pressing` therefore reports true during `TRAIN_MOUNT` and
+`TRAIN_RELEASE` so `BotFire` idles, and false during `TRAIN_DRIVE` and `TRAIN_RIDE` — acceleration
+goes through `PreThink`, not `PlayerUse`, so the bot can fight while driving and while riding.
+
+**Acceleration is four edge-triggered presses.** `PreThink` fires `Use(USE_SET, ±1)` on
+`m_afButtonPressed & IN_FORWARD`, and the delta math steps `pev->speed` 0 → 100 → 200 → 300 → 400.
+The `kFunPulse` alternation already used for `IN_USE` supplies the edges. Control drops the moment the
+bot leaves the ground, strafes (`IN_MOVELEFT|IN_MOVERIGHT`), or presses `+USE` again, and
+`pev->velocity` is zeroed every `PreThink` while it is held — so `TRAIN_DRIVE` and `TRAIN_RELEASE`
+send zero `fmove`/`smove` and no jump.
+
+**No new gamedata offsets.** Where `FUN_TANK` needed nine, the tram needs none: `FL_ONTRAIN` on
+`pev->flags` says whether the bot holds the controls, `pev->groundentity` says whether it is aboard,
+`pev->speed` is the signed current speed, `Spawn` caches the top speed in `pev->impulse`,
+`pev->spawnflags` carries `SF_TRACKTRAIN_NOCONTROL`, and the track is the `path_track` chain walked
+through plain `target`/`targetname`/`origin` keys.
+
+### Board points come from the track, not from the tram
+
+There is no attempt to predict a rendezvous. `BuildBoardPoints` walks the cached `path_track`
+polyline once per map and, at each node, probes both sides for nav areas the bot could hop from. Three
+rules decide, and each earned its place:
+
+- The probe offsets start **beyond the tram's own half-width**. Offsets measured from the deck centre
+  put the board point inside the tram's footprint, and bots walked into the parked brush until
+  `OnBlocked` retired the goal.
+- The stand point takes the area's **`centroid.z`**, not the probe's z. `ClampToArea` clamps into the
+  area's bounding box, so a probe at deck height stays at deck height and the goal point floats above
+  the floor — `follow.done` never fires and the bot never arrives.
+- `deck.z - point.z <= kTrainStepUp` and `point.z - deck.z <= kTrainBoardRise` keep the point roughly
+  level with the deck. A generous rise admits walkways ~40 units above the track that the bot cannot
+  actually get down from.
+
+The deck itself is `DeckAt`, not `pev->origin`: the brush model is offset from its origin (on
+subtransit by 64 units along the car) and the tram's own forward is the **reverse** of the travel
+direction, because `Find` adds 180° to the angles it derives from the look-ahead.
+
+### Start it, or catch it
+
+The mode is chosen from the live `train->v.speed` on arrival, never from what was decided at
+selection, so a bot that set out for a parked tram and finds it moving simply switches to catching.
+
+**Stopped** → walk at the deck and hop on (`kTrainJumpGap` from the bbox, `IN_JUMP` only when below
+deck height), then mount, accelerate to `pev->impulse`, release with one more `+USE`, and ride.
+
+**Moving** → the bot is already trackside, so it stands still and computes
+`ArcForward(ProjectOnTrack(tram), boardArc, sign(speed)) / |speed|`. If the tram is not due within
+`kTrainCatchWindow` (3 s), the goal is banned by `abandonReadiness` alone — no `readyTime` — so the
+bot goes to resupply and the tram becomes interesting again once it is better armed. If it is due, the
+bot waits and hops.
+
+The hop aims at the **cached trackside deck point**, not at the tram's current centre: driving at a
+moving tram means running into its front face, and `Blocked` crushes for `dmg 1000` unless the victim
+is already `FL_ONGROUND` **with the train as its ground entity**. It fires on either the predicted
+ETA or a straight proximity test, because the arc projection is ambiguous where the loop's two
+tunnels run parallel and a predicted-only trigger missed catches that the proximity test makes.
+
+`RunArrival` only hands over the first frame. Everything after that runs from `BotFun::Run`, which is
+called unconditionally — `RunArrival` fires only while `follow.done`, and the bot stops being at its
+goal point the moment it steps toward the deck, so an arrival-driven state machine stalls silently
+partway through boarding.
+
+Riding is a normal player standing on a moving platform: zero move input, aim and fire from the usual
+pipeline, and a nudge back toward the deck centre when drift exceeds `kTrainCentreRadius` (without it
+bots slide off on the curves). Boredom is the tank's rule unchanged. Dismount looks each frame for a
+nav area within `kTrainHopRange` of either side and no more than `kTrainSafeDrop` below, then jumps
+onto it; `kTrainRideMax` forces a bail if nothing qualifies for a full minute.
 
 ## bot_move.h
 

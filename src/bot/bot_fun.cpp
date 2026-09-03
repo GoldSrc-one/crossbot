@@ -10,7 +10,9 @@
 
 #include "../game/game_profile.h"
 #include "../game/gamedata.h"
+#include "../nav/nav.h"
 #include "../nav/nav_math.h"
+#include "../nav/nav_query.h"
 #include "../nav/path_follower.h"
 #include "../nav/pm_sim.h"
 #include "bot.h"
@@ -63,9 +65,45 @@ namespace
 	constexpr float kTankAimTolerance = 4.f;
 	constexpr float kTankReachRange = 56.f;
 
+	constexpr int kSfTrainNoControl = 2;
+
+	constexpr float kTrainStopEpsilon = 1.f;
+	constexpr float kTrainBoardRange = 112.f;
+	constexpr float kTrainStepUp = 32.f;
+	constexpr float kTrainBoardRise = 40.f;
+	constexpr float kTrainCentreRadius = 24.f;
+	constexpr float kTrainBoardArcSlack = 192.f;
+	constexpr float kTrainCatchWindow = 3.f;
+	constexpr float kTrainHopLead = 0.3f;
+	constexpr float kTrainHopRange = 112.f;
+	constexpr float kTrainSafeDrop = 96.f;
+	constexpr float kTrainRideMax = 60.f;
+	constexpr float kTrainJumpGap = 40.f;
+	constexpr float kTrainDriveTimeout = 8.f;
+	constexpr float kTrainOffGrace = 0.4f;
+	constexpr float kTrainUnreachable = 1.0e9f;
+
+	constexpr int kTrainMaxNodes = 512;
+
 	constexpr float kMoveDeadzone = 0.01f;
 
 	constexpr int kHullDuck = 3;
+
+	struct Track
+	{
+		std::vector<Vector> nodes;
+		std::vector<float> arcs;
+		float length = 0.f;
+		bool closed = false;
+	};
+
+	struct BoardPoint
+	{
+		unsigned int areaId = 0;
+		Vector point;
+		Vector deck;
+		float arc = 0.f;
+	};
 
 	struct Entry
 	{
@@ -73,6 +111,10 @@ namespace
 		BotFun::Kind kind = BotFun::FUN_SWITCH;
 		BotFun::Action action = BotFun::FUN_ACT_USE;
 		char terminal[32] = {};
+
+		Track track;
+		std::vector<BoardPoint> board;
+		bool boardBuilt = false;
 	};
 
 	std::vector<Entry> g_table;
@@ -275,6 +317,159 @@ namespace
 		return nullptr;
 	}
 
+	edict_t *FindPathTrack(const char *name)
+	{
+		if (!name || !name[0])
+			return nullptr;
+
+		for (int i = 1; i < gpGlobals->maxEntities; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!ent || ent->free || strcmp(NameOf(ent), name) != 0)
+				continue;
+			if (strcmp(CBotClassOf(ent), "path_track") == 0)
+				return ent;
+		}
+
+		return nullptr;
+	}
+
+	void BuildTrack(edict_t *train, Track &track)
+	{
+		std::vector<int> seen;
+		const char *name = TargetOf(train);
+
+		while (static_cast<int>(track.nodes.size()) < kTrainMaxNodes)
+		{
+			edict_t *node = FindPathTrack(name);
+			if (!node)
+				break;
+
+			int index = g_engfuncs.pfnIndexOfEdict(node);
+			if (std::find(seen.begin(), seen.end(), index) != seen.end())
+			{
+				track.closed = !seen.empty() && index == seen.front();
+				break;
+			}
+
+			seen.push_back(index);
+			track.nodes.push_back(node->v.origin);
+			name = TargetOf(node);
+		}
+
+		size_t count = track.nodes.size();
+		track.arcs.assign(count, 0.f);
+		if (count < 2)
+		{
+			track.closed = false;
+			return;
+		}
+
+		float acc = 0.f;
+		for (size_t i = 0; i + 1 < count; ++i)
+		{
+			track.arcs[i] = acc;
+			acc += (track.nodes[i + 1] - track.nodes[i]).Length();
+		}
+		track.arcs[count - 1] = acc;
+
+		if (track.closed)
+			acc += (track.nodes[0] - track.nodes[count - 1]).Length();
+		track.length = acc;
+	}
+
+	size_t TrackSegments(const Track &track)
+	{
+		size_t count = track.nodes.size();
+		if (count < 2)
+			return 0;
+		return track.closed ? count : count - 1;
+	}
+
+	float ProjectOnTrack(const Track &track, const Vector &point)
+	{
+		size_t count = track.nodes.size();
+		size_t segs = TrackSegments(track);
+		if (segs == 0)
+			return 0.f;
+
+		float best = 1.0e30f;
+		float bestArc = 0.f;
+
+		for (size_t i = 0; i < segs; ++i)
+		{
+			const Vector &a = track.nodes[i];
+			const Vector &b = track.nodes[(i + 1) % count];
+			Vector d = b - a;
+
+			float len2 = DotProduct(d, d);
+			float u = len2 > 0.0001f ? DotProduct(point - a, d) / len2 : 0.f;
+			u = u < 0.f ? 0.f : (u > 1.f ? 1.f : u);
+
+			Vector q = a + d * u;
+			float dist = (point - q).Length();
+			if (dist < best)
+			{
+				best = dist;
+				bestArc = track.arcs[i] + d.Length() * u;
+			}
+		}
+
+		return bestArc;
+	}
+
+	float ArcForward(const Track &track, float from, float to, float sign)
+	{
+		if (track.length <= 0.f)
+			return kTrainUnreachable;
+
+		float d = sign >= 0.f ? (to - from) : (from - to);
+
+		if (!track.closed)
+			return d >= 0.f ? d : kTrainUnreachable;
+
+		d = fmodf(d, track.length);
+		if (d < 0.f)
+			d += track.length;
+		return d;
+	}
+
+	Vector TrainRight(float yawDegrees)
+	{
+		float yaw = yawDegrees * (kPiF / 180.f);
+		return Vector(sinf(yaw), -cosf(yaw), 0.f);
+	}
+
+	Vector TrainForward(float yawDegrees)
+	{
+		float yaw = yawDegrees * (kPiF / 180.f);
+		return Vector(cosf(yaw), sinf(yaw), 0.f);
+	}
+
+	Vector DeckAt(edict_t *train, const Vector &origin, const Vector &forward, const Vector &right)
+	{
+		Vector mid = (train->v.mins + train->v.maxs) * 0.5f;
+		Vector deck = origin + forward * mid.x - right * mid.y;
+		deck.z = origin.z + train->v.maxs.z;
+		return deck;
+	}
+
+	Vector TrainDeck(edict_t *train)
+	{
+		return DeckAt(train, train->v.origin, TrainForward(train->v.angles.y),
+			TrainRight(train->v.angles.y));
+	}
+
+	float TrainEta(const Track &track, edict_t *train, float boardArc)
+	{
+		float speed = train->v.speed;
+		if (fabsf(speed) < kTrainStopEpsilon)
+			return kTrainUnreachable;
+
+		float arc = ProjectOnTrack(track, train->v.origin);
+		return ArcForward(track, arc, boardArc, speed) / fabsf(speed);
+	}
+
 	bool IsSwitchClass(const char *cls)
 	{
 		return strcmp(cls, "func_button") == 0 || strcmp(cls, "func_rot_button") == 0 ||
@@ -333,6 +528,26 @@ namespace
 				continue;
 			}
 
+			if (strcmp(cls, "func_tracktrain") == 0)
+			{
+				if ((static_cast<int>(ent->v.spawnflags) & kSfTrainNoControl) != 0)
+					continue;
+				if (ent->v.impulse == 0)
+					continue;
+
+				Entry entry;
+				entry.index = i;
+				entry.kind = BotFun::FUN_TRAIN;
+				entry.action = BotFun::FUN_ACT_USE;
+				BuildTrack(ent, entry.track);
+				if (TrackSegments(entry.track) == 0)
+					continue;
+
+				snprintf(entry.terminal, sizeof(entry.terminal), "path_track");
+				g_table.push_back(entry);
+				continue;
+			}
+
 			if (!IsSwitchClass(cls))
 				continue;
 
@@ -355,6 +570,18 @@ namespace
 		if (!ent || ent->free)
 			return nullptr;
 		return ent;
+	}
+
+	const Entry *EntryFor(edict_t *ent)
+	{
+		if (!ent || ent->free)
+			return nullptr;
+
+		int index = g_engfuncs.pfnIndexOfEdict(ent);
+		for (const Entry &entry : g_table)
+			if (entry.index == index)
+				return &entry;
+		return nullptr;
 	}
 
 	bool SwitchReady(edict_t *ent, BotFun::Action action)
@@ -523,6 +750,97 @@ namespace
 		}
 	}
 
+	void BuildBoardPoints(const Nav::NavMesh &mesh, edict_t *train, Entry &entry)
+	{
+		if (entry.boardBuilt)
+			return;
+		entry.boardBuilt = true;
+
+		const Track &track = entry.track;
+		size_t count = track.nodes.size();
+		size_t segs = TrackSegments(track);
+		if (segs == 0)
+			return;
+
+		float halfWidth = (train->v.maxs.y - train->v.mins.y) * 0.5f;
+		const float offsets[3] = {halfWidth + 16.f, halfWidth + 56.f, halfWidth + 96.f};
+
+		for (size_t i = 0; i < count; ++i)
+		{
+			const Vector &node = track.nodes[i];
+
+			Vector d = track.nodes[(i + 1) % count] - node;
+			float flat = sqrtf(d.x * d.x + d.y * d.y);
+			Vector travel = flat > 0.0001f ? Vector(d.x / flat, d.y / flat, 0.f)
+				: Vector(1.f, 0.f, 0.f);
+
+			Vector forward = travel * -1.f;
+			Vector right(forward.y, -forward.x, 0.f);
+
+			Vector deck = DeckAt(train, node, forward, right);
+
+			for (int s = -1; s <= 1; s += 2)
+			{
+				for (int o = 0; o < 3; ++o)
+				{
+					Vector probe = deck + right * (static_cast<float>(s) * offsets[o]);
+
+					const Nav::Area *area = Nav::FindAreaNearest(mesh, probe);
+					if (!area)
+						continue;
+
+					Vector point = BotItems::ClampToArea(*area,
+						Vector(probe.x, probe.y, area->centroid.z));
+					float dx = point.x - deck.x;
+					float dy = point.y - deck.y;
+					float reach = sqrtf(dx * dx + dy * dy);
+
+					if (reach > halfWidth + kTrainBoardRange)
+						continue;
+					if (fabsf(dx * right.x + dy * right.y) < halfWidth)
+						continue;
+					if (deck.z - point.z > kTrainStepUp)
+						continue;
+					if (point.z - deck.z > kTrainBoardRise)
+						continue;
+
+					Vector airFrom(point.x, point.y, std::max(point.z, deck.z) + 1.f);
+					Vector airTo(deck.x, deck.y, deck.z + 1.f);
+					if (!HullClear(train, airFrom, airTo))
+						continue;
+
+					size_t slot = entry.board.size();
+					for (size_t b = 0; b < entry.board.size(); ++b)
+					{
+						if (entry.board[b].areaId == area->id)
+						{
+							slot = b;
+							break;
+						}
+					}
+
+					if (slot < entry.board.size())
+					{
+						const BoardPoint &have = entry.board[slot];
+						float bx = have.point.x - have.deck.x;
+						float by = have.point.y - have.deck.y;
+						if (sqrtf(bx * bx + by * by) <= reach)
+							continue;
+					}
+					else
+					{
+						entry.board.push_back(BoardPoint());
+					}
+
+					entry.board[slot].areaId = area->id;
+					entry.board[slot].point = point;
+					entry.board[slot].deck = deck;
+					entry.board[slot].arc = track.arcs[i];
+				}
+			}
+		}
+	}
+
 	float AngleDistance(float next, float cur)
 	{
 		return Bot_NormalizeAngle(next - cur);
@@ -677,6 +995,319 @@ namespace
 		bot.fun.arrival = false;
 		bot.fun.pressed = false;
 	}
+
+	bool Grounded(edict_t *pEdict)
+	{
+		return (static_cast<int>(pEdict->v.flags) & FL_ONGROUND) != 0;
+	}
+
+	bool RunTrainRide(CBot &bot);
+
+	bool RunTrainArrival(CBot &bot, edict_t *train)
+	{
+		BotFun::State &st = bot.fun;
+
+		if (!EntryFor(train))
+		{
+			FinishSwitch(bot, train, kFunFailCooldown, "lost the track of");
+			return false;
+		}
+
+		st.aboard = true;
+		st.dismounting = false;
+		st.arrival = false;
+		st.pressed = false;
+		st.offTrainSince = 0.f;
+		st.boardTime = gpGlobals->time;
+		st.phaseStart = gpGlobals->time;
+		st.trainPhase = fabsf(train->v.speed) < kTrainStopEpsilon ? BotFun::TRAIN_APPROACH
+			: BotFun::TRAIN_WAIT;
+
+		return RunTrainRide(bot);
+	}
+
+	void LeaveTrain(CBot &bot)
+	{
+		bot.fun.aboard = false;
+		bot.fun.dismounting = false;
+		bot.fun.train.Clear();
+	}
+
+	bool RunTrainBoarding(CBot &bot, edict_t *train, const Entry &entry)
+	{
+		BotFun::State &st = bot.fun;
+		edict_t *pEdict = bot.pEdict;
+
+		bool stopped = fabsf(train->v.speed) < kTrainStopEpsilon;
+		Vector deck = TrainDeck(train);
+		Vector angles = Bot_UpdateFacing(bot);
+
+		float budget = stopped ? kFunArrivalTimeout : kTrainCatchWindow + kFunArrivalTimeout;
+
+		if (gpGlobals->time - st.boardTime > budget)
+		{
+			NoteCooldown(bot, train, kFunFailCooldown);
+
+			BOT_VLOG("CrossBot: %s %s at (%.1f,%.1f,%.1f), leaving it for %.0fs\n", bot.name,
+				stopped ? "could not get on the tram" : "missed the tram",
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, kFunFailCooldown);
+
+			LeaveTrain(bot);
+			BotGoal::Clear(bot);
+			return false;
+		}
+
+		if (stopped)
+		{
+			unsigned short extra = 0;
+			if (Grounded(pEdict) && pEdict->v.origin.z < deck.z &&
+				UseBoxDist(train, pEdict->v.origin) <= kTrainJumpGap)
+				extra |= IN_JUMP;
+
+			DriveTo(bot, angles, deck, false, extra);
+			return true;
+		}
+
+		float eta = TrainEta(entry.track, train, st.boardArc);
+
+		if (st.lastEta >= kTrainUnreachable)
+		{
+			float readiness = Readiness(bot);
+
+			if (eta > kTrainCatchWindow)
+			{
+				if (BotFun::Memo *memo = MemoSlot(bot, train))
+					memo->abandonReadiness = readiness;
+
+				BOT_VLOG("CrossBot: %s reached the track, tram not due for %.1fs, "
+					"leaving it until readiness beats %.2f\n", bot.name, eta, readiness);
+
+				LeaveTrain(bot);
+				BotGoal::Clear(bot);
+				return false;
+			}
+
+			BOT_VLOG("CrossBot: %s reached the track, tram due in %.1fs, waiting\n", bot.name, eta);
+		}
+		st.lastEta = eta;
+
+		float lead = fabsf(train->v.speed) * kTrainHopLead + kTrainJumpGap;
+		bool closing = UseBoxDist(train, pEdict->v.origin) <= lead;
+
+		if ((eta <= kTrainHopLead || closing) && Grounded(pEdict))
+		{
+			DriveTo(bot, angles, st.boardDeck, false, IN_JUMP);
+			return true;
+		}
+
+		bot.moveForward = 0.f;
+		bot.moveSide = 0.f;
+		Bot_RunPlayerMove(bot, angles, 0.f, 0.f, 0);
+		return true;
+	}
+
+	bool RunTrainRide(CBot &bot)
+	{
+		BotFun::State &st = bot.fun;
+		edict_t *pEdict = bot.pEdict;
+		edict_t *train = st.train.Get();
+		const Entry *entry = EntryFor(train);
+
+		if (!train || !entry || !g_pGameProfile || g_pGameProfile->IsDead(pEdict))
+		{
+			BOT_VLOG("CrossBot: %s is off the tram\n", bot.name);
+			LeaveTrain(bot);
+			BotGoal::Clear(bot);
+			return false;
+		}
+
+		bool onTrain = pEdict->v.groundentity == train;
+		bool boarded = st.trainPhase >= BotFun::TRAIN_MOUNT;
+
+		bot.lastProgressTime = gpGlobals->time;
+
+		if (bot.sense.enemy.Get())
+			st.lastSeenEnemy = gpGlobals->time;
+
+		BotSense::ApplyLook(bot);
+
+		if (!boarded)
+		{
+			if (!onTrain)
+				return RunTrainBoarding(bot, train, *entry);
+
+			st.offTrainSince = 0.f;
+			st.boardTime = gpGlobals->time;
+			st.phaseStart = gpGlobals->time;
+			st.lastSeenEnemy = gpGlobals->time;
+			st.trainPhase = BotFun::TRAIN_MOUNT;
+
+			BOT_VLOG("CrossBot: %s boarded the tram\n", bot.name);
+		}
+
+		if (!onTrain)
+		{
+			if (st.offTrainSince == 0.f)
+			{
+				st.offTrainSince = gpGlobals->time;
+			}
+			else if (gpGlobals->time - st.offTrainSince > kTrainOffGrace)
+			{
+				BOT_VLOG("CrossBot: %s is off the tram\n", bot.name);
+				LeaveTrain(bot);
+				BotGoal::Clear(bot);
+				return false;
+			}
+		}
+		else
+		{
+			st.offTrainSince = 0.f;
+		}
+
+		if (st.trainPhase != BotFun::TRAIN_RIDE && onTrain)
+		{
+			float speed = train->v.speed;
+			float top = fabsf(static_cast<float>(train->v.impulse));
+			bool holding = (static_cast<int>(pEdict->v.flags) & FL_ONTRAIN) != 0;
+			bool stopped = fabsf(speed) < kTrainStopEpsilon;
+
+			BotFun::TrainPhase want;
+			if (holding)
+				want = fabsf(speed) + kTrainStopEpsilon < top ? BotFun::TRAIN_DRIVE
+					: BotFun::TRAIN_RELEASE;
+			else
+				want = stopped ? BotFun::TRAIN_MOUNT : BotFun::TRAIN_RIDE;
+
+			if (gpGlobals->time - st.boardTime > kTrainDriveTimeout)
+				want = BotFun::TRAIN_RIDE;
+
+			if (want != st.trainPhase)
+			{
+				if (want == BotFun::TRAIN_RELEASE)
+					BOT_VLOG("CrossBot: %s is driving the tram, speed %.0f\n", bot.name,
+						fabsf(speed));
+				else if (want == BotFun::TRAIN_RIDE)
+					BOT_VLOG("CrossBot: %s is riding the tram at %.0f\n", bot.name, fabsf(speed));
+
+				st.trainPhase = want;
+				st.phaseStart = gpGlobals->time;
+			}
+
+			if (want != BotFun::TRAIN_RIDE)
+			{
+				bool pulse = static_cast<int>((gpGlobals->time - st.phaseStart) / kFunPulse) % 2 == 0;
+				Vector driveAngles = Bot_UpdateFacing(bot);
+
+				if (want == BotFun::TRAIN_MOUNT)
+				{
+					Vector deck = TrainDeck(train);
+					float ox = deck.x - pEdict->v.origin.x;
+					float oy = deck.y - pEdict->v.origin.y;
+					bool centred = sqrtf(ox * ox + oy * oy) <= kTrainCentreRadius;
+
+					unsigned short buttons = 0;
+					if (centred && pulse)
+						buttons |= IN_USE;
+
+					DriveTo(bot, driveAngles, deck, centred, buttons);
+					return true;
+				}
+
+				unsigned short buttons = 0;
+				if (pulse)
+					buttons |= want == BotFun::TRAIN_DRIVE ? IN_FORWARD : IN_USE;
+
+				bot.moveForward = 0.f;
+				bot.moveSide = 0.f;
+				Bot_RunPlayerMove(bot, driveAngles, 0.f, 0.f, buttons);
+				return true;
+			}
+		}
+
+		if (!st.dismounting && gpGlobals->time - st.lastSeenEnemy > kFunBoredom)
+		{
+			float readiness = Readiness(bot);
+			if (BotFun::Memo *memo = MemoSlot(bot, train))
+			{
+				memo->abandonReadiness = readiness;
+				memo->readyTime = gpGlobals->time + kFunTankFailCooldown;
+			}
+
+			BOT_VLOG("CrossBot: %s is bored of the tram, nobody around for %.1fs, readiness %.2f\n",
+				bot.name, gpGlobals->time - st.lastSeenEnemy, readiness);
+
+			st.dismounting = true;
+			st.dismountStart = gpGlobals->time;
+		}
+
+		Vector angles = Bot_UpdateFacing(bot);
+
+		if (st.dismounting)
+		{
+			const Nav::NavMesh *mesh = Nav::Get();
+			Vector deck = TrainDeck(train);
+			Vector right = TrainRight(train->v.angles.y);
+
+			float halfWidth = (train->v.maxs.y - train->v.mins.y) * 0.5f;
+
+			for (int s = -1; mesh && s <= 1; s += 2)
+			{
+				Vector land = deck + right * (static_cast<float>(s) * (halfWidth + kTrainHopRange));
+
+				const Nav::Area *area = Nav::FindAreaNearest(*mesh, land);
+				if (!area)
+					continue;
+
+				Vector point = BotItems::ClampToArea(*area,
+					Vector(land.x, land.y, area->centroid.z));
+				float dx = point.x - deck.x;
+				float dy = point.y - deck.y;
+				if (sqrtf(dx * dx + dy * dy) > halfWidth + kTrainHopRange)
+					continue;
+				if (deck.z - point.z > kTrainSafeDrop)
+					continue;
+				if (!HullClear(train, deck + Vector(0.f, 0.f, 1.f),
+					Vector(point.x, point.y, deck.z + 1.f)))
+					continue;
+
+				BOT_VLOG("CrossBot: %s jumped off the tram onto area %u\n", bot.name, area->id);
+
+				LeaveTrain(bot);
+				DriveTo(bot, angles, point, false, IN_JUMP);
+				BotGoal::Clear(bot);
+				return true;
+			}
+
+			if (gpGlobals->time - st.dismountStart > kTrainRideMax)
+			{
+				BOT_VLOG("CrossBot: %s bailed off the tram after %.0fs with nowhere to land\n",
+					bot.name, gpGlobals->time - st.dismountStart);
+
+				LeaveTrain(bot);
+
+				bot.moveForward = 0.f;
+				bot.moveSide = 0.f;
+				Bot_RunPlayerMove(bot, angles, 0.f, 0.f, IN_JUMP);
+				BotGoal::Clear(bot);
+				return true;
+			}
+		}
+
+		Vector deck = TrainDeck(train);
+		float ox = deck.x - pEdict->v.origin.x;
+		float oy = deck.y - pEdict->v.origin.y;
+
+		if (sqrtf(ox * ox + oy * oy) > kTrainCentreRadius)
+		{
+			DriveTo(bot, angles, deck, false, 0);
+			return true;
+		}
+
+		bot.moveForward = 0.f;
+		bot.moveSide = 0.f;
+		Bot_RunPlayerMove(bot, angles, 0.f, 0.f, 0);
+		return true;
+	}
 }
 
 namespace BotFun
@@ -700,7 +1331,13 @@ bool DebugEnabled()
 
 const char *KindName(Kind kind)
 {
-	return kind == FUN_TANK ? "tank" : "switch";
+	switch (kind)
+	{
+	case FUN_TANK: return "tank";
+	case FUN_TRAIN: return "tram";
+	default: break;
+	}
+	return "switch";
 }
 
 const char *ActionName(Action action)
@@ -730,11 +1367,39 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Can
 
 	const Vector &from = bot.pEdict->v.origin;
 
-	for (const Entry &entry : g_table)
+	for (Entry &entry : g_table)
 	{
 		edict_t *ent = EntryEdict(entry);
 		if (!ent || Blocked(bot, ent))
 			continue;
+
+		if (entry.kind == FUN_TRAIN)
+		{
+			BuildBoardPoints(mesh, ent, entry);
+
+			bool stopped = fabsf(ent->v.speed) < kTrainStopEpsilon;
+			float here = stopped ? ProjectOnTrack(entry.track, ent->v.origin) : 0.f;
+
+			for (const BoardPoint &b : entry.board)
+			{
+				if (stopped)
+				{
+					float ahead = ArcForward(entry.track, here, b.arc, 1.f);
+					float behind = ArcForward(entry.track, b.arc, here, 1.f);
+					if (std::min(ahead, behind) > kTrainBoardArcSlack)
+						continue;
+				}
+
+				BotGoal::Candidate cand;
+				cand.tier = BotGoal::GOAL_FUN;
+				cand.ent = ent;
+				cand.areaId = b.areaId;
+				cand.point = b.point;
+				cand.payload = PackPayload(FUN_TRAIN, FUN_ACT_USE);
+				out.push_back(cand);
+			}
+			continue;
+		}
 
 		if (entry.kind == FUN_TANK)
 		{
@@ -814,6 +1479,30 @@ void Accept(CBot &bot, const BotGoal::Candidate &cand)
 		if (edict_t *tank = TankOfControls(cand.ent))
 			st.tank.Set(tank);
 	}
+
+	if (st.kind == FUN_TRAIN)
+	{
+		st.train.Set(cand.ent);
+		st.trainPhase = TRAIN_APPROACH;
+		st.phaseStart = gpGlobals->time;
+		st.boardArc = 0.f;
+		st.boardDeck = cand.point;
+		st.lastEta = kTrainUnreachable;
+		st.offTrainSince = 0.f;
+
+		if (const Entry *entry = EntryFor(cand.ent))
+		{
+			for (const BoardPoint &b : entry->board)
+			{
+				if (b.areaId == cand.areaId)
+				{
+					st.boardArc = b.arc;
+					st.boardDeck = b.deck;
+					break;
+				}
+			}
+		}
+	}
 }
 
 bool ValidFor(const CBot &bot, edict_t *ent, int payload)
@@ -823,6 +1512,9 @@ bool ValidFor(const CBot &bot, edict_t *ent, int payload)
 
 	if (Blocked(bot, ent))
 		return false;
+
+	if (PayloadKind(payload) == FUN_TRAIN)
+		return true;
 
 	if (PayloadKind(payload) == FUN_TANK)
 	{
@@ -857,9 +1549,19 @@ bool Mounted(const CBot &bot)
 	return bot.fun.mounted;
 }
 
+bool Aboard(const CBot &bot)
+{
+	return bot.fun.aboard;
+}
+
 bool Pressing(const CBot &bot)
 {
-	return bot.fun.arrival && bot.fun.action != FUN_ACT_SHOOT;
+	const State &st = bot.fun;
+
+	if (st.kind == FUN_TRAIN)
+		return st.aboard && (st.trainPhase == TRAIN_MOUNT || st.trainPhase == TRAIN_RELEASE);
+
+	return st.arrival && st.action != FUN_ACT_SHOOT;
 }
 
 bool RunArrival(CBot &bot)
@@ -907,6 +1609,9 @@ bool RunArrival(CBot &bot)
 
 		return true;
 	}
+
+	if (st.kind == FUN_TRAIN)
+		return RunTrainArrival(bot, ent);
 
 	Vector center = BrushCenter(ent);
 
@@ -1010,6 +1715,10 @@ bool RunArrival(CBot &bot)
 bool Run(CBot &bot)
 {
 	State &st = bot.fun;
+
+	if (st.aboard)
+		return RunTrainRide(bot);
+
 	if (!st.mounted)
 		return false;
 
@@ -1142,6 +1851,9 @@ void OnBlocked(CBot &bot, const char *what)
 void OnRespawn(CBot &bot)
 {
 	bot.fun.mounted = false;
+	bot.fun.aboard = false;
+	bot.fun.dismounting = false;
+	bot.fun.train.Clear();
 	bot.fun.memo.clear();
 	Forget(bot);
 }
@@ -1150,7 +1862,7 @@ void PrintCandidates(const Nav::NavMesh &mesh)
 {
 	BuildTable();
 
-	for (const Entry &entry : g_table)
+	for (Entry &entry : g_table)
 	{
 		edict_t *ent = EntryEdict(entry);
 		if (!ent)
@@ -1160,6 +1872,44 @@ void PrintCandidates(const Nav::NavMesh &mesh)
 
 		char areaBuf[80] = "none";
 		const char *why = "ready";
+
+		if (entry.kind == FUN_TRAIN)
+		{
+			BuildBoardPoints(mesh, ent, entry);
+
+			int written = 0;
+			for (size_t p = 0; p < entry.board.size() && written >= 0 &&
+				written + 8 < static_cast<int>(sizeof(areaBuf)); ++p)
+				written += snprintf(areaBuf + written, sizeof(areaBuf) - written, "%s%u",
+					p == 0 ? "" : ",", entry.board[p].areaId);
+
+			if (entry.board.empty())
+				why = "no nav area";
+
+			Vector deck = TrainDeck(ent);
+
+			char line[400];
+			snprintf(line, sizeof(line),
+				"CrossBot: fun tram use %s at (%.1f,%.1f,%.1f) speed %.0f deck (%.1f,%.1f,%.1f) "
+				"area %s -> %s, %s\n",
+				CBotClassOf(ent), center.x, center.y, center.z, ent->v.speed, deck.x, deck.y, deck.z,
+				entry.board.empty() ? "none" : areaBuf, entry.terminal, why);
+			SERVER_PRINT(line);
+
+			if (DebugEnabled())
+			{
+				for (const BoardPoint &b : entry.board)
+				{
+					char spot[200];
+					snprintf(spot, sizeof(spot),
+						"CrossBot:   tram board area %u at (%.1f,%.1f,%.1f), deck (%.1f,%.1f,%.1f),"
+						" arc %.0f\n", b.areaId, b.point.x, b.point.y, b.point.z, b.deck.x, b.deck.y,
+						b.deck.z, b.arc);
+					SERVER_PRINT(spot);
+				}
+			}
+			continue;
+		}
 
 		if (entry.kind == FUN_TANK)
 		{

@@ -162,10 +162,17 @@ and it catches chain-analysis bugs that the bots would only show you as vague li
 | undertow | the `wait 142` button at `(1640,152,184)` | the `bunker_door` button |
 | snark_pit | the `wait 120` snark button at `(304,-640,48)` | the four door/lift buttons |
 | datacore | nothing — `0 fun entities` | — |
+| subtransit | one `tram` row for the `func_tracktrain`, 19 board areas | the two `func_rot_button`s (their chain ends at `pipedoor`) |
 
 crossfire's trigger is also the reachability assertion: it sits behind `strike_ready_door`, which
 opens 180 s into the map, so before t=180 it must read `no nav area` and must not be offered as a
 candidate.
+
+subtransit's assertion is that the board points are a property of the **track**, not of the tram: the
+19 areas and the second `crossbot_list_fun` must be identical whether the tram is parked at
+`speed 0` or circling at `speed 400`. The row also prints `deck (-608.0,-896.0,-167.0)` while the
+tram sits at `(-544,-896,-200)` — the 64-unit offset is the brush model's offset from its origin and
+is correct; a deck equal to the origin means `DeckAt` has been bypassed.
 
 **A healthy run is a cycle**, and it takes more than one bot to see all of it:
 
@@ -193,9 +200,58 @@ Three failure signatures are worth naming, because each looks like something els
   `UTIL_ClampVectorToBox` trap (`doc/bot.md`, `bot_fun.cpp`). Small brushes hide it entirely, so
   undertow passing proves nothing about stalkyard.
 
+### subtransit, the tram
+
+Two transcripts have to appear over a long enough run — the first once, the second repeatedly. Start
+it:
+
+```
+Player2 boarded the tram
+Player2 is driving the tram, speed 400
+Player2 is riding the tram at 400
+Player2 is bored of the tram, nobody around for 10.0s, readiness 0.20
+Player2 jumped off the tram onto area 403
+```
+
+and catch it, which is only possible after somebody has started it:
+
+```
+Player2 reached the track, tram due in 1.9s, waiting
+Player2 boarded the tram
+Player2 is riding the tram at 400
+```
+
+The negative branch is the readiness ban, and it should be the **most common** line in the log —
+a ~25 s lap against a 3 s catch window means most arrivals are too early:
+
+```
+Player1 reached the track, tram not due for 5.8s, leaving it until readiness beats 0.35
+```
+
+Four failure signatures, each pointing at one mechanism:
+
+- **`boarded the tram` then `riding the tram at 0`** — the mount never took, and after
+  `kTrainDriveTimeout` the bot gave up and rode a stationary tram. Two causes, both silent: the bot
+  is standing on the deck *edge* so `OnControls` fails its box test on the origin, or the bot is
+  firing and `m_flNextAttack` is keeping `PlayerUse` out of reach. Neither logs anything by itself.
+- **`could not get on the tram`, tram parked** — the board point is unreachable, or the hop is not
+  clearing the deck lip. Check the board-point dump for a stand z far from the deck z.
+- **`could not get past func_tracktrain`** — a board point is inside the parked tram's footprint. The
+  probe offsets must start beyond the tram's half-width, not at the deck centre.
+- **`missed the tram` after a long `due in`** — the arc projection picked the wrong branch where the
+  loop's two tunnels run parallel. The proximity trigger is the backstop; if this is frequent, that
+  is what has regressed. A miss after a *sub-second* `due in` is not that bug and not fixable from
+  here: the jump itself takes about `kTrainHopLead`, so a bot that arrives with the tram already on
+  top of it watches it go past. It costs a `kFunFailCooldown`, and the next lap is somebody else's.
+
+A bot occasionally dying under the tram is expected, not a bug: once started it circles forever and
+the trench is lethal on a ~25 s cycle, and nothing in the nav mesh knows that.
+
 `undertow` is the map for the long-`wait` switch: the bot presses once, logs `leaving it for 142s`,
 and the tier must then stay empty for the rest of the run. `datacore` is the negative control — the
-tier must be empty and gather behaviour untouched.
+tier must be empty and gather behaviour untouched. `subtransit` is the only map with a `tram`, so
+`stalkyard` and `crossfire` double as the assertion that the tram branch is unreachable everywhere
+else.
 
 **Regression.** `test_nav_goal.ps1` sets `crossbot_fun 0` alongside `crossbot_gather 0`, so the
 51-map sweep is unaffected by the tier and stays comparable against transcripts taken before it
@@ -211,6 +267,10 @@ run-to-run spread — the cached `toTargetCosts` is what buys that, since a repa
 `AreaCosts` rather than two. The worst *frame* does move, 1.6–2.9 ms to 3.1–6.8 ms, and that is the
 retarget: one extra `AreaCostsToGoal` plus the hull-3 reachability traces (0.19–1.01 traces/frame).
 Amortised cost nil, peak selection frame roughly doubled.
+
+The tram adds nothing measurable on top of that. Its track polyline and board points are built once
+per map on the first `Collect` that has a mesh; per selection it contributes one cached lookup, and
+per waiting frame one `ProjectOnTrack` over 43 nodes. subtransit is the only map that pays any of it.
 
 ## scripts/test_sense.ps1
 

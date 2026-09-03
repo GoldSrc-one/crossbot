@@ -13,10 +13,13 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_list_spawns` / `crossbot_list_targets` — entity positions, for picking a goal by hand
 - `crossbot_list_items` — every pickup and charger with its kind, resolved nav area, `frame`, `solid`
   and state; see `doc/bot.md`, `bot_items.cpp`
-- `crossbot_list_fun` — the fun goal tier's whole inventory for this map: kind (`switch`/`tank`),
-  action (`use`/`touch`/`shoot`), brush centre, every resolved nav area, the chain terminal it fires,
-  and why it was skipped (`no nav area`, `taken or locked`, `not ready`) or `ready`. Ends with a
-  count; see `doc/bot.md`, `bot_fun.cpp`
+- `crossbot_list_fun` — the fun goal tier's whole inventory for this map: kind
+  (`switch`/`tank`/`tram`), action (`use`/`touch`/`shoot`), brush centre, every resolved nav area, the
+  chain terminal it fires, and why it was skipped (`no nav area`, `taken or locked`, `not ready`) or
+  `ready`. Ends with a count. A `tram` row also prints the tram's current `speed` and its computed
+  `deck` point, and with `crossbot_fun_debug 1` follows it with one `tram board area` line per board
+  point giving the stand position, the deck position as the tram passes that node, and its arc length
+  along the track; see `doc/bot.md`, `bot_fun.cpp`
 - `crossbot_list_gates` — every walk gate that could hold a mine: the mesh width, the *measured*
   opening, the chosen surface, the mount point and the rejection reason. A gate that failed only at
   the surface or coverage stage is printed too, so the near misses are visible; ones filtered earlier
@@ -122,6 +125,12 @@ entity absent from the list was never detected (its chain does not reach an inte
 it dangles), while one that is listed but reads `no nav area` was detected and is unreachable. It is
 also the negative control — on `datacore` it must print `0 fun entities`, and on `crossfire` the nuke
 trigger must read `no nav area` until `strike_ready_door` opens at t=180.
+
+For the subtransit tram the useful reading is the `deck` point against the board-point dump. Board
+points are derived from the track, not from where the tram happens to be, so the list is identical
+whether the tram is parked or doing 400 — if it changes when the tram moves, the deck geometry is
+being taken from `pev->origin` instead of `DeckAt`. A board point whose stand z is far from the deck z
+is the signature of a walkway the bot cannot actually get down from.
 
 `crossbot_weapons` ends with a line comparing the walked weapon mask against `pev->weapons`. That is
 the only self-check the offsets have, so read it before believing any other number on the dump — see

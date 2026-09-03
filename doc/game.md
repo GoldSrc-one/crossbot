@@ -223,6 +223,27 @@ These all obey the base-class rule above without an exception: every one is read
 classname the caller has already matched, and none of them is a derived field read through a base
 pointer.
 
+### The tram needs no offsets at all
+
+`FUN_TRAIN` (`doc/bot.md`, bot_fun.cpp) drives subtransit's `func_tracktrain` and adds **nothing** to
+`GameOffsets` or `kRequests`. Worth stating explicitly, because the natural assumption from
+`FUN_TANK` — which needed nine — is that a second vehicle needs its own set, and adding fatal request
+entries for fields that turn out to be reachable through `entvars_t` is a self-inflicted crash on any
+deployment whose `gamedata/valve-win.json` predates the change.
+
+| what the tram needs | where it already is |
+| --- | --- |
+| does the bot hold the controls | `pev->flags & FL_ONTRAIN`, set by `CBasePlayer::PreThink` |
+| is the bot aboard | `pev->groundentity` |
+| current speed and direction | `pev->speed`, signed |
+| top speed | `pev->impulse`, cached by `CFuncTrackTrain::Spawn` as `(int)m_speed` |
+| controllable at all | `pev->spawnflags & SF_TRACKTRAIN_NOCONTROL` |
+| the route | the `path_track` chain, walked through `target` / `targetname` / `origin` |
+
+`CFuncTrackTrain::m_ppath` and `m_controlMins`/`m_controlMaxs` are the fields one would reach for and
+are deliberately **not** requested. The path is rebuilt from the entity lump instead, and the control
+box is reconstructed from `pev->mins`/`pev->maxs` with `maxs.z += 72`, exactly as `Spawn` computes it.
+
 ### Every failure is fatal
 
 A wrong offset is a wild read into another object's memory, which corrupts silently and crashes

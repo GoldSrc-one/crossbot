@@ -17,6 +17,17 @@ enum Kind
 {
 	FUN_SWITCH = 0,
 	FUN_TANK,
+	FUN_TRAIN,
+};
+
+enum TrainPhase
+{
+	TRAIN_APPROACH = 0,
+	TRAIN_WAIT,
+	TRAIN_MOUNT,
+	TRAIN_DRIVE,
+	TRAIN_RELEASE,
+	TRAIN_RIDE,
 };
 
 enum Action
@@ -50,6 +61,18 @@ struct State
 	float mountTime = 0.f;
 	float lastSeenEnemy = 0.f;
 	int shots = 0;
+
+	CBotEntHandle train;
+	bool aboard = false;
+	bool dismounting = false;
+	TrainPhase trainPhase = TRAIN_APPROACH;
+	float phaseStart = 0.f;
+	float boardArc = 0.f;
+	float boardTime = 0.f;
+	Vector boardDeck;
+	float lastEta = 0.f;
+	float dismountStart = 0.f;
+	float offTrainSince = 0.f;
 
 	std::vector<Memo> memo;
 
@@ -99,6 +122,8 @@ void OnRespawn(CBot &bot);
 bool Run(CBot &bot);
 
 bool Mounted(const CBot &bot);
+
+bool Aboard(const CBot &bot);
 
 bool Pressing(const CBot &bot);
 
