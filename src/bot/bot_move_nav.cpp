@@ -21,6 +21,7 @@
 #include "bot_log.h"
 #include "bot_perf.h"
 #include "../game/game_profile.h"
+#include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
@@ -111,8 +112,8 @@ namespace
 	{
 		BOTPERF_SCOPE(ZONE_PLANTRACES);
 		NavPlan::PlanTraceContext traces;
-		traces.standTrace = Bot_EngineTraceFn(pEdict, kHullHuman);
-		traces.duckTrace = Bot_EngineTraceFn(pEdict, kHullDuck);
+		traces.standTrace = BSPTRACE_WRAP(Bot_EngineTraceFn(pEdict, kHullHuman), kHullHuman);
+		traces.duckTrace = BSPTRACE_WRAP(Bot_EngineTraceFn(pEdict, kHullDuck), kHullDuck);
 		{
 			BOTPERF_SCOPE(ZONE_PUSHFIELDS);
 			traces.standPush = Bot_PushFields(kHullHuman);
@@ -2281,11 +2282,13 @@ void Bot_MoveNav(CBot &bot)
 		bot.visitedAreaPath.push_back(curArea->id);
 	}
 
+#if BOT_VLOG_ON
 	{
 		BOTPERF_SCOPE(ZONE_TRACELOG);
 		if (bot.traceLog.size() < 100000)
 			bot.traceLog.push_back(pEdict->v.origin);
 	}
+#endif
 
 	if (bot.airmoveActive)
 	{
@@ -2396,13 +2399,9 @@ void Bot_MoveNav(CBot &bot)
 				return;
 		}
 
-		Vector miss = pEdict->v.origin - bot.goalPoint;
-		char msg[224];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s reached goal (%.1f,%.1f,%.1f) standing at (%.1f,%.1f,%.1f), %.1f out\n", bot.name,
-			bot.goalPoint.x, bot.goalPoint.y, bot.goalPoint.z, pEdict->v.origin.x, pEdict->v.origin.y,
-			pEdict->v.origin.z, miss.Length());
-		SERVER_PRINT(msg);
+		BOT_VLOG("CrossBot: %s reached goal (%.1f,%.1f,%.1f) standing at (%.1f,%.1f,%.1f), %.1f out\n",
+			bot.name, bot.goalPoint.x, bot.goalPoint.y, bot.goalPoint.z, pEdict->v.origin.x,
+			pEdict->v.origin.y, pEdict->v.origin.z, (pEdict->v.origin - bot.goalPoint).Length());
 
 		WriteTraceLog(bot);
 		BotGoal::OnArrived(bot);

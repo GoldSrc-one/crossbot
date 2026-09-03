@@ -89,6 +89,18 @@ else()
     message(STATUS "crossbot: verbose bot logging DISABLED")
 endif()
 
+option(CROSSBOT_BSPTRACE "In-process BSP hull tracer, for A/B against the engine's pfnTraceHull" OFF)
+if(CROSSBOT_BSPTRACE)
+    target_compile_definitions(crossbot_mm PRIVATE CROSSBOT_BSPTRACE)
+    target_sources(crossbot_mm PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/navgen/bsp_file.cpp
+        ${CMAKE_SOURCE_DIR}/src/navgen/clipnode_tree.cpp
+        ${CMAKE_SOURCE_DIR}/src/navgen/polytope.cpp
+    )
+    target_include_directories(crossbot_mm PRIVATE ${CMAKE_SOURCE_DIR}/src/nav)
+    message(STATUS "crossbot: BSP trace A/B harness ENABLED")
+endif()
+
 option(CROSSBOT_PERF "Zone/trace profiler and its crossbot_perf cvars" OFF)
 if(CROSSBOT_PERF)
     target_compile_definitions(crossbot_mm PRIVATE CROSSBOT_PERF)

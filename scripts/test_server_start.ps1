@@ -18,7 +18,13 @@ param(
     # Extra engine launch arguments, inserted before +map so any cvar they set
     # is already in effect when the level loads. Use for +sys_ticrate and
     # friends when stress-testing the bot at an unusual server framerate.
-    [string[]]$ExtraArgs = @()
+    [string[]]$ExtraArgs = @(),
+    # Refuse to start unless the plugin was built with -DCROSSBOT_VERBOSE=ON.
+    # Tests that assert on per-bot narration (reached goal, placed a mine, is
+    # shooting) parse lines that compile out when the flag is off; without this
+    # guard they would read an empty log as a behavioural failure. Same shape as
+    # the crossbot_perf probe in profile_hlds.ps1.
+    [switch]$RequireVerbose
 )
 
 $exe = Join-Path $HLDSDir "hlds.exe"
@@ -73,6 +79,15 @@ while ((Get-Date) -lt $deadline) {
         if ($head -match "player server started") { $ready = $true; break }
     }
     Start-Sleep -Milliseconds 200
+}
+
+if ($ready -and $RequireVerbose) {
+    $probe = try { & "$PSScriptRoot\rcon.ps1" -Port $Port -Command "crossbot_verbose" | Out-String } catch { "" }
+    if ($probe -notmatch 'crossbot_verbose"?\s+is') {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        "EXITED code=-3 (crossbot_verbose cvar not registered -- this test parses per-bot log lines; rebuild with: build.bat -DCROSSBOT_VERBOSE=ON)"
+        exit
+    }
 }
 
 if ($ready -and $Commands.Count -gt 0) {

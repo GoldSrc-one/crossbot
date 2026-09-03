@@ -26,6 +26,8 @@ public:
 
 	int MeleeWeapon() const override;
 
+	int AmbushWeapon(AmbushKind kind) const override;
+
 	int DeployWeapon(DeployKind kind) const override;
 
 	const char *DeployEntity(DeployKind kind) const override;

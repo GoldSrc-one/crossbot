@@ -201,6 +201,16 @@ int CHLDMProfile::MeleeWeapon() const
 	return kHLDMMelee;
 }
 
+int CHLDMProfile::AmbushWeapon(AmbushKind kind) const
+{
+	switch (kind)
+	{
+	case AMBUSH_GRENADE: return kHLDMGrenade;
+	case AMBUSH_SNARK: return kHLDMSnark;
+	default: return 0;
+	}
+}
+
 int CHLDMProfile::DeployWeapon(DeployKind kind) const
 {
 	switch (kind)

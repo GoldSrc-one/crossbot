@@ -31,6 +31,17 @@ second to check whether a gate is already mined, to confirm a placement landed, 
 bot's own live charges — and `bot_avoid.cpp` needs the second to recognise a beam's owner. A mod with
 no deployables returns 0 and null and the whole feature idles.
 
+`AmbushWeapon(kind)` follows the same rule for a third role: what to open with against someone who
+has not noticed the bot yet. `AmbushKind` is `AMBUSH_GRENADE` / `AMBUSH_SNARK`, which in HLDM are the
+hand grenade and the snark.
+
+It has to be a named role and cannot be inferred from the table. `WPN_Q_THROW_ARC` does pick out the
+hand grenade uniquely, but **nothing in `WeaponSpec` separates a snark from a hornet gun** — both are
+`WPN_Q_HOMING`, and the snark is deliberately not `IsArc` because homing wins. Adding a throwable-
+creature quirk to express that would be a type tag, which is the class of field this table rejects.
+A mod with neither returns 0 for both and `bot_fire.cpp` never offers an ambush weapon, which is the
+same outcome as carrying none.
+
 `AmmoEntity(weaponId, pool)` is the mapping from a weapon and one of its ammo pools to the entity
 classname that refills it, and it is here for the same reason `ThrowLaunch` is: `src/bot/` must not
 name `ammo_ARgrenades`. It exists because the pin now equips (see `bot_fire.cpp` in `doc/bot.md`), and

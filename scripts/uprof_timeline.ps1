@@ -49,8 +49,11 @@ if (-not (Test-Path $DuckDB)) {
 
 if (-not $Session) {
     $perfDir = Join-Path $repoRoot "nav_debug\perf"
+    # Sort by CreationTime, not Name and not LastWriteTime. Names are uprof_<map>_<stamp>, so the
+    # map name dominates an alphabetical sort and xen_dm always wins; and `translate` rewrites the
+    # directory, so LastWriteTime marks the last time a session was READ, not when it was collected.
     $newest = Get-ChildItem -Path $perfDir -Directory -Filter "uprof_*" -ErrorAction SilentlyContinue |
-        Sort-Object Name | Select-Object -Last 1
+        Sort-Object CreationTime | Select-Object -Last 1
     if (-not $newest) { throw "no uprof_* session under $perfDir; run profile_hlds.ps1 without -NoProfiler first" }
     $Session = $newest.FullName
 }

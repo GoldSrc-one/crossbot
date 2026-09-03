@@ -24,7 +24,7 @@ Write-Host "=== crossbot single-target test: $Map ==="
 # --- 1. Start the server, listing the spawn and target as part of the boot
 #        cfg so we don't need a separate rcon round-trip before the bot
 #        exists (same reasoning as nav_spawn_test.ps1). ---
-$startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port `
+$startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port -RequireVerbose `
     -Commands @("crossbot_add TargetTestBot", "crossbot_list_spawns", "crossbot_list_targets")
 
 if ($startResult -match "^EXITED") {

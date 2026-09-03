@@ -45,6 +45,12 @@ cvar_t g_combatDebugCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_ambushCvar = {
+	"crossbot_ambush",
+	"1",
+	FCVAR_SERVER
+};
+
 cvar_t g_gatherDebugCvar = {
 	"crossbot_gather_debug",
 	"0",
@@ -165,11 +171,37 @@ cvar_t g_airmoveVerifyCvar = {
 	FCVAR_SERVER
 };
 
+#ifdef CROSSBOT_BSPTRACE
+
+cvar_t g_bspTraceCvar = {
+	"crossbot_bsptrace",
+	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_bspTraceBlockersCvar = {
+	"crossbot_bsptrace_blockers",
+	"0",
+	FCVAR_SERVER
+};
+
+#endif
+
 cvar_t g_timeDebugCvar = {
 	"crossbot_time_debug",
 	"0",
 	FCVAR_SERVER
 };
+
+#ifdef CROSSBOT_VERBOSE
+
+cvar_t g_verboseCvar = {
+	"crossbot_verbose",
+	"1",
+	FCVAR_SERVER
+};
+
+#endif
 
 #ifdef CROSSBOT_PERF
 
@@ -198,6 +230,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatDebugCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_ambushCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_funCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_funDebugCvar);
@@ -218,7 +251,14 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);
+#ifdef CROSSBOT_BSPTRACE
+	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceBlockersCvar);
+#endif
 	g_engfuncs.pfnCvar_RegisterVariable(&g_airmoveVerifyCvar);
+#ifdef CROSSBOT_VERBOSE
+	g_engfuncs.pfnCvar_RegisterVariable(&g_verboseCvar);
+#endif
 #ifdef CROSSBOT_PERF
 	g_engfuncs.pfnCvar_RegisterVariable(&g_perfCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_perfSpikeCvar);

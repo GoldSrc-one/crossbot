@@ -98,6 +98,7 @@ struct State
 	int reloads = 0;
 	int emptySwitches = 0;
 	int idleSwitches = 0;
+	int ambushes = 0;
 	int idleReloads = 0;
 };
 

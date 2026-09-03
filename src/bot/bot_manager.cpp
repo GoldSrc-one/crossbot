@@ -18,6 +18,7 @@
 #include "bot_timing.h"
 #include "bot_weapons.h"
 #include "../game/game_profile.h"
+#include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 
 #include <cmath>
@@ -110,6 +111,7 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
 	Nav::LoadForMap(mapName);
+	BspTrace::LoadForMap(mapName);
 
 	g_driftSpeedChecked = false;
 }
@@ -534,8 +536,10 @@ void PrintSenseStatus()
 void PrintCombatStatus()
 {
 	char head[128];
-	snprintf(head, sizeof(head), "CrossBot: crossbot_combat=%d crossbot_combat_debug=%d\n",
-		BotCombat::Enabled() ? 1 : 0, BotCombat::DebugEnabled() ? 1 : 0);
+	snprintf(head, sizeof(head),
+		"CrossBot: crossbot_combat=%d crossbot_combat_debug=%d crossbot_ambush=%d\n",
+		BotCombat::Enabled() ? 1 : 0, BotCombat::DebugEnabled() ? 1 : 0,
+		BotCombat::AmbushEnabled() ? 1 : 0);
 	SERVER_PRINT(head);
 
 	for (auto &bot : g_bots)
@@ -556,9 +560,11 @@ void PrintCombatStatus()
 		}
 
 		snprintf(line, sizeof(line),
-			"CrossBot: %s fighting %s for %.1fs, unseen %.1fs, driving=%d area %d\n", bot.name,
-			enemy ? CBotPlayerNameOf(enemy) : "-", gpGlobals->time - st.startTime,
-			gpGlobals->time - st.lastSightTime, st.driving ? 1 : 0, bot.currentAreaId);
+			"CrossBot: %s fighting %s for %.1fs, unseen %.1fs, aware=%d ambush=%d, driving=%d "
+			"area %d\n", bot.name, enemy ? CBotPlayerNameOf(enemy) : "-",
+			gpGlobals->time - st.startTime, gpGlobals->time - st.lastSightTime,
+			st.enemyAware ? 1 : 0, BotCombat::Ambushing(bot) ? 1 : 0, st.driving ? 1 : 0,
+			bot.currentAreaId);
 		SERVER_PRINT(line);
 
 		if (st.haveProbe)
@@ -706,14 +712,14 @@ void PrintFireStatus()
 			"CrossBot: %s held=%s zoom=%d mode=%s why=%s %s %s commit=%s for=%.2f shots=%d "
 			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d uphill=%d "
 			"selfveto=%d aimveto=%d targetaims=%d switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
-			"idlereload=%d target=%s\n",
+			"idlereload=%d ambush=%d target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
 			fire.leadShots, fire.chargeShots, fire.arcShots, fire.throwShots, fire.guides,
 			fire.commitCaps,
 			fire.uphillVetoes, fire.selfVetoes, fire.aimVetoes, fire.targetAims,
 			fire.switches, fire.reloads,
-			fire.emptySwitches, fire.idleSwitches, fire.idleReloads,
+			fire.emptySwitches, fire.idleSwitches, fire.idleReloads, fire.ambushes,
 			target ? CBotPlayerNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}
@@ -911,8 +917,9 @@ void PrintNavStatus()
 		}
 
 		edict_t *enemy = bot.sense.enemy.Get();
-		snprintf(line, sizeof(line), " combat=%d enemy=%s enemyAge=%.1fs ready=%.2f",
-			bot.combat.active ? 1 : 0, enemy ? CBotPlayerNameOf(enemy) : "-",
+		snprintf(line, sizeof(line), " combat=%d aware=%d enemy=%s enemyAge=%.1fs ready=%.2f",
+			bot.combat.active ? 1 : 0, bot.combat.enemyAware ? 1 : 0,
+			enemy ? CBotPlayerNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f,
 			g_pGameProfile ? g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory) : 0.f);
 		msg += line;

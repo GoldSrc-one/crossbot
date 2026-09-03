@@ -1889,6 +1889,77 @@ than merely that it aimed long.
 to compare, so the bot takes the random direction unscored and the reason reads `no vantage`. Moving
 unpredictably beats standing still.
 
+### Whether the enemy has noticed, and what the bot does about it
+
+Combat knew *that* a fight had started and never *how*. A bot rounding a corner behind an oblivious
+opponent played the encounter exactly like one that had just been shot in the back: highest-`value`
+loaded gun, open fire.
+
+`enemyAware` is that missing fact, and it is nearly free. Combat is entered either on sight or on
+damage, and **the bot already knows the sightline is clear** on a sight entry -- that is how
+`TraceVisible` set `sense.target` in the first place. So "does he see me?" is a dot product against
+the enemy's own forward vector and nothing else. No new traceline, which matters when vision is
+deliberately budgeted to two per bot per frame.
+
+The reciprocal is assumed rather than tested, and the two rays are not literally the same one:
+`UpdateVision` clears bot-eye to a hitbox *bone*, `EnemySees` reasons eye to eye. They are near
+enough. Getting it wrong costs one badly chosen opening weapon, not a broken state.
+
+`pfnAngleVectors`, not `MAKE_VECTORS`, for the reason `bot_sense.cpp` gives at its own gaze term: the
+macro writes `gpGlobals->v_forward`, which a caller above may still be holding. A nonzero `v.fov`
+means the player is **zoomed**, so it is a narrower cone than the 90 degree default, not a wider one.
+
+**The flag latches on.** It is evaluated at entry and re-tested every frame it is still false, and
+once true it stays true -- nobody unsees someone. Four sites set it, and the third is the one that is
+easy to miss:
+
+| Site | Value |
+| --- | --- |
+| sight entry | `EnemySees` |
+| damage entry | `true` -- they shot us, no cone test improves on that |
+| **retarget** | recomputed; that branch rebinds `st.enemy` *without* going through `Enter`, so a flag written only in `Enter` would hand the new opponent the last one's verdict |
+| every later frame with sight, or on damage | `EnemySees`, or `true` |
+
+`SetAware` is the only writer of the true edge, and it does one more thing: it zeroes
+`fire.nextSelectTime`. Selection is throttled to `kSelectInterval`, so without that a bot caught
+mid-ambush spends half a second holding a crowbar at someone already aiming back. That single line
+*is* the "switch to something reasonable once he sees you" rule; the rest of it was already there.
+
+### The ambush is a restricted pick, not a new policy
+
+While `Ambushing`, `BotFire` opens with melee if it can and a throwable otherwise.
+
+Almost all of this is existing machinery pointed at a smaller set. `PickBest` already ranks by best
+`value` then *least carry time* with a reservoir draw on ties, so restricting it to the profile's
+ambush weapons gives "a random throwable weighted by rarity" with no second scoring rule -- the hand
+grenade and the snark are both worth 0.1, tie on value, and the least-carried one wins. Likewise
+melee needs no range constant of its own: `BuildChoices` only offers the crowbar when `dist` is
+inside its `range` of 32, so "in melee range" is already computed.
+
+`IGameProfile::AmbushWeapon(AmbushKind)` names them, beside `MeleeWeapon` and `DeployWeapon`. It has
+to be a profile hook rather than a quirk test: `WPN_Q_THROW_ARC` does identify the hand grenade
+uniquely, but **nothing distinguishes the snark from the hornet gun** -- both are `WPN_Q_HOMING`, and
+the snark is deliberately not `IsArc`.
+
+**The attempt happens before `TryKeep`, and that placement is the whole trick.** `PickChoice` is the
+obvious home and it is wrong: `TryKeep` returns the moment the held weapon still works, so a bot
+holding a loaded MP5 beside an oblivious enemy would never reach the picker. Three guards on the
+block, each load-bearing -- not while `holding`, because a commit in flight may be a *primed* grenade
+and switching away leaves it cooking; not when an ambush weapon is already drawn, or it re-selects
+every frame and `TryKeep` never gets to throw it; and not once the enemy knows.
+
+**One thing `BuildChoices` does not check is a minimum range.** `ModeUsable` gates the maximum only,
+and no `WeaponMode` has a minimum-range field -- self-blast is caught much later, at press time, by
+`SplashSafe`. Left alone the bot would draw a grenade at knife range and then never throw it. So the
+throwable pass rejects a mode when `dist < m.splash`. The same gap exists for the RPG and the MP5
+contact grenade on the ordinary path; widening the fix to those is a separate change.
+
+**Expect a good share of ambushes to decline themselves, correctly.** The uphill veto refuses any
+`gravity > 0` non-detonating mode at a target more than 16 units above the eye, which covers *both*
+the grenade and the snark, and the `AIM_LEAD` flight-time gate caps the grenade near 600 units and the
+snark near 300. When nothing survives, `PickAmbush` returns -1 and the frame falls through to ordinary
+selection -- which is exactly "blast him with whatever is in hand", written by not writing it.
+
 ## bot_fire.cpp
 
 The bot could see, aim and describe every gun it carried long before it could pull a trigger. This is
@@ -2416,6 +2487,11 @@ that, holding the button would flip the zoom every 1.0s forever. Toggles are nev
 
 ### Selection takes the best gun it has, and the rarest of those
 
+One caller reuses this ranking on a restricted set rather than adding a rule of its own: the ambush
+pick in `bot_combat.cpp` above runs `PickBest` over melee only, then over the profile's ambush
+weapons only. It is attempted *before* `TryKeep` rather than inside `PickChoice`, because `TryKeep`
+returns early whenever the held weapon still works.
+
 Two numbers rank a weapon, applied in that order.
 
 **Score** is `WeaponSpec::value`, the static ladder already in the weapon table (`doc/game.md`,
@@ -2726,6 +2802,10 @@ runtime and navgen must agree on that list, which is why it is one function and 
 
 ### WriteTraceLog
 Writes bot trajectory trace to file specified by crossbot_trace_path cvar (defaults to valve/addons/crossbot/trace/nav_trace.txt).
+Verbose builds only. The `bot.traceLog` append in `Bot_MoveNav` is inside `#if BOT_VLOG_ON`, so in a
+`-DCROSSBOT_VERBOSE=OFF` build the vector is empty and this returns at its first line -- no file, no
+print. Every bot writes the same path, so the file is only meaningful with one bot on the server;
+`test_nav_goal.ps1` sets `crossbot_trace_path` per instance and passes `-RequireVerbose`.
 
 ### Repath
 Finds path from current area to goal area using A* and builds waypoint plan.
@@ -4260,23 +4340,45 @@ in one sitting:
 ### What is verbose and what is not
 
 Verbose means **per-bot narration**: what a bot is doing and why. All of `bot_move_nav.cpp` bar two
-exceptions, the item narration in `bot_items.cpp`, and the touch dump in `bot_manager.cpp`.
+exceptions, the item narration in `bot_items.cpp`, the touch dump in `bot_manager.cpp`, and the
+event-level narration in `bot_avoid.cpp`, `bot_break.cpp`, `bot_deploy.cpp` and `bot_opportunist.cpp`.
 
-Four categories deliberately stay unconditional, because something other than a human reading the
-console depends on them:
+Two categories stay unconditional, because something other than a human reading the console depends on
+them:
 
 - **Console command output.** Everything in `commands.cpp`, and the `Print*` handlers in
-  `bot_manager.cpp`, `bot_items.cpp` and `bot_deploy.cpp` that they call. These are answers to an rcon
-  question; a build that answered nothing would be broken, and they cost nothing when nobody asks.
-- **Server lifecycle and fatal errors.** `gamedata.cpp`, `AddBot`, `ServerActivate`, `nav_loader.cpp`.
-- **Event lines the test suite asserts on.** `reached goal` in `bot_move_nav.cpp` is
-  `nav_target_test.ps1`'s primary pass signal; `test_deploy.ps1` counts `placed a mine`, `detonated a
-  satchel`, `avoid jump`, `is shooting`, `destroyed`, `blocked by` and `reached goal`. That is why all
-  of `bot_avoid.cpp`, `bot_break.cpp` and `bot_deploy.cpp` stay as they are. They are event-level, not
-  per-frame, so they were never the problem.
-- **`WriteTraceLog`.** Once per goal, and `test_nav_goal.ps1` reads the file it names.
+  `bot_manager.cpp`, `bot_items.cpp`, `bot_fun.cpp` and `bot_deploy.cpp` that they call. These are
+  answers to an rcon question; a build that answered nothing would be broken, and they cost nothing
+  when nobody asks. Command-driven results (`crossbot_aim_test`) and cvar-gated reports
+  (`crossbot_time_debug`, `crossbot_perf`) count as the same thing: somebody asked.
+- **Server lifecycle and fatal errors.** `gamedata.cpp`, `AddBot`, `ServerActivate`, `nav_loader.cpp`,
+  and the `ALERT(at_logged, ...)` interface checks in `dll_hooks.cpp` / `engine_hooks.cpp`.
 
-The split is not "cheap vs expensive" but **"who reads it"**: a human debugging one bot, or a script.
+The split is not "cheap vs expensive" but **"who asked for it"**: a bot narrating itself is verbose
+however cheap the line is, and an answer to an rcon command is not verbose however long it is.
+
+### The event lines the test suite parses
+
+An earlier revision kept `bot_avoid.cpp`, `bot_break.cpp`, `bot_deploy.cpp` and `WriteTraceLog`
+unconditional on the grounds that scripts assert on them: `nav_target_test.ps1:90` regexes
+`CrossBot: <bot> reached goal (x, y, z)`, and `test_deploy.ps1` counts `placed a mine`, `detonated a
+satchel`, `avoid jump`, `is shooting`, `destroyed` and `blocked by`. That reasoning was sound about the
+scripts and wrong about the requirement: at 32 bots these are the bulk of what a `-DCROSSBOT_VERBOSE=OFF`
+build still printed, and "off" has to mean off.
+
+They are verbose now. The scripts that parse them pass `-RequireVerbose` to `test_server_start.ps1`,
+which probes for the `crossbot_verbose` cvar after the level loads and refuses to continue with
+`EXITED code=-3` naming the rebuild flag. The cvar exists only in a verbose build, the same way
+`crossbot_perf` marks a `CROSSBOT_PERF` one, and the probe is the same shape as the one in
+`profile_hlds.ps1`. Without it an OFF build makes every assertion read zero, which looks like a
+behavioural regression rather than a missing flag.
+
+`WriteTraceLog` needed more than a wrapped print. `bot.traceLog` was appended every frame for every bot
+and the file was rewritten on every goal arrival -- all bots to one path, so the result was already
+meaningless with more than one -- which is per-arrival blocking I/O in a build that asked for silence.
+The accumulation in `Bot_MoveNav` is inside `#if BOT_VLOG_ON`, so the vector stays empty and
+`WriteTraceLog` returns at its first line. Its own prints are left alone: the failure branch is a real
+error, and it can only be reached from a verbose build.
 
 ### The flag defaults on
 
@@ -4285,7 +4387,9 @@ build.bat -DCROSSBOT_VERBOSE=OFF
 ```
 
 turns it off; the value caches in `build/CMakeCache.txt`, so plain `build.bat` keeps whatever was last
-set and `-DCROSSBOT_VERBOSE=ON` puts it back. CMake prints `crossbot: verbose bot logging DISABLED`
+set and only an explicit `-DCROSSBOT_VERBOSE=ON` puts it back. The `option()` default applies on the
+first configure of a build directory and never again, so a bare `build.bat` after an OFF build is still
+an OFF build -- check the configure line, not the flag you think you passed. CMake prints `crossbot: verbose bot logging DISABLED`
 when it is off, which is the only way to tell from the build output.
 
 On by default is the deliberate choice: these lines are how nav work gets debugged, and most of

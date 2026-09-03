@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "bot_opportunist.h"
+#include "bot_log.h"
 #include "bot_move.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
@@ -164,14 +165,11 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 	bot.airmoveMaxTime = kMaxSimSeconds;
 	bot.airmoveOverrunLogged = false;
 
-	char msg[320];
-	snprintf(msg, sizeof(msg),
-		"CrossBot: %s oppo jump at (%.1f,%.1f,%.1f) yaw %.0f (vel %.0f) speed %.0f kind %s | "
+	BOT_VLOG("CrossBot: %s oppo jump at (%.1f,%.1f,%.1f) yaw %.0f (vel %.0f) speed %.0f kind %s | "
 		"here %.2fs land %.2fs flight %.2fs (%.2fs real) gain %.2fs -> area %u\n",
 		bot.name, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, yaw, velYaw, speed,
 		longJump ? "lj" : "jump", bot.oppoCosts[here], bot.oppoCosts[land], flight, sim.Time(), gain,
 		land);
-	SERVER_PRINT(msg);
 
 	return true;
 }

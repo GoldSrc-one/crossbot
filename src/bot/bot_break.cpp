@@ -8,6 +8,7 @@
 #include "bot_break.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_weapons.h"
@@ -153,20 +154,14 @@ namespace
 		if (!drawn)
 			return;
 
-		char msg[224];
-		snprintf(msg, sizeof(msg), "CrossBot: %s went back to %s after %s %s\n", bot.name, drawn,
+		BOT_VLOG("CrossBot: %s went back to %s after %s %s\n", bot.name, drawn,
 			st.standoff > 0.f ? "shooting" : "breaking", st.targetName);
-		SERVER_PRINT(msg);
 	}
 
 	void Report(CBot &bot, const char *verb)
 	{
-		BotBreak::State &st = bot.brk;
-
-		char msg[224];
-		snprintf(msg, sizeof(msg), "CrossBot: %s %s %s after %.1fs and %d swings\n", bot.name, verb,
-			st.targetName, gpGlobals->time - st.startTime, st.swings);
-		SERVER_PRINT(msg);
+		BOT_VLOG("CrossBot: %s %s %s after %.1fs and %d swings\n", bot.name, verb,
+			bot.brk.targetName, gpGlobals->time - bot.brk.startTime, bot.brk.swings);
 	}
 
 	void Finish(CBot &bot)
@@ -313,11 +308,8 @@ bool EngageStandoff(CBot &bot, edict_t *ent, float minRange)
 	st.nextSwingTime = 0.f;
 	snprintf(st.targetName, sizeof(st.targetName), "%s", CBotClassOf(ent));
 
-	char msg[288];
-	snprintf(msg, sizeof(msg),
-		"CrossBot: %s is shooting %s at (%.1f,%.1f,%.1f) from %.0f units\n", bot.name,
+	BOT_VLOG("CrossBot: %s is shooting %s at (%.1f,%.1f,%.1f) from %.0f units\n", bot.name,
 		st.targetName, ent->v.origin.x, ent->v.origin.y, ent->v.origin.z, minRange);
-	SERVER_PRINT(msg);
 
 	return true;
 }
@@ -347,11 +339,8 @@ bool Engage(CBot &bot, edict_t *ent)
 	st.nextSwingTime = 0.f;
 	snprintf(st.targetName, sizeof(st.targetName), "%s", CBotClassOf(ent));
 
-	char msg[288];
-	snprintf(msg, sizeof(msg),
-		"CrossBot: %s is breaking %s at (%.1f,%.1f,%.1f), health %.0f\n", bot.name, st.targetName,
-		ent->v.absmin.x, ent->v.absmin.y, ent->v.absmin.z, ent->v.health);
-	SERVER_PRINT(msg);
+	BOT_VLOG("CrossBot: %s is breaking %s at (%.1f,%.1f,%.1f), health %.0f\n", bot.name,
+		st.targetName, ent->v.absmin.x, ent->v.absmin.y, ent->v.absmin.z, ent->v.health);
 
 	return true;
 }
@@ -454,10 +443,7 @@ bool Run(CBot &bot)
 		{
 			if (const char *drawn = SelectWeapon(bot, wantId))
 			{
-				char msg[224];
-				snprintf(msg, sizeof(msg), "CrossBot: %s drew %s to break %s\n", bot.name,
-					drawn, st.targetName);
-				SERVER_PRINT(msg);
+				BOT_VLOG("CrossBot: %s drew %s to break %s\n", bot.name, drawn, st.targetName);
 			}
 			st.nextSelectTime = now + kBreakSelectInterval;
 		}

@@ -154,7 +154,17 @@ take a whole match to produce, and it takes any entity classname, ammo boxes inc
 
 Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 
-- `crossbot_trace_path` — where `WriteTraceLog` puts the bot trajectory
+- `crossbot_verbose` — **read-only marker, not a switch.** Registered only when the plugin was built
+  with `CROSSBOT_VERBOSE` (the default), the same way `crossbot_perf` marks a `CROSSBOT_PERF` build.
+  Setting it does nothing: the narration is compiled out, not branched on. It exists so a script can
+  tell the two builds apart before it starts parsing per-bot log lines —
+  `test_server_start.ps1 -RequireVerbose` probes it and refuses to run without it
+- `crossbot_bsptrace` / `crossbot_bsptrace_blockers` — **only exist in a `-DCROSSBOT_BSPTRACE=ON`
+  build**, which is not the default. A/B the in-process BSP hull tracer against the engine's
+  `pfnTraceHull` on the planner's airmove traces; read with `crossbot_bsptrace_stats`. Mode 1 still
+  returns the engine's answer, so it measures without changing behaviour. See `doc/testing.md` for the
+  numbers and why it is off
+- `crossbot_trace_path` — where `WriteTraceLog` puts the bot trajectory (verbose builds only)
 - `crossbot_nav_avoid` — obstacle avoidance layer, 0 to A/B a suspected regression without rebuilding
 - `crossbot_nav_break` — breaking `func_breakable` out of the way. Default 1. With it off the bot falls
   back to the pre-`BotBreak` behaviour: it avoids the breakable, or gives up on the goal behind it
@@ -179,7 +189,14 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   `crossbot_chase` it replaces, it is **not** disabled by `crossbot_gather 0`: combat is no longer a
   goal, so it does not live inside `SelectGoal`
 - `crossbot_combat_debug` — one line per probe: which way the bot decided to shuffle, the area it
-  resolved to, and the exposure there against the exposure where it stands
+  resolved to, and the exposure there against the exposure where it stands. Also logs the frame an
+  enemy notices the bot, which is what ends an ambush
+- `crossbot_ambush` — open on an enemy who has not noticed the bot yet with melee at contact range,
+  otherwise a grenade or a snark. Default 1. Off, the bot always opens with its best gun, which is
+  what it did before the flag existed — useful as the A/B, since the awareness verdict is still
+  logged either way. Inert without `crossbot_combat`, which owns the flag, and it decides nothing on
+  its own: an ambush weapon is only ever *offered*, and if none is usable at that range the ordinary
+  selection runs untouched
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`

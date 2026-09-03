@@ -15,6 +15,7 @@
 #include "../game/game_profile.h"
 #include "../game/give_item.h"
 #include "../game/hldm_weapons.h"
+#include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 #include "../nav/nav_water.h"
 
@@ -580,6 +581,20 @@ namespace
 		BotDeploy::PrintGates(*mesh);
 	}
 
+#ifdef CROSSBOT_BSPTRACE
+	void Cmd_CrossBotBspTrace()
+	{
+		int argc = g_engfuncs.pfnCmd_Argc();
+		if (argc > 1 && strcmp(g_engfuncs.pfnCmd_Argv(1), "reset") == 0)
+		{
+			BspTrace::ResetStats();
+			SERVER_PRINT("CrossBot: bsp trace stats reset\n");
+			return;
+		}
+		BspTrace::PrintStats();
+	}
+#endif
+
 	void Cmd_CrossBotAirmoveCache()
 	{
 		const NavPlan::AirmoveCache &cache = Bot_AirmoveCache();
@@ -715,6 +730,9 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
 	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
 	ADD_SERVER_COMMAND("crossbot_airmove_cache_stats", Cmd_CrossBotAirmoveCache);
+#ifdef CROSSBOT_BSPTRACE
+	ADD_SERVER_COMMAND("crossbot_bsptrace_stats", Cmd_CrossBotBspTrace);
+#endif
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
 	ADD_SERVER_COMMAND("crossbot_weaponspec", Cmd_CrossBotWeaponSpec);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);

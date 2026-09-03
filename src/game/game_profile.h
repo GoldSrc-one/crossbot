@@ -52,6 +52,16 @@ enum DeployKind
 	DEPLOY_COUNT,
 };
 
+// Weapons worth opening with against someone who has not noticed the bot yet. A role rather than a
+// type: nothing in WeaponSpec distinguishes a snark from a hornet gun (both are WPN_Q_HOMING), so
+// the profile has to name them the way it already names the melee and deploy weapons.
+enum AmbushKind
+{
+	AMBUSH_GRENADE = 0,
+	AMBUSH_SNARK,
+	AMBUSH_COUNT,
+};
+
 struct BotInventory;
 
 class IGameProfile
@@ -87,6 +97,8 @@ public:
 	virtual const char *AmmoEntity(int weaponId, WeaponAmmo pool) const = 0;
 
 	virtual int MeleeWeapon() const = 0;
+
+	virtual int AmbushWeapon(AmbushKind kind) const = 0;
 
 	virtual int DeployWeapon(DeployKind kind) const = 0;
 

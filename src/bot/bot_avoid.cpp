@@ -10,6 +10,7 @@
 #include "bot.h"
 #include "bot_break.h"
 #include "bot_deploy.h"
+#include "bot_log.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_query.h"
 #include "../nav/waypoint_plan.h"
@@ -569,13 +570,10 @@ namespace
 	void Announce(const CBot &bot, const char *what, edict_t *hit, float gap, float top, float dist,
 		float speed, float hold)
 	{
-		const Vector &origin = bot.pEdict->v.origin;
-		char msg[256];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) gap %.0f top %.0f dist %.0f speed %.0f "
+		BOT_VLOG("CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) gap %.0f top %.0f dist %.0f speed %.0f "
 			"hold %.2f\n",
-			bot.name, what, ClassOf(hit), origin.x, origin.y, origin.z, gap, top, dist, speed, hold);
-		SERVER_PRINT(msg);
+			bot.name, what, ClassOf(hit), bot.pEdict->v.origin.x, bot.pEdict->v.origin.y,
+			bot.pEdict->v.origin.z, gap, top, dist, speed, hold);
 	}
 
 	bool DetourActive(const CBot &bot, const BotAvoid::State &state, float now)
@@ -641,13 +639,9 @@ namespace
 		out.mineTarget = hit;
 		bot.avoid.lastKind = BotAvoid::AVOID_SHOOT;
 
-		const Vector &origin = bot.pEdict->v.origin;
-
-		char msg[288];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s avoid shooting %s at (%.1f,%.1f,%.1f), %s\n",
-			bot.name, ClassOf(hit), origin.x, origin.y, origin.z, why);
-		SERVER_PRINT(msg);
+		BOT_VLOG("CrossBot: %s avoid shooting %s at (%.1f,%.1f,%.1f), %s\n",
+			bot.name, ClassOf(hit), bot.pEdict->v.origin.x, bot.pEdict->v.origin.y,
+			bot.pEdict->v.origin.z, why);
 
 		return true;
 	}
@@ -660,13 +654,9 @@ namespace
 		out.breakTarget = hit;
 		bot.avoid.lastKind = BotAvoid::AVOID_BREAK;
 
-		const Vector &origin = bot.pEdict->v.origin;
-
-		char msg[288];
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s avoid breaking %s at (%.1f,%.1f,%.1f), %s, health %.0f\n",
-			bot.name, ClassOf(hit), origin.x, origin.y, origin.z, why, hit->v.health);
-		SERVER_PRINT(msg);
+		BOT_VLOG("CrossBot: %s avoid breaking %s at (%.1f,%.1f,%.1f), %s, health %.0f\n",
+			bot.name, ClassOf(hit), bot.pEdict->v.origin.x, bot.pEdict->v.origin.y,
+			bot.pEdict->v.origin.z, why, hit->v.health);
 
 		return true;
 	}
@@ -704,7 +694,6 @@ namespace
 		ctx.ignore = bot.pEdict;
 		ctx.hull = hull;
 
-		char msg[288];
 		Vector dest;
 		size_t d = bot.waypointIndex;
 		if (!PickDestination(bot, ctx, hit, beam, origin, hullHalf, dest, d))
@@ -719,12 +708,10 @@ namespace
 			state.lastKind = recedes ? BotAvoid::AVOID_FOLLOW : BotAvoid::AVOID_BLOCKED;
 			if (!recedes)
 				state.blockedUntil = now + 2.f * kAvoidSearchCooldown;
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) no clear rejoin point "
+			BOT_VLOG("CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) no clear rejoin point "
 				"closing %.0f traces %d\n",
 				bot.name, recedes ? "following" : "blocked by", ClassOf(hit), origin.x, origin.y,
 				origin.z, closing, ctx.traces);
-			SERVER_PRINT(msg);
 			return;
 		}
 
@@ -748,12 +735,10 @@ namespace
 			state.detourHit = g_engfuncs.pfnIndexOfEdict(hit);
 			state.detourExpire = now + kAvoidDetourMaxTime;
 
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s avoid side %s at (%.1f,%.1f,%.1f) points %zu length %.0f direct %.0f "
+			BOT_VLOG("CrossBot: %s avoid side %s at (%.1f,%.1f,%.1f) points %zu length %.0f direct %.0f "
 				"traces %d to wp %zu/%zu\n",
 				bot.name, ClassOf(hit), origin.x, origin.y, origin.z, out.detourPoints.size(), length,
 				direct, ctx.traces, d, bot.waypoints.size());
-			SERVER_PRINT(msg);
 			return;
 		}
 
@@ -768,12 +753,10 @@ namespace
 		if (!recedes)
 			state.blockedUntil = now + 2.f * kAvoidSearchCooldown;
 
-		snprintf(msg, sizeof(msg),
-			"CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) %s length %.0f budget %.0f "
+		BOT_VLOG("CrossBot: %s avoid %s %s at (%.1f,%.1f,%.1f) %s length %.0f budget %.0f "
 			"closing %.0f traces %d\n",
 			bot.name, recedes ? "following" : "blocked by", ClassOf(hit), origin.x, origin.y,
 			origin.z, ok ? "too long" : "no way around", length, budget, closing, ctx.traces);
-		SERVER_PRINT(msg);
 	}
 }
 

@@ -74,7 +74,8 @@ function Invoke-Phase([string]$name, [string]$map, [int]$port, [string[]]$boot,
     Write-Host "=== $name ($map) ==="
 
     $start = & "$scriptDir\test_server_start.ps1" -Map $map -Port $port -LogFile $log `
-        -WaitSeconds 90 -ConfigName "_deploy_$name.cfg" -Commands $boot -HLDSDir $HLDSDir
+        -WaitSeconds 90 -ConfigName "_deploy_$name.cfg" -Commands $boot -HLDSDir $HLDSDir `
+        -RequireVerbose
     if ($start -notmatch 'PID=(\d+)') {
         Assert-That $false "$name server started ($start)"
         return @()

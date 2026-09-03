@@ -23,12 +23,17 @@ extern IGameProfile *g_pGameProfile;
 
 namespace
 {
+	using NavMath::kPiF;
 	using NavMath::Norm2D;
 
 	// The bot gives up on an enemy it cannot see for this long. Suspicion entries expire on
 	// crossbot_sense_decay, which defaults to the same 5s, so on stock settings the two rules
 	// retire an enemy at about the same moment and either one may be the one that logs it.
 	constexpr float kSightTimeout = 5.f;
+
+	// Fallback when a player has no fov of their own. Matches the bot's own kViewCone in
+	// bot_sense.cpp, which is the cone this is the mirror image of.
+	constexpr float kEnemyViewCone = 90.f;
 
 	constexpr float kProbeDist = 160.f;
 	constexpr float kProbeInterval = 0.7f;
@@ -139,7 +144,58 @@ namespace
 		return true;
 	}
 
-	void Enter(CBot &bot, edict_t *enemy, const char *how)
+	// Is the bot inside the enemy's view cone? A dot product and nothing else.
+	//
+	// Reciprocal line of sight is assumed, not tested: every caller asks this only on a frame
+	// where the bot can see them, and we take it that they could therefore see the bot. The two
+	// rays are not literally the same one -- UpdateVision clears bot-eye to a hitbox bone, this
+	// reasons eye to eye -- but they are near enough, and vision is budgeted to two tracelines
+	// per bot per frame, which is not a budget to spend on that distinction. Guessing wrong
+	// costs one badly chosen opening weapon.
+	bool EnemySees(const CBot &bot, edict_t *enemy)
+	{
+		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+		Vector theirEye = enemy->v.origin + enemy->v.view_ofs;
+
+		Vector los = eye - theirEye;
+		float dist = los.Length();
+		if (dist < 0.001f)
+			return true;
+
+		// pfnAngleVectors rather than MAKE_VECTORS, for the reason bot_sense.cpp gives at its own
+		// gaze term: MAKE_VECTORS writes gpGlobals->v_forward, which a caller may still be
+		// holding. v_angle is the true view angle and needs no pitch flip.
+		Vector theirForward, theirRight, theirUp;
+		g_engfuncs.pfnAngleVectors(enemy->v.v_angle, theirForward, theirRight, theirUp);
+
+		// A nonzero fov means the player is zoomed, which is a narrower cone than the default.
+		float fov = enemy->v.fov;
+		if (fov <= 0.f)
+			fov = kEnemyViewCone;
+
+		return DotProduct(theirForward, los * (1.f / dist)) >= cosf(fov * 0.5f * kPiF / 180.f);
+	}
+
+	// One way only. Once an enemy has noticed the bot, nothing they do afterwards makes them
+	// forget, so the ambush is over for the rest of this engagement.
+	void SetAware(CBot &bot, const char *how)
+	{
+		BotCombat::State &st = bot.combat;
+		if (st.enemyAware)
+			return;
+
+		st.enemyAware = true;
+
+		// The ambush weapon in the bot's hands is the wrong weapon now. Selection is throttled to
+		// kSelectInterval, so without this the bot spends half a second holding a crowbar at
+		// someone who is aiming back.
+		bot.fire.nextSelectTime = 0.f;
+
+		if (BotCombat::DebugEnabled())
+			BOT_VLOG("CrossBot: %s is spotted (%s), ambush off\n", bot.name, how);
+	}
+
+	void Enter(CBot &bot, edict_t *enemy, const char *how, bool aware)
 	{
 		BotCombat::State &st = bot.combat;
 
@@ -148,13 +204,14 @@ namespace
 		st.enemy.Set(enemy);
 		st.startTime = gpGlobals->time;
 		st.lastSightTime = gpGlobals->time;
+		st.enemyAware = aware;
 		st.haveProbe = false;
 		st.probeArea = -1;
 		st.nextProbeTime = 0.f;
 		st.lastReason = how;
 
-		BOT_VLOG("CrossBot: %s entered combat with %s (%s)\n", bot.name,
-			CBotPlayerNameOf(enemy), how);
+		BOT_VLOG("CrossBot: %s entered combat with %s (%s, aware=%d)\n", bot.name,
+			CBotPlayerNameOf(enemy), how, aware ? 1 : 0);
 	}
 
 	// Pick where to stand next. One random direction, scored on exposure alone; if it is no
@@ -248,6 +305,17 @@ bool BotCombat::Enabled()
 	return !cvar || cvar->value != 0.f;
 }
 
+bool BotCombat::AmbushEnabled()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_ambush");
+	return !cvar || cvar->value != 0.f;
+}
+
+bool BotCombat::Ambushing(const CBot &bot)
+{
+	return bot.combat.active && !bot.combat.enemyAware && AmbushEnabled();
+}
+
 bool BotCombat::DebugEnabled()
 {
 #if BOT_VLOG_ON
@@ -301,6 +369,7 @@ void BotCombat::Exit(CBot &bot, const char *why)
 	st.active = false;
 	st.driving = false;
 	st.enemy.Clear();
+	st.enemyAware = false;
 	st.haveProbe = false;
 	st.probeArea = -1;
 	st.nextProbeTime = 0.f;
@@ -352,11 +421,28 @@ void BotCombat::Update(CBot &bot)
 				CBotPlayerNameOf(enemy), CBotPlayerNameOf(seen));
 			st.enemy.Set(seen);
 			st.lastSightTime = gpGlobals->time;
+
+			// This branch rebinds the enemy without going through Enter, so awareness has to be
+			// recomputed here or the new opponent inherits the last one's verdict. Via SetAware
+			// rather than by assignment, so that dropping an ambush against an opponent who is
+			// already looking re-picks the weapon on this frame.
+			st.enemyAware = false;
+			if (EnemySees(bot, seen))
+				SetAware(bot, "new opponent");
 		}
 		else
 		{
 			if (seen == enemy)
+			{
 				st.lastSightTime = gpGlobals->time;
+
+				if (!st.enemyAware && EnemySees(bot, enemy))
+					SetAware(bot, "turned around");
+			}
+
+			// Being shot settles it whether or not the bot can see them.
+			if (!st.enemyAware && DamageSource(bot.pEdict) == enemy)
+				SetAware(bot, "shot at us");
 
 			if (!BotSense::Senses(bot, enemy))
 				Exit(bot, "lost every trace of the enemy");
@@ -370,13 +456,15 @@ void BotCombat::Update(CBot &bot)
 
 	if (seen)
 	{
-		Enter(bot, seen, "sight");
+		Enter(bot, seen, "sight", EnemySees(bot, seen));
 		return;
 	}
 
+	// Whoever shot us has seen us, by definition. No cone test can improve on that, and the bot
+	// may not be able to see them at all.
 	edict_t *hurt = DamageSource(bot.pEdict);
 	if (hurt)
-		Enter(bot, hurt, "damage");
+		Enter(bot, hurt, "damage", true);
 }
 
 bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)

@@ -213,7 +213,7 @@ $bootCommands = @(
 
 Write-Host "Starting HLDS on port $Port..."
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands $bootCommands `
-    -ConfigName $configName -HLDSDir $HLDSDir -LogFile $ServerLog -ExtraArgs $ServerArgs
+    -ConfigName $configName -HLDSDir $HLDSDir -LogFile $ServerLog -ExtraArgs $ServerArgs -RequireVerbose
 
 if ($startResult -match "^EXITED") {
     Write-Host "FAIL: server failed to start ($startResult)"

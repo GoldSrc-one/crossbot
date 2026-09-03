@@ -23,6 +23,10 @@ struct State
 	float startTime = 0.f;
 	float lastSightTime = 0.f;
 
+	// Has this enemy noticed the bot? Latches on true and is re-tested every frame it stays
+	// false, so a bot that opens an ambush stops ambushing the moment it is spotted.
+	bool enemyAware = false;
+
 	bool haveProbe = false;
 	Vector probePoint;
 	float probeExposure = 0.f;
@@ -40,6 +44,8 @@ bool Enabled();
 
 bool DebugEnabled();
 
+bool AmbushEnabled();
+
 void Update(CBot &bot);
 
 bool Run(CBot &bot, const Nav::NavMesh &mesh);
@@ -49,6 +55,8 @@ void Exit(CBot &bot, const char *why);
 void OnRespawn(CBot &bot);
 
 bool Active(const CBot &bot);
+
+bool Ambushing(const CBot &bot);
 
 edict_t *Enemy(const CBot &bot);
 

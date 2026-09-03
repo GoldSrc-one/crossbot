@@ -624,6 +624,43 @@ against the exposure where the bot stands.
 a `--no-vantage` nav, which drives the probe down the same unscored branch. Bots must still fight and
 still move, with every probe reading `no vantage`.
 
+### The awareness flag and the ambush
+
+The flag rides the same run. What to check in the log:
+
+- **Both verdicts appear on sight entries.** `aware=1` only would mean the cone test is inverted or the
+  fov fallback is wrong; `aware=0` only would mean `v_angle` is not being read. A stock crossfire run
+  splits them roughly evenly.
+- **Every `(damage` entry reads `aware=1`.** There is no cone test on that path, so any `aware=0`
+  beside `damage` is a straight logic error.
+- **All three latch paths fire**: `turned around`, `new opponent`, and `shot at us`. The last is much
+  the rarest -- it needs the bot to be hit by the enemy it is already fighting while still unspotted --
+  so treat one occurrence as a pass and zero as worth a longer run rather than a bug hunt.
+
+**Crossfire cannot exercise the ambush on its own.** The map holds one `weapon_handgrenade` and two
+`weapon_snark` for the whole server, so bots almost never have one in hand at the moment they surprise
+someone, and `ambush=` in `crossbot_fire_status` stays 0 through a normal run. That is scarcity, not a
+failure. Force it instead:
+
+```powershell
+.\scriptscon.ps1 -Port 29015 -Command "crossbot_equip weapon_handgrenade"
+.\scriptscon.ps1 -Port 29015 -Command "crossbot_equip weapon_snark"
+```
+
+Re-equip every few polls -- five grenades go quickly -- and watch `ambush=` climb. Unlike the weapon
+phases of `test_fire.ps1`, equipping *is* the right lever here and the pin would be wrong: the pin
+makes every other weapon unusable, which would destroy the very thing under test, namely that an
+ambush weapon is chosen over a working gun the bot would otherwise have kept.
+
+`ambush=` is a per-life counter and resets with the rest of `BotFire::State` on respawn, so sum the
+increments across a run rather than reading the last sample -- a tally taken at the end reads 0.
+
+Two things that look like bugs and are not. A bot left **holding a throwable out of combat** is the
+idle rotation working as designed: the grenade and the snark are worth 0.1, the same as the glock, so
+a freshly picked-up one wins the rarity tiebreak until its carry time catches up. And a good share of
+ambushes **declining themselves** is correct -- the uphill veto refuses both throwables at a target
+more than 16 units above the eye, which on a map as vertical as crossfire is often.
+
 ## scripts/test_deploy.ps1
 
 Four phases, each on its own server, each asserting something only it can show. `-Phase` runs one;
@@ -885,6 +922,61 @@ Two limits worth knowing before trusting a session:
   warns under 100KB. A 32-bot `xen_dm` run that hits `FATAL ERROR (shutting down): ED_Alloc: no free
   edicts` leaves a 528-byte `.prd`, an empty database and a server log with no `PERF window` line at
   all.
+
+## `CROSSBOT_BSPTRACE`: the in-process BSP tracer, and why it is not the default
+
+The planner's airmove sims call `pfnTraceHull` for every simulated frame, and navgen runs the *same*
+`PmSim::PmSimulator` against its own in-process BSP tracer instead. The obvious idea is to use navgen's
+tracer at runtime too, since airmove planning does not care about dynamic entities. It was measured, and
+it does not pay off.
+
+```
+build.bat -DCROSSBOT_BSPTRACE=ON
+```
+
+adds `bsp_file.cpp`, `clipnode_tree.cpp` and `polytope.cpp` to the plugin, registers
+`crossbot_bsptrace` (0 off, 1 compare, 2 BSP only) and `crossbot_bsptrace_blockers`, and the
+`crossbot_bsptrace_stats` command (`crossbot_bsptrace_stats reset` to zero it). In mode 1 every planner
+trace runs through **both** backends on the same ray, timed with `QueryPerformanceCounter`; the engine's
+answer is the one returned, so behaviour is unchanged while measuring.
+
+**Off by default and it costs nothing when off.** `BSPTRACE_WRAP` expands to its first argument, the
+cvars are not declared let alone registered, the command is not added, and CMake does not compile the
+three navgen translation units — verified by checking the ninja link line (only `crc32.cpp.obj` remains)
+and by grepping the stock DLL for the cvar names. Stock is ~100KB smaller.
+
+### The measurement
+
+16 bots, 60s, per-trace cost net of the ~0.048us timer overhead:
+
+| map | blockers | engine | bsp | speedup | traces disagreeing |
+| --- | --- | ---: | ---: | ---: | ---: |
+| crossfire | off | 0.617us | 0.470us | 1.31x | 0.110% |
+| crossfire | **on** | 0.615us | 0.709us | **0.87x** | 0.026% |
+| rocket_frenzy | off | 1.346us | 0.549us | 2.45x | 3.763% |
+| rocket_frenzy | **on** | 1.373us | 1.071us | **1.28x** | 1.551% |
+
+**The speedup and the wrongness are the same number.** The engine's per-trace cost more than doubles
+between crossfire and rocket_frenzy while the world-only BSP tracer barely moves -- that gap is entity
+handling, and skipping it is the whole win. Put the entities back and crossfire is *slower than the
+engine*, because `TraceHullWithEntities` does a full clipnode descent per blocker with no bbox rejection
+(fine offline across threads, not in a frame) while the engine has a spatial index. Even with a bbox
+pre-filter and blockers rebuilt from live edicts, rocket_frenzy still disagrees on 1.55% of traces:
+translating a brush model by its origin does not handle rotation, and `ignore_monsters` still lets the
+engine hit pushables and items.
+
+**`rp_plan`'s `vs ents 0%` is not evidence for this idea.** That column excludes `FL_WORLDBRUSH` *and*
+baked blockers, so a trace stopping on a static door reads as "no entity" while a world-only tracer sails
+straight through it. That is exactly the 3.76%.
+
+**The ceiling.** `rp_plan` traces are 9.0ms of 5440ms of crossbot time on crossfire and 104.2ms of 5644ms
+on rocket_frenzy. The correct variant is a 1.3ms *loss* on crossfire and saves 22.8ms on rocket_frenzy --
+0.40% of crossbot time. On the 93ms `rp_plan` spike frame tracing is only 39% of the cost, so even the
+incorrect 2.45x variant leaves a ~71ms spike. The airmove cache hit rate governs how many sims run at
+all and is the far bigger lever; see `## Airmove cache: correctness and tuning`.
+
+One bias to keep in mind if this is re-measured: the engine trace runs first on each ray and warms the
+cache for the BSP trace that follows, so the BSP figure is if anything flattering.
 
 ## Airmove cache: correctness and tuning
 

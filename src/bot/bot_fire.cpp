@@ -1103,15 +1103,65 @@ static int BuildChoices(CBot &bot, bool strict, bool geometry, float dist, float
 	return count;
 }
 
-static bool ChoiceEligible(const CBot &bot, const Choice &choice, bool skipMelee)
+static bool IsAmbushWeapon(int id)
 {
-	if (!skipMelee)
-		return true;
+	if (id <= 0 || !g_pGameProfile)
+		return false;
 
-	return bot.inventory.weapons[choice.index].id != g_pGameProfile->MeleeWeapon();
+	for (int k = 0; k < AMBUSH_COUNT; ++k)
+	{
+		if (g_pGameProfile->AmbushWeapon(static_cast<AmbushKind>(k)) == id)
+			return true;
+	}
+
+	return false;
 }
 
-static int PickBest(CBot &bot, const Choice *choices, int count, bool skipMelee)
+// Which slice of the inventory a pick is allowed to draw from. The two ambush passes exist so that
+// PickBest's ranking -- best value, then least carry time, ties by reservoir -- can be reused
+// verbatim on a restricted set instead of growing a second scoring rule.
+enum Pass
+{
+	PASS_NO_MELEE = 0,
+	PASS_ANY,
+	PASS_MELEE,
+	PASS_THROWN,
+};
+
+// dist is consulted by PASS_THROWN only.
+static bool ChoiceEligible(const CBot &bot, const Choice &choice, Pass pass, float dist)
+{
+	int id = bot.inventory.weapons[choice.index].id;
+	int melee = g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
+
+	switch (pass)
+	{
+	case PASS_ANY:
+		return true;
+	case PASS_NO_MELEE:
+		return id != melee;
+	case PASS_MELEE:
+		return id == melee;
+	case PASS_THROWN:
+		break;
+	}
+
+	if (!IsAmbushWeapon(id))
+		return false;
+
+	// ModeUsable gates the maximum range, and there is no minimum-range field anywhere in
+	// WeaponMode -- self-blast is caught much later, at press time, by SplashSafe. Without this
+	// the bot would draw a grenade at knife range and then never throw it, standing there holding
+	// it while the ambush it was drawn for expires.
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(id);
+	const WeaponMode *m = spec ? ModeOf(*spec, choice.mode, bot.fire.zoomed) : nullptr;
+	if (!m)
+		return false;
+
+	return m->splash <= 0.f || dist >= m->splash;
+}
+
+static int PickBest(CBot &bot, const Choice *choices, int count, Pass pass, float dist)
 {
 	const BotInventory &inv = bot.inventory;
 
@@ -1120,7 +1170,7 @@ static int PickBest(CBot &bot, const Choice *choices, int count, bool skipMelee)
 
 	for (int i = 0; i < count; ++i)
 	{
-		if (!ChoiceEligible(bot, choices[i], skipMelee))
+		if (!ChoiceEligible(bot, choices[i], pass, dist))
 			continue;
 
 		float score = WeaponScore(inv.weapons[choices[i].index].id);
@@ -1140,7 +1190,7 @@ static int PickBest(CBot &bot, const Choice *choices, int count, bool skipMelee)
 
 	for (int i = 0; i < count; ++i)
 	{
-		if (!ChoiceEligible(bot, choices[i], skipMelee))
+		if (!ChoiceEligible(bot, choices[i], pass, dist))
 			continue;
 
 		int id = inv.weapons[choices[i].index].id;
@@ -1149,7 +1199,7 @@ static int PickBest(CBot &bot, const Choice *choices, int count, bool skipMelee)
 
 		bool seen = false;
 		for (int j = 0; j < i && !seen; ++j)
-			seen = ChoiceEligible(bot, choices[j], skipMelee) &&
+			seen = ChoiceEligible(bot, choices[j], pass, dist) &&
 				inv.weapons[choices[j].index].id == id;
 		if (seen)
 			continue;
@@ -1180,7 +1230,7 @@ static int PickBest(CBot &bot, const Choice *choices, int count, bool skipMelee)
 
 	for (int i = 0; i < count; ++i)
 	{
-		if (!ChoiceEligible(bot, choices[i], skipMelee))
+		if (!ChoiceEligible(bot, choices[i], pass, dist))
 			continue;
 		if (inv.weapons[choices[i].index].id != bestId)
 			continue;
@@ -1193,14 +1243,30 @@ static int PickBest(CBot &bot, const Choice *choices, int count, bool skipMelee)
 	return pick;
 }
 
-static int PickChoice(CBot &bot, const Choice *choices, int count)
+static int PickChoice(CBot &bot, const Choice *choices, int count, float dist)
 {
 	if (count <= 0)
 		return -1;
 
-	int pick = PickBest(bot, choices, count, true);
+	int pick = PickBest(bot, choices, count, PASS_NO_MELEE, dist);
 	if (pick < 0)
-		pick = PickBest(bot, choices, count, false);
+		pick = PickBest(bot, choices, count, PASS_ANY, dist);
+
+	return pick;
+}
+
+// Melee first: BuildChoices only offers it when dist is inside the weapon's own range (32 units for
+// the crowbar), so "in melee range" is already computed and needs no constant of its own. Otherwise
+// a throwable, chosen by the same value-then-rarity rule as any other weapon -- the hand grenade and
+// the snark are both worth 0.1, so they tie on value and the least-carried one wins.
+static int PickAmbush(CBot &bot, const Choice *choices, int count, float dist)
+{
+	if (count <= 0)
+		return -1;
+
+	int pick = PickBest(bot, choices, count, PASS_MELEE, dist);
+	if (pick < 0)
+		pick = PickBest(bot, choices, count, PASS_THROWN, dist);
 
 	return pick;
 }
@@ -1425,7 +1491,7 @@ static void IdleSelect(CBot &bot)
 	Choice choices[kMaxChoices];
 	int count = BuildChoices(bot, true, false, 0.f, 0.f, 0, choices, kMaxChoices);
 
-	int pick = PickBest(bot, choices, count, true);
+	int pick = PickBest(bot, choices, count, PASS_NO_MELEE, 0.f);
 	if (pick < 0)
 		return;
 
@@ -1576,6 +1642,33 @@ void Think(CBot &bot)
 	bool triedBoth = false;
 	bool dry = false;
 
+	bool throttled = gpGlobals->time < fire.nextSelectTime;
+	Choice choices[kMaxChoices];
+
+	// The opening shot against someone who has not noticed us yet, and it has to be attempted
+	// before TryKeep rather than inside PickChoice: TryKeep returns as soon as the held weapon
+	// still works, so a bot holding a loaded MP5 next to an oblivious enemy would never reach the
+	// picker at all.
+	//
+	// Three guards. Not while holding, because a commit in flight may be a primed grenade and
+	// switching away would leave it cooking. Not when an ambush weapon is already drawn, or this
+	// re-selects it every frame and TryKeep never gets to aim and throw it. And not once the
+	// enemy knows, which is what hands the frame back to ordinary selection.
+	if (!throttled && !holding && BotCombat::Ambushing(bot) &&
+		(!active || !IsAmbushWeapon(active->id)))
+	{
+		int count = BuildChoices(bot, true, true, dist, rise, 0, choices, kMaxChoices);
+		int pick = PickAmbush(bot, choices, count, dist);
+
+		// Nothing suitable, or nothing usable at this range, just falls through to the ordinary
+		// path below and the bot fights with whatever it has.
+		if (pick >= 0 && SelectWeapon(bot, choices[pick], "ambush"))
+		{
+			++fire.ambushes;
+			return;
+		}
+	}
+
 	if (active && TryKeep(bot, *active, basePoint, baseVel, eye, dist, rise, holding, true,
 		triedBoth))
 		return;
@@ -1583,14 +1676,11 @@ void Think(CBot &bot)
 	if (active && triedBoth)
 		dry = HeldDry(bot, *active, dist, rise);
 
-	bool throttled = gpGlobals->time < fire.nextSelectTime;
-	Choice choices[kMaxChoices];
-
 	if (!throttled)
 	{
 		int skipId = (active && triedBoth) ? active->id : 0;
 		int count = BuildChoices(bot, true, true, dist, rise, skipId, choices, kMaxChoices);
-		int pick = PickChoice(bot, choices, count);
+		int pick = PickChoice(bot, choices, count, dist);
 
 		if (pick >= 0)
 		{
@@ -1608,7 +1698,7 @@ void Think(CBot &bot)
 	{
 		int skipId = (active && triedBoth) ? active->id : 0;
 		int count = BuildChoices(bot, false, true, dist, rise, skipId, choices, kMaxChoices);
-		int pick = PickChoice(bot, choices, count);
+		int pick = PickChoice(bot, choices, count, dist);
 
 		if (pick >= 0)
 		{

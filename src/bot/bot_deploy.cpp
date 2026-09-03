@@ -9,6 +9,7 @@
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_fire.h"
+#include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_sense.h"
@@ -348,11 +349,8 @@ namespace
 			st.firedTime = 0.f;
 			st.lastReason = "detonating";
 
-			char msg[256];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: %s is detonating a satchel at (%.0f,%.0f,%.0f), contact %.0f away\n",
+			BOT_VLOG("CrossBot: %s is detonating a satchel at (%.0f,%.0f,%.0f), contact %.0f away\n",
 				bot.name, ent->v.origin.x, ent->v.origin.y, ent->v.origin.z, senseDist);
-			SERVER_PRINT(msg);
 
 			return true;
 		}
@@ -381,10 +379,8 @@ namespace
 				++st.aborts;
 		}
 
-		char msg[224];
-		snprintf(msg, sizeof(msg), "CrossBot: %s %s at conn %u after %.1fs\n", bot.name, why,
-			st.spot.connIndex, gpGlobals->time - st.startTime);
-		SERVER_PRINT(msg);
+		BOT_VLOG("CrossBot: %s %s at conn %u after %.1fs\n", bot.name, why, st.spot.connIndex,
+			gpGlobals->time - st.startTime);
 
 		st.active = false;
 		st.phase = BotDeploy::PHASE_NONE;
@@ -845,12 +841,9 @@ void TryStart(CBot &bot, const Nav::NavMesh &mesh)
 	st.firedTime = 0.f;
 	st.lastReason = "started";
 
-	char msg[288];
-	snprintf(msg, sizeof(msg),
-		"CrossBot: %s is mining conn %u (open %.0f, %s, %s) at (%.0f,%.0f,%.0f)\n", bot.name,
+	BOT_VLOG("CrossBot: %s is mining conn %u (open %.0f, %s, %s) at (%.0f,%.0f,%.0f)\n", bot.name,
 		spot.connIndex, spot.opening, SpotKindName(spot.kind), duck ? "ducked" : "standing",
 		spot.stand.x, spot.stand.y, spot.stand.z);
-	SERVER_PRINT(msg);
 }
 
 bool Run(CBot &bot)
