@@ -31,7 +31,7 @@ Command-line tool with extensive debug flags:
   `--vantage-spacing`, `--vantage-cone` and `--vantage-neighbors`; see `vantage_sampler.cpp` below
 - `--vantage-verify-neighbors` - cross-check every nearest-neighbour query the reduction makes against a
   brute-force scan and report mismatches
-- `--no-vantage` - skip the visibility field. The `.nav` is still valid and still v18, it just carries no
+- `--no-vantage` - skip the visibility field. The `.nav` is still valid and still v20, it just carries no
   vantage section, and bots on it lose the idle look and the cone weighting. This is the fast-iteration
   switch: the field is the single most expensive thing navgen does (see `vantage_sampler.cpp`)
 - `--dump-vis-probe "x y z x y z"` - what the visibility sampler sees between two world points: the BSP leaf
@@ -79,6 +79,10 @@ Command-line tool with extensive debug flags:
   volume totals before and after each stage, per-leaf fragment counts over `kCarveDumpThreshold`, a
   per-blocker table of carves/pieces/wasted carves, and every carve that came back with more volume
   than it was given
+- `--dump-drift` - every `func_conveyor` and horizontal `trigger_push` that can shove a player:
+  classname, entity index, brush model, spawnflags, movedir, speed, hull-expanded bounds, and either
+  "taken" or the reason it was skipped. The leaf tag count is printed unconditionally when any field
+  survives (see `Drift Fields`)
 - `--no-blockers` - skip ExtractBlockingVolumes, so no func_wall/func_wall_toggle/func_conveyor/
   func_healthcharger/func_recharge brush is carved out of the leaves (debug)
 - `--no-passables` - skip ExtractPassableVolumes, so no func_door/func_door_rotating/func_breakable
@@ -87,6 +91,8 @@ Command-line tool with extensive debug flags:
 - `--no-floor-split` - keep leaves whose floor is not solid (debug)
 - `--no-lethal` - keep floors and routes that only a fall through a lethal `trigger_hurt` can
   reach (debug: isolate what the lethal prune removes; see `floor_support.cpp`)
+- `--no-drift` - ignore conveyor and push-field drift entirely, so every connection costs the same
+  in both directions again (debug: isolate what the direction-aware costs change)
 - `--no-sky-prune` - keep floors whose underside is sky (debug: isolate what the sky prune removes,
   e.g. the skybox shell a test map is built inside; see `floor_support.cpp`)
 - `--max-merge-group <n>` - most leaf groups one merge may fuse (default 64). `1` blocks the first
@@ -293,6 +299,87 @@ frame.
 
 `airmove_prune.cpp`'s own `WalkDijkstra` still uses its local centroid-to-centroid measure rather than this
 one. Routing it through the shared helper would change pruning decisions on every map for no benefit here.
+
+### Drift Fields (conveyors and horizontal push)
+
+`func_conveyor` and `trigger_push` shove a standing player by the same engine mechanism: they set
+`pev->basevelocity`, which `pm_shared` adds to velocity for the move and subtracts back out afterwards, so
+world speed is own speed plus field velocity and `pev->velocity` stays own-only. Travel time therefore
+depends on which way you go, which is what `ExtractDriftVolumes` exists to capture.
+
+The two entities differ in three ways that matter here:
+
+- A conveyor pushes only what **stands on** it; a push field acts on anything **inside** it, airborne
+  included.
+- A conveyor pushes iff `spawnflags & 3 == 0` (`SF_CONVEYOR_VISUAL` sets no `FL_CONVEYOR`,
+  `SF_CONVEYOR_NOTSOLID` means nothing can stand on it). That is **not** the carve predicate:
+  `IsBakedBlocker` carves it iff `spawnflags & 2 == 0`, so a visual-only conveyor is still solid geometry.
+  `ExtractDriftVolumes` tests the two flags separately so `--dump-drift` can say which one dropped a
+  field; both constants live in `baked_blockers.h` next to the carve predicate they differ from.
+- Overlapping push fields **sum** (`CTriggerPush::Touch` adds to any base velocity already applied), so a
+  leaf's drift is a vector sum, not a table index.
+
+`ExtractDriftVolumes` takes conveyors and push fields whose *horizontal* component reaches
+`kMinDriftSpeed`, which is what leaves vertical launch pads entirely on the air-move path (`Push Fields`
+above) — they are unchanged by any of this. `--dump-drift` prints every candidate with movedir, speed,
+spawnflags, bounds, and either "taken" or the reason it was dropped.
+
+`kSfPushStartOff` used to be 1. The SDK has `SF_TRIG_PUSH_ONCE = 1` and
+`SF_TRIGGER_PUSH_START_OFF = 2`, so navgen was skipping one-shot pushes and treating start-disabled ones as
+permanently on — snark_pit, rocket_frenzy and doublecross all have them, and the runtime disagreed because
+`Bot_PushFields` skips `SOLID_NOT` entities. Both flags are skipped now.
+
+**Tagging.** `TagDriftLeaves` runs after every leaf-splitting pass and before `MergeAreas`, so nothing has to
+propagate the tag through a split. It probes the `LowestFloorFace` centroid: dropped 2 units for a conveyor
+(you must be standing on it), lifted 1 unit for a push field (you must be inside it), classified against the
+entity's own hull-3 clip tree — the probe `PruneLethalConnections` uses. Every claim is summed and the z
+component dropped.
+
+Conveyors need no leaf split: the blocker carve has already cut every leaf along their planes. Push fields
+are `SOLID_TRIGGER` and never carve, so a leaf can straddle one; they get an explicit
+`SplitByPassableVolume` pass so an area is uniformly inside or outside a field. `MergeAreas` then refuses any
+seam whose two leaves disagree on drift by more than `kDriftMergeEpsilon`, exactly as it refuses one that
+crosses `passableIndex`.
+
+**The cost model.** With `ms` the mover's max ground speed, `v` the area's drift and `d` the unit direction
+of travel, the bot steers to cancel the perpendicular part of `v`, spending its own speed budget on it:
+
+```
+along = Dot(v, d)
+s     = along + sqrt(max(ms^2 - (|v|^2 - along^2), 0))
+```
+
+Straight downstream that is `ms + |v|`. Perpendicular to a gentle 100 u/s belt it is 304 — a 5% penalty.
+Perpendicular to a 500 u/s current it is 0, which is correct: you cannot hold a line across a strong field.
+
+Cost divides by `max(s, kMinDriftSpeed)`, so a sideways crossing of a violent field is roughly 10x expensive
+but still available. **Blocking uses a looser test on purpose** — a direction is impassable only when
+`ms + along < kMinDriftSpeed`, i.e. when running flat out straight down `d` still loses ground. Using `s` for
+the block test would wall off the side exits of every fast field and disconnect the graph; using `ms + along`
+blocks exactly the genuinely-upstream case.
+
+**Nothing about this is baked at a fixed speed.** `Bot_MaxSpeed` reads `pEdict->v.maxspeed` before
+`sv_maxspeed`, so `ms` is per-server *and* per-bot. Baking the decision fails in exactly the case that
+matters: a 280 u/s belt bakes at `320 - 280 = 40` ("expensive but walkable") and is impossible at
+`sv_maxspeed 270`, where the bot would commit to the edge and stall. So `ConnectionDriftTerm` stores a
+speed-independent `crossbot_nav::DriftTerm` and every consumer calls `NavDrift::EvalDrift` with its own
+`maxSpeed`. See `doc/nav.md`.
+
+The term splits the crossing at the connection's own endpoints — leg A is `centroid(areaA) -> pointA`, leg B
+is `pointB -> centroid(areaB)` — and keeps, over the legs whose area actually drifts, the total `length`,
+the length-weighted mean `along` and `perp`, and the `alongMin`/`alongMax` extremes. The mean prices the
+crossing; the extremes decide passability, because a connection whose two legs drift in opposite directions
+(subtransit's `*22` and `*23` meet head to head) must not average its way out of an impossible leg.
+
+`airmove_prune.cpp`'s `WalkDijkstra` does **not** see drift: it runs before the terms are computed, and
+it already uses its own local centroid measure rather than `travelSeconds` for the same reason. On a map
+with a strong field it can therefore prune an air move in favour of a walk route that goes upstream. Only
+subtransit and undertow are exposed to this today.
+
+`PruneUnreachableAreas` evaluates the term at navgen's own `--max-speed`, which is what
+`header.designMaxSpeed` records. Running a server *slower* than the bake leaves areas in the mesh the runtime
+will not route to, which is the safe direction; running it *faster* over-prunes, and `--max-speed` is the
+answer. The plugin prints a warning at load when the two disagree. `--no-drift` disables the whole feature.
 
 ### Door/Breakable Isolation
 A merge never crosses `ExtractedLeaf::passableIndex`. A door or breakable has to stay its own area so it keeps
@@ -1461,8 +1548,8 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v18):
-- Header: magic "CBNV", version 18, mapName[64], bspChecksum, counts (including `detourCount`,
+Serializes MergeResult to crossbot_nav format (v20):
+- Header: magic "CBNV", version 20, mapName[64], bspChecksum, counts (including `detourCount`,
   `detourPointCount` and `vantageCount`), `designMaxSpeed`, `vantageSpacing` and `maxExposure`
 - Vantage records (96 B): `pos[3]`, `exposure`, `focus[4]`, and four `NavWatchDir{yaw, pitch, spread,
   amount}`. Unused watch slots are all-zero and the loader drops them on `amount == 0`, so the record

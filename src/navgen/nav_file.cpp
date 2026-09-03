@@ -99,6 +99,9 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.waterVolume = areas[i].waterVolume;
 		rec.pad1[0] = rec.pad1[1] = rec.pad1[2] = 0;
 		rec.submergeZ = static_cast<float>(areas[i].submergeZ);
+		rec.driftVelocity[0] = static_cast<float>(areas[i].driftVelocity.x);
+		rec.driftVelocity[1] = static_cast<float>(areas[i].driftVelocity.y);
+		rec.driftVelocity[2] = static_cast<float>(areas[i].driftVelocity.z);
 
 		rec.detourOffset = static_cast<uint32_t>(detourRecords.size());
 		rec.detourCount = static_cast<uint32_t>(areas[i].detours.size());
@@ -187,6 +190,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 
 		rec.costSeconds = ConnectionCostSeconds(c);
 		rec.travelSeconds = ConnectionTravelSeconds(areas, c);
+		rec.drift = c.drift;
 		rec.waterVolume = c.waterVolume;
 		rec.pad2[0] = rec.pad2[1] = rec.pad2[2] = 0;
 		rec.submergeZ = static_cast<float>(c.submergeZ);

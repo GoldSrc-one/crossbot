@@ -6,6 +6,7 @@ namespace crossbot_nav
 {
 
 constexpr int kSfWallStartOff = 1;
+constexpr int kSfConveyorVisual = 1;
 constexpr int kSfConveyorNotSolid = 2;
 
 inline bool IsBakedBlocker(const char *classname, int spawnflags)

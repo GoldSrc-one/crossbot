@@ -21,6 +21,9 @@ constexpr double kPlaneNormalEpsilon = 1e-4;
 constexpr double kPlaneDistEpsilon = 0.01;
 constexpr double kLethalProbeLift = 1.0;
 constexpr double kSkyProbeDrop = 2.0;
+
+constexpr double kDriftProbeLift = 1.0;
+constexpr double kDriftProbeDrop = 2.0;
 constexpr double kOnBoundaryEpsilon = 0.1;
 constexpr double kMinNotchArea = 1.0;
 constexpr double kMinFragmentVolume = 1.0;
@@ -994,6 +997,50 @@ size_t DropSkyFloorLeaves(const BspFile &bsp, std::vector<ExtractedLeaf> &leaves
 	return dropped;
 }
 
+
+size_t TagDriftLeaves(const BspFile &bsp, const std::vector<DriftVolume> &drifts,
+	std::vector<ExtractedLeaf> &leaves)
+{
+	if (drifts.empty() || leaves.empty())
+		return 0;
+
+	size_t tagged = 0;
+
+	for (ExtractedLeaf &leaf : leaves)
+	{
+		const Face *floorFace = LowestFloorFace(leaf.polytope);
+		if (!floorFace)
+			continue;
+
+		Vec3 stand = WindingCentroid(floorFace->winding);
+		Vec3 total(0.0, 0.0, 0.0);
+
+		for (const DriftVolume &drift : drifts)
+		{
+			Vec3 probe = stand;
+			probe.z += drift.standOn ? -kDriftProbeDrop : kDriftProbeLift;
+
+			if (probe.x < drift.volume.mins.x || probe.x > drift.volume.maxs.x ||
+				probe.y < drift.volume.mins.y || probe.y > drift.volume.maxs.y ||
+				probe.z < drift.volume.mins.z || probe.z > drift.volume.maxs.z)
+				continue;
+
+			if (ClassifyPoint(bsp, drift.volume.headnode, probe - drift.volume.origin) != CONTENTS_SOLID)
+				continue;
+
+			total = total + drift.velocity;
+		}
+
+		total.z = 0.0;
+		if (total.x == 0.0 && total.y == 0.0)
+			continue;
+
+		leaf.driftVelocity = total;
+		++tagged;
+	}
+
+	return tagged;
+}
 
 size_t DropLethalFloorLeaves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 	const std::vector<BlockingVolume> &hurtVolumes, std::vector<ExtractedLeaf> &leaves)

@@ -1,5 +1,7 @@
 #include "nav_path.h"
 
+#include "drift.h"
+
 #include <algorithm>
 #include <cmath>
 #include <queue>
@@ -44,6 +46,7 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 		gc.areaB = c.areaB;
 		gc.crossing = NavPlan::ConnectionCrossing(mesh.planAreas, mesh.planConns[i]);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
+		gc.drift = c.drift;
 		gc.costSeconds = c.costSeconds + c.runtimePenalty;
 		gc.exposure = c.vantageExposure;
 	}
@@ -76,8 +79,20 @@ PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 	std::vector<NavAStar::Connection> graphConns;
 	BuildGraph(mesh, areaConnIndices, graphConns);
 
-	return NavPlan::PlanRoute(areaConnIndices, graphConns, mesh.planAreas, mesh.planConns, startArea,
-		goalArea, startPoint, goalPoint, traces, stats, careful, mesh.minConnExposure);
+	float maxSpeed = (traces && traces->physics.maxSpeed > 1.f) ? traces->physics.maxSpeed
+		: mesh.designMaxSpeed;
+
+	PlannedPath path = NavPlan::PlanRoute(areaConnIndices, graphConns, mesh.planAreas, mesh.planConns,
+		startArea, goalArea, startPoint, goalPoint, traces, stats, careful, mesh.minConnExposure,
+		maxSpeed);
+
+	for (NavPlan::PlanWaypoint &wp : path.waypoints)
+	{
+		if (wp.targetAreaId >= 0 && static_cast<size_t>(wp.targetAreaId) < mesh.planAreas.size())
+			wp.drift = mesh.planAreas[static_cast<size_t>(wp.targetAreaId)].drift;
+	}
+
+	return path;
 }
 
 namespace
@@ -86,7 +101,7 @@ namespace
 constexpr float kGravityEpsilon = 0.01f;
 
 void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::vector<float> &out,
-	float gravityMultiplier, float careful)
+	float gravityMultiplier, float careful, float maxSpeed)
 {
 	size_t n = mesh.areas.size();
 	out.assign(n, kUnreachableSeconds);
@@ -122,7 +137,7 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 			uint32_t from = reverse ? neighbor : current;
 			uint32_t to = reverse ? current : neighbor;
 
-			if ((c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0 && c.areaA != from)
+			if (!crossbot_nav::ConnAllowsDirection(c.connFlags, c.areaA, from))
 				continue;
 			if (neighbor >= n || settled[neighbor])
 				continue;
@@ -134,7 +149,13 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 			if (WaterBlocks(mesh, c))
 				continue;
 
-			float base = c.travelSeconds + c.costSeconds + c.runtimePenalty;
+			NavDrift::DriftEval drift = NavDrift::EvalDrift(c.drift, maxSpeed, c.areaA == from);
+			if (!drift.passable)
+				continue;
+
+			float base = c.travelSeconds + c.costSeconds + c.runtimePenalty + drift.seconds;
+			if (base < 0.f)
+				base = 0.f;
 			float step = currentDist + base * (1.f - careful + careful * c.vantageExposure);
 			if (step >= out[neighbor])
 				continue;
@@ -148,15 +169,17 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 }
 
 void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out,
-	float gravityMultiplier, float careful)
+	float gravityMultiplier, float careful, float maxSpeed)
 {
-	AreaCostsImpl(mesh, startArea, false, out, gravityMultiplier, careful);
+	AreaCostsImpl(mesh, startArea, false, out, gravityMultiplier, careful,
+		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed);
 }
 
 void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out,
-	float gravityMultiplier, float careful)
+	float gravityMultiplier, float careful, float maxSpeed)
 {
-	AreaCostsImpl(mesh, goalArea, true, out, gravityMultiplier, careful);
+	AreaCostsImpl(mesh, goalArea, true, out, gravityMultiplier, careful,
+		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed);
 }
 
 }

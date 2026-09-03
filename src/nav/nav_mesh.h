@@ -29,6 +29,8 @@ struct Area
 
 	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
 	float submergeZ = crossbot_nav::kNavSubmergeNever;
+
+	Vector driftVelocity = Vector(0.f, 0.f, 0.f);
 };
 
 struct WaterVolume
@@ -52,6 +54,8 @@ struct Connection
 	float costSeconds = 0.f;
 	float travelSeconds = 0.f;
 	float runtimePenalty = 0.f;
+
+	crossbot_nav::DriftTerm drift;
 
 	float vantageExposure = 1.f;
 

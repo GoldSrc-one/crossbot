@@ -4,6 +4,8 @@
 #include <limits>
 #include <queue>
 
+#include "drift.h"
+
 namespace NavPlan
 {
 
@@ -38,7 +40,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	const std::vector<NavAStar::Connection> &graphConns, const std::vector<PlanArea> &planAreas,
 	const std::vector<PlanConnection> &planConns, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint, const PlanTraceContext *traces,
-	PlanStats *stats, float careful, float minExposure)
+	PlanStats *stats, float careful, float minExposure, float maxSpeed)
 {
 	PlannedRoute result;
 
@@ -106,6 +108,10 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 
 			if (gc.oneWay && gc.areaA != current)
 				continue;
+
+			NavDrift::DriftEval drift = NavDrift::EvalDrift(gc.drift, maxSpeed, gc.areaA == current);
+			if (!drift.passable)
+				continue;
 			if (neighbor >= n)
 				continue;
 
@@ -122,7 +128,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 				continue;
 			}
 
-			next.AddCost(gc.costSeconds);
+			next.AddCost(gc.costSeconds + drift.seconds);
 
 			float g = std::max(next.Time(), state[current].g);
 			float score = state[current].score +

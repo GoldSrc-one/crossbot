@@ -79,6 +79,8 @@ struct PlanArea
 	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
 	float submergeZ = crossbot_nav::kNavSubmergeNever;
 
+	Vector drift = Vector(0.f, 0.f, 0.f);
+
 	std::vector<PlanPlane> boundPlanes;
 
 	std::vector<PlanGate> edgeGates;
@@ -132,6 +134,7 @@ struct PlanWaypoint
 	bool requiresTriggerTouch = false;
 	Vector activatorCenter;
 	int targetAreaId = -1;
+	Vector drift = Vector(0.f, 0.f, 0.f);
 	int connIndex = -1;
 	float clearance = 16.f;
 

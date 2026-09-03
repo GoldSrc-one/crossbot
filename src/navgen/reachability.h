@@ -22,7 +22,7 @@ size_t PruneLethalConnections(const BspFile &bsp, const std::vector<BlockingVolu
 	std::vector<MergedConnection> &conns);
 
 MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vector<MergedConnection> &conns,
-	const std::vector<int> &seedAreas);
+	const std::vector<int> &seedAreas, float maxSpeed);
 
 }
 

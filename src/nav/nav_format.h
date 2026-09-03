@@ -8,7 +8,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 19;
+constexpr uint32_t kNavVersion = 20;
 
 constexpr size_t kNavFocusLevels = 4;
 constexpr size_t kNavWatchDirs = 4;
@@ -20,6 +20,8 @@ constexpr uint8_t kNoWaterVolume = 0xFF;
 constexpr float kNavSubmergeNever = 1.0e9f;
 
 constexpr float kNavDefaultDesignSpeed = 320.f;
+
+constexpr float kMinDriftSpeed = 30.f;
 
 enum AreaFlags : uint32_t
 {
@@ -87,6 +89,22 @@ inline bool ConnBlockedByWater(uint8_t connType, bool submerged)
 	return false;
 }
 
+inline bool ConnAllowsDirection(uint8_t connFlags, uint32_t areaA, uint32_t from)
+{
+	return (connFlags & CONN_FLAG_ONE_WAY) == 0 || areaA == from;
+}
+
+struct DriftTerm
+{
+	float length = 0.f;
+	float along = 0.f;
+	float perp = 0.f;
+	float alongMin = 0.f;
+	float alongMax = 0.f;
+};
+
+static_assert(sizeof(DriftTerm) == 20, "DriftTerm layout changed without a version bump");
+
 struct NavHeader
 {
 	char magic[4];
@@ -130,6 +148,8 @@ struct NavAreaRecord
 	uint8_t waterVolume;
 	uint8_t pad1[3];
 	float submergeZ;
+
+	float driftVelocity[3];
 };
 
 struct NavWaterVolumeRecord
@@ -165,7 +185,7 @@ struct NavDetourPointRecord
 	uint8_t pad[3];
 };
 
-static_assert(sizeof(NavAreaRecord) == 76, "NavAreaRecord layout changed without a version bump");
+static_assert(sizeof(NavAreaRecord) == 88, "NavAreaRecord layout changed without a version bump");
 static_assert(sizeof(NavWaterVolumeRecord) == 48, "NavWaterVolumeRecord layout changed");
 static_assert(sizeof(NavActivationDetourRecord) == 40, "NavActivationDetourRecord layout changed");
 static_assert(sizeof(NavDetourPointRecord) == 24, "NavDetourPointRecord layout changed");
@@ -209,9 +229,11 @@ struct NavConnectionRecord
 	uint8_t waterVolume;
 	uint8_t pad2[3];
 	float submergeZ;
+
+	DriftTerm drift;
 };
 
-static_assert(sizeof(NavConnectionRecord) == 152, "NavConnectionRecord layout changed without a version bump");
+static_assert(sizeof(NavConnectionRecord) == 172, "NavConnectionRecord layout changed without a version bump");
 
 struct NavWatchDir
 {

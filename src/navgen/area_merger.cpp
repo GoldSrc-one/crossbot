@@ -18,6 +18,8 @@ namespace navgen
 
 constexpr float kWaterJumpCommitSeconds = 1.0f;
 
+constexpr double kMinDriftLegLength = 1e-3;
+
 float ConnectionCostSeconds(const MergedConnection &conn)
 {
 	float seconds = 0.0f;
@@ -116,6 +118,66 @@ float ConnectionTravelSeconds(const std::vector<Area> &areas, const MergedConnec
 	return static_cast<float>(PortalWalkDistance(from, to, left, right) / NavAStar::kNavRunSpeed);
 }
 
+crossbot_nav::DriftTerm ConnectionDriftTerm(const std::vector<Area> &areas, const MergedConnection &conn)
+{
+	crossbot_nav::DriftTerm term;
+
+	if (conn.areaA < 0 || conn.areaB < 0 ||
+		static_cast<size_t>(conn.areaA) >= areas.size() || static_cast<size_t>(conn.areaB) >= areas.size())
+		return term;
+
+	double totalLen = 0.0;
+	double alongSum = 0.0;
+	double perpSum = 0.0;
+	double alongMin = 0.0;
+	double alongMax = 0.0;
+	bool any = false;
+
+	auto leg = [&](const Vec3 &drift, const Vec3 &from, const Vec3 &to)
+	{
+		if (drift.x == 0.0 && drift.y == 0.0)
+			return;
+
+		double dx = to.x - from.x;
+		double dy = to.y - from.y;
+		double len = std::sqrt(dx * dx + dy * dy);
+		if (len < kMinDriftLegLength)
+			return;
+
+		dx /= len;
+		dy /= len;
+
+		double along = drift.x * dx + drift.y * dy;
+		double perpSq = drift.x * drift.x + drift.y * drift.y - along * along;
+		double perp = perpSq > 0.0 ? std::sqrt(perpSq) : 0.0;
+
+		totalLen += len;
+		alongSum += along * len;
+		perpSum += perp * len;
+		if (!any || along < alongMin)
+			alongMin = along;
+		if (!any || along > alongMax)
+			alongMax = along;
+		any = true;
+	};
+
+	const Area &areaA = areas[static_cast<size_t>(conn.areaA)];
+	const Area &areaB = areas[static_cast<size_t>(conn.areaB)];
+
+	leg(areaA.driftVelocity, areaA.polytope.Centroid(), conn.pointA);
+	leg(areaB.driftVelocity, conn.pointB, areaB.polytope.Centroid());
+
+	if (!any || totalLen <= 0.0)
+		return term;
+
+	term.length = static_cast<float>(totalLen);
+	term.along = static_cast<float>(alongSum / totalLen);
+	term.perp = static_cast<float>(perpSum / totalLen);
+	term.alongMin = static_cast<float>(alongMin);
+	term.alongMax = static_cast<float>(alongMax);
+	return term;
+}
+
 namespace
 {
 
@@ -126,6 +188,8 @@ constexpr double kFloorFootprintTolerance = 1.0;
 constexpr double kFloorAdjacencyEpsilon = 0.5;
 constexpr double kMinStepSpan = 1e-9;
 constexpr double kMinSeamLength = 1.0;
+
+constexpr double kDriftMergeEpsilon = 1.0;
 
 bool FloorFaceSpan(const Face &f, const Vec3 &a, const Vec3 &ab, double epsilon, double &lo, double &hi)
 {
@@ -790,6 +854,12 @@ int LeafElevatorStop(const std::vector<ExtractedLeaf> &leaves, int leafId)
 		? leaves[static_cast<size_t>(leafId)].elevatorStopId : -1;
 }
 
+Vec3 LeafDrift(const std::vector<ExtractedLeaf> &leaves, int leafId)
+{
+	return (static_cast<size_t>(leafId) < leaves.size())
+		? leaves[static_cast<size_t>(leafId)].driftVelocity : Vec3(0.0, 0.0, 0.0);
+}
+
 uint8_t LeafWaterVolume(const std::vector<ExtractedLeaf> &leaves, int leafId)
 {
 	return (static_cast<size_t>(leafId) < leaves.size())
@@ -1401,6 +1471,9 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 		if (LeafElevatorStop(leaves, seam.a) != LeafElevatorStop(leaves, seam.b))
 			continue;
 
+		if ((LeafDrift(leaves, seam.a) - LeafDrift(leaves, seam.b)).Length() > kDriftMergeEpsilon)
+			continue;
+
 		if (LeafWaterVolume(leaves, seam.a) != LeafWaterVolume(leaves, seam.b))
 			continue;
 
@@ -1622,6 +1695,7 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 			if (LeafIsCrouch(isCrouchLeaf, leafId))
 				area.areaFlags |= crossbot_nav::NAV_AREA_CROUCH;
 			ApplyPassable(area, passables, LeafPassable(leaves, leafId));
+			area.driftVelocity = LeafDrift(leaves, leafId);
 			int stopId = LeafElevatorStop(leaves, leafId);
 			if (stopId >= 0)
 			{

@@ -1,5 +1,7 @@
 #include "path_profile.h"
 
+#include "drift.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -210,6 +212,18 @@ PlanProfile BuildPathProfile(const std::vector<PlanWaypoint> &waypoints,
 		float v = physics.maxSpeed;
 		if (waypoints[i].requiresCrouch && !waypoints[i].airmoveLaunch && !waypoints[i].requiresLadder)
 			v *= PmSim::kDuckingMultiplier;
+
+		const Vector &drift = waypoints[i].drift;
+		if (drift.x != 0.f || drift.y != 0.f)
+		{
+			size_t from = (i + 1 < n) ? i : i - 1;
+			Vector seg = waypoints[from + 1].point - waypoints[from].point;
+			seg.z = 0.f;
+			float len = seg.Length();
+			if (len > 1e-3f)
+				v = NavDrift::DriftSpeedAlong(drift, seg * (1.f / len), v);
+		}
+
 		return v;
 	};
 

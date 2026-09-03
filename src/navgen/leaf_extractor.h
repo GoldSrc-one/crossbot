@@ -18,6 +18,8 @@ struct ExtractedLeaf
 	int passableIndex = -1;
 	int elevatorStopId = -1;
 
+	Vec3 driftVelocity;
+
 	uint8_t waterVolume = crossbot_nav::kNoWaterVolume;
 	double submergeZ = crossbot_nav::kNavSubmergeNever;
 	bool waterColumn = false;

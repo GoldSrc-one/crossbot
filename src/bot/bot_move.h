@@ -22,6 +22,8 @@ PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull);
 
 PmSim::PmPushFn Bot_PushFields(int hull);
 
+Vector Bot_DriftVelocity(edict_t *pEdict, const PmSim::PmPushFn &push);
+
 float Bot_GravityMultiplier(edict_t *pEdict);
 
 float Bot_Carefulness(const CBot &bot);

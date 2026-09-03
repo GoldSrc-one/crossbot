@@ -309,7 +309,7 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
-		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot));
+		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
 
 	std::vector<Candidate> cands;
 	Tier tier = GOAL_NONE;
@@ -355,7 +355,7 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 	if (tier > GOAL_GATHER)
 	{
 		Nav::AreaCostsToGoal(mesh, static_cast<uint32_t>(st.target.areaId), st.toTargetCosts,
-			Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot));
+			Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
 		st.toTargetArea = st.target.areaId;
 	}
 	else
@@ -387,7 +387,7 @@ bool Advance(CBot &bot)
 
 	std::vector<float> costs;
 	Nav::AreaCosts(*mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
-		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot));
+		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
 
 	PickStop(bot, *mesh, costs);
 	Bot_ResetNavPath(bot);

@@ -391,6 +391,68 @@ everything `travelSeconds` inherits: centroid-anchored, and priced at `kNavRunSp
 bot's real speed. They are plan-seconds, not real seconds, and mixing them with a real duration without
 converting is the trap the opportunist section describes.
 
+### drift.h: direction-aware cost
+
+A `func_conveyor` or a horizontal `trigger_push` makes a connection cost different amounts in its two
+directions, and sometimes makes one of them impossible. `doc/navgen.md` (Drift Fields) has how the fields
+are found and how areas get their `driftVelocity`; this is what the searches do with it.
+
+`crossbot_nav::DriftTerm` is five floats on `NavConnectionRecord`, and **carries no speed**: `length` (how
+much of the crossing lies in drifting areas), the length-weighted mean `along` and `perp`, and the
+`alongMin`/`alongMax` extremes. `NavDrift::EvalDrift(term, maxSpeed, forward)` turns it into
+`{seconds, passable}` for one direction. `forward` means areaA -> areaB, and reversing it negates `along`
+and swaps which extreme is the worst case.
+
+This is deliberately evaluated per search rather than baked. `Bot_MaxSpeed` reads `pEdict->v.maxspeed`
+before `sv_maxspeed`, so the speed is per-server and per-bot; a 280 u/s belt is walkable upstream at 320
+and impossible at 270, and a mesh that had decided in advance would send a bot onto an edge it cannot
+cross. `EvalDrift` returns `{0, true}` the moment `length` is zero, so on a map with no fields the whole
+feature costs one float compare per edge.
+
+`seconds` is a **correction on the existing `kNavRunSpeed` baseline**, not a replacement for it: negative
+downstream, positive upstream, and bounded by the crossing's own baseline time. That bound is what keeps
+`PlanWalker::Time()` monotonic, so the `std::max(next.Time(), state[current].g)` clamp in `PlanRoute` never
+swallows a step.
+
+Both searches consume it:
+
+- `PlanRoute` (`plan_search.cpp`) skips an impassable direction and folds `seconds` into
+  `AddCost(gc.costSeconds + drift.seconds)`, so it rides in `m_extraTime` alongside door waits and flight
+  time. `PlanPath` passes `traces->physics.maxSpeed`, falling back to `mesh.designMaxSpeed`.
+- `AreaCostsImpl` (`nav_path.cpp`) skips the same directions and adds `seconds` to
+  `travelSeconds + costSeconds + runtimePenalty`, clamped at zero. `AreaCosts`/`AreaCostsToGoal` take a
+  `maxSpeed` argument; the bot call sites pass `Bot_MaxSpeed(bot.pEdict)`.
+
+The heuristic still divides by `kNavRunSpeed`, so a downstream run that beats 250 u/s makes `h` an
+overestimate and optimality becomes best-effort. `PlanRoute` already re-opens closed nodes, so this is a
+difference of degree from the bias `travelSeconds` already carries, not a new failure mode.
+
+Blocking is expressed by `EvalDrift` returning `passable == false`, **not** by a connection flag. There is
+no `ONE_WAY_BACK` bit: the answer depends on the speed of whoever is asking. `CONN_FLAG_ONE_WAY` still
+means what it always did; `crossbot_nav::ConnAllowsDirection` is the shared test wherever the question
+is "may I leave `from` along this connection". The sites asking a different question -- `airmove_prune`
+testing whether an edge is bidirectional, `activation_detours` looking at entries into an area -- keep
+their own inline check.
+
+### Following a drifting path
+
+`NavFollow::Config::driftVelocity` is the world-frame shove the bot is currently subject to.
+`Bot_DriftVelocity` reads it live from the engine — `groundentity->v.movedir * speed` when the ground entity
+has `FL_CONVEYOR`, plus the cached `Bot_PushFields` closure at the bot's origin — so a `Use`-reversed
+conveyor or a switched-on field is handled without rebaking. The closure is cached on `CBot::pushFields` and
+refreshed with each repath, because scanning every edict per frame per bot is not free.
+
+`Track` does two things with it. The world-speed cap becomes `DriftSpeedAlong(drift, aimDir, maxSpeed)`
+instead of `physics.maxSpeed`, so a bot riding a belt is allowed to exceed its own run speed. And the wanted
+velocity handed to `SolveDrive` is `aimDir * target - drift`: `pev->velocity` is own-only, `SolveDrive`
+solves in the own frame, and its clamp to `physics.maxSpeed` stays correct untouched. Without that
+subtraction a bot crossing undertow's 420 u/s current is simply carried away from its own plan.
+
+`BuildPathProfile`'s `NodeMaxSpeed` applies the same `DriftSpeedAlong` using the waypoint's outgoing segment
+direction (the last waypoint uses its incoming one), which is where `PlanWaypoint::drift` — copied from
+`PlanArea::drift` in `PlanPath` — is used. Corner radii, the forward/backward speed pass and `totalTime` all
+follow from it, so `estimatedArrivalTime` stops being wrong by up to 2x on a belt.
+
 ## funnel_graph.cpp
 
 ### NavFunnel::StringPull
@@ -1504,15 +1566,18 @@ larger change than this one.
 
 ## nav_format.h
 
-### Nav File Format (version 17)
+### Nav File Format (version 20)
 - Magic: "CBNV"
 - Header: magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex, areaPlanes,
   detours, detourPoints)
-- AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount
-- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity
+- AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount, waterVolume, pad1[3], submergeZ, driftVelocity[3]
+- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity, waterVolume, pad2[3], submergeZ, drift
 - `gravity` is the `pev->gravity` multiplier the air move was sampled at (1.0 for every other
   connection type). A map with `trigger_gravity` carries one air move set per distinct multiplier, and
   the runtime uses only the set matching the bot's current gravity — see "Gravity" below
+- `drift` is a `DriftTerm`: length, along, perp, alongMin, alongMax. Speed-independent by design;
+  see "drift.h: direction-aware cost" above
+- `driftVelocity` is the area's conveyor plus push-field velocity, used by the speed profile
 - ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
 - DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
 
@@ -1531,7 +1596,7 @@ plus a z-slab rather than its true faces.
   exitSpeed the climb speed, and flightTime/fallDamage belong to the dismount hop. An elevator ride uses
   launchPos as the boarding point and landingPos as the arrival point, and carries its own rideSeconds /
   rideWaitSeconds; rideSecondsMax equals rideSeconds today and is the hook for a swept-interval sampler
-- ConnFlags: ONE_WAY(1), NEEDS_CROUCH(2), JUMP(4) - jump means left ground under impulse, not derivable from jumpBackDist
+- ConnFlags: ONE_WAY(1), NEEDS_CROUCH(2), JUMP(4), WATERJUMP(8) - jump means left ground under impulse, not derivable from jumpBackDist. There is no reverse one-way bit: a drift field blocks a direction only for a given max speed, so that answer is computed per search by `NavDrift::EvalDrift` and never stored
 - DoorActivation: TOUCH(0), BUTTON(1), TRIGGER(2)
 - GateValidFlags: VALID_A(1), VALID_B(2), CLAMPED_A(4), CLAMPED_B(8)
 

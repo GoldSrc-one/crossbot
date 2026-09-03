@@ -43,7 +43,8 @@ namespace
 			bot.oppoCosts.size() == mesh.areas.size())
 			return true;
 
-		Nav::AreaCostsToGoal(mesh, goalArea->id, bot.oppoCosts, Bot_GravityMultiplier(bot.pEdict));
+		Nav::AreaCostsToGoal(mesh, goalArea->id, bot.oppoCosts, Bot_GravityMultiplier(bot.pEdict),
+			0.f, Bot_MaxSpeed(bot.pEdict));
 		bot.oppoCostsGoalArea = static_cast<int>(goalArea->id);
 		return true;
 	}

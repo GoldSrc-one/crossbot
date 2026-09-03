@@ -105,7 +105,7 @@ namespace
 			const Nav::Connection &conn = mesh.conns[ci];
 			if (conn.connType != crossbot_nav::CONN_WALK)
 				continue;
-			if ((conn.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0 && conn.areaA != cur->id)
+			if (!crossbot_nav::ConnAllowsDirection(conn.connFlags, conn.areaA, cur->id))
 				continue;
 
 			uint32_t other = (conn.areaA == cur->id) ? conn.areaB : conn.areaA;

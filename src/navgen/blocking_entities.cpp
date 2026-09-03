@@ -28,12 +28,15 @@ constexpr int kSfBreakTriggerOnly = 1;
 constexpr int kSfDoorStartOpen = 1;
 constexpr int kSfDoorPassable = 8;
 constexpr int kSfDoorUseOnly = 256;
-constexpr int kSfPushStartOff = 1;
+constexpr int kSfPushOnce = 1;
+constexpr int kSfPushStartOff = 2;
 constexpr int kSfHurtStartOff = 2;
 constexpr int kSfHurtNoClients = 8;
 constexpr double kLethalHurtDamage = 100.0;
 
 constexpr double kDefaultPushSpeed = 100.0;
+
+constexpr double kDefaultConveyorSpeed = 100.0;
 constexpr double kGravityEpsilon = 0.005;
 constexpr size_t kMaxGravityMultipliers = 4;
 
@@ -367,6 +370,93 @@ std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::
 	return result;
 }
 
+DriftSet ExtractDriftVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
+	int hullIndex)
+{
+	Vec3 hullMins(kHumanHullMinX, kHumanHullMinY, kHumanHullMinZ);
+	Vec3 hullMaxs(kHumanHullMaxX, kHumanHullMaxY, kHumanHullMaxZ);
+	if (hullIndex == kHullDuck)
+	{
+		hullMins = Vec3(kDuckClipHullMinX, kDuckClipHullMinY, kDuckClipHullMinZ);
+		hullMaxs = Vec3(kDuckClipHullMaxX, kDuckClipHullMaxY, kDuckClipHullMaxZ);
+	}
+
+	DriftSet result;
+
+	for (size_t i = 0; i < entities.size(); ++i)
+	{
+		const Entity &ent = entities[i];
+		const std::string &classname = ent.Get("classname");
+
+		bool conveyor = classname == "func_conveyor";
+		bool push = classname == "trigger_push";
+		if (!conveyor && !push)
+			continue;
+
+		DriftReport report;
+		report.entityIndex = static_cast<int>(i);
+		report.classname = classname;
+		report.spawnflags = ParseInt(ent.Get("spawnflags"), 0);
+		report.modelIndex = ParseBrushModelIndex(ent.Get("model"));
+		report.movedir = MoveDirFromAngles(EntityAngles(ent));
+		report.speed = ParseDouble(ent.Get("speed"), 0.0);
+		if (report.speed == 0.0)
+			report.speed = conveyor ? kDefaultConveyorSpeed : kDefaultPushSpeed;
+
+		if (conveyor && (report.spawnflags & crossbot_nav::kSfConveyorVisual) != 0)
+			report.reason = "visual only, no FL_CONVEYOR";
+		else if (conveyor && (report.spawnflags & crossbot_nav::kSfConveyorNotSolid) != 0)
+			report.reason = "not solid, nothing stands on it";
+		else if (push && (report.spawnflags & kSfPushOnce) != 0)
+			report.reason = "one-shot impulse, not a steady field";
+		else if (push && (report.spawnflags & kSfPushStartOff) != 0)
+			report.reason = "starts off";
+		else if (report.modelIndex < 0 ||
+			static_cast<size_t>(report.modelIndex) >= bsp.Models().size())
+			report.reason = "no brush model";
+
+		if (report.reason.empty())
+		{
+			const dmodel_t &model = bsp.Models()[static_cast<size_t>(report.modelIndex)];
+			if (model.headnode[hullIndex] < 0)
+			{
+				report.reason = "no clip tree in this hull";
+			}
+			else
+			{
+				DriftVolume drift;
+				drift.velocity = Vec3(report.movedir.x * report.speed,
+					report.movedir.y * report.speed, 0.0);
+				drift.standOn = conveyor;
+				drift.volume.headnode = model.headnode[hullIndex];
+				drift.volume.origin = ParseEntityOrigin(ent.Get("origin"));
+				drift.volume.mins = Vec3(model.mins[0] + hullMins.x, model.mins[1] + hullMins.y,
+					model.mins[2] + hullMins.z) + drift.volume.origin;
+				drift.volume.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
+					model.maxs[2] + hullMaxs.z) + drift.volume.origin;
+				drift.volume.entityIndex = static_cast<int>(i);
+
+				report.mins = drift.volume.mins;
+				report.maxs = drift.volume.maxs;
+
+				double horizontal = std::sqrt(drift.velocity.x * drift.velocity.x +
+					drift.velocity.y * drift.velocity.y);
+				if (horizontal < crossbot_nav::kMinDriftSpeed)
+					report.reason = "no meaningful horizontal component";
+				else
+				{
+					report.taken = true;
+					result.volumes.push_back(drift);
+				}
+			}
+		}
+
+		result.reports.push_back(report);
+	}
+
+	return result;
+}
+
 std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex)
 {
@@ -386,7 +476,8 @@ std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector
 		if (ent.Get("classname") != "trigger_push")
 			continue;
 
-		if ((ParseInt(ent.Get("spawnflags"), 0) & kSfPushStartOff) != 0)
+		int spawnflags = ParseInt(ent.Get("spawnflags"), 0);
+		if ((spawnflags & (kSfPushOnce | kSfPushStartOff)) != 0)
 			continue;
 
 		int modelIndex = ParseBrushModelIndex(ent.Get("model"));

@@ -26,6 +26,33 @@ struct PushVolume
 	Vec3 push;
 };
 
+struct DriftVolume
+{
+	BlockingVolume volume;
+	Vec3 velocity;
+	bool standOn = false;
+};
+
+struct DriftReport
+{
+	int entityIndex = -1;
+	std::string classname;
+	int modelIndex = -1;
+	int spawnflags = 0;
+	Vec3 movedir;
+	double speed = 0.0;
+	Vec3 mins;
+	Vec3 maxs;
+	bool taken = false;
+	std::string reason;
+};
+
+struct DriftSet
+{
+	std::vector<DriftVolume> volumes;
+	std::vector<DriftReport> reports;
+};
+
 struct ActivatorVolume
 {
 	uint8_t kind = crossbot_nav::ACT_BUTTON;
@@ -108,6 +135,9 @@ std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std
 std::vector<BlockingVolume> ExtractVisBlockers(const BspFile &bsp, const std::vector<Entity> &entities);
 
 std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
+	int hullIndex);
+
+DriftSet ExtractDriftVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex);
 
 std::vector<PushVolume> ExtractPushVolumes(const BspFile &bsp, const std::vector<Entity> &entities,

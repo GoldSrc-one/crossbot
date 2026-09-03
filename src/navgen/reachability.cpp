@@ -6,6 +6,7 @@
 #include <unordered_set>
 
 #include "clipnode_tree.h"
+#include "drift.h"
 #include "nav_math.h"
 
 namespace navgen
@@ -141,7 +142,7 @@ std::vector<int> FindTargetAreas(const std::vector<Entity> &entities, const std:
 }
 
 MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vector<MergedConnection> &conns,
-	const std::vector<int> &seedAreas)
+	const std::vector<int> &seedAreas, float maxSpeed)
 {
 	if (seedAreas.empty())
 	{
@@ -177,7 +178,11 @@ MergeResult PruneUnreachableAreas(const std::vector<Area> &areas, const std::vec
 			const MergedConnection &conn = conns[static_cast<size_t>(pi)];
 			bool isAreaA = (conn.areaA == a);
 
-			if ((conn.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) && !isAreaA)
+			if (!crossbot_nav::ConnAllowsDirection(conn.connFlags, static_cast<uint32_t>(conn.areaA),
+				static_cast<uint32_t>(a)))
+				continue;
+
+			if (!NavDrift::EvalDrift(conn.drift, maxSpeed, isAreaA).passable)
 				continue;
 
 			int other = isAreaA ? conn.areaB : conn.areaA;

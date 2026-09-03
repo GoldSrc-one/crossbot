@@ -27,6 +27,8 @@ IGameProfile *g_pGameProfile = nullptr;
 
 namespace
 {
+
+bool g_driftSpeedChecked = false;
 	constexpr int kMaxBots = 32;
 
 	constexpr float kBeamRefresh = 0.25f;
@@ -108,6 +110,8 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
 	Nav::LoadForMap(mapName);
+
+	g_driftSpeedChecked = false;
 }
 
 void ServerDeactivate()
@@ -154,6 +158,40 @@ void StartFrame()
 		BOTPERF_SCOPE(ZONE_BEAMS);
 		g_nextBeamRefresh = gpGlobals->time + kBeamRefresh;
 		BotDeploy::RefreshBeams();
+	}
+
+	bool anyBot = false;
+	for (const auto &bot : g_bots)
+		anyBot = anyBot || bot.inUse;
+
+	if (anyBot && !g_driftSpeedChecked)
+	{
+		g_driftSpeedChecked = true;
+
+		const Nav::NavMesh *mesh = Nav::Get();
+		float serverSpeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");
+		if (mesh && serverSpeed > 1.f && fabsf(serverSpeed - mesh->designMaxSpeed) > 1.f)
+		{
+			bool drifts = false;
+			for (const Nav::Area &area : mesh->areas)
+			{
+				if (area.driftVelocity.x != 0.f || area.driftVelocity.y != 0.f)
+				{
+					drifts = true;
+					break;
+				}
+			}
+
+			if (drifts)
+			{
+				char warn[256];
+				snprintf(warn, sizeof(warn),
+					"CrossBot: nav baked at %.0f u/s but sv_maxspeed is %.0f; conveyor and push-field "
+					"costs adapt per bot, but navgen pruned at the baked speed.\n",
+					mesh->designMaxSpeed, serverSpeed);
+				SERVER_PRINT(warn);
+			}
+		}
 	}
 
 	for (auto &bot : g_bots)

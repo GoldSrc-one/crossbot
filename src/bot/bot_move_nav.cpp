@@ -1818,6 +1818,7 @@ namespace
 		bot.rideFloorWp = 0;
 
 		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
+		bot.pushFields = traces.standPush;
 		BotPerf::Enter(BotPerf::ZONE_RP_PROFILE);
 		bot.followProfile = NavPlan::BuildPathProfile(bot.waypoints, traces.physics, &traces);
 		BotPerf::Leave(BotPerf::ZONE_RP_PROFILE);
@@ -1879,6 +1880,7 @@ namespace
 		BotBreak::PhaseThrough phaseBreakables;
 
 		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
+		bot.pushFields = traces.standPush;
 		NavPlan::PlanStats planStats;
 		float careful = Bot_Carefulness(bot);
 		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
@@ -2343,6 +2345,7 @@ void Bot_MoveNav(CBot &bot)
 		bot.activationActive = false;
 
 	NavFollow::Config followCfg;
+	followCfg.driftVelocity = Bot_DriftVelocity(pEdict, bot.pushFields);
 	size_t rideWp = bot.waypoints.size();
 	for (size_t i = 0; i < bot.waypoints.size(); ++i)
 	{

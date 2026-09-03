@@ -29,6 +29,7 @@
 #include "plan_model.h"
 #include "plan_search.h"
 #include "reachability.h"
+#include "drift.h"
 #include "stand_classifier.h"
 #include "svg_debug.h"
 #include "swim_connections.h"
@@ -80,6 +81,33 @@ void PrintNullCarveEvents(const std::vector<navgen::Entity> &entities, const nav
 	}
 }
 
+
+void PrintDriftReports(const std::string &bspPath, const std::vector<navgen::Entity> &entities,
+	const navgen::DriftSet &drifts)
+{
+	std::printf("%s: drift field discovery (%zu entity/entities considered, %zu taken)\n",
+		bspPath.c_str(), drifts.reports.size(), drifts.volumes.size());
+
+	for (const navgen::DriftReport &rep : drifts.reports)
+	{
+		std::string targetname;
+		if (rep.entityIndex >= 0 && static_cast<size_t>(rep.entityIndex) < entities.size())
+			targetname = entities[static_cast<size_t>(rep.entityIndex)].Get("targetname");
+
+		std::printf("  %-14s [ent %4d] model *%-3d sf %3d movedir (%6.2f, %6.2f, %6.2f) speed %7.1f",
+			rep.classname.c_str(), rep.entityIndex, rep.modelIndex, rep.spawnflags,
+			rep.movedir.x, rep.movedir.y, rep.movedir.z, rep.speed);
+		if (!targetname.empty())
+			std::printf(" \"%s\"", targetname.c_str());
+
+		if (rep.taken)
+			std::printf(" -- taken, bounds (%.0f, %.0f, %.0f)..(%.0f, %.0f, %.0f)\n",
+				rep.mins.x, rep.mins.y, rep.mins.z, rep.maxs.x, rep.maxs.y, rep.maxs.z);
+		else
+			std::printf(" -- skipped: %s\n", rep.reason.c_str());
+	}
+	std::fflush(stdout);
+}
 
 void PrintCarveBlockerTable(const std::vector<navgen::Entity> &entities,
 	const std::vector<navgen::BlockingVolume> &blockers, const navgen::CarveStats &stats)
@@ -188,9 +216,14 @@ void PrintUsage(const char *argv0)
 		"                    below it, reporting how much walkable footprint stands on sky\n"
 		"  --dump-water      every liquid volume found: type, brush model, bounds, both surface\n"
 		"                    levels, travel and speed, and which areas each one can submerge\n"
+		"  --dump-drift      every func_conveyor and horizontal trigger_push that can shove a\n"
+		"                    player: movedir, speed, bounds, whether it was taken or why it was\n"
+		"                    skipped, and how many leaves and areas it tagged\n"
 		"  --no-lethal       keep floors and routes that only a fall through a lethal trigger_hurt\n"
 		"                    can reach (debug: isolate what the lethal prune removes). Also keeps\n"
 		"                    floors and routes inside slime and lava\n"
+		"  --no-drift        ignore conveyor and push-field drift entirely (debug: isolate what\n"
+		"                    the direction-aware costs change)\n"
 		"  --no-sky-prune    keep floors whose underside is sky (debug: isolate what the sky prune\n"
 		"                    removes, e.g. the skybox shell a test map is built inside)\n"
 		"  --no-blockers     ignore func_wall/func_wall_toggle/func_conveyor/charger brushes\n"
@@ -585,7 +618,8 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 
 	NavPlan::PlanStats planStats;
 	NavPlan::PlannedRoute result = NavPlan::PlanRoute(areaConnIndices, graphConns, planAreas,
-		planConns, startArea, goalArea, startPoint, goalPoint, traces, &planStats);
+		planConns, startArea, goalArea, startPoint, goalPoint, traces, &planStats, 0.f, 1.f,
+		traces ? traces->physics.maxSpeed : crossbot_nav::kNavDefaultDesignSpeed);
 	if (!result.found || result.connPath.empty())
 	{
 		std::printf("debug path: no route from area %u to area %u\n", startArea, goalArea);
@@ -593,6 +627,12 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 	}
 
 	std::vector<NavPlan::PlanWaypoint> plan = std::move(result.waypoints);
+
+	for (NavPlan::PlanWaypoint &wp : plan)
+	{
+		if (wp.targetAreaId >= 0 && static_cast<size_t>(wp.targetAreaId) < planAreas.size())
+			wp.drift = planAreas[static_cast<size_t>(wp.targetAreaId)].drift;
+	}
 
 	NavPlan::PlanProfile profile = NavPlan::BuildPathProfile(plan,
 		traces ? traces->physics : PmSim::PmPhysics(), traces);
@@ -809,8 +849,10 @@ int main(int argc, char **argv)
 	bool dumpCarve = false;
 	bool dumpSky = false;
 	bool dumpWater = false;
+	bool dumpDrift = false;
 	bool noBlockers = false;
 	bool noLethal = false;
+	bool noDrift = false;
 	bool noSkyPrune = false;
 	bool noPassables = false;
 	bool noFloorSplit = false;
@@ -901,9 +943,17 @@ int main(int argc, char **argv)
 		{
 			dumpWater = true;
 		}
+		else if (arg == "--dump-drift")
+		{
+			dumpDrift = true;
+		}
 		else if (arg == "--no-lethal")
 		{
 			noLethal = true;
+		}
+		else if (arg == "--no-drift")
+		{
+			noDrift = true;
 		}
 		else if (arg == "--no-sky-prune")
 		{
@@ -1268,6 +1318,15 @@ int main(int argc, char **argv)
 		if (!standPushes.empty())
 			std::printf("%s: %zu trigger_push fields\n", bspPath.c_str(), standPushes.size());
 
+		navgen::DriftSet drifts = noDrift
+			? navgen::DriftSet()
+			: navgen::ExtractDriftVolumes(bsp, entities, navgen::kHullDuck);
+		if (!drifts.volumes.empty())
+			std::printf("%s: %zu drift field(s) (conveyor or horizontal trigger_push)\n",
+				bspPath.c_str(), drifts.volumes.size());
+		if (dumpDrift)
+			PrintDriftReports(bspPath, entities, drifts);
+
 		navgen::PassableSet duckPassables = noPassables
 			? navgen::PassableSet()
 			: navgen::ExtractPassableVolumes(bsp, entities, navgen::kHullDuck, elevators.claimedEntities);
@@ -1495,6 +1554,58 @@ int main(int argc, char **argv)
 				duckPassables.impassable.size());
 		}
 
+		size_t driftSplitLeaves = 0;
+		for (const navgen::DriftVolume &drift : drifts.volumes)
+		{
+			if (drift.standOn)
+				continue;
+
+			std::vector<navgen::ExtractedLeaf> next;
+			next.reserve(leaves.size());
+
+			for (navgen::ExtractedLeaf &leaf : leaves)
+			{
+				if (!navgen::OverlapsBlockingVolume(leaf.polytope, drift.volume))
+				{
+					leaf.id = static_cast<int>(next.size());
+					next.push_back(std::move(leaf));
+					continue;
+				}
+
+				std::vector<navgen::Polytope> inside, outside;
+				navgen::SplitByPassableVolume(bsp, leaf.polytope, drift.volume, kMapRadius, inside,
+					outside, 0.01, nullptr);
+
+				if (inside.empty() || outside.empty())
+				{
+					leaf.id = static_cast<int>(next.size());
+					next.push_back(std::move(leaf));
+					continue;
+				}
+
+				++driftSplitLeaves;
+				for (navgen::Polytope &piece : outside)
+				{
+					navgen::ExtractedLeaf split = leaf;
+					split.id = static_cast<int>(next.size());
+					split.polytope = std::move(piece);
+					next.push_back(std::move(split));
+				}
+				for (navgen::Polytope &piece : inside)
+				{
+					navgen::ExtractedLeaf split = leaf;
+					split.id = static_cast<int>(next.size());
+					split.polytope = std::move(piece);
+					next.push_back(std::move(split));
+				}
+			}
+
+			leaves = std::move(next);
+		}
+		if (driftSplitLeaves > 0)
+			std::printf("%s: push-field split %zu leaves (-> %zu leaves)\n",
+				bspPath.c_str(), driftSplitLeaves, leaves.size());
+
 		if (!noFloorSplit)
 		{
 			navgen::FloorSupportStats floorStats;
@@ -1603,6 +1714,11 @@ int main(int argc, char **argv)
 				"(%zu have no supported ceiling)\n",
 				bspPath.c_str(), wetLeaves, leaves.size(), ceilingless);
 		}
+
+		size_t driftLeaves = navgen::TagDriftLeaves(bsp, drifts.volumes, leaves);
+		if (!drifts.volumes.empty())
+			std::printf("%s: %zu drift field(s) tagged %zu leaves\n",
+				bspPath.c_str(), drifts.volumes.size(), driftLeaves);
 
 		size_t leafSeams = 0;
 		navgen::MergeResult merged = navgen::MergeAreas(leaves, isCrouchLeaf, duckPassables.passable,
@@ -1760,6 +1876,17 @@ int main(int argc, char **argv)
 				bspPath.c_str(), liquids.hazard.size(), hazardConns);
 		}
 
+		size_t driftConns = 0;
+		for (navgen::MergedConnection &c : merged.conns)
+		{
+			c.drift = navgen::ConnectionDriftTerm(merged.areas, c);
+			if (c.drift.length > 0.f)
+				++driftConns;
+		}
+		if (driftConns > 0)
+			std::printf("%s: %zu of %zu connections cross a drift field\n",
+				bspPath.c_str(), driftConns, merged.conns.size());
+
 		size_t rawAreaCount = merged.areas.size();
 		std::vector<int> spawnAreas = navgen::FindSpawnAreas(entities, merged.areas);
 		if (noPrune)
@@ -1769,7 +1896,8 @@ int main(int argc, char **argv)
 		}
 		else
 		{
-			merged = navgen::PruneUnreachableAreas(merged.areas, merged.conns, spawnAreas);
+			merged = navgen::PruneUnreachableAreas(merged.areas, merged.conns, spawnAreas,
+				static_cast<float>(physics.maxSpeed));
 			std::printf("%s: %zu spawn point(s) resolved, %zu areas reachable after first pass (%zu void areas pruned)\n",
 				bspPath.c_str(), spawnAreas.size(), merged.areas.size(), rawAreaCount - merged.areas.size());
 		}
@@ -2024,6 +2152,8 @@ int main(int argc, char **argv)
 
 		if (dumpConns)
 		{
+			float planSpeedForDump = (planSpeed > 0.f) ? planSpeed : static_cast<float>(physics.maxSpeed);
+
 			for (const navgen::MergedConnection &c : merged.conns)
 			{
 				const char *typeName = (c.connType == crossbot_nav::CONN_AIRMOVE) ? "airmove"
@@ -2036,6 +2166,17 @@ int main(int argc, char **argv)
 					typeName, c.areaA, oneWay ? "->" : "<->", c.areaB,
 					c.pointA.x, c.pointA.y, c.pointA.z, c.pointB.x, c.pointB.y, c.pointB.z,
 					c.planeA, c.planeB);
+
+				if (c.drift.length > 0.f)
+				{
+					NavDrift::DriftEval fwd = NavDrift::EvalDrift(c.drift, planSpeedForDump, true);
+					NavDrift::DriftEval bwd = NavDrift::EvalDrift(c.drift, planSpeedForDump, false);
+					std::printf("  [drift len %.0f along %+.0f perp %.0f min %+.0f max %+.0f | at %.0f u/s: "
+						"A->B %+.3fs %s, B->A %+.3fs %s]",
+						c.drift.length, c.drift.along, c.drift.perp, c.drift.alongMin, c.drift.alongMax,
+						planSpeedForDump, fwd.seconds, fwd.passable ? "ok" : "BLOCKED",
+						bwd.seconds, bwd.passable ? "ok" : "BLOCKED");
+				}
 
 				if (c.connFlags & crossbot_nav::CONN_FLAG_NEEDS_CROUCH)
 					std::printf("  [crouch]");

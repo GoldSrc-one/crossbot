@@ -42,6 +42,7 @@ struct Area
 	uint8_t activation = crossbot_nav::ACT_NONE;
 	double openSeconds = 0.0;
 	int passableIndex = -1;
+	Vec3 driftVelocity;
 	int elevatorStopId = -1;
 	int activationEntity = -1;
 	std::vector<ActivatorVolume> activators;
@@ -83,6 +84,8 @@ struct MergedConnection
 	double fallDamage = 0.0;
 	double flightTime = 0.0;
 
+	crossbot_nav::DriftTerm drift;
+
 	double rideSeconds = 0.0;
 	double rideSecondsMax = 0.0;
 	double rideWaitSeconds = 0.0;
@@ -102,6 +105,8 @@ struct MergeResult
 float ConnectionCostSeconds(const MergedConnection &conn);
 
 float ConnectionTravelSeconds(const std::vector<Area> &areas, const MergedConnection &conn);
+
+crossbot_nav::DriftTerm ConnectionDriftTerm(const std::vector<Area> &areas, const MergedConnection &conn);
 
 size_t ResolveConnectionPlanes(const std::vector<Area> &areas, std::vector<MergedConnection> &conns);
 

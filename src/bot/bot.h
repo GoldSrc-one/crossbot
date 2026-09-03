@@ -82,6 +82,8 @@ struct CBot
 	NavPlan::PlanProfile followProfile;
 	NavFollow::TrackState trackState;
 
+	PmSim::PmPushFn pushFields;
+
 	bool airmoveActive = false;
 	bool airmoveCrouch = false;
 	float airmoveYaw = 0.f;

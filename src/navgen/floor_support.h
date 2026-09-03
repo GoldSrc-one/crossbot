@@ -53,6 +53,9 @@ struct FloorSupportStats
 
 size_t DropSkyFloorLeaves(const BspFile &bsp, std::vector<ExtractedLeaf> &leaves);
 
+size_t TagDriftLeaves(const BspFile &bsp, const std::vector<DriftVolume> &drifts,
+	std::vector<ExtractedLeaf> &leaves);
+
 size_t DropLethalFloorLeaves(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 	const std::vector<BlockingVolume> &hurtVolumes, std::vector<ExtractedLeaf> &leaves);
 

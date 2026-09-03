@@ -147,6 +147,24 @@ PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
 	};
 }
 
+Vector Bot_DriftVelocity(edict_t *pEdict, const PmSim::PmPushFn &push)
+{
+	Vector drift(0.f, 0.f, 0.f);
+	if (!pEdict)
+		return drift;
+
+	edict_t *ground = pEdict->v.groundentity;
+	if (ground && !ground->free && (pEdict->v.flags & FL_ONGROUND) != 0 &&
+		(ground->v.flags & FL_CONVEYOR) != 0)
+		drift = ground->v.movedir * ground->v.speed;
+
+	if (push)
+		drift = drift + push(pEdict->v.origin);
+
+	drift.z = 0.f;
+	return drift;
+}
+
 PmSim::PmPushFn Bot_PushFields(int hull)
 {
 	struct Field

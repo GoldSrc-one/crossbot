@@ -32,6 +32,7 @@ PlanModel BuildPlanModel(const MergeResult &merged, bool walkOnly)
 		pa.doorWaitTime = static_cast<float>(area.openSeconds);
 		pa.waterVolume = area.waterVolume;
 		pa.submergeZ = static_cast<float>(area.submergeZ);
+		pa.drift = ToVector(area.driftVelocity);
 
 		pa.detours.reserve(area.detours.size());
 		for (const ActivationDetour &d : area.detours)
@@ -83,6 +84,7 @@ PlanModel BuildPlanModel(const MergeResult &merged, bool walkOnly)
 		gc.areaB = static_cast<uint32_t>(c.areaB);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 		gc.costSeconds = ConnectionCostSeconds(c);
+		gc.drift = c.drift;
 
 		NavPlan::PlanConnection &pc = model.conns[i];
 		pc.areaA = gc.areaA;

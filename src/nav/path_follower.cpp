@@ -1,5 +1,7 @@
 #include "path_follower.h"
 
+#include "drift.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -134,10 +136,14 @@ Decision Track(const NavPlan::PlanProfile &profile, const Vector &pos, const Vec
 	if (lateral > cfg.rejoinAbort)
 		d.needRepath = true;
 
-	float target = std::min(here.speed, physics.maxSpeed) * derate;
+	float worldCap = physics.maxSpeed;
+	if (cfg.driftVelocity.x != 0.f || cfg.driftVelocity.y != 0.f)
+		worldCap = NavDrift::DriftSpeedAlong(cfg.driftVelocity, aimDir, physics.maxSpeed);
+
+	float target = std::min(here.speed, worldCap) * derate;
 	d.targetSpeed = target;
 
-	Drive solved = SolveDrive(aimDir * target, vel, physics);
+	Drive solved = SolveDrive(aimDir * target - cfg.driftVelocity, vel, physics);
 	d.wishDir = (solved.wishSpeed > 0.f) ? solved.wishDir : aimDir;
 	d.wishSpeed = solved.wishSpeed;
 

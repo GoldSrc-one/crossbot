@@ -119,6 +119,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		area.areaFlags = rec.areaFlags;
 		area.waterVolume = rec.waterVolume;
 		area.submergeZ = rec.submergeZ;
+		area.driftVelocity = Vector(rec.driftVelocity[0], rec.driftVelocity[1], rec.driftVelocity[2]);
 		area.connIndices.reserve(rec.connCount);
 		for (uint32_t k = 0; k < rec.connCount; ++k)
 			area.connIndices.push_back(areaConnIndex[rec.connOffset + k]);
@@ -145,6 +146,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.connFlags = rec.connFlags;
 		conn.costSeconds = rec.costSeconds;
 		conn.travelSeconds = rec.travelSeconds;
+		conn.drift = rec.drift;
 		conn.exitSpeed = rec.exitSpeed;
 		conn.exitAngle = rec.exitAngle;
 		conn.jumpBackDist = rec.jumpBackDist;
@@ -188,6 +190,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		pa.doorWaitTime = rec.openSeconds;
 		pa.waterVolume = rec.waterVolume;
 		pa.submergeZ = rec.submergeZ;
+		pa.drift = a.driftVelocity;
 
 		pa.detours.reserve(rec.detourCount);
 		for (uint32_t k = 0; k < rec.detourCount; ++k)

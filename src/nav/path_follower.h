@@ -17,6 +17,7 @@ struct Config
 	float goalRadius = 12.f;
 	float sLimit = -1.f;
 	float sFloor = -1.f;
+	Vector driftVelocity = Vector(0.f, 0.f, 0.f);
 };
 
 struct TrackState

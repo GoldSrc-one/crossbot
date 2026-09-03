@@ -2487,6 +2487,12 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
 - `Bot_PushFields` snapshots the live `trigger_push` entities into a `PmSim::PmPushFn` once per plan,
   so `JumpLandsIn` simulates a launch through a push field the same way navgen sampled it. A field
   that is `SOLID_NOT` (START_OFF, or toggled off) is skipped; the next repath picks up the change.
+- `Bot_DriftVelocity` is the steering counterpart: the world-frame shove acting on the bot right now,
+  read live as `groundentity->v.movedir * speed` when the ground entity carries `FL_CONVEYOR`, plus the
+  cached push closure at the bot's origin. It goes into `NavFollow::Config::driftVelocity`, which is what
+  stops a bot on a conveyor or in a current being carried off its own plan — see `doc/nav.md`. The closure
+  lives on `CBot::pushFields` and is refreshed with each repath, because scanning every edict per bot per
+  frame is not free.
 - `sv_maxvelocity` matters only where a push field is involved: `bounce`'s pods push at 3800 u/s
   squared, which runs the simulated velocity into the engine's clamp within a second.
 - Jump waypoints are commitments — not passed until the jump is made, and gated on on-ground,
