@@ -88,6 +88,13 @@ struct State
 	int commitCaps = 0;
 	int uphillVetoes = 0;
 	int selfVetoes = 0;
+	// Shots withheld because the ray missed the target box. Cumulative, because the reason string
+	// is a single frame sampled every two seconds and misses most of what it describes -- the same
+	// reason selfVetoes exists alongside the "splash-self" reason.
+	int aimVetoes = 0;
+	// Frames that published an AIM_TARGET aim. For a pinned crossbow that is exactly "primaryZoomed
+	// was selected", which the aim= field in the status line can only witness by luck.
+	int targetAims = 0;
 	int switches = 0;
 	int reloads = 0;
 	int emptySwitches = 0;

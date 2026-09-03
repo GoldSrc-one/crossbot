@@ -1283,11 +1283,87 @@ The blind spot is damage taken during the bot's own pmove -- fall damage, walkin
 which `UpdateClientData` clears before the next update sees it. Those are self- and world-inflicted and the
 inflictor filter discards them anyway.
 
+### Vision spends at most two tracelines per bot
+
+It used to spend one per candidate. `UpdateVision` traced line of sight to every live player that passed
+range and the view cone, every frame, with no throttle, stagger or cache, and of the expensive kind:
+`dont_ignore_monsters` makes the engine walk the entity list. `pfnGetBonePosition` rode along at the same
+rate. The gates that should have bounded this do not: 4096 units covers all of crossfire, and a 90-degree
+cone rejects half the server.
+
+Measured on crossfire with 32 bots, the mean in-cone candidate count (`cands` in
+`crossbot_sense_status`) is **6.18**, with a tail to 15 -- so the old scan cost about 198 perception
+traces per frame across the server, not the 992 the worst case suggests. After the change `ZONE_SN_LOS`
+reports **51.6 traces/frame over ~30.5 active bots, or 1.69 per bot**, and that figure already includes
+the lead trace below. Roughly a fourfold cut, and the tail is what it really removes: the bot in the
+middle of a firefight was the one paying 15.
+
+The scan pass now spends no traces at all. It keeps the same gates in the same order and its only job is to
+**choose**, by weighted reservoir (`acc += w; if (RandomUnit(...) * acc < w) pick = ent;` -- the idiom from
+`bot_fire.cpp`, single-pass and needing no storage). The weight is
+
+```
+(dot(theirViewDir, dirFromThemToUs) + 1) / dist
+```
+
+so a bot spends its one discretionary trace on someone close *and* looking at it -- the person about to
+shoot. Then at most two traces run:
+
+1. **The incumbent**, if it passed the gates. That is `BotCombat::Enemy` if combat is active, else last
+   frame's `sense.target`. The bot re-checks the enemy it is already fighting before looking for another.
+2. **The weighted pick**, only if there was no incumbent or the incumbent came back occluded.
+
+`kViewRange` and the cone are unchanged, and the lead trace below is unchanged, so the per-bot budget is
+1-2 `dont_ignore_monsters` traces plus 0-1 world-only.
+
+**The incumbent still has to pass `Candidate`, range and the cone.** It is not traced from outside the view
+cone -- skipping the gates for it would let a bot see and shoot an enemy standing directly behind it. A bot
+that turns away from its enemy drops `sense.target` exactly as it always did; combat's own five-second
+persistence is what carries the enemy across the gap, not vision.
+
+**`Incumbent` reads last frame's combat enemy.** `BotSense::Update` runs before `BotCombat::Update`, which
+in turn reads this frame's `sense.target`. The one-frame lag is deliberate and stable, but a reader who
+assumes same-frame coherence will misread the loop; the `sense.target` fallback is what covers the frame
+before combat has entered.
+
+**Use `pfnAngleVectors` for the target's facing, never `MAKE_VECTORS`.** The latter writes
+`gpGlobals->v_forward`, which the function is still holding as *this* bot's forward. Clobbering it mid-loop
+would rotate the bot's own view cone to each candidate's facing in turn -- a bug that would look like
+erratic acquisition, not like an aliasing error. And read `v.v_angle` without flipping pitch: it is already
+the true view angle, unlike `pev->angles`, which is why `bot_deploy.cpp` negates x when it reads a
+tripmine's orientation. Copying that flip here would make every bot prefer targets facing *away* from it.
+
+#### Four consequences, all intended
+
+- **`sense.target` no longer means "nearest visible".** It means "the one I traced and saw". The old strict
+  nearest-wins rule is gone, so a bot can keep fighting a mid-range enemy while someone closer runs past.
+  That is the point of the incumbent rule and reads as commitment rather than the old snap-to-nearest
+  twitch. `bot_fire`, `bot_combat`, `bot_fun` and `bot_deploy` all inherit it.
+- **`SUSP_SIGHT` is pushed for at most one entity per frame**, where every visible player used to get one.
+  The case that matters is unaffected: the active enemy *is* the incumbent and is traced every frame it is
+  in the cone, so `BotSense::Senses` keeps holding combat open. Everyone else still enters the table
+  through sound, damage and events. The PLAYER tier in `LookDirection` thins out, which is the same
+  direction the one-entry-per-entity change already took.
+- **Acquisition is probabilistic.** A bot facing N enemies draws one per frame instead of testing all N, so
+  first contact takes a frame or two rather than being guaranteed. The incumbent lock holds afterwards, so
+  this is invisible at 100 Hz and about 0.1-0.2s at `sys_ticrate 10`. `test_fire.ps1` is the gate on it.
+  The measurable cost is a small drop in the fraction of frames on which a bot is holding a target: with
+  four bots and combat off it reads 27%, and `keep=new` is well under 1% of samples because a pick only
+  wins on the *first* frame of an engagement and the incumbent holds every frame after. Downstream, a
+  target lost mid-commit is what makes a grenade throw run to its 1.5s safety cap, so
+  `test_fire.ps1`'s zero-tolerance `capped` check on `weapon_handgrenade` is the assertion most likely to
+  feel this; it was seen firing once in three runs at one cap per 35 throws.
+- **`(dot + 1)` gives an exactly-back-turned target weight zero.** This gates *acquisition only* -- once
+  acquired, the incumbent path traces the enemy regardless of facing, so an enemy that turns and runs stays
+  tracked. The residual is spotting someone already running directly away who has made no noise, which
+  footsteps generally cover. If that ever reads wrong in game, the fix is an additive floor in `gaze`;
+  this is the tuning point, and it deliberately has no cvar.
+
 ### Vision samples a hitbox bone, not the eye
 
-Per player, in this order: range, then a 3D cone test, then a bone position, then the trace. The order is
-cost -- `pfnGetBonePosition` runs a full `SV_StudioSetupBones` on every single call, one skeleton setup per
-bone, so it goes last and only for candidates that already passed the cheap tests.
+Per traced player, in this order: range, then a 3D cone test, then a bone position, then the trace. The
+order is cost -- `pfnGetBonePosition` runs a full `SV_StudioSetupBones` on every single call, one skeleton
+setup per bone, so it goes last and only for the one or two candidates that survived selection.
 
 The cone is a genuine 3D dot against `v_forward`, not foxbot's yaw-only `FInViewCone`, which lets a bot see
 targets directly above it. Half-angle is `fov / 2`, so a symmetric cone against the *horizontal* FOV --
@@ -1319,13 +1395,13 @@ entire drain window aimed at brickwork.
 So the lead is traced, from the bot's real current eye, and the slot is pushed only if it comes back clear.
 A blocked lead pushes nothing at all.
 
-**It gates the queue write and nothing else.** The per-candidate trace above still runs against the raw bone
+**It gates the queue write and nothing else.** The perception trace above still runs against the raw bone
 point, so `SUSP_SIGHT` and target selection are untouched. Pointing that one trace at the lead instead --
 the obvious version -- would let an occluded lead null out `best`, and when it returned the next frame
 `best != sense.target.Get()` would fire `ClearDelayQueue` and wipe the whole ring. With 80-unit leads and a
 hitbox bone redrawn at random every frame, that flickers at every doorway and railing, and each flicker
-costs a full reaction delay of silence. Gating only the write also costs one trace per bot per frame rather
-than one per candidate, because the write happens once, for the winner.
+costs a full reaction delay of silence. Gating only the write also costs one trace per bot per frame,
+because the write happens once, for the winner.
 
 **The flags differ from the perception trace, deliberately.** This one is `ignore_monsters`; the one above
 is `dont_ignore_monsters` and has to be, or `tr.pHit == ent` could never be true. The two ask different

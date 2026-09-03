@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Driver for the hitscan firing loop: boots HLDS, lets a handful of bots roam
     a real deathmatch map, and checks that they actually shoot each other.
@@ -124,6 +124,8 @@ function Update-FireState {
         if ($line -match 'capped=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.Capped++ } }
         if ($line -match 'uphill=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.Uphill++ } }
         if ($line -match 'selfveto=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.SelfVeto++ } }
+        if ($line -match 'aimveto=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.AimVeto++ } }
+        if ($line -match 'targetaims=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.TargetAims++ } }
         if ($line -match 'aim=(\w+)') { $state.Aims[$Matches[1]] = $true }
         $target = '-'
         if ($line -match 'target=(\S+)') { $target = $Matches[1] }
@@ -234,6 +236,8 @@ function New-FireState {
         Zoomed = 0
         Uphill = 0
         SelfVeto = 0
+        AimVeto = 0
+        TargetAims = 0
         Capped = 0
     }
 }
@@ -580,8 +584,9 @@ try {
 
         Write-Host ("  shots={0} leadshots={1} chargeshots={2} arcshots={3} throwshots={4} guides={5}" -f `
             $shots, $lead, $charged, $arced, $thrown, $guided)
-        Write-Host ("  firing={0} zoomed={1} uphill={2} selfveto={3} capped={4}" -f `
-            $proj.Firing, $proj.Zoomed, $proj.Uphill, $proj.SelfVeto, $proj.Capped)
+        Write-Host ("  firing={0} zoomed={1} uphill={2} selfveto={3} capped={4} aimveto={5} targetaims={6}" -f `
+            $proj.Firing, $proj.Zoomed, $proj.Uphill, $proj.SelfVeto, $proj.Capped,
+            $proj.AimVeto, $proj.TargetAims)
         Write-Host ("  weapons held: {0}" -f (($proj.Weapons.Keys | Sort-Object) -join ','))
         Write-Host ("  aim kinds seen: {0}" -f (($proj.Aims.Keys | Sort-Object) -join ','))
         Write-Host ("  reasons: {0}" -f (($proj.Reasons.Keys | Sort-Object | ForEach-Object { "$_=$($proj.Reasons[$_])" }) -join ' '))
@@ -594,10 +599,20 @@ try {
                 # crossbow has to show both aims: lead below 300 units, target
                 # once the range decision has zoomed it.
                 if ($proj.Zoomed -eq 0) { $projFailures += "WEAPON ${pin}: the bot never zoomed" }
-                if (-not $proj.Aims.ContainsKey('target')) {
+                # targetaims is cumulative and cannot miss; aim= in the status line is one frame
+                # sampled every two seconds and routinely does. Carried on aim= alone this failed on
+                # a bot that had selected primaryZoomed all phase -- the sample simply never landed
+                # on a frame that was both zoomed and holding a target.
+                if ($proj.TargetAims -eq 0 -and -not $proj.Aims.ContainsKey('target')) {
                     $projFailures += "WEAPON ${pin}: aim=target never appeared, so primaryZoomed was never selected"
                 }
-                if (-not $proj.Reasons.ContainsKey('off-target')) {
+                # aimveto is the cumulative counter, so a single refusal anywhere in the phase
+                # reaches the poll; the reason string is one frame sampled every two seconds and
+                # misses most of what it describes, so it widens this test rather than carrying it.
+                # This is the same shape as the handgrenade refusal check below, and for the same
+                # reason -- carried on the reason string alone it failed on a bot that had withheld
+                # shots all phase and simply never been sampled mid-refusal.
+                if ($proj.AimVeto -eq 0 -and -not $proj.Reasons.ContainsKey('off-target')) {
                     $projFailures += "WEAPON ${pin}: no shot was ever withheld"
                 }
             }

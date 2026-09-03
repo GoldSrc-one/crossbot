@@ -7,6 +7,7 @@
 #include "bot_sense.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_combat.h"
 #include "bot_fire.h"
 #include "bot_move.h"
 #include "bot_perf.h"
@@ -24,6 +25,10 @@ namespace
 
 	constexpr float kViewCone = 90.f;
 	constexpr float kViewRange = 4096.f;
+
+	// Numerical guard on the 1/dist term of the vision weight, not a tuning knob: players cannot
+	// overlap, so at roughly a player half-width this never binds in practice.
+	constexpr float kGazeMinDist = 32.f;
 
 	constexpr float kLookPitchLimit = 45.f;
 
@@ -252,6 +257,46 @@ namespace
 		BotSense::Push(bot, BotSense::EntitySoundOrigin(inflictor), BotSense::SUSP_DAMAGE, inflictor);
 	}
 
+	// The one place that spends a vision traceline. Samples a hitbox, traces, and on success
+	// records the sighting. Everything expensive about vision lives here, so the call count of
+	// this function *is* the per-bot cost -- see the ZONE_SN_LOS / ZONE_SN_BONE perf zones.
+	bool TraceVisible(CBot &bot, const Vector &eye, edict_t *ent, Vector &pointOut, int &boneOut)
+	{
+		int bone = -1;
+		Vector point;
+		{
+			BOTPERF_SCOPE(ZONE_SN_BONE);
+			point = SamplePoint(bot, ent, bone);
+		}
+
+		TraceResult tr;
+		{
+			BOTPERF_SCOPE(ZONE_SN_LOS);
+			TRACE_LINE(eye, point, dont_ignore_monsters, bot.pEdict, &tr);
+		}
+		if (tr.flFraction < 1.f && tr.pHit != ent)
+			return false;
+
+		BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
+
+		pointOut = point;
+		boneOut = bone;
+		return true;
+	}
+
+	// Who the bot is already fighting. BotCombat's enemy survives losing line of sight (it retires
+	// on death, a stale handle, kSightTimeout, or losing every trace in the suspicion table), which
+	// is exactly the persistence the incumbent rule wants. Note this reads *last* frame's value:
+	// BotSense::Update runs before BotCombat::Update, which in turn reads this frame's sense.target.
+	// The one-frame lag is deliberate and stable; sense.target covers the frame before combat enters.
+	edict_t *Incumbent(const CBot &bot)
+	{
+		edict_t *ent = BotCombat::Enemy(bot);
+		if (ent)
+			return ent;
+		return bot.sense.target.Get();
+	}
+
 	void UpdateVision(CBot &bot)
 	{
 		edict_t *pEdict = bot.pEdict;
@@ -265,11 +310,16 @@ namespace
 			fov = kViewCone;
 		float minDot = cosf(fov * 0.5f * kPiF / 180.f);
 
-		edict_t *best = nullptr;
-		Vector bestPoint;
-		int bestBone = -1;
-		float bestDist = 0.f;
+		edict_t *incumbent = Incumbent(bot);
+		bool incumbentSeen = false;
 
+		edict_t *pick = nullptr;
+		float acc = 0.f;
+		int cands = 0;
+
+		// One pass, no traces. Gate on range and viewcone exactly as before, then choose a single
+		// candidate by weighted reservoir (the idiom from bot_fire.cpp) so the traces below are
+		// bounded at two regardless of how many players are on the server.
 		for (int i = 1; i <= gpGlobals->maxClients; ++i)
 		{
 			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
@@ -282,36 +332,60 @@ namespace
 			if (dist > kViewRange || dist < 0.001f)
 				continue;
 
-			if (DotProduct(forward, los * (1.f / dist)) < minDot)
+			Vector dir = los * (1.f / dist);
+			if (DotProduct(forward, dir) < minDot)
 				continue;
 
-			int bone = -1;
-			Vector point;
+			++cands;
+
+			// The incumbent is traced unconditionally below, so it must not also be drawable --
+			// otherwise a two-player fight would spend both traces on the same entity.
+			if (ent == incumbent)
 			{
-				BOTPERF_SCOPE(ZONE_SN_BONE);
-				point = SamplePoint(bot, ent, bone);
+				incumbentSeen = true;
+				continue;
 			}
 
-			TraceResult tr;
-			{
-				BOTPERF_SCOPE(ZONE_SN_LOS);
-				TRACE_LINE(eye, point, dont_ignore_monsters, pEdict, &tr);
-			}
-			if (tr.flFraction < 1.f && tr.pHit != ent)
+			// Their view direction, via pfnAngleVectors rather than MAKE_VECTORS: the latter writes
+			// gpGlobals->v_forward, which we are still holding above as this bot's own facing.
+			// v_angle is the true view angle and needs no pitch flip (unlike pev->angles, which is
+			// why bot_deploy.cpp negates x when reading a tripmine's orientation).
+			Vector theirForward, theirRight, theirUp;
+			g_engfuncs.pfnAngleVectors(ent->v.v_angle, theirForward, theirRight, theirUp);
+
+			// dir is bot -> them, so the direction from them to us is -dir. Prefer targets that are
+			// close and looking at us: those are the ones about to shoot.
+			float gaze = DotProduct(theirForward, dir * -1.f) + 1.f;
+			float w = gaze / (dist < kGazeMinDist ? kGazeMinDist : dist);
+			if (w <= 0.f)
 				continue;
 
-			BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
-
-			if (best && dist >= bestDist)
-				continue;
-
-			best = ent;
-			bestPoint = point;
-			bestBone = bone;
-			bestDist = dist;
+			acc += w;
+			if (RandomUnit(bot.sense) * acc < w)
+				pick = ent;
 		}
 
 		BotSense::State &sense = bot.sense;
+
+		sense.visionCands = cands;
+		sense.visionKeep = BotSense::KEEP_NONE;
+
+		edict_t *best = nullptr;
+		Vector bestPoint;
+		int bestBone = -1;
+
+		if (incumbentSeen && TraceVisible(bot, eye, incumbent, bestPoint, bestBone))
+		{
+			best = incumbent;
+			sense.visionKeep = BotSense::KEEP_INCUMBENT;
+		}
+		else if (pick && TraceVisible(bot, eye, pick, bestPoint, bestBone))
+		{
+			best = pick;
+			sense.visionKeep = BotSense::KEEP_NEW;
+		}
+
+		++sense.keeps[sense.visionKeep];
 
 		if (best && best != sense.target.Get())
 			BotAim::ClearDelayQueue(bot);
@@ -559,6 +633,17 @@ const char *BotSense::KindName(SuspicionKind kind)
 	return "?";
 }
 
+const char *BotSense::KeepName(VisionKeep keep)
+{
+	switch (keep)
+	{
+	case KEEP_NONE: return "none";
+	case KEEP_INCUMBENT: return "inc";
+	case KEEP_NEW: return "new";
+	}
+	return "?";
+}
+
 void BotSense::Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_t *ent)
 {
 	if (!ent || ent->free)
@@ -740,6 +825,8 @@ void BotSense::Update(CBot &bot)
 			BotAim::ClearDelayQueue(bot);
 		sense.target.Clear();
 		sense.targetBone = -1;
+		sense.visionCands = 0;
+		sense.visionKeep = KEEP_NONE;
 		ForgetEnemy(bot);
 		return;
 	}

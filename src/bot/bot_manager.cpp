@@ -502,13 +502,17 @@ void PrintSenseStatus()
 
 		char line[640];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s target=%s enemy=%s enemyAge=%.1fs bone=%d leadblk=%d susp=%d/%zu "
+			"CrossBot: %s target=%s enemy=%s enemyAge=%.1fs bone=%d leadblk=%d "
+			"cands=%d keep=%s keeps=inc:%u,new:%u susp=%d/%zu "
 			"kinds=p:%d,m:%d,o:%d "
 			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u\n",
 			bot.name, target ? CBotPlayerNameOf(target) : "-",
 			enemy ? CBotPlayerNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f, bot.sense.targetBone,
-			bot.sense.leadVetoes, live, BotSense::kSuspicionSlots,
+			bot.sense.leadVetoes,
+			bot.sense.visionCands, BotSense::KeepName(bot.sense.visionKeep),
+			bot.sense.keeps[BotSense::KEEP_INCUMBENT], bot.sense.keeps[BotSense::KEEP_NEW],
+			live, BotSense::kSuspicionSlots,
 			kinds[BotSense::KIND_PLAYER], kinds[BotSense::KIND_MONSTER],
 			kinds[BotSense::KIND_OTHER],
 			bot.sense.lookValid ? BotSense::KindName(bot.sense.lookKind) : "-", freshBuf, lookBuf,
@@ -698,12 +702,14 @@ void PrintFireStatus()
 		snprintf(line, sizeof(line),
 			"CrossBot: %s held=%s zoom=%d mode=%s why=%s %s %s commit=%s for=%.2f shots=%d "
 			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d uphill=%d "
-			"selfveto=%d switches=%d reloads=%d emptyswitch=%d idleswitch=%d idlereload=%d target=%s\n",
+			"selfveto=%d aimveto=%d targetaims=%d switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
+			"idlereload=%d target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
 			fire.leadShots, fire.chargeShots, fire.arcShots, fire.throwShots, fire.guides,
 			fire.commitCaps,
-			fire.uphillVetoes, fire.selfVetoes, fire.switches, fire.reloads,
+			fire.uphillVetoes, fire.selfVetoes, fire.aimVetoes, fire.targetAims,
+			fire.switches, fire.reloads,
 			fire.emptySwitches, fire.idleSwitches, fire.idleReloads,
 			target ? CBotPlayerNameOf(target) : "-");
 		SERVER_PRINT(line);

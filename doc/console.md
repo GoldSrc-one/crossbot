@@ -51,10 +51,15 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   one number that separates "correctly delayed" from "delayed and also wrong", but it no longer bottoms out
   at zero: it is measured against the target eye while the bot aims at a random hitbox bone, so a couple of
   degrees is the floor. Read its trend across delays, not its value; see `doc/bot.md`, `bot_aim.cpp`
-- `crossbot_sense_status` — per bot: aim target and bone, live suspicion count with a `kinds` breakdown
+- `crossbot_sense_status` — per bot: aim target and bone, `cands`/`keep` for the vision pick, live
+  suspicion count with a `kinds` breakdown
   by player/monster/other, the `tier` that won the look vote, the freshest entry with source, age and
   position, the look direction with its authority and how many entries survived the cone refinement, and
   `pushed` — cumulative per-source push counts. `tier` must read `PLAYER` whenever `kinds=p:` is nonzero.
+  `cands` is how many players passed range and the view cone — i.e. how many tracelines the old
+  every-candidate scan would have spent, against the 1-2 now actually spent. `keep` is `inc` when the
+  incumbent enemy held, `new` for a fresh weighted-random pick, `none` when nothing was visible; a duel
+  should read `inc` on nearly every frame, and a run of `new` means the lock is broken.
   `fresh` is the freshest entry overall rather than within the winning tier, so it can name an entity the
   vote ignored; see `doc/bot.md`, `bot_sense.cpp`
 - `crossbot_fire_status` — per bot: the weapon held, whether it is `zoom`ed, the fire mode chosen, why

@@ -480,6 +480,8 @@ namespace
 		fire.aimArc = IsArc(m);
 		fire.aimHoming = IsHoming(m);
 		fire.aimLead = m.aim == AIM_LEAD && !fire.aimHoming && !fire.aimArc;
+		if (m.aim == AIM_TARGET && !fire.aimHoming && !fire.aimArc)
+			++fire.targetAims;
 	}
 
 	void ClearAim(BotFire::State &fire)
@@ -603,6 +605,7 @@ namespace
 		if (!RayHitsBox(eye, dir, centre, half, range, entry))
 		{
 			fire.lastReason = "off-target";
+			++fire.aimVetoes;
 			return false;
 		}
 

@@ -494,9 +494,20 @@ drops the inventory, the charge and every per-life counter at once.
 `off-target` must appear in the **crossbow** phase — an aim gate that never withholds a shot is an aim
 gate that is not running. It is asserted there and nowhere else, for two different reasons. The gauss
 cannot show it at all, because `ChargeButtons` overwrites `lastReason` with `charging`/`charged` on
-every frame the ray test fails. Everywhere else it is a reason string and therefore a sampled one — it
-survives on the crossbow only because a bolt's ray gate rejects on most frames a target exists, so a
-two-second poll cannot miss it. Do not copy the pattern to a new phase without checking that.
+every frame the ray test fails. Everywhere else it is a reason string and therefore a sampled one.
+
+**That premise expired, exactly as this paragraph warned it might.** The crossbow's `off-target` check
+survived on the reason string only because a target existed on most frames; when vision dropped to two
+tracelines per bot (2026-09-03) the fraction of target-holding frames fell to about 27%, and the
+two-second poll started missing both `off-target` and `aim=target` — two consecutive runs failed on
+*different* halves of the pair, each having observed the other. The behaviour was never broken: the
+cumulative counters added with that change read `aimveto=44 targetaims=46` on the very run whose reason
+histogram caught `off-target` exactly once. Both crossbow assertions are now carried by
+`aimveto`/`targetaims` and merely widened by the reason string, matching the arc phases below.
+
+The general rule, twice learned: **an assertion carried by a sampled reason string is only as good as
+the duty cycle of the state it samples, and that duty cycle is not a property of the test.** Any change
+to how often bots hold targets silently re-tunes every such assertion in the suite.
 
 **The two arc phases assert the refusal on `selfveto`, not on the reason string**, and that is a
 correction rather than a preference. `why=` is one frame sampled every two seconds, so `arc-self` and
@@ -697,6 +708,19 @@ build.bat -DCROSSBOT_PERF=ON
 `-DCROSSBOT_PERF=OFF` puts it back). Against a default build the rcon commands come back as unknown
 and the run produces no `CrossBot PERF` lines at all -- which looks exactly like a server that had
 nothing to report.
+
+**`ZONE_SN_LOS traces/f` is the regression witness for vision cost.** Nothing in the PowerShell suites
+measures tracelines, so a change that quietly restores per-candidate line-of-sight tracing would pass
+every one of them -- it would be slower, not wrong. Vision is bounded at two `dont_ignore_monsters`
+traces per bot per frame by construction, so at 32 bots `ZONE_SN_LOS` must read at most about 2.0 per
+frame per bot, and `ZONE_SN_BONE` must track it. Measured 2026-09-03 on crossfire at 32 bots: **51.6
+traces/frame over ~30.5 active bots, 1.69 per bot**, against a mean `cands` of **6.18**.
+
+`crossbot_sense_status`'s `cands` field gives the counterfactual in the same breath: it counts the
+players that passed range and the cone, which is exactly what the old scan would have traced, so `cands`
+against `ZONE_SN_LOS` is the before/after without needing two builds. Normalise by a per-bot-per-frame
+zone (`sn_damage`'s `calls/f`) rather than assuming the bot count -- not every bot is updated on every
+frame, and dividing by 32 understates the per-bot figure by about 5%.
 
 `-NoProfiler` skips uProf and just sleeps, which is the usual mode: the zone report is the part that
 attributes, and uProf only adds the module split. `-NullStdout` sends the server's stdout to `NUL` and
