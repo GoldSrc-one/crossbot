@@ -101,6 +101,10 @@ bool DebugEnabled();
 
 void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Candidate> &out);
 
+void Prioritize(std::vector<BotGoal::Candidate> &cands);
+
+void NoteDeath(const CBot &bot);
+
 void Accept(CBot &bot, const BotGoal::Candidate &cand);
 
 bool ValidFor(const CBot &bot, edict_t *ent, int payload);

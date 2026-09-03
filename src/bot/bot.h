@@ -149,7 +149,7 @@ struct CBot
 	BotDeploy::State deploy;
 	BotSense::State sense;
 	BotFire::State fire;
-	BotFire::Usage weaponUsage;
+	BotFire::Carry weaponCarry;
 
 	bool fallTelemetryLogged = false;
 

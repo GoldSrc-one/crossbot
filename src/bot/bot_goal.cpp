@@ -319,6 +319,8 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		cands.clear();
 		CollectTier(bot, mesh, costs, static_cast<Tier>(t), cands);
 		PruneUnreachable(bot, mesh, costs, cands);
+		if (t == GOAL_FUN)
+			BotFun::Prioritize(cands);
 		if (!cands.empty())
 		{
 			tier = static_cast<Tier>(t);

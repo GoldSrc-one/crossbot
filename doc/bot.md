@@ -170,12 +170,40 @@ that on a small map with several bots, fun goals get re-selected often. Fighting
 
 The middle tier: the map gimmicks that make an HLDM map what it is. Three kinds ship —
 `FUN_SWITCH` (a button or trigger whose chain reaches something that hurts people), `FUN_TANK` (a
-mounted gun) and `FUN_TRAIN` (a drivable `func_tracktrain`). `crossbot_fun 0` empties the tier, at
-which point `BotGoal::Select` reduces exactly to the old gather-only behaviour.
+mounted gun) and `FUN_TRAIN` (a drivable `func_tracktrain`). Switches outrank the other two — see
+below. `crossbot_fun 0` empties the tier, at which point `BotGoal::Select` reduces exactly to the old
+gather-only behaviour.
 
 **This is entirely a runtime feature. No nav format change, no `kNavVersion` bump, no navgen work.**
 Everything a fun goal needs is either a plain `entvars_t` field or an offset already present in
 `gamedata/valve-win.json` (`doc/game.md`, gamedata.cpp).
+
+### Switches outrank everything else in the tier
+
+`BotFun::Prioritize` is a hard filter, not a weight: if any surviving candidate is a `FUN_SWITCH`,
+every tank and tram candidate is erased and the roulette runs over switches alone. Both switch
+actions count, so crossfire's `trigger_multiple` nuke ranks with the buttons.
+
+**It runs in `BotGoal::Select`, after `PruneUnreachable` and before the tier's emptiness test**
+([bot_goal.cpp:321](../src/bot/bot_goal.cpp:321)). That position is the whole design:
+
+- Filtering earlier — inside `BotFun::Collect` — cannot work. `Collect` is never handed the `costs`
+  vector, so it cannot tell a reachable switch from an unreachable one, and a switch the bot has no
+  route to would suppress every tank and leave the tier empty. The bot would fall through to gather
+  and ignore a working tank standing next to it.
+- Filtering after the emptiness test would be too late; the tier would already have been accepted.
+
+The memo gate supplies the rest for free. A switch on cooldown emits no candidate at all, so
+crossfire's tanks become selectable again during the nuke's `wait`, and undertow's 142 s button
+simply empties the tier rather than blocking it.
+
+**On stock maps this rule is currently a no-op**, which is worth knowing before debugging it. Only
+crossfire and doublecross carry both a switch and tanks, and on both the switch is unroutable in the
+mesh — crossfire's nuke has a nav area after `strike_ready_door` opens at t=180 but still prices as
+unreachable, and doublecross's `fire_button_texture` at area 304 never survives the prune. Every
+other fun map has exactly one kind. `crossbot_fun_debug` logs `fun priority kept N switch candidates,
+dropped M others` whenever the filter actually bites; if that line never appears, the filter is not
+broken, there is simply never more than one kind to choose between.
 
 ### The chain table
 
@@ -410,15 +438,29 @@ There is no attempt to predict a rendezvous. `BuildBoardPoints` walks the cached
 polyline once per map and, at each node, probes both sides for nav areas the bot could hop from. Three
 rules decide, and each earned its place:
 
-- The probe offsets start **beyond the tram's own half-width**. Offsets measured from the deck centre
-  put the board point inside the tram's footprint, and bots walked into the parked brush until
-  `OnBlocked` retired the goal.
-- The stand point takes the area's **`centroid.z`**, not the probe's z. `ClampToArea` clamps into the
-  area's bounding box, so a probe at deck height stays at deck height and the goal point floats above
-  the floor — `follow.done` never fires and the bot never arrives.
-- `deck.z - point.z <= kTrainStepUp` and `point.z - deck.z <= kTrainBoardRise` keep the point roughly
-  level with the deck. A generous rise admits walkways ~40 units above the track that the bot cannot
-  actually get down from.
+- The probe offsets start at **`halfWidth + kTrainSideClear`**, which is the tram's own half-width
+  plus the bot's hull half-width plus a margin. Offsets measured from the deck centre put the board
+  point inside the tram's footprint, and bots walked into the parked brush until `OnBlocked` retired
+  the goal. Clearing only the tram's half-width is still not enough: the bot's hull is 32 wide, so at
+  exactly `halfWidth` its near edge is flush with the car's side and a passing tram clips a bot that
+  is standing still waiting for it.
+- The stand height is **traced, never taken from the nav area**. `GroundBelow` fires a downward duck
+  hull from the area point and reports the floor; `standZ` is that plus 36. An area's `centroid.z` is
+  nowhere near its floor — on subtransit the centroid beside the track reads -128 where the floor is
+  -192 — so every height comparison built on it is wrong by tens of units. This is the single most
+  expensive mistake available here, because the numbers look plausible and invert the geometry: it
+  makes the deck appear to be *below* the walkway when it is 25 units above it.
+- The ground probe traces **straight down from the area point**, never from an offset above it. The
+  area point is inside a nav area and therefore in open space; starting the trace 96 units higher
+  puts it inside the tunnel ceiling, `fStartSolid` fires, and the whole board point is silently
+  dropped. That symptom is a tram nobody ever boards, with no log line to say why.
+- `deck.z - floorZ <= kTrainStepUp` and `floorZ - deck.z <= kTrainBoardRise` keep the point roughly
+  level with the deck, both measured against the traced floor.
+
+Note `point` stays the nav-space goal point from `ClampToArea` and is **not** overwritten with the
+traced floor. It feeds `follow.done` and the air-route trace; moving it to the real floor drops the
+trace to deck level, where the trench lip blocks it, and every board point beside the parked tram
+disappears.
 
 The deck itself is `DeckAt`, not `pev->origin`: the brush model is offset from its origin (on
 subtransit by 64 units along the car) and the tram's own forward is the **reverse** of the travel
@@ -440,9 +482,46 @@ bot waits and hops.
 
 The hop aims at the **cached trackside deck point**, not at the tram's current centre: driving at a
 moving tram means running into its front face, and `Blocked` crushes for `dmg 1000` unless the victim
-is already `FL_ONGROUND` **with the train as its ground entity**. It fires on either the predicted
-ETA or a straight proximity test, because the arc projection is ambiguous where the loop's two
-tunnels run parallel and a predicted-only trigger missed catches that the proximity test makes.
+is already `FL_ONGROUND` **with the train as its ground entity**.
+
+### The hop is a timed jump, and the deck is above the walkway
+
+On subtransit the ledge floor beside the track is at -192 and the deck top at -167, so **boarding is
+a 25-unit rise, not a drop**. That is worth stating because the opposite reading is easy to reach and
+inverts the whole manoeuvre — see the `centroid.z` trap above.
+
+`TryTrainHop` works entirely in time. From the traced geometry it computes the interval during which
+a jump would leave the bot **at or above deck height**:
+
+```
+rise      = (boardDeck.z + 36) - origin.z
+clearFrom = (kJumpImpulse - sqrt(kJumpImpulse^2 - 2*g*rise)) / g      -- clears the deck going up
+clearTo   = (kJumpImpulse + sqrt(kJumpImpulse^2 - 2*g*rise)) / g      -- drops back below it
+```
+
+and jumps only when the tram's own `eta` falls inside `[clearFrom, clearTo]`. A rise beyond
+`PmSim::PlainJumpHeight` is rejected outright. `eta` is used unmodified: `b.deck` is by construction
+the deck's position when the tram's origin reaches `b.arc`, so `TrainEta` already *is* the deck
+arrival time. Subtracting a deck-lead term on top of that double-counts and pushes the estimate below
+the firing window, at which point the hop never triggers at all.
+
+Two guards make the difference between boarding and being crushed:
+
+- **The brink.** The bot never crosses `halfWidth + kTrainBrink` on foot. Beyond it the bot runs; at
+  it the bot either jumps, or stands still and waits for the next pass. Air control is weak, so the
+  run-up must happen outside the car's sweep and the bot must already be moving when it leaves the
+  ground.
+- **No proximity trigger.** An earlier version also fired on raw distance to the tram. That ignores
+  geometry entirely and commits hopeless jumps, putting the bot airborne in the car's path — the
+  worst possible state, since being off the ground is exactly what turns the nudge branch of
+  `Blocked` into the `dmg 1000` branch.
+
+`PmSim` is deliberately **not** used for this. It is perfectly usable at runtime — `BotOppo::TryJump`
+([bot_opportunist.cpp:64](../src/bot/bot_opportunist.cpp:64)) predicts landings with `BeginAirborne`
+and `Step` — but every trace it makes is a snapshot of the world *now*, and nothing in the repo
+extrapolates geometry in time. Asked where the bot lands, it would answer "in the trench", which is
+true at the moment of the query and false at the moment of landing. The tram is on rails at constant
+speed, so its future position is closed-form and needs no simulation.
 
 `RunArrival` only hands over the first frame. Everything after that runs from `BotFun::Run`, which is
 called unconditionally — `RunArrival` fires only while `follow.done`, and the bot stops being at its
@@ -2335,26 +2414,47 @@ that, holding the button would flip the zoom every 1.0s forever. Toggles are nev
 `IN_ATTACK2` alone and shoots nothing that frame. `IN_ATTACK2` short-circuits `IN_ATTACK` in
 `ItemPostFrame` anyway, so there was never a frame to share.
 
-### Selection spends the weapon the bot has used least
+### Selection takes the best gun it has, and the rarest of those
 
-Every `(weapon, mode)` pair carries an accumulator of seconds. It lives in `BotFire::Usage` on `CBot`
-rather than in `BotFire::State`, because `Reset` assigns a fresh `State` on every respawn and the whole
-point of the tally is that it outlives a life — a bot that spent the last three lives on the mp5 should
-still reach for something else after the fourth.
+Two numbers rank a weapon, applied in that order.
 
-**It counts time on target, not shots.** `Buttons` adds `frametime` to the held pair the moment
-`onTarget` comes back true, which is downstream of every readiness gate — reloading, `nextAttack`, an
-empty clip and the zoom toggle have all already returned by then. So the number is "seconds this
-weapon spent pointed at somebody with the trigger available", which is what a weapon costs the bot in a
-fight; a slow weapon is not punished for firing fewer rounds and a fast one is not rewarded for spraying.
-Rounds fired would have measured the weapon's cycle time instead of the bot's attention.
+**Score** is `WeaponSpec::value`, the static ladder already in the weapon table (`doc/game.md`,
+"`value` is the one field that fails the criterion on purpose"): 0.5 for gauss, egon and crossbow, 0.3
+for RPG and mp5, 0.2 for shotgun, hornetgun and python, 0.1 for everything else. Selection keeps only
+the candidates at the single highest score present and discards the rest outright. There is no
+tolerance band: a 0.3 never competes with a 0.5.
 
-Zoomed variants fold into primary. `BotFire::Mode` has no zoom member — zoom is a range decision made
-inside the mode, not a mode of its own — so `primaryZoomed` accrues where `primary` does.
+**Carry time** is seconds the weapon has been in the bot's inventory, one float per weapon id in
+`BotFire::Carry` on `CBot`. Among the survivors of the score filter, **least carried wins** — that is
+what "rare to him" means. The gauss a bot almost never finds beats the crossbow it has been lugging
+around for two minutes, and a weapon just picked up beats everything.
 
-`Buttons` can run twice in one frame (the jump split in `Bot_RunPlayerMove`), so accrual is stamped
-with `gpGlobals->time` and the second call is skipped. Without the stamp a jumping bot would rate its
-weapon twice as expensive as a walking one.
+`AccrueCarry` runs once per bot per frame from `BotManager::StartFrame`, immediately after
+`BotWeapons::Refresh` — the one place the inventory is known fresh — and charges `Bot_FrameTime()` to
+every carried weapon. Dead bots `continue` before that point, so the clock only runs while the bot is
+alive, which is what "has the weapon" means. That single call site is also why there is no
+double-accrual stamp: the hazard was `Buttons` running twice per frame in the jump split, and
+`StartFrame` is not part of `Bot_RunPlayerMove`.
+
+The table lives on `CBot` rather than in `BotFire::State`, because `Reset` assigns a fresh `State` on
+every respawn and the tally has to outlive a life. The inventory does not outlive one — it resets to
+the spawn kit on every death — and the gap between the two is the point: the crowbar and glock climb
+life after life while a gun the bot rarely finds stays near zero. That divergence *is* the rarity
+signal. Only `bot = CBot()` clears it — map change, disconnect, deactivate.
+
+Mode does not enter the ranking. "Time in inventory" is the same number for a weapon's primary and its
+secondary, so once a weapon wins, one of its usable modes is drawn at random through the per-bot RNG.
+The draw happens once at select time and `fire.pendingMode` carries it through the switch, so it does
+not flap frame to frame. Zoomed variants never appear as candidates at all: `BotFire::Mode` has no zoom
+member, because zoom is a range decision made inside a mode rather than a mode of its own.
+
+**What this replaced, and why.** The first cut of selection counted seconds on target per
+`(weapon, mode)` pair and spent the least-used one. The metric was unreliable. It accrued only in
+combat, downstream of every readiness gate, so it measured how often the bot happened to be in a fight
+while holding a gun rather than anything about the gun — and a weapon carried for ten minutes and never
+fired read exactly like one never picked up. Carry time is observable every frame, needs no fight to
+mean something, and answers the question the humanness goal actually asks: is this weapon novel to this
+bot.
 
 ### Three triggers, and only one of them is new to combat
 
@@ -2383,16 +2483,26 @@ that weapon, and `Buttons` presses `IN_RELOAD` from a branch above the `mode == 
 (`fire.idleReloadId`). A weapon that still needs rounds wins the next tick outright, so an in-progress
 reload is never abandoned halfway.
 
-Only when nothing needs rounds does the least-used pair win, with a random tie-break through the
-existing per-bot RNG. **Melee is excluded from the ranking** and reachable only as the last resort when
-no other pair is usable — a crowbar with zero seconds on it would otherwise win every idle tick for
-free, since it never runs out of ammo.
+The reload pass is deliberately **not** score-filtered. Topping up a magazine is inventory tidying, not
+a decision about which gun to fight with, and a bot that only ever reloaded its best weapon would leave
+the rest of the bag empty for the moment that weapon runs dry. Carry time breaks ties between equal
+deficits, for no stronger reason than that it is the number already to hand.
 
-**Out of combat the held weapon wins ties.** The bot switches only when its best held pair has strictly
-more seconds than the best candidate. Usage accrues only in combat, so without that rule everything the
-bot could rotate to sits at zero forever and an idle bot cycles its whole inventory every three seconds.
-The exception is a held melee weapon, which loses ties on purpose: a bot idling with a crowbar and a
-loaded shotgun in the bag should be holding the shotgun.
+Only when nothing needs rounds does the score-then-rarity ranking run. **Melee is excluded from it**
+and reachable only as the last resort when no other candidate is usable. Score nearly handles this on
+its own — the crowbar's 0.1 loses to anything better — but at spawn the crowbar and the glock are both
+0.1, and the melee pass is what stops the bot settling on the crowbar there.
+
+**Out of combat the held weapon wins ties**, now lexicographically: the bot switches only when the
+winner strictly beats what it holds on score first, then on carry. Equal score and equal-or-greater
+carry means stay put. Without it two same-score weapons whose carry times are converging make an idle
+bot flap between them every three seconds. A held melee weapon is exempt and loses ties on purpose: a
+bot idling with a crowbar and a loaded shotgun in the bag should be holding the shotgun.
+
+In practice this rule fires far less than its predecessor did, because score is stable where usage
+drifted. An idle bot with a gauss and a glock settles on the gauss and stops re-evaluating, instead of
+alternating on every tick — which is the visible behaviour change from the rewrite, and the reason the
+test suite now asserts where a bot *ends up* rather than that it did not churn.
 
 Out of combat there is no target, so range, uphill and flight time cannot be evaluated at all. That
 split is why `ModeUsable` became `ModeViable` (`Supported`, the pin, `WPN_Q_NO_UNDERWATER`, ammo) plus
@@ -2415,7 +2525,7 @@ become a per-frame command loop, and completion is still observed rather than as
 `mode=none` and tries again next frame. Being throttled no longer blocks the loose keep, so a bot
 waiting out the interval keeps firing what it has instead of standing idle.
 
-`crossbot_weapon_usage` prints the table. `crossbot_fire_pin` is still the only lever that reaches
+`crossbot_weapon_carry` prints the table, each weapon as `carry/score`. `crossbot_fire_pin` is still the only lever that reaches
 selection deterministically, because in combat the rules above are all "the weapon stopped working" and
 a pinned weapon is the only way to make that happen on demand.
 

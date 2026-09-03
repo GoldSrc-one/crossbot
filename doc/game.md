@@ -373,12 +373,24 @@ Operating a gun decomposes into three independent questions, one enum each: how 
 struct, and `cycleTime` was rejected in as many words for being useful only to "rank guns you are
 *not* holding, which is selection".
 
-It is here anyway because the thing being ranked is not a gun. `EvaluateCombat` asks how dangerous the
-bot is *in total*, to decide whether to go looking for a fight — see `doc/game.md` above and
-`doc/bot.md`, "Readiness is what makes the comparison mean anything". That is a property of the whole
-inventory, and the only honest place to record what one weapon contributes to it is next to the weapon.
-The alternative is a second table keyed by `m_iId` sitting beside this one, which is the same data with
-an extra way to fall out of sync.
+It is here anyway because it answers a question no runtime observation can. It has two readers, and
+they want the same number for different reasons:
+
+- `EvaluateCombat` asks how dangerous the bot is *in total*, to decide whether to go looking for a
+  fight — see `doc/game.md` above and `doc/bot.md`, "Readiness is what makes the comparison mean
+  anything". That is a property of the whole inventory.
+- `BotFire`'s weapon selection asks which of the guns in the bag is worth holding. That is ranking guns
+  you are *not* holding, which is precisely what the rejected list said this table would not do.
+
+The second reader is a deliberate reversal, made when selection moved to score-then-rarity (see
+`doc/bot.md`, "Selection takes the best gun it has, and the rarest of those"). The earlier position was
+that the live inventory could answer selection on its own. It cannot: everything observable at runtime
+— clip, reserve, cycle time, range — says whether a weapon *works*, and nothing says whether it is
+worth holding. A bot with a full glock and a full gauss sees two working weapons and no reason to
+prefer either. Desirability is a judgement about the mod, which is what this table is for, and the only
+honest place to record what one weapon contributes is next to the weapon. The alternative is a second
+table keyed by `m_iId` sitting beside this one, which is the same data with an extra way to fall out of
+sync.
 
 The numbers are a coarse ladder, not damage figures: 0.5 for gauss, egon and crossbow, 0.3 for RPG and
 MP5, 0.2 for shotgun, hornetgun and python, 0.1 for everything else. They sum to 3.3 across the table,
@@ -386,9 +398,12 @@ so `arms` saturates at two good weapons rather than requiring the full arsenal �
 bot holding gauss and egon is already as willing to hunt as it will ever be, and a sum that only
 reached 1.0 with every weapon would mean bots essentially never chased.
 
-This does not reopen the rejected list. A per-weapon *selection* score still has no business here; the
-live inventory answers those questions. `value` is one number per weapon in service of one question
-about the bot.
+The coarseness serves the second reader too, and there it is load-bearing rather than merely
+sufficient. Selection filters to the single best score and breaks the remainder on rarity, so a ladder
+of unique values would turn the choice into a lookup: one weapon would always win and the bot would
+never vary. The ties are what leave rarity room to act — three weapons share 0.5 and six share 0.1, so
+in most inventories the score filter narrows the field without deciding it. Adding precision to these
+numbers would make bots *less* varied, not more accurate.
 
 ### Why FIRE_TAP is bot intent, not an SDK requirement
 
@@ -619,7 +634,7 @@ do not get re-proposed:
 |---|---|
 | `MELEE` / `HITSCAN` / `BEAM` as separate aim values | One instruction between them. Reach is `range`, sustained fire is `FIRE_HOLD`. |
 | `HOMING` as its own aim value | The flight time is still real and still worth recording, so the aim value stays `AIM_LEAD`. What a homing weapon needs is a *handling* difference — do not solve, point and click — and that is `WPN_Q_HOMING`. |
-| `cycleTime` | The live `nextPrimaryAttack` on the weapon in hand is authoritative. A table value only helps rank guns you are *not* holding, which is selection. |
+| `cycleTime` | The live `nextPrimaryAttack` on the weapon in hand is authoritative. A table value only helps rank guns you are *not* holding, and `value` already carries that ranking at the coarseness selection needs — a second, finer axis would only give the two something to disagree about. |
 | `zoomFov` | `pev->fov != 0` answers "am I zoomed". 20 vs 40 changes no handling decision. |
 | a `needsSurface` quirk | Redundant with `AIM_SURFACE`. |
 | an `exhaustible` quirk | The inventory walk runs every frame; the bot sees the weapon disappear. |

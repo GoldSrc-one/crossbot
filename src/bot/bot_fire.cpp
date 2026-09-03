@@ -26,7 +26,7 @@ namespace
 	constexpr float kSelectInterval = 0.5f;
 	constexpr float kIdleSelectInterval = 3.f;
 	constexpr float kCombatMemory = 3.f;
-	constexpr float kUsageEpsilon = 0.05f;
+	constexpr float kCarryEpsilon = 0.05f;
 	constexpr float kEquipInterval = 0.5f;
 
 	constexpr float kMaxFlightTime = 1.5f;
@@ -947,14 +947,27 @@ bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, 
 	return true;
 }
 
-float UsageOf(const CBot &bot, int weaponId, Mode mode)
+float CarryOf(const CBot &bot, int weaponId)
 {
 	if (weaponId <= 0 || weaponId >= kMaxWeaponIds)
 		return 0.f;
-	if (mode != MODE_PRIMARY && mode != MODE_SECONDARY)
-		return 0.f;
 
-	return bot.weaponUsage.seconds[weaponId][mode - 1];
+	return bot.weaponCarry.seconds[weaponId];
+}
+
+void AccrueCarry(CBot &bot)
+{
+	const BotInventory &inv = bot.inventory;
+	float dt = Bot_FrameTime();
+
+	for (int i = 0; i < inv.count; ++i)
+	{
+		int id = inv.weapons[i].id;
+		if (id <= 0 || id >= kMaxWeaponIds)
+			continue;
+
+		bot.weaponCarry.seconds[id] += dt;
+	}
 }
 
 void Reset(CBot &bot)
@@ -1024,20 +1037,11 @@ static void PinEquip(CBot &bot)
 	}
 }
 
-static void AccrueUsage(CBot &bot, Mode mode)
+static float WeaponScore(int weaponId)
 {
-	State &fire = bot.fire;
+	const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(weaponId) : nullptr;
 
-	if (fire.usageStamp == gpGlobals->time)
-		return;
-	fire.usageStamp = gpGlobals->time;
-
-	if (fire.weaponId <= 0 || fire.weaponId >= kMaxWeaponIds)
-		return;
-	if (mode != MODE_PRIMARY && mode != MODE_SECONDARY)
-		return;
-
-	bot.weaponUsage.seconds[fire.weaponId][mode - 1] += Bot_FrameTime();
+	return spec ? spec->value : 0.f;
 }
 
 static bool WeaponViable(CBot &bot, const BotWeapon &w)
@@ -1062,14 +1066,6 @@ static int ReloadDeficit(CBot &bot, const BotWeapon &w)
 	int reserve = AmmoCount(bot.inventory, w.primaryAmmoType);
 
 	return (deficit < reserve) ? deficit : reserve;
-}
-
-static float WeaponUsage(const CBot &bot, int weaponId)
-{
-	float primary = UsageOf(bot, weaponId, MODE_PRIMARY);
-	float secondary = UsageOf(bot, weaponId, MODE_SECONDARY);
-
-	return (primary < secondary) ? primary : secondary;
 }
 
 static int BuildChoices(CBot &bot, bool strict, bool geometry, float dist, float rise, int skipId,
@@ -1107,40 +1103,94 @@ static int BuildChoices(CBot &bot, bool strict, bool geometry, float dist, float
 	return count;
 }
 
-static int PickLeastUsed(CBot &bot, const Choice *choices, int count, bool skipMelee)
+static bool ChoiceEligible(const CBot &bot, const Choice &choice, bool skipMelee)
+{
+	if (!skipMelee)
+		return true;
+
+	return bot.inventory.weapons[choice.index].id != g_pGameProfile->MeleeWeapon();
+}
+
+static int PickBest(CBot &bot, const Choice *choices, int count, bool skipMelee)
 {
 	const BotInventory &inv = bot.inventory;
-	int melee = g_pGameProfile->MeleeWeapon();
 
-	int best = -1;
-	float bestUsage = 0.f;
-	int ties = 0;
+	float bestScore = 0.f;
+	bool haveScore = false;
 
 	for (int i = 0; i < count; ++i)
 	{
-		int id = inv.weapons[choices[i].index].id;
-		if (skipMelee && id == melee)
+		if (!ChoiceEligible(bot, choices[i], skipMelee))
 			continue;
 
-		float usage = UsageOf(bot, id, choices[i].mode);
-
-		if (best < 0 || usage < bestUsage - kUsageEpsilon)
+		float score = WeaponScore(inv.weapons[choices[i].index].id);
+		if (!haveScore || score > bestScore)
 		{
-			best = i;
-			bestUsage = usage;
-			ties = 1;
+			bestScore = score;
+			haveScore = true;
+		}
+	}
+
+	if (!haveScore)
+		return -1;
+
+	int bestId = 0;
+	float bestCarry = 0.f;
+	int carryTies = 0;
+
+	for (int i = 0; i < count; ++i)
+	{
+		if (!ChoiceEligible(bot, choices[i], skipMelee))
+			continue;
+
+		int id = inv.weapons[choices[i].index].id;
+		if (WeaponScore(id) < bestScore)
+			continue;
+
+		bool seen = false;
+		for (int j = 0; j < i && !seen; ++j)
+			seen = ChoiceEligible(bot, choices[j], skipMelee) &&
+				inv.weapons[choices[j].index].id == id;
+		if (seen)
+			continue;
+
+		float carry = CarryOf(bot, id);
+
+		if (bestId == 0 || carry < bestCarry - kCarryEpsilon)
+		{
+			bestId = id;
+			bestCarry = carry;
+			carryTies = 1;
 			continue;
 		}
 
-		if (usage > bestUsage + kUsageEpsilon)
+		if (carry > bestCarry + kCarryEpsilon)
 			continue;
 
-		++ties;
-		if (RandomUnit(bot.fire) * static_cast<float>(ties) < 1.f)
-			best = i;
+		++carryTies;
+		if (RandomUnit(bot.fire) * static_cast<float>(carryTies) < 1.f)
+			bestId = id;
 	}
 
-	return best;
+	if (bestId == 0)
+		return -1;
+
+	int pick = -1;
+	int modeTies = 0;
+
+	for (int i = 0; i < count; ++i)
+	{
+		if (!ChoiceEligible(bot, choices[i], skipMelee))
+			continue;
+		if (inv.weapons[choices[i].index].id != bestId)
+			continue;
+
+		++modeTies;
+		if (RandomUnit(bot.fire) * static_cast<float>(modeTies) < 1.f)
+			pick = i;
+	}
+
+	return pick;
 }
 
 static int PickChoice(CBot &bot, const Choice *choices, int count)
@@ -1148,9 +1198,9 @@ static int PickChoice(CBot &bot, const Choice *choices, int count)
 	if (count <= 0)
 		return -1;
 
-	int pick = PickLeastUsed(bot, choices, count, true);
+	int pick = PickBest(bot, choices, count, true);
 	if (pick < 0)
-		pick = PickLeastUsed(bot, choices, count, false);
+		pick = PickBest(bot, choices, count, false);
 
 	return pick;
 }
@@ -1343,7 +1393,7 @@ static void IdleSelect(CBot &bot)
 		if (reloadPick >= 0 && deficit < bestDeficit)
 			continue;
 		if (reloadPick >= 0 && deficit == bestDeficit &&
-			WeaponUsage(bot, w.id) >= WeaponUsage(bot, inv.weapons[reloadPick].id))
+			CarryOf(bot, w.id) >= CarryOf(bot, inv.weapons[reloadPick].id))
 			continue;
 
 		reloadPick = i;
@@ -1375,28 +1425,30 @@ static void IdleSelect(CBot &bot)
 	Choice choices[kMaxChoices];
 	int count = BuildChoices(bot, true, false, 0.f, 0.f, 0, choices, kMaxChoices);
 
-	int pick = PickLeastUsed(bot, choices, count, true);
+	int pick = PickBest(bot, choices, count, true);
 	if (pick < 0)
 		return;
 
-	float bestUsage = UsageOf(bot, inv.weapons[choices[pick].index].id, choices[pick].mode);
+	int wantId = inv.weapons[choices[pick].index].id;
 
 	if (active && active->id != g_pGameProfile->MeleeWeapon())
 	{
-		float heldUsage = -1.f;
+		bool heldViable = false;
 
-		for (int i = 0; i < count; ++i)
+		for (int i = 0; i < count && !heldViable; ++i)
+			heldViable = inv.weapons[choices[i].index].id == active->id;
+
+		if (heldViable)
 		{
-			if (inv.weapons[choices[i].index].id != active->id)
-				continue;
+			float heldScore = WeaponScore(active->id);
+			float wantScore = WeaponScore(wantId);
 
-			float usage = UsageOf(bot, active->id, choices[i].mode);
-			if (heldUsage < 0.f || usage < heldUsage)
-				heldUsage = usage;
+			if (wantScore < heldScore)
+				return;
+			if (wantScore == heldScore &&
+				CarryOf(bot, wantId) >= CarryOf(bot, active->id) - kCarryEpsilon)
+				return;
 		}
-
-		if (heldUsage >= 0.f && heldUsage <= bestUsage + kUsageEpsilon)
-			return;
 	}
 
 	if (SelectWeapon(bot, choices[pick], "idle-switch"))
@@ -1662,9 +1714,6 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	bool onTarget = fire.aimValid &&
 		(IsArc(*m) ? ArcOnTarget(bot, angles, *m, eye) : RayOnTarget(bot, angles, *m, eye));
-
-	if (onTarget)
-		AccrueUsage(bot, fire.mode);
 
 	if (charge)
 	{

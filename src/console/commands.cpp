@@ -213,9 +213,9 @@ namespace
 		BotManager::PrintFireStatus();
 	}
 
-	void Cmd_CrossBotWeaponUsage()
+	void Cmd_CrossBotWeaponCarry()
 	{
-		BotManager::PrintWeaponUsage();
+		BotManager::PrintWeaponCarry();
 	}
 
 	void Cmd_CrossBotFirePin()
@@ -725,7 +725,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_combat_status", Cmd_CrossBotCombatStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
-	ADD_SERVER_COMMAND("crossbot_weapon_usage", Cmd_CrossBotWeaponUsage);
+	ADD_SERVER_COMMAND("crossbot_weapon_carry", Cmd_CrossBotWeaponCarry);
 }
 
 }

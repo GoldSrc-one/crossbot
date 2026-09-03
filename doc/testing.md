@@ -237,15 +237,48 @@ Four failure signatures, each pointing at one mechanism:
 - **`could not get on the tram`, tram parked** — the board point is unreachable, or the hop is not
   clearing the deck lip. Check the board-point dump for a stand z far from the deck z.
 - **`could not get past func_tracktrain`** — a board point is inside the parked tram's footprint. The
-  probe offsets must start beyond the tram's half-width, not at the deck centre.
-- **`missed the tram` after a long `due in`** — the arc projection picked the wrong branch where the
-  loop's two tunnels run parallel. The proximity trigger is the backstop; if this is frequent, that
-  is what has regressed. A miss after a *sub-second* `due in` is not that bug and not fixable from
-  here: the jump itself takes about `kTrainHopLead`, so a bot that arrives with the tram already on
-  top of it watches it go past. It costs a `kFunFailCooldown`, and the next lap is somebody else's.
+  probe offsets must clear the tram's half-width *plus the bot's hull*, not the deck centre.
+- **The board list loses the areas nearest the parked tram, and nobody ever starts it.** The tram
+  becomes completely inert with no failure logged anywhere, because with no board point at arc 0 no
+  bot can reach it and the catch path needs somebody to have started it first. Both known causes are
+  in `BuildBoardPoints`: the ground probe starting above the area point and hitting the tunnel
+  ceiling (`fStartSolid`), or `point.z` being moved to the traced floor, which drops the air-route
+  trace to deck level where the trench lip blocks it. Diff the board-area list against the 19 in the
+  table above before looking anywhere else.
+- **`hops for the tram` never appears while `due in` does** — the bot reaches the track, waits, and
+  never commits. The jump window is `[clearFrom, clearTo]` against `eta`; if `eta` has anything
+  subtracted from it (a deck-lead term, say) it sits permanently below the window.
+
+**Death accounting.** With `-FunDebug`, every bot death logs `died at (x,y,z), D from the tram doing
+S, onground N, tram phase P`. That is the only way to tell the three populations apart, and they need
+different fixes:
+
+```bash
+grep -aoE '[0-9]+ from the tram' nav_debug/logs/subtransit_fun.log | awk '$1<=20' | wc -l
+```
+
+Deaths at `D <= 20` are the tram; everything further out is ordinary combat and moves a lot run to
+run, so total death count is a useless metric here. Of the tram deaths, `tram phase wait` means the
+bot died attempting a catch — that is the hop's fault and should be zero. `tram phase not engaged`
+means a bot was run over while walking, which the hop logic cannot help: once started the tram
+circles forever and the mesh knows nothing about it. On a 300 s four-bot run expect roughly 7 of the
+latter and none of the former.
 
 A bot occasionally dying under the tram is expected, not a bug: once started it circles forever and
 the trench is lethal on a ~25 s cycle, and nothing in the nav mesh knows that.
+
+### The switch-priority rule cannot be tested on a stock map
+
+`BotFun::Prioritize` drops tank and tram candidates whenever a switch is available, but **no stock map
+can exercise it**. crossfire and doublecross are the only ones carrying a switch alongside tanks, and
+on both the switch prices as unreachable and never survives `PruneUnreachable` — so the fun tier only
+ever holds one kind, and the filter is a no-op everywhere.
+
+What can be checked is that each kind still selects on its own: undertow must log `wants fun
+func_button` and then `pressed func_button ... leaving it for 142s`; stalkyard must still mount tanks;
+subtransit must still board the tram. If the filter ever does bite, `crossbot_fun_debug` prints
+`fun priority kept N switch candidates, dropped M others` — the absence of that line on stock maps is
+expected and is not evidence of a bug.
 
 `undertow` is the map for the long-`wait` switch: the bot presses once, logs `leaving it for 142s`,
 and the tier must then stay empty for the rest of the run. `datacore` is the negative control — the
@@ -384,17 +417,34 @@ suspicion sources.
 
 **The select phase runs first, with one bot and nothing to shoot at.** It is the only arrangement in
 the suite where the out-of-combat weapon decision runs unopposed — once four bots roam `crossfire`, a
-three-second gap without a sighting is the exception. What it measures is the *tie* rule rather than
-rotation: with no combat anywhere, every weapon+mode pair sits at zero seconds, the held weapon wins
-every tie, and the bot must stay put. A rotation that ignored ties would show up as one switch per 3 s
-tick, so the phase allows a small budget (a weapon picked up with an empty clip — the RPG always has
-one — is a legitimate idle switch to go and load it) and fails on churn above it. It also asserts zero
-shots, since a bot with no target that fires anything has a trigger running off the target path.
+three-second gap without a sighting is the exception — and the only one where the two stages of
+selection can be taken apart, because nothing gates the candidate list before ranking sees it.
 
-Rotation itself cannot be proved there: ranking needs seconds on the clock, and seconds only accrue in
-a fight. Its witness is the duel, under `-Full`, alongside the two other paths that need real combat
-to appear — `idlereload` (a magazine topped up between fights) and a usage table with more than one
-pair on it. `crossbot_weapon_usage` is what the last of those reads.
+It runs them in order, and each assertion is on **where the bot ends up**, not on how it got there.
+Part A hands over four weapons spanning three score bands (crossbow 0.5, 9mmAR 0.3, shotgun and
+hornetgun 0.2) and requires the held weapon to be at the top score present. Part B then hands over a
+gauss, which ties the crossbow at 0.5 and so cannot be separated by score — but its carry clock starts
+at zero, so rarity must move the bot onto the least-carried weapon of that score. Part B is the one
+assertion in the suite that fails outright if carry time is not being accrued.
+
+**Neither part may name the weapon it expects**, and the first version that did was wrong within two
+runs: the bot roams while the phase runs, and an egon picked up off the floor ties the crossbow at 0.5
+and legitimately beats it on carry. The assertions read `crossbot_weapon_carry` and check the *rule*
+against whatever the bot is actually holding — top score present, then least carried among that score.
+They also retry for a few seconds before failing, because the idle reload pass outranks the score
+filter by design and parks the bot on a part-empty gun for a second or two.
+
+Churn is still budgeted rather than forbidden: two settles are expected, and a weapon picked up with an
+empty clip (the RPG always has one) makes going to load it a legitimate third. The phase also asserts
+zero shots, since a bot with no target that fires anything has a trigger running off the target path.
+
+Under the old least-used rule this phase could only assert a negative — that a bot with everything tied
+at zero did not churn — because ranking needed combat seconds it had no way to accrue. Score and carry
+are both available with nobody else on the map, which is what turned it into a positive test.
+
+What still needs the duel and `-Full` is `idlereload` (a magazine topped up between fights) and the
+carry *spread*: at least two weapons whose carry times differ, which is what shows the tally tracks
+acquisition rather than running as one uniform clock. `crossbot_weapon_carry` is what that reads.
 
 **The control phase is the load-bearing half.** With `crossbot_fire 0` nothing may fire, and it is
 checked two independent ways: the plugin's own shot counter, and ammo the bots actually spent, read
@@ -435,16 +485,19 @@ attack timer moving.
 **The weapon phases need `crossbot_fire_pin`, and equipping instead does not work.** In a fight a bot
 re-selects only when the weapon in its hands stops working, so handing a roaming bot a crossbow puts it
 in the inventory and nothing else happens while a target is up — a first attempt gave 288 crossbows and
-hornetguns away across two minutes and recorded zero projectiles fired. Least-used rotation loosened
-this but did not remove it: rotation runs out of combat, on a 3 s tick, and picks the pair with the
-fewest seconds on it, which is a fair coin among everything the bot is carrying rather than the weapon
-a phase wants. The pin makes every other weapon unusable, which is still the only lever that names one.
+hornetguns away across two minutes and recorded zero projectiles fired. Out-of-combat rotation loosened
+this and score-then-rarity has tightened it again. Least-used rotation at least moved the held weapon
+around on its 3 s tick, a fair coin among everything carried; score does not drift, so a bot that has
+found a 0.5 weapon settles on it and holds it for the rest of the phase. Handing a bot the weapon a
+phase wants is now actively counter-productive unless that weapon happens to be its best-scoring one.
+The pin makes every other weapon unusable, which is still the only lever that names one.
 
-**The gauss needs the mode argument as well, for the same reason one level down.** Selection now
-carries `pendingMode` through the switch, so a secondary *can* be chosen on merit — but only once the
-primary has accumulated more seconds than it, which inside a two-minute pinned phase it may never do.
-Gauss primary is a hitscan that works at any range, so `FIRE_CHARGE` stays effectively unreachable
-without `crossbot_fire_pin weapon_gauss secondary`. The hornetgun reaches its secondary without help,
+**The gauss needs the mode argument as well, for the same reason one level down.** Selection carries
+`pendingMode` through the switch, so a secondary *can* be chosen — but the mode is now drawn at random
+once the weapon has won, and the draw is not repeated while the keep-loop is happy with what it has.
+A pinned gauss whose primary works therefore has a coin-flip chance of reaching `FIRE_CHARGE` at the
+one select that opens the phase, and no further chances after it. `crossbot_fire_pin weapon_gauss
+secondary` remains the only way to make the phase deterministic. The hornetgun reaches its secondary without help,
 by range rather than by tally: its primary's flight-time ceiling rejects targets past 900 units.
 
 Each weapon runs its own pass so the aim kinds are attributable to the weapon that produced them, and

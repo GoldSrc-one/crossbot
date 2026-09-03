@@ -18,13 +18,16 @@
     Encounters are stochastic, so the duel phase is generous with time and the
     pass condition is "shots were fired at real targets", not a fixed count.
 
-    SELECT: one bot, alone on the map, handed four weapons. With no target the
-    only weapon decision left is the out-of-combat one, and with no combat
-    anywhere every weapon+mode pair is tied at zero seconds -- so the bot must
-    hold onto what it has instead of rotating on every 3s tick. Rotation needs
-    usage to rank and is therefore the duel's to prove. It runs before the other
-    bots join because once four of them roam crossfire, a three-second gap
-    without a sighting is the exception rather than the rule.
+    SELECT: one bot, alone on the map, and the only phase that can take the two
+    stages of selection apart. With no target the sole weapon decision left is
+    the out-of-combat one, and nothing gates the candidate list, so the ranking
+    is visible on its own. Four weapons spanning three score bands must leave
+    the bot on a top-scoring one; a fifth that ties that score but arrives with
+    a cold carry clock must then win on rarity. Both checks are against the live
+    carry table rather than a named weapon, because the bot keeps picking things
+    up off the floor and a found egon ties the crossbow fairly. It runs before
+    the other bots join because once four of them roam crossfire, a three-second
+    gap without a sighting is the exception rather than the rule.
 
     CONTROL: crossbot_fire 0. Bots roam and must fire nothing at all. This is
     what separates "firing works" from "the shot counter is broken" -- the
@@ -38,9 +41,11 @@
     WEAPON: one pass per weapon that needs its own aim or trigger, each pinned
     with crossbot_fire_pin. Equipping alone is not enough and no amount of
     patience fixes it -- in a fight a bot only re-selects when the weapon in its
-    hands stops working, and out of combat it rotates to whichever pair it has
-    used least, which is not the one a phase wants. The pin makes every other
-    weapon unusable, which is the only lever that names one. Separate passes
+    hands stops working, and out of combat it settles on its best-scoring gun,
+    which is not the one a phase wants and which it then refuses to leave. The
+    pin makes every other weapon unusable, which is the only lever that names
+    one, and it is now needed harder than before: score is stable where usage
+    drifted, so a bot that finds a crossbow will hold it all phase. Separate passes
     are what make aim=lead,
     aim=homing, the zoom decision and the charge each attributable to the
     weapon that produced them.
@@ -312,21 +317,101 @@ function Get-TotalIdleReload {
     return $sum
 }
 
-# The usage table is the one thing the plugin reports that does not reset on
-# respawn, so it needs no banking -- the largest pair count any bot reaches is
-# the whole measurement.
-function Get-UsagePairs {
+# The carry table is the one thing the plugin reports that does not reset on
+# respawn, so it needs no banking -- the widest spread any bot reaches is the
+# whole measurement. Every carried weapon has a non-zero carry time by
+# construction, so the count of carried weapons proves nothing; what proves the
+# tally tracks acquisition rather than running as one uniform clock is that the
+# times differ from each other. Carry is printed at one decimal, so distinctness
+# is counted on that same resolution.
+function Get-CarrySpread {
     $best = 0
     $detail = @()
-    foreach ($line in ((Invoke-Rcon "crossbot_weapon_usage") -split "`r?`n")) {
+    foreach ($line in ((Invoke-Rcon "crossbot_weapon_carry") -split "`r?`n")) {
         if ($line -notmatch '^CrossBot: (\S+) held=(\S+)') { continue }
         $name = $Matches[1]
-        $pairs = 0
-        if ($line -match 'pairs=(\d+)') { $pairs = [int]$Matches[1] }
-        if ($pairs -gt $best) { $best = $pairs }
-        if ($pairs -gt 0) { $detail += "${name}:$pairs" }
+        $seen = @{}
+        foreach ($m in ([regex]'weapon_\S+?=([\d.]+)/[\d.]+').Matches($line)) {
+            $seen[$m.Groups[1].Value] = $true
+        }
+        $distinct = $seen.Count
+        if ($distinct -gt $best) { $best = $distinct }
+        if ($distinct -gt 0) { $detail += "${name}:$distinct" }
     }
-    return @{ Pairs = $best; Detail = ($detail -join ' ') }
+    return @{ Distinct = $best; Detail = ($detail -join ' ') }
+}
+
+# SELECT reads the settled weapon straight off the status line rather than the
+# HeldSeen set, because what it asserts is where the bot ended up, not every
+# weapon it passed through on the way.
+# The bot roams and picks weapons up while the phase runs, so naming the weapon
+# it ought to hold is wrong -- an egon found on the floor ties the crossbow at
+# 0.5 and legitimately beats it on carry. What is stable is the *rule*, so these
+# read the live table and check the held weapon against it: top score present,
+# and least carried among the weapons sharing that score.
+function Get-CarryTable {
+    $table = @{}
+    foreach ($line in ((Invoke-Rcon "crossbot_weapon_carry") -split "`r?`n")) {
+        if ($line -notmatch '^CrossBot: (\S+) held=(\S+)') { continue }
+        foreach ($m in ([regex]'(weapon_\S+?)=([\d.]+)/([\d.]+)').Matches($line)) {
+            $table[$m.Groups[1].Value] = @{
+                Carry = [double]$m.Groups[2].Value
+                Score = [double]$m.Groups[3].Value
+            }
+        }
+        return $table
+    }
+    return $table
+}
+
+function Test-SelectionRule {
+    param([switch]$RequireRarest)
+
+    $held = @(Get-HeldWeapons)[0]
+    $table = Get-CarryTable
+
+    if (-not $held -or $held -eq '-') { return "nothing held" }
+    if ($table.Count -eq 0) { return "the carry table is empty" }
+    if (-not $table.ContainsKey($held)) { return "held $held is absent from the carry table" }
+
+    $max = ($table.Values | ForEach-Object { $_.Score } | Measure-Object -Maximum).Maximum
+    if ($table[$held].Score -lt $max - 0.001) {
+        return "held $held scores $($table[$held].Score) while the bag holds a $max"
+    }
+
+    if ($RequireRarest) {
+        $rarest = ($table.Values | Where-Object { $_.Score -ge $max - 0.001 } |
+            ForEach-Object { $_.Carry } | Measure-Object -Minimum).Minimum
+        if ($table[$held].Carry -gt $rarest + 0.15) {
+            return "held $held has been carried $($table[$held].Carry)s while a weapon of the same score has only $rarest s"
+        }
+    }
+
+    return $null
+}
+
+# Sampled rather than settled: a weapon picked up with a partial clip sends the
+# bot off to reload it, which outranks the score filter by design and parks it on
+# the wrong gun for a second or two. Retrying past that is cheaper than trying to
+# exclude it.
+function Wait-SelectionRule {
+    param([switch]$RequireRarest, [int]$Tries = 5)
+
+    $why = $null
+    for ($i = 0; $i -lt $Tries; $i++) {
+        $why = Test-SelectionRule -RequireRarest:$RequireRarest
+        if (-not $why) { return $null }
+        Start-Sleep -Seconds 3
+    }
+    return $why
+}
+
+function Get-HeldWeapons {
+    $held = @()
+    foreach ($line in ((Invoke-Rcon "crossbot_fire_status") -split "`r?`n")) {
+        if ($line -match '^CrossBot: (\S+) held=(\S+)') { $held += $Matches[2] }
+    }
+    return $held
 }
 
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
@@ -371,13 +456,23 @@ try {
     # once four bots are roaming crossfire, three-second gaps in sight are the
     # exception rather than the rule.
     #
-    # This measures the tie rule rather than rotation. With no combat anywhere,
-    # every weapon+mode pair sits at zero seconds, the held weapon wins every
-    # tie and the bot must therefore stay put -- a rotation that ignored ties
-    # would switch on every 3s tick and show up here as six or seven. Rotation
-    # itself needs usage to rank, so its witness is the duel.
+    # Selection is a two-stage filter and this phase takes the stages one at a
+    # time, which is the only place either can be seen in isolation -- in a duel
+    # the candidate list is churned by ammo and geometry long before ranking
+    # sees it.
+    #
+    # Part A is stage 1. The four weapons handed over span three score bands
+    # (crossbow 0.5, 9mmAR 0.3, shotgun and hornetgun 0.2), so the score filter
+    # has exactly one survivor and the answer is not a matter of chance: the bot
+    # must settle on the crossbow and stay there.
+    #
+    # Part B is stage 2. The gauss also scores 0.5, so it ties the crossbow on
+    # score and the filter cannot separate them -- but it arrives with its carry
+    # clock at zero while the crossbow has been in the bag for the whole of part
+    # A, so rarity must break the tie towards the gauss. This is the one
+    # assertion in the suite that fails if carry time is not being accrued.
     Write-Host "`n===== SELECT: one bot, no targets, ${SelectSeconds}s ====="
-    Write-Host "Idle ticks must not churn the weapon when nothing has been used."
+    Write-Host "Score picks the band; carry breaks the tie inside it."
 
     Invoke-Rcon "crossbot_fire 1" | Out-Null
     foreach ($give in @('weapon_shotgun', 'weapon_crossbow', 'weapon_9mmAR', 'weapon_hornetgun')) {
@@ -392,6 +487,20 @@ try {
         Update-FireState $select
     }
 
+    $scoreHeld = @(Get-HeldWeapons)[0]
+    $scoreWhy = Wait-SelectionRule
+
+    Invoke-Rcon "crossbot_equip weapon_gauss Fire1" | Out-Null
+
+    $deadline = (Get-Date).AddSeconds($SelectSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds $PollSeconds
+        Update-FireState $select
+    }
+
+    $carryHeld = @(Get-HeldWeapons)[0]
+    $carryWhy = Wait-SelectionRule -RequireRarest
+
     $selectHeld = @{}
     foreach ($bot in $select.Bots.Values) {
         foreach ($k in $bot.HeldSeen.Keys) { $selectHeld[$k] = $true }
@@ -399,18 +508,23 @@ try {
     $selectIdleSw = Get-TotalIdleSwitch $select
     $selectIdleRel = Get-TotalIdleReload $select
     $selectShots = Get-TotalShots $select
+    $selectCarry = Get-CarrySpread
 
-    # A weapon picked up off the map can arrive with an empty clip -- the RPG
-    # always does -- and loading it is a legitimate idle switch, so the budget is
-    # a handful rather than zero. A tie rule that failed would produce one every
-    # 3s tick for the whole phase.
-    $churnBudget = [int]($SelectSeconds / 6)
+    # Two settles are expected, plus one per top-scoring weapon the bot finds on
+    # the floor, plus one per weapon that arrives with a partial clip and has to
+    # be carried while it reloads. A score filter that was not applied would
+    # instead churn on every 3s tick and show up here as a dozen.
+    $churnBudget = 4 + [int]($SelectSeconds / 5)
 
-    Write-Host ("  idleswitch={0} idlereload={1} shots={2} held: {3}" -f $selectIdleSw, $selectIdleRel,
-        $selectShots, (($selectHeld.Keys | Sort-Object) -join ','))
+    Write-Host ("  idleswitch={0} idlereload={1} shots={2} scoreheld={3} carryheld={4}" -f `
+        $selectIdleSw, $selectIdleRel, $selectShots, $scoreHeld, $carryHeld)
+    Write-Host ("  held seen: {0}" -f (($selectHeld.Keys | Sort-Object) -join ','))
+    Write-Host ("  carry spread: {0}" -f $selectCarry.Detail)
 
+    if ($scoreWhy) { $failures += "SELECT: the score filter is not deciding -- $scoreWhy" }
+    if ($carryWhy) { $failures += "SELECT: rarity is not breaking score ties -- $carryWhy" }
     if ($selectIdleSw -gt $churnBudget) {
-        $failures += "SELECT: $selectIdleSw out-of-combat switch(es) with nothing used yet, so the held weapon is losing ties"
+        $failures += "SELECT: $selectIdleSw out-of-combat switch(es), so the bot is churning instead of settling on its best weapon"
     }
     if ($selectShots -ne 0) { $failures += "SELECT: $selectShots shot(s) fired with no target on the map" }
 
@@ -478,12 +592,12 @@ try {
     $duelEmptySw = Get-TotalEmptySwitch $duel
     $duelIdleSw = Get-TotalIdleSwitch $duel
     $duelIdleRel = Get-TotalIdleReload $duel
-    $usage = Get-UsagePairs
+    $duelCarry = Get-CarrySpread
 
     Write-Host ("  shots={0} burned={1} firing={2} targets={3} deaths={4} switches={5} reloads={6}" -f `
         $duelShots, $duelBurned, $duel.Firing, $duel.Targets, $deaths, $switches, $reloads)
-    Write-Host ("  emptyswitch={0} idleswitch={1} idlereload={2} usage pairs: {3}" -f `
-        $duelEmptySw, $duelIdleSw, $duelIdleRel, $usage.Detail)
+    Write-Host ("  emptyswitch={0} idleswitch={1} idlereload={2} carry spread: {3}" -f `
+        $duelEmptySw, $duelIdleSw, $duelIdleRel, $duelCarry.Detail)
     Write-Host ("  weapons held: {0}" -f (($duel.Weapons.Keys | Sort-Object) -join ','))
     Write-Host ("  reasons: {0}" -f (($duel.Reasons.Keys | Sort-Object | ForEach-Object { "$_=$($duel.Reasons[$_])" }) -join ' '))
     Write-Host ("  suspicion sources seen: {0}" -f (($senseSeen.Keys | Sort-Object) -join ','))
@@ -501,8 +615,8 @@ try {
     # magazine, and which guns spawn near which bot decides whether that happens
     # at all inside the short window.
     if ($Full) {
-        if ($usage.Pairs -lt 2) {
-            $failures += "DUEL: no bot accumulated time on more than one weapon+mode pair"
+        if ($duelCarry.Distinct -lt 2) {
+            $failures += "DUEL: no bot reported two carry times that differ, so the tally is running as one uniform clock rather than tracking pickups"
         }
         if ($duelIdleRel -eq 0) { $failures += "DUEL: no bot ever reloaded out of combat" }
         if ($duelIdleSw -eq 0) { $failures += "DUEL: no bot ever rotated weapons between fights" }
@@ -510,12 +624,12 @@ try {
 
     $projFailures = @()
 
-    # The pin is per weapon and, for the gauss, per mode. Weapon stickiness has
-    # a second storey: the random pick names a weapon+mode pair but only the
-    # weapon id survives the switch, so the frame after a select the mode order
-    # starts at primary again. A gauss whose primary is usable therefore never
-    # reaches FIRE_CHARGE on its own, exactly as a bot holding a glock never
-    # reaches a crossbow.
+    # The pin is per weapon and, for the gauss, per mode. Ranking names a weapon
+    # and then draws one of its usable modes at random, and pendingMode carries
+    # that draw through the switch -- but the draw is not repeated while the
+    # keep-loop is happy with what it already has. So a pinned gauss gets one
+    # coin flip at FIRE_CHARGE, at the select that opens the phase, and none
+    # after it. The mode argument is what makes the phase deterministic.
     $pins = @(
         @{ Weapon = 'weapon_crossbow';  Mode = '' }
         @{ Weapon = 'weapon_hornetgun'; Mode = '' }

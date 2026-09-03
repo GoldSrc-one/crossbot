@@ -38,7 +38,7 @@ namespace BotManager
 
 	void PrintDeployStatus();
 
-	void PrintWeaponUsage();
+	void PrintWeaponCarry();
 
 	void OnSound(edict_t *src, int channel, const char *sample, float volume, float attenuation);
 

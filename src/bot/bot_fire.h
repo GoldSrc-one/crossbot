@@ -20,9 +20,9 @@ enum Mode
 
 constexpr int kMaxWeaponIds = 32;
 
-struct Usage
+struct Carry
 {
-	float seconds[kMaxWeaponIds][2] = {};
+	float seconds[kMaxWeaponIds] = {};
 };
 
 enum Commit
@@ -63,7 +63,6 @@ struct State
 	float nextSelectTime = 0.f;
 	float nextIdleTime = 0.f;
 	float nextEquipTime = 0.f;
-	float usageStamp = -1.f;
 
 	unsigned int rngState = 0;
 	bool rngSeeded = false;
@@ -125,7 +124,9 @@ bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict)
 bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, float rise,
 	bool strict);
 
-float UsageOf(const CBot &bot, int weaponId, Mode mode);
+float CarryOf(const CBot &bot, int weaponId);
+
+void AccrueCarry(CBot &bot);
 
 void Reset(CBot &bot);
 

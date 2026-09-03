@@ -19,7 +19,9 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   `ready`. Ends with a count. A `tram` row also prints the tram's current `speed` and its computed
   `deck` point, and with `crossbot_fun_debug 1` follows it with one `tram board area` line per board
   point giving the stand position, the deck position as the tram passes that node, and its arc length
-  along the track; see `doc/bot.md`, `bot_fun.cpp`
+  along the track; see `doc/bot.md`, `bot_fun.cpp`. `crossbot_fun_debug 1` also logs every bot death
+  with its distance to the tram and its tram phase, which is the only way to separate bots crushed
+  attempting a catch from bots run over while walking
 - `crossbot_list_gates` — every walk gate that could hold a mine: the mesh width, the *measured*
   opening, the chosen surface, the mount point and the rejection reason. A gate that failed only at
   the surface or coverage stage is printed too, so the near misses are visible; ones filtered earlier
@@ -79,8 +81,8 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 
   `shots`, `leadshots`, `chargeshots`, `arcshots`, `throwshots`, `guides`, `uphill`, `selfveto`,
   `switches`, `reloads`, `emptyswitch`, `idleswitch` and `idlereload` are **per life**: respawn zeroes
-  them, so a drop is a death. The usage table that drives selection is the one thing that does *not*
-  reset — read it with `crossbot_weapon_usage`. `emptyswitch` counts fights the bot left a dry clip in
+  them, so a drop is a death. The carry table that drives selection is the one thing that does *not*
+  reset — read it with `crossbot_weapon_carry`. `emptyswitch` counts fights the bot left a dry clip in
   rather than reloading it, `idleswitch` counts out-of-combat rotations, and `idlereload` counts
   `IN_RELOAD` presses issued with no target — several per shotgun refill, one per magazine elsewhere.
   `throwshots` and `chargeshots` are counted from the game DLL's own state rather than from an attack timer,
@@ -89,12 +91,15 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   non-zero is a fault, with the same standing `charge-timeout` has on the gauss. `uphill` and `selfveto` count rejections rather than
   situations — both predicates run per weapon per mode per frame — so read them as a yes/no; see
   `doc/bot.md`, `bot_fire.cpp`
-- `crossbot_weapon_usage [name]` — per bot: the weapon held, then `classname=primary/secondary` seconds
-  for every weapon+mode pair with time on it, and `pairs` — how many are non-zero. This is the table
-  selection ranks, so `pairs=1` after a long run means the bot has been camping one weapon and the
-  ranking is not reaching the rest. Seconds are time spent on target with the trigger available, not
-  shots, and zoomed variants fold into primary. Unlike the other counters it survives respawn, and
-  unlike `crossbot_weapons` it can only report bots; see `doc/bot.md`, `bot_fire.cpp`
+- `crossbot_weapon_carry [name]` — per bot: the weapon held, then `classname=carry/score` for every
+  weapon the bot has ever held, and `carried` — how many that is. Carry is seconds the weapon has spent
+  in the inventory while the bot was alive; score is the weapon's `WeaponSpec::value`. Together they
+  are the whole of selection: highest score wins, lowest carry breaks the tie. Every weapon listed has
+  a non-zero carry by construction, so the count proves nothing — what is worth reading is the
+  *spread*. All-equal times mean the walk is charging every slot rather than the carried ones, and a
+  bot whose held weapon is neither the top score nor the least carried of that score means the ranking
+  is not being applied. Unlike the other counters it survives respawn, and unlike `crossbot_weapons`
+  it can only report bots; see `doc/bot.md`, `bot_fire.cpp`
 - `crossbot_fire_pin <classname|off> [primary|secondary] [zoom|nozoom]` — restrict weapon selection to
   one classname, and optionally one mode, making everything else unusable. Only useful for testing, and
   necessary there because in a fight a bot only re-selects when the weapon it holds stops working — it
@@ -130,6 +135,11 @@ entity absent from the list was never detected (its chain does not reach an inte
 it dangles), while one that is listed but reads `no nav area` was detected and is unreachable. It is
 also the negative control — on `datacore` it must print `0 fun entities`, and on `crossfire` the nuke
 trigger must read `no nav area` until `strike_ready_door` opens at t=180.
+
+Note `ready` on this dump means "detected, chain is interesting, and it resolved to a nav area". It
+does **not** mean the bots can route to it: reachability is priced per bot in `BotGoal::Select`, and
+crossfire's nuke reads `ready` after t=180 while still pricing as unreachable. An entity that is
+listed `ready` and never appears in a `wants fun` line is a routing gap, not a detection gap.
 
 For the subtransit tram the useful reading is the `deck` point against the board-point dump. Board
 points are derived from the track, not from where the tram happens to be, so the list is identical

@@ -205,6 +205,8 @@ void StartFrame()
 		if (dead)
 		{
 			BOTPERF_SCOPE(ZONE_RESPAWN);
+			if (!bot.wasDead)
+				BotFun::NoteDeath(bot);
 			g_pGameProfile->Respawn(bot.pEdict);
 			bot.wasDead = true;
 			BotTiming::EndBot(bot);
@@ -227,6 +229,7 @@ void StartFrame()
 		{
 			BOTPERF_SCOPE(ZONE_WEAPONS);
 			BotWeapons::Refresh(bot);
+			BotFire::AccrueCarry(bot);
 		}
 
 		{
@@ -749,7 +752,7 @@ void PrintDeployStatus()
 	SERVER_PRINT(summary);
 }
 
-void PrintWeaponUsage()
+void PrintWeaponCarry()
 {
 	int shown = 0;
 	for (auto &bot : g_bots)
@@ -770,31 +773,34 @@ void PrintWeaponUsage()
 		}
 
 		char line[1024];
+		const int cap = static_cast<int>(sizeof(line)) - 1;
 		int used = snprintf(line, sizeof(line), "CrossBot: %s held=%s", bot.name, heldBuf);
-		int pairs = 0;
+		if (used > cap)
+			used = cap;
+		int carried = 0;
 
 		for (int id = 1; id < BotFire::kMaxWeaponIds; ++id)
 		{
-			float primary = BotFire::UsageOf(bot, id, BotFire::MODE_PRIMARY);
-			float secondary = BotFire::UsageOf(bot, id, BotFire::MODE_SECONDARY);
-			if (primary <= 0.f && secondary <= 0.f)
+			float carry = BotFire::CarryOf(bot, id);
+			if (carry <= 0.f)
 				continue;
 
 			const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(id) : nullptr;
 			const char *name = (spec && spec->classname) ? spec->classname : "?";
 
-			if (primary > 0.f)
-				++pairs;
-			if (secondary > 0.f)
-				++pairs;
+			++carried;
 
-			if (used < static_cast<int>(sizeof(line)) - 1)
-				used += snprintf(line + used, sizeof(line) - used, " %s=%.1f/%.1f", name,
-					primary, secondary);
+			if (used < cap)
+			{
+				used += snprintf(line + used, sizeof(line) - used, " %s=%.1f/%.1f", name, carry,
+					spec ? spec->value : 0.f);
+				if (used > cap)
+					used = cap;
+			}
 		}
 
-		if (used < static_cast<int>(sizeof(line)) - 1)
-			snprintf(line + used, sizeof(line) - used, " pairs=%d\n", pairs);
+		if (used < cap)
+			snprintf(line + used, sizeof(line) - used, " carried=%d\n", carried);
 
 		SERVER_PRINT(line);
 	}

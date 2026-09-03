@@ -74,7 +74,11 @@ namespace
 	constexpr float kTrainCentreRadius = 24.f;
 	constexpr float kTrainBoardArcSlack = 192.f;
 	constexpr float kTrainCatchWindow = 3.f;
-	constexpr float kTrainHopLead = 0.3f;
+	constexpr float kTrainSideClear = 40.f;
+	constexpr float kTrainBrink = 24.f;
+	constexpr float kStandHalfHeight = 36.f;
+	constexpr float kTrainGroundProbe = 96.f;
+	constexpr float kDuckHalfHeight = 18.f;
 	constexpr float kTrainHopRange = 112.f;
 	constexpr float kTrainSafeDrop = 96.f;
 	constexpr float kTrainRideMax = 60.f;
@@ -103,6 +107,7 @@ namespace
 		Vector point;
 		Vector deck;
 		float arc = 0.f;
+		float standZ = 0.f;
 	};
 
 	struct Entry
@@ -707,6 +712,20 @@ namespace
 		return tr.fStartSolid == 0 && tr.fAllSolid == 0 && tr.flFraction >= 0.99f;
 	}
 
+	bool GroundBelow(edict_t *ent, const Vector &at, float &floorZ)
+	{
+		Vector to(at.x, at.y, at.z - kTrainGroundProbe);
+
+		TraceResult tr;
+		g_engfuncs.pfnTraceHull(at, to, ignore_monsters, kHullDuck, ent, &tr);
+
+		if (tr.fStartSolid != 0 || tr.fAllSolid != 0 || tr.flFraction >= 1.f)
+			return false;
+
+		floorZ = tr.vecEndPos.z - kDuckHalfHeight;
+		return true;
+	}
+
 	void CollectVolume(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
 		std::vector<BotItems::Placement> &out)
 	{
@@ -763,7 +782,8 @@ namespace
 			return;
 
 		float halfWidth = (train->v.maxs.y - train->v.mins.y) * 0.5f;
-		const float offsets[3] = {halfWidth + 16.f, halfWidth + 56.f, halfWidth + 96.f};
+		float clear = halfWidth + kTrainSideClear;
+		const float offsets[3] = {clear, clear + 40.f, clear + 80.f};
 
 		for (size_t i = 0; i < count; ++i)
 		{
@@ -795,17 +815,25 @@ namespace
 					float dy = point.y - deck.y;
 					float reach = sqrtf(dx * dx + dy * dy);
 
-					if (reach > halfWidth + kTrainBoardRange)
+					if (reach > clear + kTrainBoardRange)
 						continue;
-					if (fabsf(dx * right.x + dy * right.y) < halfWidth)
-						continue;
-					if (deck.z - point.z > kTrainStepUp)
-						continue;
-					if (point.z - deck.z > kTrainBoardRise)
+					if (fabsf(dx * right.x + dy * right.y) < clear)
 						continue;
 
-					Vector airFrom(point.x, point.y, std::max(point.z, deck.z) + 1.f);
-					Vector airTo(deck.x, deck.y, deck.z + 1.f);
+					float floorZ = 0.f;
+					if (!GroundBelow(train, point, floorZ))
+						continue;
+
+					if (deck.z - floorZ > kTrainStepUp)
+						continue;
+					if (floorZ - deck.z > kTrainBoardRise)
+						continue;
+
+					float rideZ = deck.z + kStandHalfHeight;
+					float standZ = floorZ + kStandHalfHeight;
+
+					Vector airFrom(point.x, point.y, std::max(standZ, rideZ));
+					Vector airTo(deck.x, deck.y, rideZ);
 					if (!HullClear(train, airFrom, airTo))
 						continue;
 
@@ -836,6 +864,7 @@ namespace
 					entry.board[slot].point = point;
 					entry.board[slot].deck = deck;
 					entry.board[slot].arc = track.arcs[i];
+					entry.board[slot].standZ = standZ;
 				}
 			}
 		}
@@ -889,7 +918,7 @@ namespace
 	}
 
 	void DriveTo(CBot &bot, const Vector &angles, const Vector &to, bool stop,
-		unsigned short extra)
+		unsigned short extra, float speed = 0.f)
 	{
 		edict_t *pEdict = bot.pEdict;
 
@@ -901,7 +930,7 @@ namespace
 		if (!stop && dist > kFunStandRadius)
 		{
 			moveDir = Norm2D(flat);
-			drive = Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
+			drive = speed > 0.f ? speed : Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
 
 			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
 				Bot_DrivePhysics(pEdict));
@@ -1001,6 +1030,20 @@ namespace
 		return (static_cast<int>(pEdict->v.flags) & FL_ONGROUND) != 0;
 	}
 
+	const char *TrainPhaseName(BotFun::TrainPhase phase)
+	{
+		switch (phase)
+		{
+		case BotFun::TRAIN_APPROACH: return "approach";
+		case BotFun::TRAIN_WAIT: return "wait";
+		case BotFun::TRAIN_MOUNT: return "mount";
+		case BotFun::TRAIN_DRIVE: return "drive";
+		case BotFun::TRAIN_RELEASE: return "release";
+		case BotFun::TRAIN_RIDE: return "ride";
+		}
+		return "unknown";
+	}
+
 	bool RunTrainRide(CBot &bot);
 
 	bool RunTrainArrival(CBot &bot, edict_t *train)
@@ -1031,6 +1074,83 @@ namespace
 		bot.fun.aboard = false;
 		bot.fun.dismounting = false;
 		bot.fun.train.Clear();
+	}
+
+	bool TryTrainHop(CBot &bot, edict_t *train, float eta, const Vector &angles)
+	{
+		BotFun::State &st = bot.fun;
+		edict_t *pEdict = bot.pEdict;
+
+		float speed = fabsf(train->v.speed);
+		if (speed < kTrainStopEpsilon)
+			return false;
+
+		float gravity = Bot_Physics(pEdict).gravity;
+		if (gravity <= 0.f)
+			return false;
+
+		float driveSpeed = Bot_MaxSpeed(pEdict);
+		if (driveSpeed <= 0.f)
+			return false;
+
+		float halfWidth = (train->v.maxs.y - train->v.mins.y) * 0.5f;
+
+		float dx = st.boardDeck.x - pEdict->v.origin.x;
+		float dy = st.boardDeck.y - pEdict->v.origin.y;
+		float lateral = sqrtf(dx * dx + dy * dy);
+
+		float rise = (st.boardDeck.z + kStandHalfHeight) - pEdict->v.origin.z;
+		bool needJump = rise > 0.f;
+
+		float clearFrom = 0.f;
+		float clearTo = 0.f;
+
+		if (needJump)
+		{
+			float disc = PmSim::kJumpImpulse * PmSim::kJumpImpulse - 2.f * gravity * rise;
+			if (rise > PmSim::PlainJumpHeight(gravity) || disc < 0.f)
+				return false;
+
+			clearFrom = (PmSim::kJumpImpulse - sqrtf(disc)) / gravity;
+			clearTo = (PmSim::kJumpImpulse + sqrtf(disc)) / gravity;
+		}
+		else
+		{
+			clearTo = sqrtf(2.f * -rise / gravity);
+		}
+
+		float brink = halfWidth + kTrainBrink;
+		bool aloft = eta >= clearFrom && eta <= clearTo;
+
+		if (!Grounded(pEdict))
+		{
+			DriveTo(bot, angles, st.boardDeck, false, 0, driveSpeed);
+			return true;
+		}
+
+		if (lateral > brink)
+		{
+			if (eta > clearTo + (lateral - brink) / driveSpeed)
+				return false;
+
+			DriveTo(bot, angles, st.boardDeck, false, 0, driveSpeed);
+			return true;
+		}
+
+		if (!aloft)
+		{
+			bot.moveForward = 0.f;
+			bot.moveSide = 0.f;
+			Bot_RunPlayerMove(bot, angles, 0.f, 0.f, 0);
+			return true;
+		}
+
+		BOT_VLOG("CrossBot: %s hops for the tram, %s %.0f, aloft %.2f-%.2fs, lateral %.0f, "
+			"deck due in %.2fs\n", bot.name, needJump ? "rise" : "drop", fabsf(rise),
+			clearFrom, clearTo, lateral, eta);
+
+		DriveTo(bot, angles, st.boardDeck, false, needJump ? IN_JUMP : 0, driveSpeed);
+		return true;
 	}
 
 	bool RunTrainBoarding(CBot &bot, edict_t *train, const Entry &entry)
@@ -1091,14 +1211,8 @@ namespace
 		}
 		st.lastEta = eta;
 
-		float lead = fabsf(train->v.speed) * kTrainHopLead + kTrainJumpGap;
-		bool closing = UseBoxDist(train, pEdict->v.origin) <= lead;
-
-		if ((eta <= kTrainHopLead || closing) && Grounded(pEdict))
-		{
-			DriveTo(bot, angles, st.boardDeck, false, IN_JUMP);
+		if (TryTrainHop(bot, train, eta, angles))
 			return true;
-		}
 
 		bot.moveForward = 0.f;
 		bot.moveSide = 0.f;
@@ -1280,16 +1394,12 @@ namespace
 
 			if (gpGlobals->time - st.dismountStart > kTrainRideMax)
 			{
-				BOT_VLOG("CrossBot: %s bailed off the tram after %.0fs with nowhere to land\n",
+				BOT_VLOG("CrossBot: %s gave up dismounting after %.0fs with nowhere to land\n",
 					bot.name, gpGlobals->time - st.dismountStart);
 
 				LeaveTrain(bot);
-
-				bot.moveForward = 0.f;
-				bot.moveSide = 0.f;
-				Bot_RunPlayerMove(bot, angles, 0.f, 0.f, IN_JUMP);
 				BotGoal::Clear(bot);
-				return true;
+				return false;
 			}
 		}
 
@@ -1457,6 +1567,59 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Can
 		cand.payload = PackPayload(FUN_SWITCH, entry.action);
 		out.push_back(cand);
 	}
+}
+
+void NoteDeath(const CBot &bot)
+{
+	if (!DebugEnabled())
+		return;
+
+	edict_t *train = nullptr;
+	for (const Entry &entry : g_table)
+	{
+		if (entry.kind == FUN_TRAIN)
+		{
+			train = EntryEdict(entry);
+			break;
+		}
+	}
+
+	if (!train)
+		return;
+
+	const Vector &at = bot.pEdict->v.origin;
+
+	BOT_VLOG("CrossBot: %s died at (%.0f,%.0f,%.0f), %.0f from the tram doing %.0f, "
+		"onground %d, tram phase %s\n", bot.name, at.x, at.y, at.z,
+		UseBoxDist(train, at), train->v.speed, Grounded(bot.pEdict) ? 1 : 0,
+		bot.fun.aboard ? TrainPhaseName(bot.fun.trainPhase) : "not engaged");
+}
+
+void Prioritize(std::vector<BotGoal::Candidate> &cands)
+{
+	bool hasSwitch = false;
+	for (const BotGoal::Candidate &cand : cands)
+	{
+		if (PayloadKind(cand.payload) == FUN_SWITCH)
+		{
+			hasSwitch = true;
+			break;
+		}
+	}
+
+	if (!hasSwitch)
+		return;
+
+	size_t before = cands.size();
+
+	cands.erase(std::remove_if(cands.begin(), cands.end(),
+		[](const BotGoal::Candidate &cand) {
+			return PayloadKind(cand.payload) != FUN_SWITCH;
+		}), cands.end());
+
+	if (DebugEnabled() && cands.size() != before)
+		BOT_VLOG("CrossBot: fun priority kept %d switch candidates, dropped %d others\n",
+			static_cast<int>(cands.size()), static_cast<int>(before - cands.size()));
 }
 
 void Accept(CBot &bot, const BotGoal::Candidate &cand)
