@@ -673,14 +673,24 @@ Four phases, each on its own server, each asserting something only it can show. 
 | phase | what it proves |
 |---|---|
 | `gates` | `crossbot_list_gates` finds chokepoints on crossfire, boot_camp, stalkyard and test2_doorway, and no accepted gate exceeds the 144-unit opening bound. Needs no bots, and it is the phase that catches a broken gate scan on its own |
-| `tripmine` | placements happen, **both stances appear**, and both maneuvers follow — `avoid jump` and `avoid duck` against `monster_tripmine`. Also that no mine was removed for finding no surface, and that bots still reach goals with beams up |
+| `tripmine` | placements happen, **both stances appear**, beams are crawled under and **never jumped**, no mine was removed for finding no surface, bots still reach goals with beams up, and — the one that matters — **no bot walks into its own beam** (`onbeam 1`) and no mine arms around its placer. Needs `crossbot_deploy_debug 1`, which the phase sets |
 | `standoff` | with the surface pinned to ground on `test2_doorway`, the side search gives up, `EngageStandoff` runs, and the mine is destroyed by gunfire — and the bot never sits `blocked by monster_tripmine` |
 | `satchel` | satchels are thrown and detonated, no detonation is counted twice, and **no detonation fires on a contact under 16 units** |
 
-**The stance assertion is the load-bearing one in the tripmine phase.** A standing placement puts the
-beam 64 above the floor and a ducked one puts it at 30, which land on opposite sides of the duck and
-jump predicates. If only one stance ever appears the roll is dead and half the avoidance code is
-untested while every counter still looks healthy.
+**`contact` is the assertion this phase exists for.** `crossbot_deploy_debug` splits every own-mine
+death by `onbeam`: `1` means the bot walked into its own laser and is a bug, `0` means it was standing
+in the blast when something else tripped the mine, which is the game working as designed and will
+never be zero. Asserting on the raw self-kill count would fail forever; asserting on `contact` is what
+caught the real regressions.
+
+**The stance assertion is the other load-bearing one.** A standing placement puts the beam 64 above
+the floor and a ducked one at 30, and only the first can be crawled under. If only one stance ever
+appears the roll is dead and half the avoidance code is untested while every counter looks healthy.
+
+**`jump` is asserted to be zero, not positive.** The first version of the beam ladder jumped low beams
+and this phase asserted it happened. That was backwards: a jump sweeps the player box up through the
+beam plane, so it trips every time. Both `walk`-state deaths in the instrumented baseline were exactly
+that.
 
 **The standoff phase needs the pin, and equipping does not substitute.** A vertical beam is only
 reachable through `crossbot_deploy_surface 3`: mounts on the ceiling or ground are gated behind a
@@ -985,6 +995,12 @@ One cvar and one command, both available in a **stock** build (neither is behind
 - `crossbot_airmove_verify 1` — re-simulate on every cache hit and compare against the stored result.
   Costs the entire speedup, so this is a correctness harness, not something to leave on. On a mismatch the
   *fresh* result is the one returned, so verify mode is self-correcting.
+- `crossbot_airmove_correct 0` — disable the in-flight trajectory correction, so the follower re-issues
+  the launch heading unchanged for the whole flight. Default is `1`. This is the A/B switch for the
+  correction: same binary, same nav, one boot command apart. Set it through `-BootCommands`, never
+  `-ServerArgs` — plugin cvars register in `GameDLLInit`, after the engine has parsed the command line.
+  The landing log line carries `peak err` and `corrected` (frames), so a run's correction effort and its
+  miss can be read off together.
 - `crossbot_airmove_cache_stats` — occupancy/capacity, hits, misses, hit rate, inserts, evictions,
   uncacheable, and (under verify) verified and MISMATCH counts. `MISMATCH (N ent)` splits out the ones
   where the fresh sim touched an entity, which is the known and accepted divergence — see `doc/nav.md`.

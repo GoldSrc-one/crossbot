@@ -7,6 +7,7 @@
 #include "bot_opportunist.h"
 #include "bot_log.h"
 #include "bot_move.h"
+#include "bot_move_nav.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
@@ -102,10 +103,12 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 		return false;
 
 	PmSim::PmPhysics physics = Bot_Physics(pEdict);
-	PmSim::PmSimulator sim(Bot_EngineTraceFn(pEdict, kHullDuck), physics);
 
 	float velYaw = atan2f(vel.y, vel.x) * (180.f / NavMath::kPiF);
 	float yaw = velYaw;
+
+	Vector launchVel;
+	const Vector *airborneVel = nullptr;
 
 	if (longJump)
 	{
@@ -114,33 +117,20 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 
 		float horizontal = PmSim::kLongJumpSpeed * cosf(pitch * (NavMath::kPiF / 180.f));
 		Vector fwd = Bot_YawDir(yaw);
-		Vector launchVel(fwd.x * horizontal, fwd.y * horizontal, PmSim::kLongJumpImpulse);
-		sim.BeginAirborne(pEdict->v.origin, launchVel, yaw, physics.maxSpeed);
-	}
-	else
-	{
-		sim.Begin(pEdict->v.origin, yaw, speed, true);
+		launchVel = Vector(fwd.x * horizontal, fwd.y * horizontal, PmSim::kLongJumpImpulse);
+		airborneVel = &launchVel;
 	}
 
-	bool airborne = false;
-	while (sim.Time() < kMaxSimSeconds)
-	{
-		if (!sim.Step())
-			break;
-		if (!sim.OnGround())
-		{
-			airborne = true;
-			continue;
-		}
-		break;
-	}
+	Bot_SimulateAirmoveArc(pEdict, pEdict->v.origin, airborneVel, yaw,
+		longJump ? physics.maxSpeed : speed, true, kHullDuck, 0.f, kMaxSimSeconds, bot.airmoveArc);
 
-	if (!airborne || !sim.OnGround())
+	if (!bot.airmoveArc.landed)
 		return false;
-	if (PmSim::FallDamageFor(sim.FallSpeed()) > 0.f)
+	if (PmSim::FallDamageFor(bot.airmoveArc.fallSpeed) > 0.f)
 		return false;
 
-	const Nav::Area *landedArea = Nav::FindAreaExact(mesh, sim.Origin());
+	const Vector &simLanding = bot.airmoveArc.points.back();
+	const Nav::Area *landedArea = Nav::FindAreaExact(mesh, simLanding);
 	if (!landedArea || landedArea->id == here)
 		return false;
 
@@ -148,7 +138,7 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 	if (land >= bot.oppoCosts.size() || bot.oppoCosts[land] >= Nav::kUnreachableSeconds)
 		return false;
 
-	float flight = sim.Time() * (physics.maxSpeed / NavAStar::kNavRunSpeed);
+	float flight = bot.airmoveArc.flightTime * (physics.maxSpeed / NavAStar::kNavRunSpeed);
 	float gain = bot.oppoCosts[here] - bot.oppoCosts[land] - flight;
 	if (gain <= kMinGainSeconds)
 		return false;
@@ -161,15 +151,22 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 	bot.airmoveStartTime = gpGlobals->time;
 	bot.airmoveTargetArea = static_cast<int>(land);
 	bot.airmoveConnIndex = -1;
-	bot.airmovePlannedTime = sim.Time();
+	bot.airmovePlannedTime = bot.airmoveArc.flightTime;
 	bot.airmoveMaxTime = kMaxSimSeconds;
 	bot.airmoveOverrunLogged = false;
+	bot.airmoveStrafeSide = 1.f;
+	bot.airmovePeakError = 0.f;
+	bot.airmoveCorrectFrames = 0;
 
 	BOT_VLOG("CrossBot: %s oppo jump at (%.1f,%.1f,%.1f) yaw %.0f (vel %.0f) speed %.0f kind %s | "
 		"here %.2fs land %.2fs flight %.2fs (%.2fs real) gain %.2fs -> area %u\n",
 		bot.name, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, yaw, velYaw, speed,
-		longJump ? "lj" : "jump", bot.oppoCosts[here], bot.oppoCosts[land], flight, sim.Time(), gain,
+		longJump ? "lj" : "jump", bot.oppoCosts[here], bot.oppoCosts[land], flight,
+		bot.airmoveArc.flightTime, gain,
 		land);
+
+	if (!Bot_AirmoveCorrectEnabled())
+		bot.airmoveArc.Clear();
 
 	return true;
 }

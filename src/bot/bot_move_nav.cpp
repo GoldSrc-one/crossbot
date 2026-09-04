@@ -57,6 +57,13 @@ namespace
 	constexpr float kAirmoveLandingTolerance = 48.f;
 	constexpr int kWaterlevelSwimming = 2;
 
+	constexpr float kAirmoveCorrectDeadband = 2.f;
+	constexpr float kAirmoveCorrectMinRemaining = 0.1f;
+	constexpr float kAirmoveCorrectMinSpeed = 20.f;
+	constexpr float kAirmoveCorrectMinDelta = 1.f;
+	constexpr float kAirmoveArcAgreeDist = 16.f;
+	constexpr float kAirmoveCorrectAbandon = 64.f;
+
 	constexpr float kStandHullMinsZ = -36.f;
 	constexpr float kDuckHullMinsZ = -18.f;
 
@@ -422,6 +429,17 @@ namespace
 		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons, allowLongJump);
 	}
 
+	bool AirmoveArcAgrees(const BotAirmoveArc &arc, const Vector &planned)
+	{
+		if (!arc.Valid() || !arc.landed)
+			return false;
+
+		const Vector &end = arc.points.back();
+		float dx = end.x - planned.x;
+		float dy = end.y - planned.y;
+		return (dx * dx + dy * dy) <= kAirmoveArcAgreeDist * kAirmoveArcAgreeDist;
+	}
+
 	void RunAirmoveApproach(CBot &bot, const Nav::NavMesh &mesh, const Nav::Waypoint &wp)
 	{
 		edict_t *pEdict = bot.pEdict;
@@ -472,7 +490,21 @@ namespace
 			bot.airmovePlannedTime = AirmovePlannedTime(mesh, wp.connIndex);
 			bot.airmoveMaxTime = AirmoveTimeLimit(bot.airmovePlannedTime);
 			bot.airmoveOverrunLogged = false;
+			bot.airmoveStrafeSide = 1.f;
+			bot.airmovePeakError = 0.f;
+			bot.airmoveCorrectFrames = 0;
 			++bot.waypointIndex;
+
+			bot.airmoveArc.Clear();
+			if (wp.launchSimulated && Bot_AirmoveCorrectEnabled())
+			{
+				Bot_SimulateAirmoveArc(pEdict, origin, nullptr, wp.launchYaw, drive,
+					wp.requiresJump, wp.requiresCrouch ? kHullDuck : kHullHuman,
+					PmSim::kPlanSimFrameTime, bot.airmoveMaxTime, bot.airmoveArc);
+
+				if (!AirmoveArcAgrees(bot.airmoveArc, wp.launchSimTo))
+					bot.airmoveArc.Clear();
+			}
 
 			Vector offTrack(toLaunch.x - launchDir.x * remaining,
 				toLaunch.y - launchDir.y * remaining, 0.f);
@@ -541,6 +573,81 @@ namespace
 		return true;
 	}
 
+	bool AirmoveCorrection(CBot &bot, float airTime, Vector &wishDir, float &drive)
+	{
+		Vector ref, refVel;
+		if (!Bot_AirmoveArcAt(bot.airmoveArc, airTime, ref, refVel))
+			return false;
+
+		edict_t *pEdict = bot.pEdict;
+		const Vector &origin = pEdict->v.origin;
+		const Vector &vel = pEdict->v.velocity;
+
+		Vector err(ref.x - origin.x, ref.y - origin.y, 0.f);
+		float errLen = err.Length();
+		if (errLen > bot.airmovePeakError)
+			bot.airmovePeakError = errLen;
+
+		if (errLen >= kAirmoveCorrectAbandon)
+		{
+			bot.airmoveArc.Clear();
+			return false;
+		}
+
+		if (errLen <= kAirmoveCorrectDeadband)
+			return false;
+
+		Vector flat(vel.x, vel.y, 0.f);
+		float speed = flat.Length();
+		if (speed < kAirmoveCorrectMinSpeed)
+			return false;
+
+		float remaining = bot.airmoveArc.flightTime - airTime;
+		if (remaining < kAirmoveCorrectMinRemaining)
+			remaining = kAirmoveCorrectMinRemaining;
+
+		Vector dv(refVel.x + err.x / remaining - vel.x, refVel.y + err.y / remaining - vel.y, 0.f);
+
+		Vector vHat(flat.x / speed, flat.y / speed, 0.f);
+		float dvAlong = dv.x * vHat.x + dv.y * vHat.y;
+		Vector dvPerp(dv.x - vHat.x * dvAlong, dv.y - vHat.y * dvAlong, 0.f);
+		float perpLen = dvPerp.Length();
+
+		PmSim::PmPhysics physics = Bot_Physics(pEdict);
+		float budget = physics.airAccelerate * physics.frameTime;
+		float maxDrive = Bot_MaxSpeed(pEdict);
+
+		auto DriveFor = [&](float need)
+		{
+			float want = (budget > 0.f) ? (need / budget) : maxDrive;
+			return std::min(want, maxDrive);
+		};
+
+		if (perpLen > kAirmoveCorrectMinDelta)
+		{
+			wishDir = Vector(dvPerp.x / perpLen, dvPerp.y / perpLen, 0.f);
+			drive = DriveFor(perpLen);
+		}
+		else if (dvAlong < -kAirmoveCorrectMinDelta)
+		{
+			wishDir = Vector(-vHat.x, -vHat.y, 0.f);
+			drive = DriveFor(-dvAlong);
+		}
+		else if (dvAlong > kAirmoveCorrectMinDelta)
+		{
+			bot.airmoveStrafeSide = -bot.airmoveStrafeSide;
+			wishDir = Vector(-vHat.y * bot.airmoveStrafeSide, vHat.x * bot.airmoveStrafeSide, 0.f);
+			drive = maxDrive;
+		}
+		else
+		{
+			return false;
+		}
+
+		++bot.airmoveCorrectFrames;
+		return true;
+	}
+
 	bool RunAirmoveFlight(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		edict_t *pEdict = bot.pEdict;
@@ -578,14 +685,15 @@ namespace
 			}
 
 			BOT_VLOG("CrossBot: %s %s %s after %.2fs (planned %.2fs limit %.2fs) at (%.1f,%.1f,%.1f) "
-				"area %d (wanted %d) miss %.1f conn %d penalty %.1f%s\n", bot.name,
-				oppo ? "oppo" : "airmove", AirmoveEndReason(pEdict), airTime,
+				"area %d (wanted %d) miss %.1f conn %d penalty %.1f peak err %.1f corrected %d%s\n",
+				bot.name, oppo ? "oppo" : "airmove", AirmoveEndReason(pEdict), airTime,
 				bot.airmovePlannedTime, bot.airmoveMaxTime,
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, landedId,
 				bot.airmoveTargetArea, miss, bot.airmoveConnIndex,
 				(bot.airmoveConnIndex >= 0)
 					? Nav::ConnectionPenalty(static_cast<uint32_t>(bot.airmoveConnIndex))
 					: 0.f,
+				bot.airmovePeakError, bot.airmoveCorrectFrames,
 				decided ? "" : " undecided");
 
 			if (failed && BreakBlockedAirmove(bot, mesh))
@@ -633,7 +741,11 @@ namespace
 			}
 		}
 
-		RunAirmoveDrive(bot, Bot_YawDir(bot.airmoveYaw), bot.airmoveSpeed, bot.airmoveYaw, bot.airmoveCrouch,
+		Vector moveDir = Bot_YawDir(bot.airmoveYaw);
+		float drive = bot.airmoveSpeed;
+		AirmoveCorrection(bot, airTime, moveDir, drive);
+
+		RunAirmoveDrive(bot, moveDir, drive, bot.airmoveYaw, bot.airmoveCrouch,
 			false, false, breakAim, breakButtons);
 		return true;
 	}
@@ -1730,6 +1842,7 @@ namespace
 		bot.airmoveTargetArea = -1;
 		bot.airmoveConnIndex = -1;
 		bot.airmoveOpportunistic = false;
+		bot.airmoveArc.Clear();
 		bot.oppoCostsGoalArea = -1;
 		bot.airmovePlannedTime = 0.f;
 		bot.airmoveMaxTime = kAirmoveMaxAirTime;
@@ -2041,6 +2154,79 @@ PmSim::PmPhysics Bot_DrivePhysics(edict_t *pEdict)
 	return physics;
 }
 
+bool Bot_AirmoveCorrectEnabled()
+{
+	return g_engfuncs.pfnCVarGetFloat("crossbot_airmove_correct") > 0.f;
+}
+
+bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector *velocity, float yaw,
+	float speed, bool jump, int hull, float frameTime, float maxSeconds, BotAirmoveArc &out)
+{
+	out.Clear();
+
+	PmSim::PmPhysics physics = Bot_Physics(pEdict);
+	if (frameTime > 0.f)
+		physics.frameTime = frameTime;
+
+	PmSim::PmSimulator sim(Bot_EngineTraceFn(pEdict, hull), physics, Bot_PushFields(hull));
+
+	if (velocity)
+		sim.BeginAirborne(origin, *velocity, yaw, speed);
+	else
+		sim.Begin(origin, yaw, speed, jump);
+
+	out.sampleTime = physics.frameTime;
+	out.points.push_back(sim.Origin());
+
+	bool airborne = false;
+	while (sim.Time() < maxSeconds)
+	{
+		if (!sim.Step())
+			break;
+
+		out.points.push_back(sim.Origin());
+
+		if (!sim.OnGround())
+		{
+			airborne = true;
+			continue;
+		}
+
+		if (airborne)
+			break;
+	}
+
+	out.flightTime = sim.Time();
+	out.landed = airborne && sim.OnGround();
+	out.fallSpeed = sim.FallSpeed();
+	return airborne;
+}
+
+bool Bot_AirmoveArcAt(const BotAirmoveArc &arc, float t, Vector &pos, Vector &vel)
+{
+	if (!arc.Valid())
+		return false;
+
+	float step = (t > 0.f) ? (t / arc.sampleTime) : 0.f;
+	size_t last = arc.points.size() - 1;
+	size_t i = static_cast<size_t>(step);
+	if (i >= last)
+		i = last - 1;
+
+	float frac = step - static_cast<float>(i);
+	if (frac < 0.f)
+		frac = 0.f;
+	else if (frac > 1.f)
+		frac = 1.f;
+
+	const Vector &a = arc.points[i];
+	const Vector &b = arc.points[i + 1];
+
+	pos = a + (b - a) * frac;
+	vel = (b - a) * (1.f / arc.sampleTime);
+	return true;
+}
+
 bool Bot_PenalizeCurrentConnection(CBot &bot)
 {
 	if (bot.currentAreaId < 0)
@@ -2185,6 +2371,8 @@ void Bot_MoveNav(CBot &bot)
 		BOTPERF_SCOPE(ZONE_SENSE);
 		BotSense::Update(bot);
 	}
+	BotDeploy::NoteDamage(bot);
+	BotDeploy::TrackMines(bot);
 	{
 		BOTPERF_SCOPE(ZONE_FIRE);
 		BotFire::Think(bot);

@@ -165,9 +165,21 @@ cvar_t g_deploySurfaceCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_deployDebugCvar = {
+	"crossbot_deploy_debug",
+	"0",
+	FCVAR_SERVER
+};
+
 cvar_t g_airmoveVerifyCvar = {
 	"crossbot_airmove_verify",
 	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_airmoveCorrectCvar = {
+	"crossbot_airmove_correct",
+	"1",
 	FCVAR_SERVER
 };
 
@@ -250,12 +262,14 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulPinCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_deployDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);
 #ifdef CROSSBOT_BSPTRACE
 	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceBlockersCvar);
 #endif
 	g_engfuncs.pfnCvar_RegisterVariable(&g_airmoveVerifyCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_airmoveCorrectCvar);
 #ifdef CROSSBOT_VERBOSE
 	g_engfuncs.pfnCvar_RegisterVariable(&g_verboseCvar);
 #endif

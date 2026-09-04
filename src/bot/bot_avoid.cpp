@@ -62,6 +62,7 @@ namespace
 	constexpr int kAvoidBeamMaxSteps = 48;
 	constexpr float kAvoidBeamDepth = 32.f;
 	constexpr float kAvoidBeamPad = 4.f;
+	constexpr float kAvoidBeamXY = 16.f;
 
 	const char *ClassOf(edict_t *ent)
 	{
@@ -114,66 +115,6 @@ namespace
 		return ent->v.velocity + spin;
 	}
 
-	void HullExtents(int hull, Vector &mins, Vector &maxs)
-	{
-		float half = hull == kHullDuck ? kDuckHullHalf : kStandHullHalf;
-		mins = Vector(-kAvoidHullHalf, -kAvoidHullHalf, -half);
-		maxs = Vector(kAvoidHullHalf, kAvoidHullHalf, half);
-	}
-
-	bool ClipSegmentToBox(const Vector &a, const Vector &b, const Vector &mins, const Vector &maxs,
-		float &t0, float &t1)
-	{
-		t0 = 0.f;
-		t1 = 1.f;
-
-		const float av[3] = { a.x, a.y, a.z };
-		const float bv[3] = { b.x, b.y, b.z };
-		const float lo[3] = { mins.x, mins.y, mins.z };
-		const float hi[3] = { maxs.x, maxs.y, maxs.z };
-
-		for (int i = 0; i < 3; ++i)
-		{
-			float d = bv[i] - av[i];
-			if (fabsf(d) < 1e-6f)
-			{
-				if (av[i] < lo[i] || av[i] > hi[i])
-					return false;
-				continue;
-			}
-
-			float p0 = (lo[i] - av[i]) / d;
-			float p1 = (hi[i] - av[i]) / d;
-			if (p0 > p1)
-				std::swap(p0, p1);
-
-			if (p0 > t0) t0 = p0;
-			if (p1 < t1) t1 = p1;
-			if (t0 > t1)
-				return false;
-		}
-		return true;
-	}
-
-	bool BeamMeetsHull(const BotDeploy::Beam &beam, const Vector &at, int hull, float &zLo,
-		float &zHi)
-	{
-		Vector mins, maxs;
-		HullExtents(hull, mins, maxs);
-		mins = at + mins;
-		maxs = at + maxs;
-
-		float t0 = 0.f, t1 = 1.f;
-		if (!ClipSegmentToBox(beam.start, beam.end, mins, maxs, t0, t1))
-			return false;
-
-		float za = beam.start.z + (beam.end.z - beam.start.z) * t0;
-		float zb = beam.start.z + (beam.end.z - beam.start.z) * t1;
-		zLo = std::min(za, zb);
-		zHi = std::max(za, zb);
-		return true;
-	}
-
 	const BotDeploy::Beam *BeamAlong(const Vector &from, const Vector &to, int hull, float &distOut,
 		float &zLo, float &zHi)
 	{
@@ -199,7 +140,9 @@ namespace
 			{
 				if (!beams[i].ent || beams[i].ent->free)
 					continue;
-				if (!BeamMeetsHull(beams[i], at, hull, zLo, zHi))
+				if (BotDeploy::BeamMeetsHull(beams[i], from, hull, zLo, zHi, 0.f))
+					continue;
+				if (!BotDeploy::BeamMeetsHull(beams[i], at, hull, zLo, zHi, kAvoidBeamXY))
 					continue;
 
 				distOut = len * t;
@@ -873,7 +816,7 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 			float plainJump = PmSim::PlainJumpHeight(physics.gravity);
 			float crouchJump = plainJump + kDuckHullHalf;
 
-			bool canJump = (beam || top > kAvoidStepHeight)
+			bool canJump = !beam && top > kAvoidStepHeight
 				&& top <= crouchJump - kAvoidJumpMargin;
 			bool canDuck = gap >= kAvoidDuckClearance;
 

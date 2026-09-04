@@ -40,6 +40,26 @@ struct BotFullMemo
 	float expireTime = 0.f;
 };
 
+struct BotAirmoveArc
+{
+	std::vector<Vector> points;
+	float sampleTime = 0.f;
+	float flightTime = 0.f;
+	bool landed = false;
+	float fallSpeed = 0.f;
+
+	void Clear()
+	{
+		points.clear();
+		sampleTime = 0.f;
+		flightTime = 0.f;
+		landed = false;
+		fallSpeed = 0.f;
+	}
+
+	bool Valid() const { return points.size() >= 2 && sampleTime > 0.f; }
+};
+
 struct CBot
 {
 	bool inUse = false;
@@ -95,6 +115,11 @@ struct CBot
 	int airmoveTargetArea = -1;
 	int airmoveConnIndex = -1;
 	bool airmoveOpportunistic = false;
+
+	BotAirmoveArc airmoveArc;
+	float airmoveStrafeSide = 1.f;
+	float airmovePeakError = 0.f;
+	int airmoveCorrectFrames = 0;
 
 	std::vector<float> oppoCosts;
 	int oppoCostsGoalArea = -1;

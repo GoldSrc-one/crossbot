@@ -126,7 +126,7 @@ function Test-Gates([int]$port) {
 # placement puts the beam at ~64 and is crawled under, a ducked one at ~30 and is
 # jumped. Seeing only one of the two means the stance roll is dead.
 function Test-Tripmine([int]$port) {
-    $lines = Invoke-Phase "tripmine" "crossfire" $port @() {
+    $lines = Invoke-Phase "tripmine" "crossfire" $port @("crossbot_deploy_debug 1") {
         param($p)
         foreach ($n in @("Sap1", "Sap2", "Sap3")) {
             Rcon $p "crossbot_add $n"
@@ -149,15 +149,21 @@ function Test-Tripmine([int]$port) {
     $crawl = Count-Of $lines "avoid duck monster_tripmine"
     $removed = Count-Of $lines "Tripmine at .* removed"
     $goals = Count-Of $lines "reached goal"
+    $contact = Count-Of $lines "KILLED BY ITS OWN MINE.*onbeam 1"
+    $blast = Count-Of $lines "KILLED BY ITS OWN MINE.*onbeam 0"
+    $armedIn = Count-Of $lines "STILL IN BEAM AT ARMING"
 
     Assert-That ($placed -gt 0) "tripmines placed ($placed)"
     Assert-That ($stand -gt 0 -and $duck -gt 0) "both stances used (stand=$stand duck=$duck)"
-    Assert-That ($jump -gt 0) "a beam was jumped ($jump)"
+    Assert-That ($jump -eq 0) "no beam was jumped -- a beam cannot be jumped ($jump)"
     Assert-That ($crawl -gt 0) "a beam was crawled under ($crawl)"
     Assert-That ($removed -eq 0) "no mine failed to find a surface ($removed removed)"
     Assert-That ($goals -gt 0) "bots still reach goals with beams up ($goals)"
+    Assert-That ($contact -eq 0) "no bot walked into its own beam ($contact contact deaths)"
+    Assert-That ($armedIn -eq 0) "no mine armed around its placer ($armedIn)"
 
-    [void]$results.Add("tripmine placed=$placed jump=$jump duck=$crawl goals=$goals")
+    [void]$results.Add(
+        "tripmine placed=$placed duck=$crawl goals=$goals contact=$contact blast=$blast")
 }
 
 # --- standoff ----------------------------------------------------------------
@@ -167,7 +173,7 @@ function Test-Tripmine([int]$port) {
 # The bot is driven between the spawn and the info_target because it has no items
 # to fetch here and would otherwise never leave its spawn area.
 function Test-Standoff([int]$port) {
-    $lines = Invoke-Phase "standoff" "test2_doorway" $port @("crossbot_deploy_surface 3") {
+    $lines = Invoke-Phase "standoff" "test2_doorway" $port @("crossbot_deploy_surface 3", "crossbot_deploy_debug 1") {
         param($p)
         Rcon $p "crossbot_add Miner"
         Start-Sleep -Seconds 2

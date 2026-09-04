@@ -2936,8 +2936,78 @@ Two things about the drive are easy to get wrong and both stalled real routes:
   that nothing above `maxspeed * kDuckingMultiplier` is reachable. `Bot_MoveNav` did this and
   `RunAirmoveDrive` did not, so every crouched air move was driven at a third of its planned speed.
 
-`RunAirmoveFlight` keeps commanding the raw heading — no servo — because `PM_AirAccelerate` caps its wish
-speed at 30 in flight and the trajectory is already committed.
+**`RunAirmoveFlight` steers, and the wish-speed cap is why it can.** The flight used to re-issue the launch
+heading unchanged every frame, on the grounds that `PM_AirAccelerate` caps wish speed at 30 and the
+trajectory was already committed. That reasoning holds for one axis only. The cap is on the *projection of
+velocity onto the commanded direction*, not on total authority:
+
+| Commanded direction | `currentspeed` | `addspeed` | Authority |
+|---|---|---|---|
+| Along the current heading, 270 u/s | 270 | −240 | **Nothing.** `addspeed <= 0` returns before touching velocity. |
+| Perpendicular to velocity | ~0 | 30 | **~30 u/s**, reached in a few frames — ≈60 units of shift over a 2 s flight. |
+| Opposite velocity | −270 | 300 | **~53 u/s per frame**; here `airAccelerate * wishspeed * frameTime` binds, not the cap. |
+| Perpendicular, re-aimed each frame | ~0 | 30 | `sqrt(270² + 30²) − 270` = **+1.66 u/s per frame**, ≈100 u/s per second. |
+
+So the old command was not a weak correction, it was exactly zero — every frame, on every nominal flight.
+The first row is what it did.
+
+The last row is the one that is easy to miss. Perpendicular to the *launch* heading buys nothing: both
+sides only ever add to the lateral axis and the forward component never changes. Perpendicular to the
+*current* velocity is the ordinary strafe gain, and alternating the side returns the heading while keeping
+it — `(270, 0)` → `(270, 30)` → `(273.3, 0.2)`, with about half a unit of lateral excursion per half
+cycle. Along-track undershoot is therefore correctable too; it just needs the wish direction re-derived
+from live velocity rather than frozen at launch.
+
+**The target is the planned X-Y at time `t`, not the landing point.** In flight `z` is a function of time
+alone, so a bot that speeds up to arrive early arrives *high* and sails over the ledge it was aimed at.
+Matching X-Y at the planned time matches the whole 3-D arc for free — and it is why only X-Y is ever
+compared, which in turn is what lets the reference live in the planner's duck-origin z-space while the bot
+flies in world z.
+
+`AirmoveCorrection` builds the demand as a feed-forward plus a proportional term that closes the gap by
+landing, `want = refVel + err / remaining`, and splits `dv = want - velocity` about the current velocity:
+
+1. `|dvPerp| > kAirmoveCorrectMinDelta` → **steer** along `dvPerp`.
+2. `dvAlong < -kAirmoveCorrectMinDelta` → **brake** along `-vHat`.
+3. `dvAlong > kAirmoveCorrectMinDelta` → **micro-strafe**, `±perp(vHat)` with the side alternating each
+   frame via `airmoveStrafeSide`.
+4. otherwise → the launch heading at the launch speed, exactly as before.
+
+Order matters. A mixed error whose forward component dominates would normalize to a nearly-forward wish
+direction, and row 1 of the table says that does nothing *at all* — including nothing for the lateral part
+riding along with it. Taking `dvPerp` first is what keeps the achievable component achievable.
+
+`drive` is sized to the need rather than pinned at full: `need / (airAccelerate * frameTime)`, clamped to
+`maxspeed`. Braking is one-way — air acceleration can never give speed back along the direction of travel —
+so an over-brake is a permanent undershoot, and full drive would shed 53 u/s in a single frame.
+
+On plan, `err` is zero and `velocity` equals `refVel`, so `dv` is zero and branch 4 fires. The correction is
+a function of error only, which is also why the planner stays valid: it modelled the open-loop arc, and a
+zero-error flight still flies it.
+
+**The reference is simulated at launch, and checked before it is trusted.** `Bot_SimulateAirmoveArc` runs a
+`PmSimulator` from the bot's real launch state with the *planned* yaw and speed, sampling every
+`kPlanSimFrameTime`; `Bot_AirmoveArcAt` interpolates it by air time. Three things about that are load-bearing,
+each of which was a bug first:
+
+- **Seed from the bot's actual origin, not `wp.launchSimFrom`.** That field records where the *first*
+  simulation started, and `Respeed`/`Retract` move the launch point and rewrite `launchSimTo` without
+  rewriting it. Re-simulating from the stale seed put a test5_jump reference 102 units from the planner's
+  own landing, and the bot flew to it — turning an 18.9-unit miss into a 77.9-unit one in the wrong area.
+- **Do not break out of the step loop until the mover has actually been airborne.** A drop is still
+  `OnGround` for the first few frames while it walks off the edge, so breaking on the first grounded frame
+  ends the arc after 0.02 s. Only a jump is airborne from step one, which is why the opportunist's original
+  loop never hit this.
+- **Validate the endpoint against `wp.launchSimTo`** within `kAirmoveArcAgreeDist`, and drop the arc when it
+  disagrees. `launchSimTo` is an output, so unlike `launchSimFrom` it is always current. A rejected arc costs
+  nothing: `AirmoveCorrection` returns false and the flight is the open-loop one it always was.
+
+Mid-flight, an error past `kAirmoveCorrectAbandon` clears the arc for the rest of the flight. Past that the
+reference has stopped describing this flight — the bot was knocked, or hit something the sim did not — and
+steering hard toward a stale target is worse than coasting. One bounce flight showed the failure it prevents:
+a peak error of 264 units, corrected for 96 frames, landing 675 units out.
+
+`crossbot_airmove_correct 0` disables the whole thing and restores branch 4 unconditionally.
 
 **A landing outside `airmoveTargetArea` penalizes the connection, then forces a repath.**
 `RunAirmoveFlight` resolves the landed area and calls `Nav::PenalizeConnection` on the index latched at
@@ -3881,15 +3951,30 @@ The three outcomes then fall out of the existing ladder, with `gap` and `top` ta
 of the beam *inside* the hull rather than from a box:
 
 - a beam 40 or more above the feet clears the 36-tall duck hull, so it is **crawled under**;
-- a beam within `PlainJumpHeight + 18` is **jumped**;
 - a beam above 72 is not an obstacle at all and never enters the ladder;
-- a **vertical** beam spans the whole column, so `gap` is 0 and `top` is 72, neither applies, and the
-  side search **walks around** it. `RunSideSearch` already handles a thin tall column; for a
-  horizontal beam it correctly fails, because the beam runs wall to wall.
+- anything else is **walked around** by the side search, and shot if that fails. A **vertical** beam
+  spans the whole column, so `gap` is 0 and `top` is 72 and it always lands here.
 
-Measured on crossfire with bot-placed mines: beams from a standing placement report `gap 61 top 69`
-and are ducked; beams from a ducked placement report `gap 27 top 35` and are jumped. The 8-unit spread
-between gap and top is `2 * kAvoidBeamPad`.
+### A beam is never jumped, and the first version got this wrong
+
+`canJump` originally dropped its step-height floor for a beam, on the reasoning that a beam has no
+thickness so the usual "the engine steps over anything under 18" exemption does not apply. That much
+is true. The conclusion drawn from it — that a low beam should therefore be *jumped* — is not.
+
+**You cannot jump a tripmine beam.** The trip test is a traceline against the player's simple box, so
+it fires on any frame where the box intersects the beam, and a jump sweeps the box up *through* the
+beam plane before the feet ever clear it. Ducking works because the ducked box never reaches the beam
+height at all; jumping has no equivalent, because the box has to pass through the beam to get above it.
+
+The instrumented run that found this is unambiguous: both `walk`-state deaths in the baseline read
+`avoid jump vs monster_tripmine` — the bot decided to jump the beam and died doing it. `canJump` is
+now `!beam && top > kAvoidStepHeight && ...`, and the `avoid jump monster_tripmine` count went to zero
+and stayed there.
+
+The consequence is that a ducked placement (beam ~30 above the floor, `gap` 26, under the 40 needed to
+crawl) has no passive answer at all — it must be walked around or destroyed. That is why the standoff
+shot fires an order of magnitude more often than it used to, and it is correct: a knee-high laser
+across a doorway really does have to be shot.
 
 **When nothing works, shoot it.** Where the side search fails, `TakeMineTarget` sets `mineTarget`
 instead of `breakTarget`, and `Bot_MoveNav` hands it to `BotBreak::EngageStandoff` at
@@ -3902,6 +3987,41 @@ There is no owner filter anywhere in this path.
 
 **Placed satchels get no code at all.** A live `monster_satchel` is 8 units tall, well under the
 engine's 18-unit step, so the bot walks over it and `HitQualifies` is left alone.
+
+### The guard in Bot_RunPlayerMove, and why the ladder was not enough
+
+`BotAvoid::Update` runs in exactly one place: the walk drive at the end of `Bot_MoveNav`. Every
+maneuver that owns the frame — combat, break, deploy, ladder, elevator, airmove, charger — returns
+before it. So a bot in any of those states had **no beam avoidance whatsoever**, and the measurement
+says that is where the deaths were: of nine own-mine kills in the instrumented baseline, six were in
+`maneuver combat` and reported `avoid none`. The bot ran through its own lasers while fighting.
+
+The fix is a guard in `Bot_RunPlayerMove`, which is the one funnel every subsystem's movement passes
+through. It reconstructs the intended world direction from `fmove`/`smove` (`ComposeMove`, the inverse
+of `Bot_DecomposeMove`), asks `BotDeploy::BeamGuard` whether that step enters a beam, and if so forces
+a duck when the ducked hull would clear it and refuses the step otherwise. Putting it here rather than
+in each subsystem is what makes the rule unconditional: no maneuver can forget it.
+
+**Two details are load-bearing.**
+
+**It must ignore beams the hull is already inside.** A bot placing a tripmine is standing on its own
+beam line by construction (see `bot_deploy.cpp` below), and that beam is registered from spawn. A
+guard that stopped the bot for beams it already occupies would pin it inside its own mine until the
+mine armed around it — turning the placement path into a suicide. `BeamGuard` tests each beam at the
+current origin first and skips any that already meet the hull; it only refuses steps that would enter
+a beam the bot is *out* of.
+
+**Zeroing the input does not stop the bot.** The first version cleared `fmove`/`smove` and the movement
+buttons, and bots kept dying in combat with `onbeam 1`: at 250 u/s a bot coasts for a third of a second
+on momentum alone, which is far enough to cross a doorway. The guard now drives *against* the current
+velocity at full speed — an actual brake, not a release. That single change took contact deaths from
+two per run to zero.
+
+The margin lives in the beam's own XY extent rather than in the lookahead. `BeamMeetsHull` takes a
+`pad` that inflates the hull box horizontally, so `BeamGuard` (`kDeployGuardPad`) and `BeamAlong`
+(`kAvoidBeamXY`) each get room to stop or decide without either needing its own timing constant, and
+the diagnostics keep `pad` at 0 so they still report true contact. Padding z would be wrong — it would
+make a beam above head height read as an obstacle.
 
 ## bot_break.cpp
 
@@ -4092,6 +4212,59 @@ crossfire's 128-wide doorways were stepped around without the avoidance system e
 The bot stands **at the gate midpoint**, and `EvaluateGate` probes from exactly that point. Evaluating
 from anywhere else stops the pre-scan predicting what the shot will do.
 
+### The arming window, and the trace that captures you
+
+`CTripmineGrenade` is `SOLID_NOT` with no beam entity at all for its first 2.5 seconds
+(`Spawn` sets `m_flPowerUp = time + 2.5`; `PowerupThink` runs every 0.1 s until then). At arming it
+goes `SOLID_BBOX` and calls `MakeBeam`, which stores `m_flBeamLength = tr.flFraction` from a trace
+made with **`dont_ignore_monsters`**. `BeamBreakThink` then retraces every 0.1 s and detonates on
+`fabs(m_flBeamLength - tr.flFraction) > 0.001`.
+
+The consequence is sharper than "a beam you cannot see yet". **If a player is standing on the beam
+line at the moment of arming, the baseline is measured to their body** — the mine arms *around* them
+and fires the instant they step off. Being inside at arming is not a risk; it is a guaranteed kill on
+departure.
+
+And the bot is always standing on that line: `out.stand` is the gate midpoint, the probe eye is that
+midpoint plus 46, and the mine mounts where that ray hits the side wall and fires back along the wall
+normal — straight through the eye. No mount geometry avoids this, because a beam leaves along the
+surface normal, so any beam placed from where the bot stands returns to where the bot stands. The only
+beams that would miss it are above its head or below its feet, and those are not traps.
+
+`RefreshBeams` therefore registers mines **from spawn**, not from arming, with `Beam::armed` recording
+which state they are in. An unarmed beam is one that is about to be lethal, and there is no version of
+"walk through here" that is correct for it. The `SOLID_BBOX`-only filter it used to apply made the
+registry blind for precisely the window in which the bot occupies the beam.
+
+**Measurement disagreed with the theory, and the theory lost.** The instrumented baseline shows the
+bot clearing its own beam in **0.13 to 0.28 seconds** — an order of magnitude inside the 2.5 s it has —
+and `STILL IN BEAM AT ARMING` fired once in 73 placements and killed nobody. The arm-around-you case is
+real, and the pre-arm registry closes it for free, but it was never what was killing bots. What was
+killing them is in `bot_avoid.cpp` above: no avoidance during combat, and a beam the ladder decided to
+jump.
+
+### Keeping the laser inside the doorway
+
+`Probe` records the surface `normal`, which is the direction the mine will fire, and `BeamContained`
+traces `kDeployBeamLength` from the candidate mount along it and requires the hit within
+`opening + kDeployBeamSlack`. A mount whose beam runs long is skipped and the opposite wall is tried;
+if neither contains its beam the gate is rejected as `REJECT_ESCAPE`, which `crossbot_list_gates`
+prints like any other reason.
+
+Nothing checked this before, and `kDeployNormalTol` (0.94, so nearly 20 degrees of slop) is loose
+enough for it to matter: across a 128-unit opening that is up to ~46 units of lateral drift, enough to
+miss the far jamb entirely and run down a corridor for the full 2048.
+
+A long beam is its own hazard, and not the obvious one. The **blast is at the mine** while the trip
+point can be hundreds of units away, so a stranger crossing the far end of a runaway beam kills whoever
+is standing in the doorway. That is the shape of most of what is left: after the avoidance fixes, the
+remaining own-mine deaths are `onbeam 0` — the bot was 40 to 240 units from its own mine, not touching
+the beam, when something else set it off.
+
+This check subsumes the weaker proxy of demanding a facing wall on *both* sides. If the far side is not
+really a wall, the beam runs long and the gate is rejected on its own evidence rather than on a normal
+test that only ever looked at the near side.
+
 ### Stance is rolled, and that is what makes the avoidance visible
 
 Standing, the eye is 64 above the floor; ducked it is 30 — `VEC_DUCK_VIEW` is 12 above a duck origin
@@ -4169,7 +4342,7 @@ coverage stage even when it failed, and stays quiet about ones filtered earlier,
 rejections are visible without burying them.
 
 `crossbot_deploy_status` is per bot: phase, target connection, measured opening, surface, stance,
-`placed`, `dets`, `aborts`, memo size and `why`. Unlike the fire counters these are **not** per life —
+`placed`, `dets`, `aborts`, `selfhits`, `escapes`, memo size and `why`. Unlike the fire counters these are **not** per life —
 `OnRespawn` clears the memo and the active placement but leaves the tallies alone.
 
 ## bot_manager.cpp

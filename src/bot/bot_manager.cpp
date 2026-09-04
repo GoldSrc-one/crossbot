@@ -208,7 +208,10 @@ void StartFrame()
 		{
 			BOTPERF_SCOPE(ZONE_RESPAWN);
 			if (!bot.wasDead)
+			{
 				BotFun::NoteDeath(bot);
+				BotDeploy::NoteDeath(bot);
+			}
 			g_pGameProfile->Respawn(bot.pEdict);
 			bot.wasDead = true;
 			BotTiming::EndBot(bot);
@@ -745,10 +748,10 @@ void PrintDeployStatus()
 		char line[320];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s deploy=%s conn=%u open=%.0f surface=%s stance=%s placed=%d dets=%d "
-			"aborts=%d memo=%zu why=%s\n",
+			"aborts=%d selfhits=%d escapes=%d memo=%zu why=%s\n",
 			bot.name, BotDeploy::PhaseName(st.phase), st.spot.connIndex, st.spot.opening,
 			BotDeploy::SpotKindName(st.spot.kind), st.spot.duck ? "duck" : "stand", st.placements,
-			st.detonations, st.aborts, st.memo.size(), st.lastReason);
+			st.detonations, st.aborts, st.selfHits, st.escapes, st.memo.size(), st.lastReason);
 		SERVER_PRINT(line);
 	}
 

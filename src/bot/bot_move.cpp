@@ -7,6 +7,7 @@
 
 #include "bot_move.h"
 #include "bot_fire.h"
+#include "bot_deploy.h"
 #include "bot_perf.h"
 #include "bot_timing.h"
 #include "../game/game_profile.h"
@@ -64,6 +65,71 @@ byte Bot_FrameMsec()
 	return static_cast<byte>(msec);
 }
 
+namespace
+{
+	constexpr float kBeamGuardMin = 56.f;
+	constexpr float kBeamGuardTime = 0.35f;
+	constexpr float kBeamGuardMax = 144.f;
+	constexpr float kBeamGuardDeadzone = 0.01f;
+
+	Vector ComposeMove(float viewYawDeg, float forwardMove, float sideMove)
+	{
+		float yawRad = viewYawDeg * (NavMath::kPiF / 180.f);
+		float cy = cosf(yawRad), sy = sinf(yawRad);
+
+		return Vector(forwardMove * cy + sideMove * sy, forwardMove * sy - sideMove * cy, 0.f);
+	}
+
+	void ApplyBeamGuard(CBot &bot, const Vector &angles, float &fmove, float &smove,
+		unsigned short &buttons)
+	{
+		if (BotDeploy::Beams().empty())
+			return;
+
+		Vector world = ComposeMove(angles.y, fmove, smove);
+		float len = sqrtf(world.x * world.x + world.y * world.y);
+		if (len < 1.f)
+			return;
+
+		Vector dir(world.x / len, world.y / len, 0.f);
+
+		const Vector &vel = bot.pEdict->v.velocity;
+		float speed = sqrtf(vel.x * vel.x + vel.y * vel.y);
+		float lookahead = speed * kBeamGuardTime;
+		if (lookahead < kBeamGuardMin) lookahead = kBeamGuardMin;
+		if (lookahead > kBeamGuardMax) lookahead = kBeamGuardMax;
+
+		BotDeploy::BeamBlock guard = BotDeploy::BeamGuard(bot, dir, lookahead);
+		if (guard == BotDeploy::BEAM_CLEAR)
+			return;
+
+		if (guard == BotDeploy::BEAM_DUCK)
+			buttons |= IN_DUCK;
+
+		buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVERIGHT | IN_MOVELEFT | IN_JUMP);
+
+		float vlen = sqrtf(vel.x * vel.x + vel.y * vel.y);
+		if (vlen > 1.f)
+		{
+			Vector brake(-vel.x / vlen, -vel.y / vlen, 0.f);
+			Bot_DecomposeMove(angles.y, brake, Bot_MaxSpeed(bot.pEdict), fmove, smove);
+
+			if (fmove > kBeamGuardDeadzone) buttons |= IN_FORWARD;
+			else if (fmove < -kBeamGuardDeadzone) buttons |= IN_BACK;
+			if (smove > kBeamGuardDeadzone) buttons |= IN_MOVERIGHT;
+			else if (smove < -kBeamGuardDeadzone) buttons |= IN_MOVELEFT;
+		}
+		else
+		{
+			fmove = 0.f;
+			smove = 0.f;
+		}
+
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+	}
+}
+
 void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
 	unsigned short buttons, bool allowLongJump, float upmove)
 {
@@ -73,6 +139,8 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 	byte msec = Bot_FrameMsec();
 
 	buttons |= BotFire::Buttons(bot, angles);
+
+	ApplyBeamGuard(bot, angles, fmove, smove, buttons);
 
 	if (!allowLongJump && (buttons & (IN_JUMP | IN_DUCK)) == (IN_JUMP | IN_DUCK) &&
 		Bot_HasLongJumpModule(pEdict))

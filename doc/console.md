@@ -240,6 +240,13 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   beam registry stays empty and every branch this feature added to `bot_avoid.cpp` early-outs, so a
   sweep clears a deployable change for movement regressions and says nothing about deployment itself;
   see `doc/bot.md`, `bot_deploy.cpp`
+- `crossbot_deploy_debug` — per-placement and per-death tripmine forensics. Default 0. Prints an
+  audit line for every mine actually spawned (real beam length against the measured opening, both
+  jambs, and whether the placer is standing in its own beam), a residency line saying how long the
+  bot took to clear that beam against the 2.5 s arming clock, and an attribution line on every death.
+  `KILLED BY ITS OWN MINE` carries `onbeam`, which is the number that matters: `1` means the bot
+  walked into its own laser and is a bug, `0` means it was inside the blast when something else
+  tripped the mine and is the game working; see `doc/bot.md`, `bot_deploy.cpp`
 - `crossbot_deploy_surface` — pin the mount surface: 0 off, 1 wall, 2 ceiling, 3 ground. Default 0.
   A pin also bypasses the opening bound that normally keeps ceiling and ground mounts to gaps under 48
   units. It exists for the reason `crossbot_fire_pin` does: a vertical beam is what reaches the side
