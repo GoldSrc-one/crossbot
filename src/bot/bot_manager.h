@@ -16,7 +16,7 @@ namespace BotManager
 
 	void Touch(edict_t *pentTouched, edict_t *pentOther);
 
-	bool AddBot(const char *name);
+	bool AddBot(int iGame, const char *name);
 
 	bool SetGoalForAllBots(const Vector &point);
 

@@ -72,7 +72,7 @@ public:
 	virtual const char *GetName() const = 0;
 	virtual unsigned int GetFlags() const = 0;
 
-	virtual bool Detect() const = 0;
+	virtual bool Detect(const char *gamedir) const = 0;
 
 	virtual bool IsDead(edict_t *pEdict) const = 0;
 
@@ -115,6 +115,6 @@ public:
 		std::vector<BotGoal::Candidate> &out) const = 0;
 };
 
-IGameProfile *GameProfile_Detect();
+IGameProfile *GameProfile_Detect(const char *gamedir);
 
 extern IGameProfile *g_pGameProfile;

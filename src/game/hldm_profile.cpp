@@ -82,14 +82,12 @@ unsigned int CHLDMProfile::GetFlags() const
 	return GAME_DEATHMATCH;
 }
 
-bool CHLDMProfile::Detect() const
+bool CHLDMProfile::Detect(const char *gamedir) const
 {
 	if (!gpGlobals->deathmatch_)
 		return false;
 
-	char gamedir[256] = { 0 };
-	g_engfuncs.pfnGetGameDir(gamedir);
-	return CB_STRICMP(gamedir, "valve") == 0;
+	return gamedir && CB_STRICMP(gamedir, "valve") == 0;
 }
 
 bool CHLDMProfile::IsDead(edict_t *pEdict) const
@@ -99,18 +97,18 @@ bool CHLDMProfile::IsDead(edict_t *pEdict) const
 
 edict_t *CHLDMProfile::MonsterEnemy(edict_t *ent) const
 {
-	if (!ent || ent->free || !ent->pvPrivateData)
+	if (!ent || ent->free || !CBotPrivateData(ent))
 		return nullptr;
 	if ((ent->v.flags & FL_MONSTER) == 0)
 		return nullptr;
 	if (g_offsets.mon_hEnemy < 0)
 		return nullptr;
 
-	edict_t *foe = GameData::Peek<edict_t *>(ent->pvPrivateData, g_offsets.mon_hEnemy);
+	edict_t *foe = GameData::Peek<edict_t *>(CBotPrivateData(ent), g_offsets.mon_hEnemy);
 	if (!foe || foe->free)
 		return nullptr;
 
-	int serial = GameData::Peek<int>(ent->pvPrivateData, g_offsets.mon_hEnemy + 4);
+	int serial = GameData::Peek<int>(CBotPrivateData(ent), g_offsets.mon_hEnemy + 4);
 	if (foe->serialnumber != serial)
 		return nullptr;
 
@@ -350,11 +348,11 @@ void CHLDMProfile::CollectStrategicGoals(const CBot &, const Nav::NavMesh &,
 {
 }
 
-IGameProfile *GameProfile_Detect()
+IGameProfile *GameProfile_Detect(const char *gamedir)
 {
 	static CHLDMProfile hldmProfile;
 
-	if (hldmProfile.Detect())
+	if (hldmProfile.Detect(gamedir))
 		return &hldmProfile;
 
 	return NULL;

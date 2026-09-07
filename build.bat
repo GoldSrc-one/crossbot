@@ -1,5 +1,6 @@
 @echo off
 setlocal
+set CROSSBOT_DEPLOY=D:\hlds\crossplay\addons\crossbot
 call "D:\Program Files\Microsoft Visual Studio\2022\Preview\VC\Auxiliary\Build\vcvarsall.bat" x86
 if errorlevel 1 exit /b 1
 
@@ -9,24 +10,19 @@ if errorlevel 1 exit /b 1
 cmake --build build
 if errorlevel 1 exit /b 1
 
-rem Deploy to the local HLDS test install, so test_nav_goal.ps1 always runs the DLL that was just
-rem built. Skipped without complaint when hlds\ is absent -- it is gitignored, not everyone has it.
-if exist "%~dp0hlds\valve\addons\crossbot\" (
-    copy /y "%~dp0build\crossbot_mm.dll" "%~dp0hlds\valve\addons\crossbot\crossbot_mm.dll" >nul
+rem Deploy into the CrossPlay hyper-game, so test_nav_goal.ps1 always runs the DLL that was just
+rem built. Skipped without complaint when the deploy dir is absent -- not everyone has the server.
+rem gamedata is NOT deployed: D:\hlds\crossplay\gamedata\ belongs to CrossPlay and holds one file
+rem per loaded game. Nothing here writes to anything else under crossplay\.
+if exist "%CROSSBOT_DEPLOY%\" (
+    copy /y "%~dp0build\crossbot_mm.dll" "%CROSSBOT_DEPLOY%\crossbot_mm.dll" >nul
     if errorlevel 1 (
         echo build.bat: FAILED to copy crossbot_mm.dll into hlds -- is the server still running?
         exit /b 1
     )
 
-    if not exist "%~dp0hlds\valve\addons\crossbot\gamedata\" mkdir "%~dp0hlds\valve\addons\crossbot\gamedata"
-    if not exist "%~dp0hlds\valve\addons\crossbot\nav\" mkdir "%~dp0hlds\valve\addons\crossbot\nav"
-    if not exist "%~dp0hlds\valve\addons\crossbot\trace\" mkdir "%~dp0hlds\valve\addons\crossbot\trace"
+    if not exist "%CROSSBOT_DEPLOY%\nav\" mkdir "%CROSSBOT_DEPLOY%\nav"
+    if not exist "%CROSSBOT_DEPLOY%\trace\" mkdir "%CROSSBOT_DEPLOY%\trace"
 
-    copy /y "%~dp0gamedata\*.json" "%~dp0hlds\valve\addons\crossbot\gamedata\" >nul
-    if errorlevel 1 (
-        echo build.bat: FAILED to copy gamedata into hlds
-        exit /b 1
-    )
-
-    echo build.bat: deployed crossbot_mm.dll to hlds\valve\addons\crossbot
+    echo build.bat: deployed crossbot_mm.dll to %CROSSBOT_DEPLOY%
 )

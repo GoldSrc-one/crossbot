@@ -11,6 +11,7 @@
 #define JSMN_STATIC
 #include <jsmn.h>
 
+#include "crossplay.h"
 #include "gamedata.h"
 
 GameOffsets g_offsets;
@@ -82,9 +83,14 @@ const Request kRequests[] = {
 
 constexpr size_t kRequestCount = sizeof(kRequests) / sizeof(kRequests[0]);
 
-int *SlotPtr(size_t slot)
+GameOffsets g_gameOffsets[XPlay::kMaxGames];
+bool g_gameLoaded[XPlay::kMaxGames];
+
+char g_why[512];
+
+int *SlotPtr(GameOffsets &offsets, size_t slot)
 {
-	return reinterpret_cast<int *>(reinterpret_cast<char *>(&g_offsets) + slot);
+	return reinterpret_cast<int *>(reinterpret_cast<char *>(&offsets) + slot);
 }
 
 bool TokEq(const char *js, const jsmntok_t &tok, const char *name)
@@ -161,69 +167,38 @@ bool ReadWholeFile(const char *path, std::vector<char> &out)
 	return ok;
 }
 
-}
-
-namespace GameData
+const char *Why(const char *fmt, ...)
 {
-
-void Fatal(const char *fmt, ...)
-{
-	char msg[1024];
 	va_list args;
 	va_start(args, fmt);
-	vsnprintf(msg, sizeof(msg), fmt, args);
+	vsnprintf(g_why, sizeof(g_why), fmt, args);
 	va_end(args);
-
-	char line[1100];
-	snprintf(line, sizeof(line), "CrossBot: FATAL: %s\n", msg);
-	SERVER_PRINT(line);
-	SERVER_PRINT("CrossBot: refusing to run without valid gamedata, shutting the server down.\n");
-
-	g_engfuncs.pfnServerCommand("quit\n");
-	g_engfuncs.pfnServerExecute();
-	exit(1);
+	return g_why;
 }
 
-void Load()
+const char *LoadOne(const char *path, GameOffsets &out)
 {
-	static bool loaded = false;
-	if (loaded)
-		return;
-	loaded = true;
-
 	for (size_t r = 0; r < kRequestCount; ++r)
-		*SlotPtr(kRequests[r].slot) = -1;
-
-	char gamedir[256] = { 0 };
-	g_engfuncs.pfnGetGameDir(gamedir);
-
-#if defined(_WIN32)
-	const char *platform = "win";
-#else
-	const char *platform = "linux";
-#endif
-
-	char path[512];
-	snprintf(path, sizeof(path), "%s/addons/crossbot/gamedata/%s-%s.json", gamedir, gamedir, platform);
+		*SlotPtr(out, kRequests[r].slot) = -1;
 
 	std::vector<char> js;
 	if (!ReadWholeFile(path, js))
-		Fatal("cannot read gamedata file %s", path);
+		return Why("cannot read it");
 
 	jsmn_parser parser;
 	jsmn_init(&parser);
 	int need = jsmn_parse(&parser, js.data(), js.size(), nullptr, 0);
 	if (need <= 0)
-		Fatal("%s is not parseable JSON (jsmn error %d)", path, need);
+		return Why("not parseable JSON (jsmn error %d)", need);
 
 	std::vector<jsmntok_t> toks(static_cast<size_t>(need));
 	jsmn_init(&parser);
 	int got = jsmn_parse(&parser, js.data(), js.size(), toks.data(), static_cast<unsigned int>(need));
 	if (got != need)
-		Fatal("%s failed the second parse pass (jsmn error %d)", path, got);
+		return Why("failed the second parse pass (jsmn error %d)", got);
 
 	if (toks[0].type != JSMN_OBJECT)
-		Fatal("%s does not have a JSON object at its root", path);
+		return Why("no JSON object at its root");
 
 	const char *base = js.data();
 
@@ -255,23 +230,99 @@ void Load()
 			if (offset < 0 || !TokInt(base, toks[offset], value))
 				continue;
 
-			*SlotPtr(kRequests[r].slot) = value;
+			*SlotPtr(out, kRequests[r].slot) = value;
 		}
 	}
 
 	for (size_t r = 0; r < kRequestCount; ++r)
 	{
-		if (*SlotPtr(kRequests[r].slot) < 0)
-			Fatal("%s has no offset for %s::%s", path, kRequests[r].cls, kRequests[r].field);
+		if (*SlotPtr(out, kRequests[r].slot) < 0)
+			return Why("no offset for %s::%s", kRequests[r].cls, kRequests[r].field);
 	}
 
-	if (g_offsets.pev != 4)
-		Fatal("%s says CBaseEntity::pev is at %d, but the plugin assumes 4", path, g_offsets.pev);
+	if (out.pev != 4)
+		return Why("CBaseEntity::pev is at %d, but the plugin assumes 4", out.pev);
 
-	char msg[600];
-	snprintf(msg, sizeof(msg), "CrossBot: loaded gamedata %s (%d fields).\n",
-		path, static_cast<int>(kRequestCount));
-	SERVER_PRINT(msg);
+	return nullptr;
+}
+
+}
+
+namespace GameData
+{
+
+void Fatal(const char *fmt, ...)
+{
+	char msg[1024];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(msg, sizeof(msg), fmt, args);
+	va_end(args);
+
+	char line[1100];
+	snprintf(line, sizeof(line), "CrossBot: FATAL: %s\n", msg);
+	SERVER_PRINT(line);
+	SERVER_PRINT("CrossBot: refusing to run without valid gamedata, shutting the server down.\n");
+
+	g_engfuncs.pfnServerCommand("quit\n");
+	g_engfuncs.pfnServerExecute();
+	exit(1);
+}
+
+void Activate(int iGame)
+{
+	if (iGame < 0 || iGame >= XPlay::kMaxGames)
+		return;
+
+	g_offsets = g_gameOffsets[iGame];
+}
+
+bool Loaded(int iGame)
+{
+	if (iGame < 0 || iGame >= XPlay::kMaxGames)
+		return false;
+
+	return g_gameLoaded[iGame];
+}
+
+void LoadAll()
+{
+	for (int i = 0; i < XPlay::kMaxGames; ++i)
+	{
+		g_gameOffsets[i] = GameOffsets();
+		g_gameLoaded[i] = false;
+	}
+
+	char hyperdir[256] = { 0 };
+	g_engfuncs.pfnGetGameDir(hyperdir);
+
+#if defined(_WIN32)
+	const char *platform = "win";
+#else
+	const char *platform = "linux";
+#endif
+
+	char msg[900];
+	for (int iGame = 0; iGame < XPlay::NumGames(); ++iGame)
+	{
+		const char *gamedir = XPlay::GameDir(iGame);
+
+		char path[512];
+		snprintf(path, sizeof(path), "%s/gamedata/%s-%s.json", hyperdir, gamedir, platform);
+
+		const char *why = LoadOne(path, g_gameOffsets[iGame]);
+		if (why)
+		{
+			snprintf(msg, sizeof(msg), "CrossBot: no gamedata for '%s' -- %s (%s).\n", gamedir, why, path);
+			SERVER_PRINT(msg);
+			continue;
+		}
+
+		g_gameLoaded[iGame] = true;
+		snprintf(msg, sizeof(msg), "CrossBot: loaded gamedata %s (%d fields).\n",
+			path, static_cast<int>(kRequestCount));
+		SERVER_PRINT(msg);
+	}
 }
 
 }

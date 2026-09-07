@@ -1272,7 +1272,7 @@ carries the launch's index. The bot then walks straight through the launch point
 
 ### Launch speed is clamped to the server
 `candSpeed` comes out of the nav file's `gateASpeed`, which the sampler produced at navgen's assumed
-`maxSpeed` — 320 by default. The server need not agree: `hlds/valve/server.cfg` ships `sv_maxspeed 270`,
+`maxSpeed` — 320 by default. The server need not agree: `D:\hlds\valve\server.cfg` ships `sv_maxspeed 270`,
 and `BotPhysics` reads the live value into `PlanTraceContext::physics`. `Cross` therefore clamps
 `candSpeed` to `physics.maxSpeed` before handing it to `JumpLandsIn`.
 

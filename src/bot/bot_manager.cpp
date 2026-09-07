@@ -17,6 +17,7 @@
 #include "bot_sense.h"
 #include "bot_timing.h"
 #include "bot_weapons.h"
+#include "../game/crossplay.h"
 #include "../game/gamedata.h"
 #include "../game/game_profile.h"
 #include "../nav/bsp_trace.h"
@@ -52,6 +53,12 @@ bool g_driftSpeedChecked = false;
 	}
 
 	constexpr float kGravityEpsilon = 0.01f;
+
+	struct ScopedGame
+	{
+		explicit ScopedGame(int iGame) { XPlay::EnterGame(iGame); }
+		~ScopedGame() { XPlay::LeaveGame(); }
+	};
 
 	bool TouchDebugEnabled()
 	{
@@ -102,14 +109,10 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 	Bot_ResetAirmoveCache();
 	BotFun::ResetMap();
 
-	g_pGameProfile = GameProfile_Detect();
+	XPlay::DetectProfiles();
 
-	char msg[256];
-	if (g_pGameProfile)
-		snprintf(msg, sizeof(msg), "CrossBot: detected game profile '%s'.\n", g_pGameProfile->GetName());
-	else
-		snprintf(msg, sizeof(msg), "CrossBot: no known game profile matched this mod; bots disabled.\n");
-	SERVER_PRINT(msg);
+	if (XPlay::PickRandomSupported() < 0)
+		SERVER_PRINT("CrossBot: no loaded game is playable; bots disabled.\n");
 
 	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
 	Nav::LoadForMap(mapName);
@@ -127,7 +130,7 @@ void ServerDeactivate()
 	Bot_ResetAirmoveCache();
 	BotFun::ResetMap();
 
-	g_pGameProfile = nullptr;
+	XPlay::ForgetProfiles();
 	Nav::Unload();
 }
 
@@ -147,11 +150,57 @@ void ClientDisconnect(edict_t *pEntity)
 	}
 }
 
+namespace
+{
+	void ThinkOneBot(CBot &bot)
+	{
+		BotPerf::NoteBot(bot.name);
+
+		bool dead = g_pGameProfile->IsDead(bot.pEdict);
+		if (dead)
+		{
+			BOTPERF_SCOPE(ZONE_RESPAWN);
+			if (!bot.wasDead)
+			{
+				BotFun::NoteDeath(bot);
+				BotDeploy::NoteDeath(bot);
+			}
+			g_pGameProfile->Respawn(bot.pEdict);
+			bot.wasDead = true;
+			BotTiming::EndBot(bot);
+			return;
+		}
+
+		if (bot.wasDead)
+		{
+			BOTPERF_SCOPE(ZONE_RESPAWN);
+			bot.wasDead = false;
+			bot.gravity = 1.f;
+			BotGoal::OnRespawn(bot);
+			BotSense::OnRespawn(bot);
+			BotCombat::OnRespawn(bot);
+			BotFire::Reset(bot);
+			BotDeploy::OnRespawn(bot);
+			bot.brk = BotBreak::State();
+		}
+
+		{
+			BOTPERF_SCOPE(ZONE_WEAPONS);
+			BotWeapons::Refresh(bot);
+			BotFire::AccrueCarry(bot);
+		}
+
+		{
+			BOTPERF_SCOPE(ZONE_MOVENAV);
+			Bot_MoveNav(bot);
+		}
+
+		BotTiming::EndBot(bot);
+	}
+}
+
 void StartFrame()
 {
-	if (!g_pGameProfile)
-		return;
-
 	BotPerf::FrameBegin();
 
 	Bot_BeginFrame();
@@ -168,8 +217,12 @@ void StartFrame()
 	for (const auto &bot : g_bots)
 		anyBot = anyBot || bot.inUse;
 
-	if (anyBot)
-		BotSense::RefreshMonsters();
+	if (anyBot && XPlay::Supported(XPlay::MapOwner()))
+	{
+		int mapOwner = XPlay::MapOwner();
+		XPlay::EnterGame(mapOwner);
+		XPlay::InGame(mapOwner, [] { BotSense::RefreshMonsters(); });
+	}
 
 	if (anyBot && !g_driftSpeedChecked)
 	{
@@ -206,49 +259,14 @@ void StartFrame()
 		if (!bot.inUse)
 			continue;
 
-		BotPerf::NoteBot(bot.name);
-
-		bool dead = g_pGameProfile->IsDead(bot.pEdict);
-		if (dead)
-		{
-			BOTPERF_SCOPE(ZONE_RESPAWN);
-			if (!bot.wasDead)
-			{
-				BotFun::NoteDeath(bot);
-				BotDeploy::NoteDeath(bot);
-			}
-			g_pGameProfile->Respawn(bot.pEdict);
-			bot.wasDead = true;
-			BotTiming::EndBot(bot);
+		XPlay::EnterGame(bot.gameDll);
+		if (!g_pGameProfile)
 			continue;
-		}
 
-		if (bot.wasDead)
-		{
-			BOTPERF_SCOPE(ZONE_RESPAWN);
-			bot.wasDead = false;
-			bot.gravity = 1.f;
-			BotGoal::OnRespawn(bot);
-			BotSense::OnRespawn(bot);
-			BotCombat::OnRespawn(bot);
-			BotFire::Reset(bot);
-			BotDeploy::OnRespawn(bot);
-			bot.brk = BotBreak::State();
-		}
-
-		{
-			BOTPERF_SCOPE(ZONE_WEAPONS);
-			BotWeapons::Refresh(bot);
-			BotFire::AccrueCarry(bot);
-		}
-
-		{
-			BOTPERF_SCOPE(ZONE_MOVENAV);
-			Bot_MoveNav(bot);
-		}
-
-		BotTiming::EndBot(bot);
+		XPlay::InGame(bot.gameDll, [&bot] { ThinkOneBot(bot); });
 	}
+
+	XPlay::LeaveGame();
 
 	BotTiming::EndFrame();
 
@@ -276,32 +294,42 @@ namespace
 
 void Touch(edict_t *pentTouched, edict_t *pentOther)
 {
-	if (!g_pGameProfile || !pentTouched || !pentOther)
+	if (!pentTouched || !pentOther)
+		return;
+
+	CBot *bot = FindBot(pentOther);
+	edict_t *hit = pentTouched;
+	if (!bot)
+	{
+		bot = FindBot(pentTouched);
+		hit = pentOther;
+	}
+
+	if (!bot)
+		return;
+
+	XPlay::EnterGame(bot->gameDll);
+	if (!g_pGameProfile)
 		return;
 
 	bool debug = TouchDebugEnabled();
 
-	if (CBot *bot = FindBot(pentOther))
-	{
+	XPlay::InGame(bot->gameDll, [&] {
 		if (debug)
-			DumpTouch(*bot, pentTouched);
-		BotItems::OnTouch(*bot, pentTouched);
+			DumpTouch(*bot, hit);
+		BotItems::OnTouch(*bot, hit);
 		NoteGravity(*bot);
-	}
-	else if (CBot *other = FindBot(pentTouched))
-	{
-		if (debug)
-			DumpTouch(*other, pentOther);
-		BotItems::OnTouch(*other, pentOther);
-		NoteGravity(*other);
-	}
+	});
 }
 
-bool AddBot(const char *name)
+bool AddBot(int iGame, const char *name)
 {
-	if (!g_pGameProfile)
+	char why[256];
+	if (!XPlay::Supported(iGame))
 	{
-		SERVER_PRINT("CrossBot: cannot add bot, no game profile detected.\n");
+		snprintf(why, sizeof(why), "CrossBot: cannot add bot, game '%s' is not playable.\n",
+			XPlay::GameDir(iGame));
+		SERVER_PRINT(why);
 		return false;
 	}
 
@@ -320,14 +348,16 @@ bool AddBot(const char *name)
 	else
 		snprintf(botName, sizeof(botName), "CrossBot%d", ++g_botSerial);
 
-	edict_t *pEdict = CREATE_FAKE_CLIENT(botName);
+	edict_t *pEdict = nullptr;
+	XPlay::InGame(iGame, [&] { pEdict = CREATE_FAKE_CLIENT(botName); });
+
 	if (!pEdict)
 	{
 		SERVER_PRINT("CrossBot: engine refused to create a fake client.\n");
 		return false;
 	}
 
-		char rejectReason[128] = {};
+	char rejectReason[128] = {};
 	MDLL_ClientConnect(pEdict, botName, "127.0.0.1", rejectReason);
 
 	if (rejectReason[0])
@@ -342,8 +372,13 @@ bool AddBot(const char *name)
 	pEdict->v.flags |= FL_CLIENT | FL_FAKECLIENT;
 
 	pSlot->inUse = true;
+	pSlot->gameDll = iGame;
 	pSlot->pEdict = pEdict;
 	snprintf(pSlot->name, sizeof(pSlot->name), "%s", botName);
+
+	char msg[192];
+	snprintf(msg, sizeof(msg), "CrossBot: added %s to '%s'.\n", botName, XPlay::GameDir(iGame));
+	SERVER_PRINT(msg);
 
 	return true;
 }
@@ -372,7 +407,7 @@ bool KillAllBots()
 		if (!bot.inUse)
 			continue;
 
-		MDLL_ClientKill(bot.pEdict);
+		XPlay::InGame(bot.gameDll, [&bot] { MDLL_ClientKill(bot.pEdict); });
 		any = true;
 	}
 	return any;
@@ -442,6 +477,8 @@ void PrintAimStatus()
 		if (!bot.inUse)
 			continue;
 
+		ScopedGame ctx(bot.gameDll);
+
 		++shown;
 
 		edict_t *target = bot.sense.target.Get();
@@ -488,6 +525,8 @@ void PrintSenseStatus()
 	{
 		if (!bot.inUse)
 			continue;
+
+		ScopedGame ctx(bot.gameDll);
 
 		++shown;
 
@@ -547,7 +586,9 @@ void PrintSenseStatus()
 
 void PrintMonsters()
 {
-	BotSense::RefreshMonsters();
+	int mapOwner = XPlay::MapOwner();
+	ScopedGame ctx(mapOwner);
+	XPlay::InGame(mapOwner, [] { BotSense::RefreshMonsters(); });
 
 	int count = 0;
 	for (int i = 1; i < gpGlobals->maxEntities; ++i)
@@ -630,6 +671,8 @@ void PrintCombatStatus()
 	{
 		if (!bot.inUse)
 			continue;
+
+		ScopedGame ctx(bot.gameDll);
 
 		const BotCombat::State &st = bot.combat;
 		edict_t *enemy = st.enemy.Get();
@@ -730,6 +773,8 @@ void PrintVantageStatus(const Vector *at)
 		if (!bot.inUse)
 			continue;
 
+		ScopedGame ctx(bot.gameDll);
+
 		++shown;
 		report(bot.name, bot.pEdict->v.origin + bot.pEdict->v.view_ofs);
 
@@ -753,6 +798,8 @@ void PrintFireStatus()
 	{
 		if (!bot.inUse)
 			continue;
+
+		ScopedGame ctx(bot.gameDll);
 
 		++shown;
 
@@ -825,6 +872,8 @@ void PrintDeployStatus()
 		if (!bot.inUse)
 			continue;
 
+		ScopedGame ctx(bot.gameDll);
+
 		++shown;
 
 		const BotDeploy::State &st = bot.deploy;
@@ -852,6 +901,8 @@ void PrintWeaponCarry()
 	{
 		if (!bot.inUse)
 			continue;
+
+		ScopedGame ctx(bot.gameDll);
 
 		++shown;
 
@@ -920,8 +971,15 @@ void OnSound(edict_t *src, int channel, const char *sample, float volume, float 
 	{
 		if (!bot.inUse || bot.pEdict == src)
 			continue;
-		BotSense::Hear(bot, src, pos, volume, attenuation);
+
+		XPlay::EnterGame(bot.gameDll);
+		if (!g_pGameProfile)
+			continue;
+
+		XPlay::InGame(bot.gameDll, [&] { BotSense::Hear(bot, src, pos, volume, attenuation); });
 	}
+
+	XPlay::LeaveGame();
 }
 
 void OnEvent(int flags, const edict_t *pInvoker)
@@ -937,8 +995,15 @@ void OnEvent(int flags, const edict_t *pInvoker)
 	{
 		if (!bot.inUse || bot.pEdict == pInvoker)
 			continue;
-		BotSense::Notice(bot, pInvoker);
+
+		XPlay::EnterGame(bot.gameDll);
+		if (!g_pGameProfile)
+			continue;
+
+		XPlay::InGame(bot.gameDll, [&] { BotSense::Notice(bot, pInvoker); });
 	}
+
+	XPlay::LeaveGame();
 }
 
 void PrintNavStatus()
@@ -947,6 +1012,8 @@ void PrintNavStatus()
 	{
 		if (!bot.inUse)
 			continue;
+
+		ScopedGame ctx(bot.gameDll);
 		Vector origin = bot.pEdict->v.origin;
 		Vector vel = bot.pEdict->v.velocity;
 		Vector angles = bot.pEdict->v.v_angle;

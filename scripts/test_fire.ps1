@@ -69,7 +69,7 @@ param(
     # engagement. Deaths, reloads and the rarer suspicion sources need several
     # fights before they show up, and the pass condition needs only one.
     [switch]$Full,
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
+    [string]$HLDSDir = "D:\hlds"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -431,7 +431,7 @@ function Get-HeldWeapons {
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
-$navDir = Join-Path $HLDSDir "valve\addons\crossbot\nav"
+$navDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
 if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir | Out-Null }
 if (-not (Test-Path (Join-Path $navDir "$mapName.nav"))) {
     & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $hldsMap -o (Join-Path $navDir "$mapName.nav") 2>&1 |
@@ -462,7 +462,7 @@ try {
     if ($Quantum -ge 0) { Invoke-Rcon "crossbot_aim_quantum $Quantum" | Out-Null }
     if ($Impulse -ge 0) { Invoke-Rcon "crossbot_aim_impulse $Impulse" | Out-Null }
 
-    Invoke-Rcon "crossbot_add Fire1" | Out-Null
+    Invoke-Rcon "crossbot_add valve Fire1" | Out-Null
 
     # One bot, so there is never a target and every decision this phase sees is
     # the out-of-combat one. It runs before the others join because that is the
@@ -543,7 +543,7 @@ try {
     if ($selectShots -ne 0) { $failures += "SELECT: $selectShots shot(s) fired with no target on the map" }
 
     Invoke-Rcon "crossbot_fire 0" | Out-Null
-    for ($i = 2; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add Fire$i" | Out-Null }
+    for ($i = 2; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add valve Fire$i" | Out-Null }
 
     Write-Host "`n===== CONTROL: crossbot_fire 0, ${ControlSeconds}s ====="
     Write-Host "Bots roam and pick up guns. Nothing may fire."

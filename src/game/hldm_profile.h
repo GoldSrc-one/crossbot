@@ -8,7 +8,7 @@ public:
 	const char *GetName() const override;
 	unsigned int GetFlags() const override;
 
-	bool Detect() const override;
+	bool Detect(const char *gamedir) const override;
 	bool IsDead(edict_t *pEdict) const override;
 	edict_t *MonsterEnemy(edict_t *ent) const override;
 	float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const override;

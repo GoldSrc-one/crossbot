@@ -3,7 +3,9 @@
 `commands.cpp` registers every server command in `Register()`. They are thin wrappers — the work lives
 in `BotManager` or `Nav`, and each one is documented where that work is.
 
-- `crossbot_add [name]` — add a bot
+- `crossbot_add [gamedir|*] [name]` — add a bot to a loaded game. The first argument is always the
+  game directory; `*` or nothing picks a random playable one, and an unknown name lists what is loaded.
+  A game is playable only with both gamedata and a game profile — see `doc/crossplay.md`.
 - `crossbot_nav_goal <x> <y> <z>` — send all bots to a point
 - `crossbot_teleport <x> <y> <z>` — teleport all bots
 - `crossbot_kill` — suicide every bot; the only way to exercise the respawn path from the console
@@ -281,5 +283,5 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   six stock maps finds none, so those branches would ship untested. Not for playing against — a
   vertical beam in a wide doorway is walked past without anyone noticing it
 
-Output from all of these is `SERVER_PRINT`, so it goes to the HLDS console and `hlds/qconsole.log` —
+Output from all of these is `SERVER_PRINT`, so it goes to the HLDS console and `D:\hlds\qconsole.log` —
 **not** to the stdout of whatever script sent the command over RCON.

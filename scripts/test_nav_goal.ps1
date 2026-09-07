@@ -12,7 +12,7 @@
     5. Send the bot to the goal via crossbot_nav_goal
     6. Poll crossbot_nav_status until goal reached (hasGoal=0) or timeout
        - Timeout = min(2x bot's reported ETA, 60s absolute) [configurable]
-    7. Read trace log written by plugin (valve/addons/crossbot/trace/nav_trace_<map>.txt)
+    7. Read trace log written by plugin (crossplay/addons/crossbot/trace/nav_trace_<map>.txt)
     8. Run navgen --dump-svg --trace to produce nav_debug/<map>.svg with overlay
     9. Also generate .nav file for runtime
     10. Stop HLDS
@@ -38,7 +38,7 @@
     Path to navgen.exe (default: build\tools\navgen\navgen.exe)
 
 .PARAMETER HLDSDir
-    HLDS installation directory (default: D:\projects\trash\crossbot\hlds)
+    HLDS installation directory (default: D:\hlds)
 
 .PARAMETER OutputDir
     Directory for SVG/NAV output (default: nav_debug)
@@ -71,7 +71,7 @@ param(
 
     [string]$NavGenPath = "build\tools\navgen\navgen.exe",
 
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
+    [string]$HLDSDir = "D:\hlds",
 
     [string]$OutputDir = "nav_debug",
 
@@ -147,7 +147,7 @@ if ($Port -eq 0) {
 
 # Map-specific filenames for parallel isolation
 $configName = "_crossbot_autotest_$mapName.cfg"
-$traceCvarPath = "valve/addons/crossbot/trace/nav_trace_$mapName.txt"
+$traceCvarPath = "crossplay/addons/crossbot/trace/nav_trace_$mapName.txt"
 $traceLogPath = Join-Path $HLDSDir $traceCvarPath
 $svgOut = Join-Path $outputDir "$mapName.svg"
 $navOut = Join-Path $outputDir "$mapName.nav"
@@ -182,11 +182,11 @@ if (-not (Test-Path $hldsMapPath) -or (Get-Item $mapPath).LastWriteTime -gt (Get
 }
 
 # --- 0. Run navgen FIRST to generate fresh .nav file ---
-$botNavDir = Join-Path $HLDSDir "valve\addons\crossbot\nav"
+$botNavDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
 if (-not (Test-Path $botNavDir)) { New-Item -ItemType Directory -Path $botNavDir | Out-Null }
 $botNavPath = Join-Path $botNavDir "$mapName.nav"
 
-$botTraceDir = Join-Path $HLDSDir "valve\addons\crossbot\trace"
+$botTraceDir = Join-Path $HLDSDir "crossplay\addons\crossbot\trace"
 if (-not (Test-Path $botTraceDir)) { New-Item -ItemType Directory -Path $botTraceDir | Out-Null }
 
 Write-Host "Running navgen to generate fresh nav file..."
@@ -206,7 +206,7 @@ $bootCommands = @(
     "crossbot_gather 0",
     "crossbot_fun 0",
     "crossbot_deploy 0",
-    "crossbot_add TestBot",
+    "crossbot_add valve TestBot",
     "crossbot_list_spawns",
     "crossbot_list_targets"
 ) + $BootCommands

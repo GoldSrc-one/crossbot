@@ -9,7 +9,7 @@ param(
     [int]$Seconds = 60,
     [int]$Bots = 1,
     [switch]$GatherDebug,
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
+    [string]$HLDSDir = "D:\hlds"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,7 +31,7 @@ function Invoke-Rcon {
 $hldsMapPath = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if ((Resolve-Path $mapPath).Path -ne $hldsMapPath) { Copy-Item $mapPath $hldsMapPath -Force }
 
-$botNavDir = Join-Path $HLDSDir "valve\addons\crossbot\nav"
+$botNavDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
 if (-not (Test-Path $botNavDir)) { New-Item -ItemType Directory -Path $botNavDir | Out-Null }
 & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $mapPath -o (Join-Path $botNavDir "$mapName.nav") 2>&1 |
     Select-Object -Last 3 | ForEach-Object { Write-Host "navgen: $_" }
@@ -52,7 +52,7 @@ try {
 
     if ($GatherDebug) { Invoke-Rcon "crossbot_gather_debug 1" | Out-Null }
 
-    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add Gatherer$i" | Out-Null }
+    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add valve Gatherer$i" | Out-Null }
 
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {

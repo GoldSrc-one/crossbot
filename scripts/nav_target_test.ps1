@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
-$hldsDir = "D:\projects\trash\crossbot\hlds"
+$hldsDir = "D:\hlds"
 
 function Get-Distance3D($ax, $ay, $az, $bx, $by, $bz) {
     return [math]::Sqrt(($ax-$bx)*($ax-$bx) + ($ay-$by)*($ay-$by) + ($az-$bz)*($az-$bz))
@@ -25,7 +25,7 @@ Write-Host "=== crossbot single-target test: $Map ==="
 #        cfg so we don't need a separate rcon round-trip before the bot
 #        exists (same reasoning as nav_spawn_test.ps1). ---
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port -RequireVerbose `
-    -Commands @("crossbot_add TargetTestBot", "crossbot_list_spawns", "crossbot_list_targets")
+    -Commands @("crossbot_add valve TargetTestBot", "crossbot_list_spawns", "crossbot_list_targets")
 
 if ($startResult -match "^EXITED") {
     Write-Host "FAIL: server failed to start ($startResult)"

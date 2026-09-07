@@ -4,13 +4,13 @@
     inventory, adds bots, and polls crossbot_nav_status while they play with it.
 #>
 param(
-    [string]$Map = "hlds\valve\maps\crossfire.bsp",
+    [string]$Map = "maps\crossfire.bsp",
     [int]$Port = 0,
     [int]$Seconds = 180,
     [int]$Bots = 4,
     [switch]$FunDebug,
     [switch]$NoGather,
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
+    [string]$HLDSDir = "D:\hlds"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,7 +32,7 @@ function Invoke-Rcon {
 $hldsMapPath = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if ((Resolve-Path $mapPath).Path -ne $hldsMapPath) { Copy-Item $mapPath $hldsMapPath -Force }
 
-$botNavDir = Join-Path $HLDSDir "valve\addons\crossbot\nav"
+$botNavDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
 if (-not (Test-Path $botNavDir)) { New-Item -ItemType Directory -Path $botNavDir | Out-Null }
 & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $mapPath -o (Join-Path $botNavDir "$mapName.nav") 2>&1 |
     Select-Object -Last 3 | ForEach-Object { Write-Host "navgen: $_" }
@@ -54,7 +54,7 @@ try {
     if ($FunDebug) { Invoke-Rcon "crossbot_fun_debug 1" | Out-Null }
     if ($NoGather) { Invoke-Rcon "crossbot_gather 0" | Out-Null }
 
-    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add Player$i" | Out-Null }
+    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add valve Player$i" | Out-Null }
 
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {

@@ -63,6 +63,7 @@ struct BotAirmoveArc
 struct CBot
 {
 	bool inUse = false;
+	int gameDll = -1;
 	edict_t *pEdict = nullptr;
 	char name[32] = {};
 

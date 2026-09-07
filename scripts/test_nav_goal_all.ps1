@@ -33,7 +33,7 @@
     Path to navgen.exe (default: build\tools\navgen\navgen.exe)
 
 .PARAMETER HLDSDir
-    HLDS installation directory (default: D:\projects\trash\crossbot\hlds)
+    HLDS installation directory (default: D:\hlds)
 
 .PARAMETER OutputDir
     Directory for SVG/NAV output (default: nav_debug)
@@ -57,7 +57,7 @@ param(
     [double]$TimeoutMultiplier = 6.0,
     [int]$Overhead = 120,
     [string]$NavGenPath = "build\tools\navgen\navgen.exe",
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
+    [string]$HLDSDir = "D:\hlds",
     [string]$OutputDir = "nav_debug",
     [string]$MapsDir = "maps",
     [string]$Filter = "*",

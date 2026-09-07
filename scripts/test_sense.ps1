@@ -50,7 +50,7 @@ param(
     [int]$SuspicionSeconds = 30,
     [int]$Bots = 2,
     [switch]$SkipRoam,
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
+    [string]$HLDSDir = "D:\hlds"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,7 +77,7 @@ function Show-AimStatus {
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
-$navDir = Join-Path $HLDSDir "valve\addons\crossbot\nav"
+$navDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
 if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir | Out-Null }
 if (-not (Test-Path (Join-Path $navDir "$mapName.nav"))) {
     & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $hldsMap -o (Join-Path $navDir "$mapName.nav") 2>&1 |
@@ -97,7 +97,7 @@ Write-Host "Server PID=$serverPid"
 try {
     $failed = $false
     Invoke-Rcon "crossbot_gather 0" | Out-Null
-    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add Sense$i" | Out-Null }
+    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add valve Sense$i" | Out-Null }
     Invoke-Rcon "crossbot_sense 1" | Out-Null
 
     $spawnOut = Invoke-Rcon "crossbot_list_spawns"

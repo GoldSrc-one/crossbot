@@ -57,7 +57,7 @@ param(
     [int]$Flicks = 8,
     [float]$Quantum = -1,
     [float]$Impulse = -1,
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
+    [string]$HLDSDir = "D:\hlds"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,7 +78,7 @@ function Invoke-Rcon {
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
-$navDir = Join-Path $HLDSDir "valve\addons\crossbot\nav"
+$navDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
 if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir | Out-Null }
 if (-not (Test-Path (Join-Path $navDir "$mapName.nav"))) {
     & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $hldsMap -o (Join-Path $navDir "$mapName.nav") 2>&1 |
@@ -100,7 +100,7 @@ try {
     Invoke-Rcon "crossbot_sense 0" | Out-Null
     if ($Quantum -ge 0) { Invoke-Rcon "crossbot_aim_quantum $Quantum" | Out-Null }
     if ($Impulse -ge 0) { Invoke-Rcon "crossbot_aim_impulse $Impulse" | Out-Null }
-    Invoke-Rcon "crossbot_add Flicker" | Out-Null
+    Invoke-Rcon "crossbot_add valve Flicker" | Out-Null
     Start-Sleep -Seconds 3
 
     foreach ($scale in $Scales) {

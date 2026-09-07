@@ -42,7 +42,7 @@ param(
     [string]$Phase = "all",
     [int]$Seconds = 150,
     [int]$Port = 29200,
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
+    [string]$HLDSDir = "D:\hlds"
 )
 
 $ErrorActionPreference = "Stop"
@@ -129,7 +129,7 @@ function Test-Tripmine([int]$port) {
     $lines = Invoke-Phase "tripmine" "crossfire" $port @("crossbot_deploy_debug 1") {
         param($p)
         foreach ($n in @("Sap1", "Sap2", "Sap3")) {
-            Rcon $p "crossbot_add $n"
+            Rcon $p "crossbot_add valve $n"
             Start-Sleep -Milliseconds 400
         }
         Start-Sleep -Seconds 3
@@ -175,7 +175,7 @@ function Test-Tripmine([int]$port) {
 function Test-Standoff([int]$port) {
     $lines = Invoke-Phase "standoff" "test2_doorway" $port @("crossbot_deploy_surface 3", "crossbot_deploy_debug 1") {
         param($p)
-        Rcon $p "crossbot_add Miner"
+        Rcon $p "crossbot_add valve Miner"
         Start-Sleep -Seconds 2
         Rcon $p "crossbot_equip weapon_9mmhandgun"
         $goals = @("400 384 32", "128 384 48")
@@ -214,7 +214,7 @@ function Test-Satchel([int]$port) {
     $lines = Invoke-Phase "satchel" "crossfire" $port @() {
         param($p)
         foreach ($n in @("Sap1", "Sap2", "Sap3", "Sap4")) {
-            Rcon $p "crossbot_add $n"
+            Rcon $p "crossbot_add valve $n"
             Start-Sleep -Milliseconds 400
         }
         Start-Sleep -Seconds 3

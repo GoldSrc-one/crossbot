@@ -700,7 +700,7 @@ void BotSense::RefreshMonsters()
 			break;
 
 		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-		if (!ent || ent->free || !ent->pvPrivateData)
+		if (!ent || ent->free || !CBotPrivateData(ent))
 			continue;
 		if ((ent->v.flags & FL_MONSTER) == 0)
 			continue;

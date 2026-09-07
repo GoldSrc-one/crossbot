@@ -1872,7 +1872,7 @@ namespace
 		if (bot.traceLog.empty())
 			return;
 		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_trace_path");
-		const char *path = (cvar && cvar->string && cvar->string[0]) ? cvar->string : "valve/addons/crossbot/trace/nav_trace.txt";
+		const char *path = (cvar && cvar->string && cvar->string[0]) ? cvar->string : "crossplay/addons/crossbot/trace/nav_trace.txt";
 		FILE *f = fopen(path, "w");
 		if (f)
 		{

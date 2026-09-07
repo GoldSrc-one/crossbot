@@ -37,7 +37,7 @@ edict_t *ItemEdict(edict_t *player, void *item, int slot)
 	if (index < 1 || index >= gpGlobals->maxEntities)
 		GameData::Fatal("inventory slot %d of %s holds an item whose edict index is %d", slot, PlayerName(player), index);
 
-	if (ent->pvPrivateData != item)
+	if (CBotPrivateData(ent) != item)
 		GameData::Fatal("inventory slot %d of %s holds an item its own edict #%d does not point back at", slot, PlayerName(player), index);
 
 	return ent;
@@ -52,10 +52,10 @@ void Read(edict_t *player, BotInventory &out)
 {
 	out = BotInventory();
 
-	if (!player || player->free || !player->pvPrivateData)
+	if (!player || player->free || !CBotPrivateData(player))
 		return;
 
-	void *priv = player->pvPrivateData;
+	void *priv = CBotPrivateData(player);
 
 	out.nextAttack = Peek<float>(priv, g_offsets.mon_flNextAttack);
 
@@ -111,10 +111,10 @@ void Read(edict_t *player, BotInventory &out)
 // known id. 0 means "no idea", which is never a weapon.
 int ActiveWeaponId(edict_t *player)
 {
-	if (!player || player->free || !player->pvPrivateData)
+	if (!player || player->free || !CBotPrivateData(player))
 		return 0;
 
-	void *item = Peek<void *>(player->pvPrivateData, g_offsets.plr_pActiveItem);
+	void *item = Peek<void *>(CBotPrivateData(player), g_offsets.plr_pActiveItem);
 	if (!item)
 		return 0;
 

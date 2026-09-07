@@ -40,7 +40,7 @@ param(
     [int]$Seconds = 150,
     [int]$Bots = 4,
     [int]$Port = 29300,
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds"
+    [string]$HLDSDir = "D:\hlds"
 )
 
 $ErrorActionPreference = "Stop"
@@ -111,7 +111,7 @@ function Rcon([int]$port, [string]$cmd) {
 # win, and a bot that spawned with a crowbar would confound the two.
 function Start-SnarkFight([int]$port, [int]$seconds) {
     for ($i = 1; $i -le $Bots; $i++) {
-        Rcon $port "crossbot_add Snark$i"
+        Rcon $port "crossbot_add valve Snark$i"
         Start-Sleep -Milliseconds 400
     }
     Start-Sleep -Seconds 3

@@ -11,7 +11,7 @@
 
 cvar_t g_tracePathCvar = {
 	"crossbot_trace_path",
-	"valve/addons/crossbot/trace/nav_trace.txt",
+	"crossplay/addons/crossbot/trace/nav_trace.txt",
 	FCVAR_SERVER
 };
 
@@ -240,7 +240,7 @@ cvar_t g_perfSpikeCvar = {
 void GameDLLInit()
 {
 	BotPerf::InstallTraceWrappers();
-	GameData::Load();
+	GameData::LoadAll();
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);

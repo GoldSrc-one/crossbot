@@ -3020,7 +3020,7 @@ first two are the `HitQualifies` idiom from `bot_avoid.cpp` minus the solid-clas
 runtime and navgen must agree on that list, which is why it is one function and not two.
 
 ### WriteTraceLog
-Writes bot trajectory trace to file specified by crossbot_trace_path cvar (defaults to valve/addons/crossbot/trace/nav_trace.txt).
+Writes bot trajectory trace to file specified by crossbot_trace_path cvar (defaults to crossplay/addons/crossbot/trace/nav_trace.txt).
 Verbose builds only. The `bot.traceLog` append in `Bot_MoveNav` is inside `#if BOT_VLOG_ON`, so in a
 `-DCROSSBOT_VERBOSE=OFF` build the vector is empty and this returns at its first line -- no file, no
 print. Every bot writes the same path, so the file is only meaningful with one bot on the server;

@@ -1,6 +1,7 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+#include "crossplay.h"
 #include "ent_handle.h"
 
 const char *CBotPlayerNameOf(const edict_t *ent)
@@ -20,7 +21,15 @@ const char *CBotTargetNameOf(const edict_t *ent)
 	return CBotClassOf(ent);
 }
 
+void *CBotPrivateData(const edict_t *ent)
+{
+	return XPlay::PrivateData(ent, XPlay::Current());
+}
+
 bool CBotIsLivePlayer(const edict_t *ent)
 {
-	return ent && !ent->free && ent->pvPrivateData && (ent->v.flags & FL_CLIENT) != 0;
+	if (!ent || ent->free || (ent->v.flags & FL_CLIENT) == 0)
+		return false;
+
+	return XPlay::PrivateData(ent, XPlay::OwnerOf(ent)) != nullptr;
 }

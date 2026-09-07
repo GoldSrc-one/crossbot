@@ -11,6 +11,7 @@
 #include "../bot/bot_manager.h"
 #include "../bot/bot_move_nav.h"
 #include "../bot/bot_weapons.h"
+#include "../game/crossplay.h"
 #include "../game/ent_handle.h"
 #include "../game/game_profile.h"
 #include "../game/give_item.h"
@@ -30,6 +31,13 @@ namespace
 	constexpr unsigned int kSuitBit = 1u << 31;
 
 	const char *PlayerNameOf(edict_t *ent) { return CBotPlayerNameOf(ent); }
+
+	struct ScopedGame
+	{
+		explicit ScopedGame(int iGame) { XPlay::EnterGame(iGame); }
+		explicit ScopedGame(const edict_t *ent) { XPlay::EnterGame(XPlay::OwnerOf(ent)); }
+		~ScopedGame() { XPlay::LeaveGame(); }
+	};
 
 	bool IsLivePlayer(edict_t *ent) { return CBotIsLivePlayer(ent); }
 
@@ -109,6 +117,7 @@ namespace
 				return;
 			}
 
+			ScopedGame ctx(ent);
 			if (CBot *bot = BotManager::FindBot(ent))
 			{
 				PrintInventory(ent, bot->inventory);
@@ -133,6 +142,7 @@ namespace
 			if (!bot)
 				continue;
 
+			ScopedGame ctx(bot->gameDll);
 			PrintInventory(ent, bot->inventory);
 			++shown;
 		}
@@ -351,12 +361,6 @@ namespace
 
 	void Cmd_CrossBotWeaponSpec()
 	{
-		if (!g_pGameProfile)
-		{
-			SERVER_PRINT("CrossBot: no game profile detected.\n");
-			return;
-		}
-
 		if (CMD_ARGC() > 1)
 		{
 			edict_t *ent = FindPlayerByName(CMD_ARGV(1));
@@ -364,6 +368,16 @@ namespace
 			{
 				char msg[128];
 				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(1));
+				SERVER_PRINT(msg);
+				return;
+			}
+
+			ScopedGame ctx(ent);
+			if (!g_pGameProfile)
+			{
+				char msg[160];
+				snprintf(msg, sizeof(msg), "CrossBot: '%s' has no game profile.\n",
+					XPlay::GameDir(XPlay::OwnerOf(ent)));
 				SERVER_PRINT(msg);
 				return;
 			}
@@ -485,7 +499,7 @@ namespace
 		TraceResult tr;
 		TRACE_LINE(eye, want, ignore_monsters, player, &tr);
 
-		edict_t *ent = GiveItem::Spawn(classname, tr.vecEndPos);
+		edict_t *ent = GiveItem::Spawn(XPlay::OwnerOf(player), classname, tr.vecEndPos);
 
 		char msg[192];
 		if (!ent)
@@ -542,10 +556,48 @@ namespace
 			SERVER_PRINT("CrossBot: no bots connected.\n");
 	}
 
+	void PrintLoadedGames()
+	{
+		char line[256];
+		for (int i = 0; i < XPlay::NumGames(); ++i)
+		{
+			snprintf(line, sizeof(line), "  %s%s\n", XPlay::GameDir(i),
+				XPlay::Supported(i) ? "" : " (not playable)");
+			SERVER_PRINT(line);
+		}
+	}
+
 	void Cmd_CrossBotAdd()
 	{
-		const char *name = CMD_ARGC() > 1 ? CMD_ARGV(1) : nullptr;
-		BotManager::AddBot(name);
+		const char *dir = CMD_ARGC() > 1 ? CMD_ARGV(1) : nullptr;
+		const char *name = CMD_ARGC() > 2 ? CMD_ARGV(2) : nullptr;
+
+		int iGame;
+		if (!dir || !dir[0] || strcmp(dir, "*") == 0)
+		{
+			iGame = XPlay::PickRandomSupported();
+			if (iGame < 0)
+			{
+				SERVER_PRINT("CrossBot: no playable game is loaded.\n");
+				PrintLoadedGames();
+				return;
+			}
+		}
+		else
+		{
+			iGame = XPlay::FindGame(dir);
+			if (iGame < 0)
+			{
+				char msg[192];
+				snprintf(msg, sizeof(msg),
+					"usage: crossbot_add [gamedir|*] [name] -- '%s' is not a loaded game. Loaded:\n", dir);
+				SERVER_PRINT(msg);
+				PrintLoadedGames();
+				return;
+			}
+		}
+
+		BotManager::AddBot(iGame, name);
 	}
 
 	void Cmd_CrossBotNavGoal()

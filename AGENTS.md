@@ -2,10 +2,14 @@
 
 CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh-driven bots. The runtime plugin (`crossbot_mm.dll`) and an offline nav-graph compiler (`navgen.exe`) share the planning/steering code verbatim via `src/nav/`.
 
+It runs inside **CrossPlay**, a hyper-game that loads several real game DLLs into one HLDS at once, so
+every bot belongs to a game and the plugin talks to game state through `crossplay_api.h` — see
+`doc/crossplay.md` before touching anything that reads private data or calls into a game DLL.
+
 How the systems actually work lives in `doc/`, one file per system, keyed by source file: `doc/navgen.md`,
-`doc/nav.md`, `doc/bot.md`, `doc/game.md`, `doc/console.md`, plus `doc/testing.md` for the scripts. This
-file is build, commands and house rules only. If you find yourself explaining behaviour here, it belongs
-in `doc/`.
+`doc/nav.md`, `doc/bot.md`, `doc/game.md`, `doc/console.md`, `doc/crossplay.md`, plus `doc/testing.md`
+for the scripts. This file is build, commands and house rules only. If you find yourself explaining
+behaviour here, it belongs in `doc/`.
 
 ## Code Style
 
@@ -23,20 +27,25 @@ in `doc/`.
   Every debug dump is a `--dump-*` flag on navgen, so a run is reproducible from its command line alone
   and shows up in `--help`.
 
-- **Everything the plugin reads at runtime lives under `<gamedir>/addons/crossbot/`** next to the DLL:
-  `gamedata/<gamedir>-<win|linux>.json` (member offsets into the game DLL's private data), `nav/<map>.nav`,
-  and `trace/`. `build.bat` creates all three and deploys `gamedata/` from the repo. Missing or wrong
-  gamedata **kills the server on purpose** — see `doc/game.md`, `gamedata.cpp`.
+- **Never touch anything that belongs to CrossPlay.** Not the code behind `external/crossplay/`
+  (machine-local symlinks into the CrossPlay project; `crossplay_api.h` is read-only to us), not its
+  deployed data (`D:\hlds\crossplay\` — `liblist.gam`, `server.cfg`, `mapcycle.txt`, `crossplay.smc`,
+  `gamedata\`, `addons\metamod\`), and not the `gEntityOwners` array. CrossBot writes exactly one place:
+  `D:\hlds\crossplay\addons\crossbot\`. Registering the plugin in `addons/metamod/plugins.ini` is a
+  manual, operator-owned step; the scripts warn when it is missing and never edit it.
 
-- **Coordinate conventions (GoldSrc / Hammer):**
-  - X = East, Y = North, Z = Up (right-handed)
-  - SVG debug view: Y is flipped (screen Y down), so world Y+ = North = SVG Y-
+- **What the plugin reads at runtime**: `crossplay/gamedata/<gamedir>-<win|linux>.json`, one per loaded
+  game (**CrossPlay's, not ours**), plus `nav/<map>.nav` and `trace/` under
+  `crossplay/addons/crossbot/`, which `build.bat` creates. A game with missing or wrong gamedata is
+  disabled for bots with a printed reason; a bad offset **read** still kills the server on purpose —
+  see `doc/game.md`, `gamedata.cpp`.
+
+- **Coordinates (GoldSrc / Hammer):** X = East, Y = North, Z = Up (right-handed). The SVG debug view
+  flips Y (screen Y down), so world Y+ = North = SVG Y-.
 
 ## Build & Commands
 
-### Prerequisites
-- Visual Studio 2022 (x86 build tools) + Windows 10 SDK
-- CMake 3.20+, Ninja
+Visual Studio 2022 (x86 build tools) + Windows 10 SDK, CMake 3.20+, Ninja.
 
 ### Build
 ```powershell
@@ -45,32 +54,31 @@ in `doc/`.
 
 Just do `& .\build.bat`, you are in powershell, so just do that. No fucking bullshit with cmd /c or trying to build it yourself. Enough of that shit!
 
-It builds **both** targets and then copies `crossbot_mm.dll` into `hlds\valve\addons\crossbot\`. Build
-them together — the plugin once sat broken for several commits because only `navgen` was built.
+It builds **both** targets and then copies `crossbot_mm.dll` into `D:\hlds\crossplay\addons\crossbot\`.
+Build them together — the plugin once sat broken for several commits because only `navgen` was built.
+`crossbot_mm` links against `external/crossplay/crossplay.lib`; that symlink points at a **Debug** build
+of `crossplay.dll`, so CrossPlay's own asserts are live and will name any context rule you break.
 
 The copy fails if the file is locked, which means a server is still up. Only the *copy* fails: a rerun
 after the server exits reports `ninja: no work to do` and still deploys, so until that rerun the
 deployed plugin is stale while everything looks fine. **Check for the `build.bat: deployed
-crossbot_mm.dll` line before believing any runtime result.**
-
-### Output
-- `navgen.exe` → `build\tools\navgen\navgen.exe`
-- `crossbot_mm.dll` → `build\crossbot_mm.dll`
+crossbot_mm.dll` line before believing any runtime result.** Output lands in
+`build\tools\navgen\navgen.exe` and `build\crossbot_mm.dll`.
 
 ### Run navgen
 ```powershell
 .\build\tools\navgen\navgen.exe maps\test1_simple.bsp -o out.nav
 ```
+No arguments gives the authoritative flag list; `doc/navgen.md` says what each dump means. Test maps
+live in `maps/`. `.\scripts\generate_all_svgs.ps1` runs navgen over all of them into `nav_debug/` and
+regenerates the debug gallery's `index.html`.
 
-Run `navgen.exe` with no arguments for the authoritative flag list; `doc/navgen.md` says what each dump
-means and how to read it. Test maps live in `maps/`.
-
-### Batch generate SVGs for all maps
+### Run the server by hand
 ```powershell
-.\scripts\generate_all_svgs.ps1
+D:\hlds\hlds.exe -console -game crossplay -xgame1 valve -sgame1 valve +map crossfire
 ```
-Runs navgen on every `.bsp` in `maps/`, writes `.svg` and `.nav` files to `nav_debug/`, and regenerates
-`nav_debug/index.html` for the debug gallery.
+`-xgameN` is what CrossPlay loads as `gGameDirs[N-1]`; `-sgameN` is the engine's content search path for
+the same mod. Add a bot with `crossbot_add <gamedir> [name]` — see `doc/console.md`.
 
 ### Automatic nav goal test (full HLDS run)
 ```powershell
@@ -78,7 +86,9 @@ Runs navgen on every `.bsp` in `maps/`, writes `.svg` and `.nav` files to `nav_d
 ```
 
 The script's own output is the pass/fail verdict only. Everything the plugin printed goes to
-`nav_debug\logs\<map>_server.log` for that run (and, shared across runs, `hlds\qconsole.log`).
+`nav_debug\logs\<map>_server.log` for that run (and, shared across runs, `D:\hlds\qconsole.log`). The
+tests drive the live `D:\hlds` install: they add maps to `valve\maps\`, write under
+`crossplay\addons\crossbot\`, and touch nothing else.
 
 ### Sweep every map
 ```powershell
@@ -87,31 +97,17 @@ The script's own output is the pass/fail verdict only. Everything the plugin pri
 Per-map transcripts in `nav_debug\logs\`. Raising `-MaxParallel` past the default 6 loads the box enough
 to change bot behaviour — see `doc/testing.md` before trading that for wall clock.
 
-### Test combat
-```powershell
-.\scripts\test_fire.ps1
-```
-The nav sweep cannot see firing -- one bot per server means no target. `-Full` for the rarer cases.
-
-### Test deployables
-```powershell
-.\scripts\test_deploy.ps1
-```
-Tripmines, satchels and beam avoidance. The nav sweep runs with `crossbot_deploy 0` -- mines change
-every route. `-Phase` runs one of gates/tripmine/standoff/satchel.
+`.\scripts\test_fire.ps1` covers combat (`-Full` for the rarer cases) and `.\scripts\test_deploy.ps1`
+covers tripmines, satchels and beam avoidance (`-Phase` gates/tripmine/standoff/satchel). The nav sweep
+sees neither: one bot per server means no target, and it runs with `crossbot_deploy 0`.
 
 ### Sweep the mesh, then the routes
-```powershell
-& .\.claude\skills\crossbot-navgen\scripts\sweep.ps1 -Out before.txt
-```
 ```powershell
 Get-ChildItem maps\*.bsp | ForEach-Object { $n=$_.Name
     & .\build\tools\navgen\navgen.exe $_.FullName --dump-path 2>&1 |
         Select-String '^  wp' | ForEach-Object { "${n}: $_" } } | Set-Content before_wp.txt
 ```
 
-**Never judge a change on one map.** What each sweep covers, which one a given change needs, and the
-options and behaviour of `test_nav_goal.ps1` are in `doc/testing.md`. The `crossbot-nav` and
-`crossbot-navgen` skills have the technique for reading the diffs.
-
-- `scripts/nav_target_test.ps1` greps qconsole.log for "CrossBot: <name> reached goal" lines
+**Never judge a change on one map.** What each sweep covers and which one a given change needs is in
+`doc/testing.md`. `scripts/nav_target_test.ps1` greps qconsole.log for
+`CrossBot: <name> reached goal`.

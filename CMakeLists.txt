@@ -26,6 +26,7 @@ endif()
 
 set(HLSDK_DIR ${CMAKE_SOURCE_DIR}/external/hlsdk)
 set(METAMOD_DIR ${CMAKE_SOURCE_DIR}/external/metamod)
+set(CROSSPLAY_DIR ${CMAKE_SOURCE_DIR}/external/crossplay)
 
 file(GLOB CROSSBOT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
@@ -46,6 +47,7 @@ target_include_directories(crossbot_mm PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/navgen
     ${CMAKE_SOURCE_DIR}/external/jsmn
+    ${CROSSPLAY_DIR}
     ${HLSDK_DIR}/common
     ${HLSDK_DIR}/dlls
     ${HLSDK_DIR}/engine
@@ -54,6 +56,8 @@ target_include_directories(crossbot_mm PRIVATE
     ${HLSDK_DIR}/public
     ${METAMOD_DIR}
 )
+
+target_link_directories(crossbot_mm PRIVATE ${CROSSPLAY_DIR})
 
 set_target_properties(crossbot_mm PROPERTIES
     PREFIX ""

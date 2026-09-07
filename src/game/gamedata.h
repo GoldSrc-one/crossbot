@@ -65,7 +65,11 @@ namespace GameData
 		return *reinterpret_cast<T *>(reinterpret_cast<char *>(base) + offset);
 	}
 
-	void Load();
+	void LoadAll();
+
+	bool Loaded(int iGame);
+
+	void Activate(int iGame);
 
 	void Fatal(const char *fmt, ...);
 }

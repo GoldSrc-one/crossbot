@@ -11,6 +11,7 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+#include "../game/crossplay.h"
 #include "bsp_file.h"
 #include "clipnode_tree.h"
 #include "blocking_entities.h"
@@ -218,11 +219,8 @@ void LoadForMap(const char *mapName)
 	Clear();
 	InitFrequency();
 
-	char gamedir[256] = {0};
-	g_engfuncs.pfnGetGameDir(gamedir);
-
 	char bspPath[512];
-	snprintf(bspPath, sizeof(bspPath), "%s/maps/%s.bsp", gamedir, mapName);
+	XPlay::FindMapBsp(mapName, bspPath, sizeof(bspPath));
 
 	try
 	{

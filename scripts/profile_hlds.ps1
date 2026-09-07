@@ -7,7 +7,7 @@ param(
     [double]$PerfInterval = 10,
     [double]$SpikeMs = 3,
     [string]$OutDir = "",
-    [string]$HLDSDir = "D:\projects\trash\crossbot\hlds",
+    [string]$HLDSDir = "D:\hlds",
     [string]$UProf = "D:\Program Files\AMD\AMDuProf\bin\AMDuProfCLI.exe",
     [switch]$NoProfiler,
     [switch]$NoConDebug,
@@ -31,14 +31,16 @@ $sessionDir = Join-Path $OutDir "uprof_$($Map)_$stamp"
 $exe = Join-Path $HLDSDir "hlds.exe"
 if (-not (Test-Path $exe)) { throw "hlds.exe not found at $exe" }
 
-$inFile = "$logFile.in"
 $errFile = "$logFile.err"
-Set-Content -Path $inFile -Value "" -NoNewline
+
+# cmd.exe runs in $HLDSDir, so its redirection targets have to be absolute.
+$logFile = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $logFile))
+$errFile = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $errFile))
 
 $launchArgs = @("-console")
 if (-not $NoConDebug) { $launchArgs += "-condebug" }
 $launchArgs += @(
-    "-insecure", "-game", "valve",
+    "-insecure", "-game", "crossplay", "-xgame1", "valve", "-sgame1", "valve",
     "+sv_lan", "1", "+deathmatch", "1", "+developer", "1",
     "+maxplayers", "32",
     "+rcon_password", "crossbot_test", "+port", "$Port",
@@ -51,22 +53,27 @@ if ($NullStdout) {
     $stdoutTarget = "NUL"
     Remove-Item (Join-Path $HLDSDir "qconsole.log") -ErrorAction SilentlyContinue
 }
-$proc = Start-Process -FilePath $exe -ArgumentList $launchArgs `
-    -WorkingDirectory $HLDSDir -NoNewWindow -PassThru `
-    -RedirectStandardOutput $stdoutTarget -RedirectStandardError $errFile -RedirectStandardInput $inFile
+# Real pipe on stdin, and RCON for readiness -- see the long note in test_server_start.ps1.
+$quoted = $launchArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+$inner = 'waitfor /t 36000 cbstdin{0} | "{1}" {2} 1>"{3}" 2>"{4}"' -f `
+    ($Port, $exe, ($quoted -join ' '), $stdoutTarget, $errFile)
+Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $inner) `
+    -WorkingDirectory $HLDSDir -NoNewWindow | Out-Null
 
 $deadline = (Get-Date).AddSeconds(60)
 $ready = $false
 while ((Get-Date) -lt $deadline) {
-    $proc.Refresh()
-    if ($proc.HasExited) { break }
-    $probe = if ($NullStdout) { Join-Path $HLDSDir "qconsole.log" } else { $logFile }
-    $head = Get-Content $probe -Raw -ErrorAction SilentlyContinue
-    if ($head -match "player server started") { $ready = $true; break }
+    $probe = & "$PSScriptRoot\rcon.ps1" -Port $Port -Command "echo crossbot_ready" -FirstTimeoutMs 1000 | Out-String
+    if ($probe -match "crossbot_ready") { $ready = $true; break }
     Start-Sleep -Milliseconds 250
 }
-if (-not $ready) {
-    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+
+$found = Get-CimInstance Win32_Process -Filter "Name='hlds.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match "\+port\s+$Port(\s|$)" }
+$proc = if ($found) { Get-Process -Id (@($found)[0].ProcessId) -ErrorAction SilentlyContinue } else { $null }
+
+if (-not $ready -or -not $proc) {
+    if ($proc) { Stop-Process -Id $proc.Id -Force }
     throw "server did not come up; see $logFile"
 }
 Write-Host "profile_hlds: server up, pid $($proc.Id)"
@@ -92,7 +99,7 @@ Rcon "crossbot_perf 0"
 foreach ($c in $ExtraCommands) { Rcon $c }
 
 for ($i = 1; $i -le $Bots; $i++) {
-    Rcon "crossbot_add PerfBot$i"
+    Rcon "crossbot_add valve PerfBot$i"
 }
 Write-Host "profile_hlds: requested $Bots bots, warming up ${WarmupSeconds}s"
 Start-Sleep -Seconds $WarmupSeconds

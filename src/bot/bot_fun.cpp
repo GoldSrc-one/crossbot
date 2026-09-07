@@ -128,7 +128,7 @@ namespace
 
 	void *Priv(edict_t *ent)
 	{
-		return ent ? ent->pvPrivateData : nullptr;
+		return CBotPrivateData(ent);
 	}
 
 	bool PeekInt(edict_t *ent, int offset, int &out)

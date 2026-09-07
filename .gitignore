@@ -1,7 +1,3 @@
-# Local test environment (large binary downloads, not part of source)
-/hlds/
-/hlds-do-not-use/
-
 # Build output
 /build/
 
@@ -9,11 +5,11 @@
 .vs/
 *.user
 
-# Depot download tool
-/depotdownloader/
-
 nav_debug/
 maps/*.lin
 maps/*.pts
 
 graveyard/
+
+# Machine-local symlinks into the CrossPlay project (crossplay_api.h, crossplay.lib)
+external/crossplay/

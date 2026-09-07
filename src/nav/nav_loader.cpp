@@ -7,6 +7,7 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+#include "../game/crossplay.h"
 #include "bsp_checksum.h"
 #include "nav_format.h"
 
@@ -31,11 +32,8 @@ bool ReadArray(FILE *f, uint32_t count, std::vector<T> &out)
 
 std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 {
-	char gamedir[256] = {0};
-	g_engfuncs.pfnGetGameDir(gamedir);
-
 	char navPath[512];
-	snprintf(navPath, sizeof(navPath), "%s/addons/crossbot/nav/%s.nav", gamedir, mapName);
+	snprintf(navPath, sizeof(navPath), "%s/addons/crossbot/nav/%s.nav", XPlay::HyperDir(), mapName);
 
 	FILE *f = std::fopen(navPath, "rb");
 	if (!f)
@@ -86,7 +84,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	}
 
 	char bspPath[512];
-	snprintf(bspPath, sizeof(bspPath), "%s/maps/%s.bsp", gamedir, mapName);
+	XPlay::FindMapBsp(mapName, bspPath, sizeof(bspPath));
 	uint32_t liveChecksum = ComputeLiveBspChecksum(bspPath);
 	if (liveChecksum == 0)
 	{

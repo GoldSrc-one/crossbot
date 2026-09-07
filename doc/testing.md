@@ -41,6 +41,20 @@ server log and outputs; `crossbot_trace_path` isolates the trace log per instanc
 *not* isolated is `nav_debug/index.html`, so parallel callers must pass `-NoIndexUpdate` and rebuild it
 once at the end — concurrent read-modify-write on it loses results.
 
+**Every test drives the live `D:\hlds` install, through CrossPlay.** `test_server_start.ps1` launches
+`hlds.exe -game crossplay -xgame1 valve -sgame1 valve` (`-GameDir` and `-Games` override both), so the
+tests share the install with any real server you run there. What they write is deliberately narrow:
+maps into `valve\maps\`, nav and traces under `crossplay\addons\crossbot\`, and a uniquely-named
+`-ConfigName` cfg into `crossplay\`. They never touch `server.cfg`, `mapcycle.txt`, `liblist.gam` or
+`plugins.ini` — see `doc/crossplay.md`.
+
+Two preflight warnings come out of the same script: the plugin is not listed in
+`crossplay\addons\metamod\plugins.ini` (so it will not load at all), or the deployed
+`crossbot_mm.dll` is older than `build\crossbot_mm.dll` (so you are testing a stale build). Neither
+stops the run; both mean the result is not about the code you just changed.
+
+Bots now belong to a game, so every scripted `crossbot_add` names one: `crossbot_add valve TestBot`.
+
 **The server is invisible, not absent.** `test_server_start.ps1` launches `hlds.exe` with
 `-NoNewWindow` and its stdout/stderr redirected. The binary is console-subsystem, so it is created with
 no console at all rather than being shown and hidden after the fact: nothing flashes, nothing steals
@@ -50,7 +64,7 @@ the engine printing `player server started` into that log, not a window handle a
 **The plugin's output is now per-instance.** Every `SERVER_PRINT` — `Repath`, `Replan`, the air-move
 launch and landing lines — goes to `<OutputDir>/logs/<map>_server.log` for that run alone. A run that
 passes tells you nothing about *why*; that log is where the route, the failures and the penalties are.
-`hlds/qconsole.log` still receives everything too (via `-condebug`), but it is shared across concurrent
+`D:\hlds\qconsole.log` still receives everything too (via `-condebug`), but it is shared across concurrent
 instances and appended to, so prefer the per-map log and read qconsole by tail if you use it at all.
 
 ## scripts/test_nav_goal_all.ps1
@@ -118,9 +132,9 @@ the ignore table exists to break.
 candidate scan — every item, its area, its cost in seconds or why it was skipped — into the same log.
 That is the view that answers "why did it go *there*"; the outcome lines only say what happened.
 
-**`pool_party` is the map for healing volumes**, and the only one in `hlds/valve/maps` that has one:
+**`pool_party` is the map for healing volumes**, and the only one in `D:\hlds\valve\maps` that has one:
 
-    pwsh -File scripts/test_items.ps1 -Map hldsalve\maps\pool_party.bsp -Bots 5 -Seconds 180 -GatherDebug
+    pwsh -File scripts/test_items.ps1 -Map D:\hlds\valve\maps\pool_party.bsp -Bots 5 -Seconds 180 -GatherDebug
 
 Five bots, because nothing selects a pool until something has hurt it — a lone bot stays at 100 and
 every scan line reads `no need`. The cycle to look for is `reached trigger_hurt at 66, wading in`
@@ -146,7 +160,7 @@ log to read. It runs navgen, boots HLDS, prints `crossbot_list_fun`, adds bots, 
 `crossbot_nav_status` every 10 s, prints `crossbot_list_fun` again at the end, and tails the
 decisions out of `nav_debug/logs/<map>_fun.log`.
 
-    pwsh -File scripts/test_fun.ps1 -Map hlds\valve\maps\stalkyard.bsp -Bots 3 -Seconds 120
+    pwsh -File scripts/test_fun.ps1 -Map D:\hlds\valve\maps\stalkyard.bsp -Bots 3 -Seconds 120
 
 `-FunDebug` sets `crossbot_fun_debug 1`; `-NoGather` sets `crossbot_gather 0`, which strips the
 detour lines out and leaves only the tier's own decisions.
@@ -646,10 +660,10 @@ There is no dedicated script. `BotCombat` needs several bots fighting on a real 
 log than through that script's assertions:
 
 ```powershell
-$log = "hlds\logs\combat.log"
+$log = "D:\hlds\logs\combat.log"
 .\scripts\test_server_start.ps1 -Map crossfire -Port 29015 -LogFile $log -Commands @(
   "crossbot_combat_debug 1",
-  "crossbot_add bot1","crossbot_add bot2","crossbot_add bot3","crossbot_add bot4")
+  "crossbot_add valve bot1","crossbot_add valve bot2","crossbot_add valve bot3","crossbot_add valve bot4")
 ```
 
 Two minutes of that is enough for every rule to fire at least once. What to check in the log:
@@ -953,7 +967,7 @@ frame, and dividing by 32 understates the per-bot figure by about 5%.
 
 `-NoProfiler` skips uProf and just sleeps, which is the usual mode: the zone report is the part that
 attributes, and uProf only adds the module split. `-NullStdout` sends the server's stdout to `NUL` and
-reads readiness and results from `hlds\qconsole.log` instead. That is not a convenience -- a blocking
+reads readiness and results from `D:\hlds\qconsole.log` instead. That is not a convenience -- a blocking
 `WriteFile` on the redirected stdout pipe costs roughly 700us per `SERVER_PRINT`, enough to dominate
 any zone that logs, so a run measuring a chatty code path has to say which of the two it is measuring.
 `-NoConDebug` drops `-condebug`, which by contrast changes almost nothing.

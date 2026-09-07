@@ -141,9 +141,13 @@ These two are also now asked *before* travelling and not only on arrival — see
 
 The bot's only way into the game DLL's own data. `edict_t::v` (`entvars_t`) is a shared struct the
 engine defines, so the plugin can read it directly; everything else a `CBasePlayer` knows — the
-inventory, clips, ammo counts, attack timers — lives behind `edict->pvPrivateData`, which is an opaque
-blob of a class the plugin has no header for. `gamedata/valve-win.json` is a dump of that class layout
+inventory, clips, ammo counts, attack timers — lives behind the entity's private data, which is an
+opaque blob of a class the plugin has no header for. `valve-win.json` is a dump of that class layout
 for retail `hl.dll`, and `GameOffsets` is the handful of byte offsets out of it that the bot needs.
+
+Under CrossPlay there is one such blob *per loaded game per edict*, and `edict->pvPrivateData` only
+points at the right one inside a game context. Nothing here dereferences it directly: reads go through
+`CBotPrivateData(ent)`, which resolves `gEntityObjects[currentGame][ent]`. See `doc/crossplay.md`.
 
 ### Offsets are absolute, not per-class
 
@@ -278,25 +282,35 @@ deployment whose `gamedata/valve-win.json` predates the change.
 are deliberately **not** requested. The path is rebuilt from the entity lump instead, and the control
 box is reconstructed from `pev->mins`/`pev->maxs` with `maxs.z += 72`, exactly as `Spawn` computes it.
 
-### Every failure is fatal
+### A bad read is fatal; a missing file is not
 
 A wrong offset is a wild read into another object's memory, which corrupts silently and crashes
-somewhere unrelated. So there is no degraded mode and no validity flag anywhere in this feature: a
-missing file, unparseable JSON, an absent field, or a `pev` that is not 4 all go through
-`GameData::Fatal`, which prints the reason and takes the server down. A deployment that cannot describe
-its own game DLL is a bug to fix before the server runs, not a condition to survive.
+somewhere unrelated. So there is no degraded mode once the bot is *using* an offset: the consistency
+checks in `bot_weapons.cpp` go through `GameData::Fatal`, which prints the reason and takes the server
+down.
 
-### Loaded at GameDLLInit, keyed by gamedir
+Loading is the one place that had to soften. CrossPlay routinely loads games CrossBot has no data for,
+and killing the server over `dod` would take `valve` with it. `LoadOne` returns a reason string instead
+of aborting — unreadable file, unparseable JSON, an absent field, a `pev` that is not 4 — and
+`LoadAll` prints it and leaves that game's flag false. A game without usable gamedata is simply not
+playable: `XPlay::Supported` is false for it, and `crossbot_add` refuses it by name.
 
-`GameData::Load` runs from `GameDLLInit` (`dll_hooks.cpp`), not from `ServerActivate`: offsets cannot
-change while `hl.dll` stays mapped, so it parses once per DLL load rather than once per map, and it
-guards itself with a file-static flag.
+### Loaded at GameDLLInit, one table per loaded game
 
-It is keyed by gamedir — `<gamedir>/addons/crossbot/gamedata/<gamedir>-<win|linux>.json` — and not by
-`IGameProfile`, for two reasons. `CHLDMProfile::Detect` reads `gpGlobals->deathmatch_`, which the
-engine only fills in once it spawns a server, so profile detection cannot run this early and stays
-where it is. And the gamedir is the better key anyway: these offsets describe a *game binary*, and the
-gamedir is what selects which binary the engine loaded. `IGameProfile` gains nothing from this file.
+`GameData::LoadAll` runs from `GameDLLInit` (`dll_hooks.cpp`), not from `ServerActivate`: offsets
+cannot change while a game DLL stays mapped, so it parses once per plugin load rather than once per
+map. By then CrossPlay has already loaded its game DLLs, so `gGameDirs` is populated.
+
+It walks every loaded game and reads `crossplay/gamedata/<gamedir>-<win|linux>.json`, relative to the
+HLDS working directory — the `crossplay` prefix is `pfnGetGameDir()`, which returns the hyper-game
+while no context is active. **That directory is CrossPlay's**; it ships one file per game and nothing
+here writes to it. Results land in `g_gameOffsets[game]`, and `GameData::Activate(game)` copies one
+into the `g_offsets` that all 44 peek sites still read. See `doc/crossplay.md`.
+
+Keying by gamedir rather than by `IGameProfile` was already right and is now required. These offsets
+describe a *game binary*, and the gamedir is what selects which binary got loaded — whereas
+`CHLDMProfile::Detect` reads `gpGlobals->deathmatch_`, which the engine only fills in once it spawns a
+server, so profile detection cannot run this early and stays at `ServerActivate`.
 
 ## fake_cmd.cpp
 
