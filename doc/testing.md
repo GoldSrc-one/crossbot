@@ -473,14 +473,33 @@ run it in the background rather than waiting on it. `-ProjectileSeconds` default
 minute each; the floor is 15s per phase and a phase that short measures nothing.
 
 A passing 6-bot run with `-DuelSeconds 120 -ProjectileSeconds 420 -Full`, again as a reference and not
-a threshold: duel 420 shots / 193 burned / 21 deaths with all four suspicion sources; crossbow 81
-shots and 21 zoomed polls; hornetgun 378 shots with 72 led; snark 122 shots and `uphill=40`; gauss 60
-charged shots with no timeout; 9mmAR 60 arc shots, `uphill=0`, `selfveto=14`; handgrenade 62 throws,
-`uphill=59`, `selfveto=44`, `primed=5`; RPG 52 shots against 52 guides and `capped=0` everywhere.
+a threshold: duel 399 shots / 150 burned / 10 deaths / `stickyshots=119`, with all four suspicion
+sources; crossbow 78 shots and 29 zoomed polls; hornetgun 986 shots with 206 led; snark 40 shots and
+`uphill=53`; gauss 68 charged shots with no timeout; 9mmAR 48 arc shots, `uphill=0`, `selfveto=5`;
+handgrenade 62 throws, `uphill=48`, `selfveto=43`; RPG 50 shots against 50 guides, and `capped=0`
+everywhere.
+
+Two numbers in there are worth reading as warnings rather than as targets. The hornetgun's 986 against
+the snark's 40 is the range gate doing its job, not an anomaly -- the snark is unusable past 300 units
+and most polls in its phase catch it with `nothing-usable`. And the handgrenade sampled `primed=1` in
+that run, one poll away from having failed the assertion that used to depend on it.
 
 `guides` matching `shots` exactly is the healthiest single number in that output, because the two are
 independent observations — one counts a commit the plugin opened, the other counts the game DLL's
 attack timer moving.
+
+**The sticky trigger is asserted in the duel, not in a pinned phase, and that is the cheap answer
+rather than the lazy one.** Every bot spawns with a glock and both its modes are `WPN_Q_STICKY`, so the
+path is exercised by the duel that already runs; a dedicated pin would cost another minute of runtime
+to prove the same thing. `stickyshots` is the subset of `shots` that only happened because the trigger
+stayed down off-target, counted off the press flag exactly as `leadshots` is, so `stickyshots > 0` is a
+cumulative witness and not a sampled `why=` string.
+
+Two things that phase cannot show, both by construction. `stickyshots` **never counts a gauss primary
+shot**, because `CGauss::PrimaryAttack` moves no weapon timer for the `fired` edge to see -- pinning
+this assertion to the gauss would fail against a working bot. And `burned` rises against the earlier
+reference, because holding the trigger through off-target frames spends ammo on purpose; that is the
+feature, and the assertions here are existence-based so nothing else moves.
 
 **The weapon phases need `crossbot_fire_pin`, and equipping instead does not work.** In a fight a bot
 re-selects only when the weapon in its hands stops working, so handing a roaming bot a crossbow puts it
@@ -530,6 +549,13 @@ fires whenever the blast lands nearer the enemy than the bot — so six bots pin
 in a small arena kill themselves regularly. That is the rule working, not failing; every counter is
 banked on death before it resets, so the tallies survive it.
 
+`capped == 0` earns its keep in the handgrenade phase too, and it is the assertion that found the
+part-5 tap commit opening on presses the weapon had already refused — six capped commits against 78
+throws, from the half second of `m_flNextPrimaryAttack` that `CHandGrenade::WeaponIdle` arms *after*
+each throw. Nothing else in the output moved; `throwshots` looked healthy throughout. A counter that
+only ever reads zero is easy to mistake for a counter that is not wired up, and this is the run that
+showed it was.
+
 `capped == 0` is the assertion that matters there, and it has the same standing as the gauss's
 `charge-timeout`: every guide window must close on the rocket rather than on the six-second valve. It
 was first written as `guides <= shots` and that was the wrong diagnosis — the first run reported 56
@@ -561,6 +587,33 @@ histogram caught `off-target` exactly once. Both crossbow assertions are now car
 The general rule, twice learned: **an assertion carried by a sampled reason string is only as good as
 the duty cycle of the state it samples, and that duty cycle is not a property of the test.** Any change
 to how often bots hold targets silently re-tunes every such assertion in the suite.
+
+**No blocking assertion may rest on a `why=` or `aim=` string, with exactly one documented
+exception.** Both fields are one frame sampled every two seconds, so absence proves nothing. This has
+now cost three separate runs -- the MP5's refusal check, then the handgrenade's, then `aim=homing` on
+the snark, which failed against a bot that had thrown 48 snarks with `uphill=54` and `aimveto=6` in
+the same phase. Every one of them had a cumulative counter sitting beside it that said the same thing:
+
+| was asserted as | now asserted as | why it is the same claim |
+|---|---|---|
+| `aim=homing` (snark) | `shots > 0` and `leadshots == 0` | a solved-lead press moves `leadshots`, so zero of them across real shots *is* "the cone replaced the solve" |
+| `aim=homing` (hornetgun) | `shots > 0` and `leadshots < shots` | as above |
+| `aim=arc`, `why=primed` (grenade) | `throwshots > 0` | a throw is only reachable through `ArcOnTarget`, and it counts the falling edge of `m_flStartThrow` |
+| `aim=arc` (9mmAR) | `shots > 0` and `arcshots == shots` | — |
+| `why=guiding` (RPG) | `guides > 0` and `capped == 0` | the commit opened, and closed on the rocket rather than the valve |
+
+Two of those needed a `shots > 0` clause added: `leadshots == 0` and `arcshots == shots` both pass
+happily on a phase that fired nothing, so on their own they were weaker than the flaky string they
+replaced.
+
+The exception is **`why=charged` on the gauss**, which stays. It is the only assertion in the file
+with no cumulative equivalent — `chargeshots` proves a charge completed, but only the reason string
+proves the bot *stood there holding a full charge waiting for a shot* rather than releasing on a
+clock, which is the whole design. It samples reliably because a charged gauss holds that state for
+seconds at a time; it has read 27, 29 and 30 across three runs.
+
+Negative string checks are unaffected and stay: `why=charge-timeout` and the RPG's `aim=arc`/`aim=lead`
+fail *when present*, so sampling can only make them miss a real fault, never invent one.
 
 **The two arc phases assert the refusal on `selfveto`, not on the reason string**, and that is a
 correction rather than a preference. `why=` is one frame sampled every two seconds, so `arc-self` and
@@ -609,7 +662,7 @@ Two minutes of that is enough for every rule to fire at least once. What to chec
   no amount of roaming guarantees.
 - **`walled off` is a minority of probes.** It was 73% before `ResolveAlongRay` existed, which is what
   found that bug; healthy is around 20% on crossfire, with `less exposed` the largest share.
-- **Fights end.** The longest `left combat after Ns` should be in the teens. A fight that never ends
+- **Fights end.** The longest `left combat with X after Ns` should be in the teens. A fight that never ends
   is the failure mode this state is most exposed to.
 
 Exposure should trend down across a fight. It is a biased random walk, not a search, so judge it in
@@ -660,6 +713,82 @@ idle rotation working as designed: the grenade and the snark are worth 0.1, the 
 a freshly picked-up one wins the rarity tiebreak until its carry time catches up. And a good share of
 ambushes **declining themselves** is correct -- the uphill veto refuses both throwables at a target
 more than 16 units above the eye, which on a map as vertical as crossfire is often.
+
+### The melee duel
+
+Same run, three separate mechanisms, and they need different levers.
+
+**The weapon reader is self-checking.** `crossbot_weapons` prints
+`walked active id N, peeked active id N -- match` per bot, comparing the duel's two-deref
+`ActiveWeaponId` against the full inventory walk's own `activeIndex`. Any `MISMATCH` means the
+`m_pActiveItem` offset is wrong and every duel verdict below is noise. Check this first; a healthy run
+matches on all bots across several different weapon ids.
+
+**`crossbot_duel` needs the pin, and here the pin is the right lever.** Left alone, HLDM bots
+essentially never hold the crowbar -- it is worth 0.1 and loses to everything they pick up -- so
+`melee=` in `crossbot_combat_status` stays 0 and no duel ever forms. `crossbot_fire_pin weapon_crowbar`
+makes every other weapon unusable *in combat*, so bots switch to the crowbar as soon as they fight,
+which is the only cheap way to get melee into enough hands at once.
+
+```powershell
+.\scripts\rcon.ps1 -Port 29015 -Command "crossbot_fire_pin weapon_crowbar"
+```
+
+Note what the pin costs, because it is the mirror image of the ambush case above: with *everyone* on a
+crowbar the duel **selection** mostly cannot be observed, since the bot is already holding melee and
+the block correctly skips. Selections still appear at a trickle, from bots that enter a fight straight
+out of the idle rotation holding a glock -- the pin does not govern out-of-combat selection. Sum
+`duel=` increments the same way as `ambush=`; it is per-life too.
+
+What a healthy pinned run looks like on crossfire, over roughly a minute of polling:
+
+- `melee=1` on most bots in combat, and falling back to 0 within a poll or two of the pin coming off.
+- `inarea=1` **much** rarer than `melee=1`. Two bots sharing a nav area is the exception in a map this
+  open, and `duel=1` tracks `inarea=1` exactly. Roughly 20 `duel=1` samples per hundred polls is
+  normal; `inarea=1` that never fires at all is worth chasing, `inarea=0` alongside `melee=1` is not.
+- `charging` far outnumbering `backing off`, and `swinging` possibly absent entirely. That last one is
+  not a missing state: the bot fires as soon as it is inside 32 units, which drops it straight into
+  the backoff window, so the stand-still branch only shows up in the ~0.1s gap between the 0.4s
+  backoff and the crowbar's own refire.
+
+The movement reasons print on the **`no probe`** line, not the `probe` line -- the duel drops the probe
+when it takes over, which is deliberate. Looking for them on the probe line finds nothing and reads as
+the duel movement never running.
+
+`duel=1` with no `charging`/`backing off`/`swinging` anywhere is the one combination that *is* a bug:
+it means the state formed but `DuelDrive` bailed, and the likely cause is the bot never actually
+getting melee into its hands.
+
+## scripts/test_monster.ps1
+
+Two phases, each on its own server, for the one thing the rest of the suite cannot see: a bot fighting
+something that is not a player. `-Phase` runs one; `-Seconds` sets each phase's length (default 150).
+
+```powershell
+.\scripts\test_monster.ps1
+.\scripts\test_monster.ps1 -Phase engage -Seconds 300
+```
+
+Live monsters come from the bots themselves. `weapon_snark` is the profile's `AMBUSH_SNARK`, so an
+equipped bot throws snarks at the first opponent it surprises -- the same machinery `test_fire.ps1`'s
+WEAPON phase already exercises, which is why this needs no entity-spawning command. Snarks are consumed
+per throw and the give is five, so the phase body re-equips every few seconds or the map runs dry.
+
+| Phase | Asserts |
+| --- | --- |
+| `census` | `crossbot_monsters` sees `monster_snark` lines, every one carries `FL_MONSTER`, `mon_hEnemy` resolved to a real offset, and at least one snark names an enemy |
+| `engage` | `mine` and `trc`/`hit` advance in `crossbot_sense_status`, a snark becomes a bot's `target=`, and a bot logs `entered combat with monster_snark` |
+
+**Run `census` first and believe it before reading `engage`.** The two phases fail identically from the
+engage counters alone: a bot that ignores hunting snarks and a map with no snarks on it both produce
+`mine:0`. The census is the only thing that tells them apart, and it is also the only check on the
+`m_hEnemy` offset -- a wrong offset reads as `enemy=-1` on every line while everything else looks healthy.
+
+The phase is stochastic in the same way `test_fire.ps1`'s duel is: a thrown snark has to find a bot
+before its detonate timer runs out, and crossfire is vertical enough that the uphill ambush veto refuses
+plenty of throws. Counts are polled across the window rather than asserted at a tick, and `switched`,
+`stopped` and `died` are reported rather than asserted -- `stopped` in particular depends on a snark
+re-targeting mid-fight, which happens on its own two-second hunt clock.
 
 ## scripts/test_deploy.ps1
 

@@ -11,6 +11,15 @@ const char *CBotPlayerNameOf(const edict_t *ent)
 	return (s && s[0]) ? s : "?";
 }
 
+const char *CBotTargetNameOf(const edict_t *ent)
+{
+	if (!ent)
+		return "?";
+	if ((ent->v.flags & FL_CLIENT) != 0)
+		return CBotPlayerNameOf(ent);
+	return CBotClassOf(ent);
+}
+
 bool CBotIsLivePlayer(const edict_t *ent)
 {
 	return ent && !ent->free && ent->pvPrivateData && (ent->v.flags & FL_CLIENT) != 0;

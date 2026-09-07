@@ -25,4 +25,24 @@ bool Give(edict_t *player, const char *classname)
 	return true;
 }
 
+edict_t *Spawn(const char *classname, const Vector &origin)
+{
+	if (!classname || !classname[0])
+		return nullptr;
+
+	edict_t *pent = g_engfuncs.pfnCreateNamedEntity(g_engfuncs.pfnAllocString(classname));
+	if (!pent || g_engfuncs.pfnIndexOfEdict(pent) == 0)
+		return nullptr;
+
+	pent->v.origin = origin;
+	pent->v.spawnflags |= SF_NORESPAWN;
+
+	gpGamedllFuncs->dllapi_table->pfnSpawn(pent);
+
+	if (pent->free)
+		return nullptr;
+
+	return pent;
+}
+
 }

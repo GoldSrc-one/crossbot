@@ -48,6 +48,7 @@ const Request kRequests[] = {
 	{ "CRpg",              "m_cActiveRockets",        CB_OFF(rpg_cActiveRockets) },
 
 	{ "CBaseMonster",      "m_flNextAttack",          CB_OFF(mon_flNextAttack) },
+	{ "CBaseMonster",      "m_hEnemy",                CB_OFF(mon_hEnemy) },
 
 	{ "CBasePlayer",       "m_pActiveItem",           CB_OFF(plr_pActiveItem) },
 	{ "CBasePlayer",       "m_rgpPlayerItems",        CB_OFF(plr_rgpPlayerItems) },

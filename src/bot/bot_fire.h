@@ -74,9 +74,14 @@ struct State
 	int lastTimerId = 0;
 	int lastChargeState = 0;
 	float lastThrowStart = 0.f;
+	// When a shot was last corroborated by the weapon timer moving. pressed is a one-frame flag
+	// that CountShots consumes on the following frame, so it cannot answer "did we just swing?"
+	// from outside this file; this can.
+	float lastShotTime = 0.f;
 	bool pressed = false;
 	bool pressedLead = false;
 	bool pressedArc = false;
+	bool pressedSticky = false;
 	const char *lastReason = "-";
 	int shots = 0;
 	int leadShots = 0;
@@ -84,6 +89,7 @@ struct State
 	int arcShots = 0;
 	int throwShots = 0;
 	int guides = 0;
+	int stickyShots = 0;
 	int commitCaps = 0;
 	int uphillVetoes = 0;
 	int selfVetoes = 0;
@@ -99,6 +105,7 @@ struct State
 	int emptySwitches = 0;
 	int idleSwitches = 0;
 	int ambushes = 0;
+	int duels = 0;
 	int idleReloads = 0;
 };
 

@@ -30,6 +30,8 @@ namespace
 	// overlap, so at roughly a player half-width this never binds in practice.
 	constexpr float kGazeMinDist = 32.f;
 
+	constexpr float kMonsterGaze = 2.f;
+
 	constexpr float kLookPitchLimit = 45.f;
 
 	constexpr float kSoundClipDist = 1000.f;
@@ -55,6 +57,11 @@ namespace
 
 	BoneSetEntry g_boneSets[kMaxBoneSets];
 	size_t g_boneSetCount = 0;
+
+	constexpr size_t kMaxMonsters = 64;
+
+	edict_t *g_monsters[kMaxMonsters];
+	size_t g_monsterCount = 0;
 
 	float RandomUnit(BotSense::State &sense)
 	{
@@ -148,6 +155,9 @@ namespace
 	{
 		boneOut = -1;
 
+		if ((ent->v.flags & FL_CLIENT) == 0)
+			return BotSense::EntitySoundOrigin(ent);
+
 		const BoneSetEntry *set = BoneSetFor(ent);
 		if (!set || set->count == 0)
 			return ent->v.origin + ent->v.view_ofs;
@@ -200,6 +210,24 @@ namespace
 		return true;
 	}
 
+	bool Hunting(const CBot &bot, edict_t *ent)
+	{
+		if (!ent || ent->free || ent == bot.pEdict || !g_pGameProfile)
+			return false;
+		if ((ent->v.flags & FL_MONSTER) == 0)
+			return false;
+		return g_pGameProfile->MonsterEnemy(ent) == bot.pEdict;
+	}
+
+	bool MonsterCandidate(const CBot &bot, edict_t *ent)
+	{
+		if (!Hunting(bot, ent))
+			return false;
+		if (g_pGameProfile->IsDead(ent))
+			return false;
+		return true;
+	}
+
 	bool Gated(const CBot &bot)
 	{
 		size_t end = std::min(bot.waypointIndex + kGateLookahead, bot.waypoints.size());
@@ -230,6 +258,11 @@ namespace
 		if ((ent->v.flags & FL_MONSTER) != 0)
 			return BotSense::KIND_MONSTER;
 		return BotSense::KIND_OTHER;
+	}
+
+	BotSense::SuspicionKind Tier(const BotSense::Suspicion &entry)
+	{
+		return entry.hunting ? BotSense::KIND_PLAYER : entry.kind;
 	}
 
 	float LiveWeight(const BotSense::Suspicion &entry, float decay)
@@ -269,6 +302,10 @@ namespace
 			point = SamplePoint(bot, ent, bone);
 		}
 
+		bool monster = (ent->v.flags & FL_CLIENT) == 0;
+		if (monster)
+			++bot.sense.monTraces;
+
 		TraceResult tr;
 		{
 			BOTPERF_SCOPE(ZONE_SN_LOS);
@@ -276,6 +313,9 @@ namespace
 		}
 		if (tr.flFraction < 1.f && tr.pHit != ent)
 			return false;
+
+		if (monster)
+			++bot.sense.monHits;
 
 		BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
 
@@ -357,6 +397,46 @@ namespace
 			// close and looking at us: those are the ones about to shoot.
 			float gaze = DotProduct(theirForward, dir * -1.f) + 1.f;
 			float w = gaze / (dist < kGazeMinDist ? kGazeMinDist : dist);
+			if (w <= 0.f)
+				continue;
+
+			acc += w;
+			if (RandomUnit(bot.sense) * acc < w)
+				pick = ent;
+		}
+
+		for (size_t m = 0; m < g_monsterCount; ++m)
+		{
+			edict_t *ent = g_monsters[m];
+			if (!ent || ent->free)
+				continue;
+
+			++bot.sense.monSeen;
+
+			if (!MonsterCandidate(bot, ent))
+				continue;
+
+			++bot.sense.monMine;
+
+			Vector centre = BotSense::EntitySoundOrigin(ent);
+			Vector los = centre - eye;
+			float dist = los.Length();
+			if (dist > kViewRange || dist < 0.001f)
+				continue;
+
+			Vector dir = los * (1.f / dist);
+			if (DotProduct(forward, dir) < minDot)
+				continue;
+
+			++cands;
+
+			if (ent == incumbent)
+			{
+				incumbentSeen = true;
+				continue;
+			}
+
+			float w = kMonsterGaze / (dist < kGazeMinDist ? kGazeMinDist : dist);
 			if (w <= 0.f)
 				continue;
 
@@ -502,8 +582,8 @@ namespace
 			const BotSense::Suspicion &entry = sense.slots[i];
 			if (LiveWeight(entry, decay) <= 0.f)
 				continue;
-			if (entry.kind < tier)
-				tier = entry.kind;
+			if (Tier(entry) < tier)
+				tier = Tier(entry);
 		}
 
 		if (tier == BotSense::KIND_COUNT)
@@ -517,7 +597,7 @@ namespace
 		for (size_t i = 0; i < sense.count; ++i)
 		{
 			const BotSense::Suspicion &entry = sense.slots[i];
-			if (entry.kind != tier)
+			if (Tier(entry) != tier)
 				continue;
 
 			float w = LiveWeight(entry, decay);
@@ -606,6 +686,34 @@ void BotSense::ResetBoneCache()
 	for (size_t i = 0; i < kMaxBoneSets; ++i)
 		g_boneSets[i] = BoneSetEntry();
 	g_boneSetCount = 0;
+
+	g_monsterCount = 0;
+}
+
+void BotSense::RefreshMonsters()
+{
+	g_monsterCount = 0;
+
+	for (int i = gpGlobals->maxClients + 1; i < gpGlobals->maxEntities; ++i)
+	{
+		if (g_monsterCount >= kMaxMonsters)
+			break;
+
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!ent || ent->free || !ent->pvPrivateData)
+			continue;
+		if ((ent->v.flags & FL_MONSTER) == 0)
+			continue;
+		if (ent->v.takedamage == DAMAGE_NO || ent->v.health <= 0.f)
+			continue;
+
+		g_monsters[g_monsterCount++] = ent;
+	}
+}
+
+int BotSense::MonsterCount()
+{
+	return static_cast<int>(g_monsterCount);
 }
 
 const char *BotSense::SourceName(SuspicionSource source)
@@ -687,6 +795,7 @@ void BotSense::Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_
 	entry.ent.Set(ent);
 	entry.source = source;
 	entry.kind = KindOf(ent);
+	entry.hunting = entry.kind == KIND_MONSTER && Hunting(bot, ent);
 }
 
 void BotSense::Hear(CBot &bot, const edict_t *src, const Vector &pos, float volume,
@@ -727,6 +836,24 @@ int BotSense::LiveCounts(const CBot &bot, int counts[KIND_COUNT])
 		++live;
 	}
 	return live;
+}
+
+int BotSense::LiveHunting(const CBot &bot)
+{
+	const State &sense = bot.sense;
+	float decay = Decay();
+
+	int hunting = 0;
+	for (size_t i = 0; i < sense.count; ++i)
+	{
+		const Suspicion &entry = sense.slots[i];
+		if (!entry.hunting)
+			continue;
+		if (LiveWeight(entry, decay) <= 0.f)
+			continue;
+		++hunting;
+	}
+	return hunting;
 }
 
 int BotSense::LiveCount(const CBot &bot)

@@ -84,6 +84,16 @@ namespace
 		snprintf(msg, sizeof(msg), "CrossBot:  walked mask 0x%08x, pev->weapons 0x%08x -- %s\n",
 			walked, pevBits, walked == (pevBits & ~kSuitBit) ? "match" : "MISMATCH");
 		SERVER_PRINT(msg);
+
+		// Same spirit as the mask check above. ActiveWeaponId is the two-deref shortcut the duel
+		// rule reads other players with, and nothing else corroborates it; the full walk's own
+		// activeIndex is the oracle.
+		int walkedActive = (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
+			? inv.weapons[inv.activeIndex].id : 0;
+		int peeked = BotWeapons::ActiveWeaponId(player);
+		snprintf(msg, sizeof(msg), "CrossBot:  walked active id %d, peeked active id %d -- %s\n",
+			walkedActive, peeked, walkedActive == peeked ? "match" : "MISMATCH");
+		SERVER_PRINT(msg);
 	}
 
 	void Cmd_CrossBotWeapons()
@@ -191,6 +201,11 @@ namespace
 		BotManager::PrintSenseStatus();
 	}
 
+	void Cmd_CrossBotMonsters()
+	{
+		BotManager::PrintMonsters();
+	}
+
 	void Cmd_CrossBotVantageStatus()
 	{
 		if (CMD_ARGC() < 4)
@@ -282,6 +297,7 @@ namespace
 			{ WPN_Q_THROW_ARC,     "throwarc" },
 			{ WPN_Q_INHERIT_VEL,   "inheritvel" },
 			{ WPN_Q_KEEP_AIMING,   "keepaiming" },
+			{ WPN_Q_STICKY,        "sticky" },
 			{ WPN_Q_HOMING,        "homing" },
 		};
 
@@ -451,6 +467,75 @@ namespace
 			++bots;
 			if (!EquipPlayer(ent, classname))
 				return;
+		}
+
+		if (bots == 0)
+			SERVER_PRINT("CrossBot: no bots connected.\n");
+	}
+
+	bool SpawnNear(edict_t *player, const char *classname, float ahead)
+	{
+		Vector eye = player->v.origin + player->v.view_ofs;
+
+		Vector forward, right, up;
+		g_engfuncs.pfnAngleVectors(player->v.v_angle, forward, right, up);
+
+		Vector want = eye + forward * ahead;
+
+		TraceResult tr;
+		TRACE_LINE(eye, want, ignore_monsters, player, &tr);
+
+		edict_t *ent = GiveItem::Spawn(classname, tr.vecEndPos);
+
+		char msg[192];
+		if (!ent)
+		{
+			snprintf(msg, sizeof(msg), "CrossBot: could not spawn %s near %s\n", classname,
+				PlayerNameOf(player));
+			SERVER_PRINT(msg);
+			return false;
+		}
+
+		snprintf(msg, sizeof(msg), "CrossBot: spawned %s #%d at (%.0f,%.0f,%.0f) near %s\n",
+			classname, g_engfuncs.pfnIndexOfEdict(ent), tr.vecEndPos.x, tr.vecEndPos.y,
+			tr.vecEndPos.z, PlayerNameOf(player));
+		SERVER_PRINT(msg);
+		return true;
+	}
+
+	void Cmd_CrossBotSpawn()
+	{
+		if (CMD_ARGC() < 2)
+		{
+			SERVER_PRINT("usage: crossbot_spawn <classname> [name] [distance]\n");
+			return;
+		}
+
+		const char *classname = CMD_ARGV(1);
+		float ahead = (CMD_ARGC() > 3) ? static_cast<float>(atof(CMD_ARGV(3))) : 96.f;
+
+		if (CMD_ARGC() > 2)
+		{
+			edict_t *ent = FindPlayerByName(CMD_ARGV(2));
+			if (!ent)
+			{
+				char msg[128];
+				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(2));
+				SERVER_PRINT(msg);
+				return;
+			}
+			SpawnNear(ent, classname, ahead);
+			return;
+		}
+
+		int bots = 0;
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!IsLivePlayer(ent) || !BotManager::FindBot(ent))
+				continue;
+			++bots;
+			SpawnNear(ent, classname, ahead);
 		}
 
 		if (bots == 0)
@@ -736,9 +821,11 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
 	ADD_SERVER_COMMAND("crossbot_weaponspec", Cmd_CrossBotWeaponSpec);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);
+	ADD_SERVER_COMMAND("crossbot_spawn", Cmd_CrossBotSpawn);
 	ADD_SERVER_COMMAND("crossbot_aim_test", Cmd_CrossBotAimTest);
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
+	ADD_SERVER_COMMAND("crossbot_monsters", Cmd_CrossBotMonsters);
 	ADD_SERVER_COMMAND("crossbot_vantage_status", Cmd_CrossBotVantageStatus);
 	ADD_SERVER_COMMAND("crossbot_combat_status", Cmd_CrossBotCombatStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);

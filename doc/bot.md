@@ -1412,6 +1412,45 @@ erratic acquisition, not like an aliasing error. And read `v.v_angle` without fl
 the true view angle, unlike `pev->angles`, which is why `bot_deploy.cpp` negates x when it reads a
 tripmine's orientation. Copying that flip here would make every bot prefer targets facing *away* from it.
 
+### Monsters are candidates only while they are hunting us
+
+The scan used to run `1 .. maxClients` and nothing else, and `Candidate` demanded `FL_CLIENT` on top of
+that. Between them, a monster could never become `sense.target`, never become `combat.enemy` and never be
+shot at -- so bots walked past snarks that were actively eating them. A monster still reached the
+suspicion table through sound, damage and events, which steered the gaze and did nothing else.
+
+A second loop now runs after the client loop, over a **shared per-frame monster list**:
+`BotSense::RefreshMonsters` scans the edict array once per frame in `BotManager::StartFrame`, keeping the
+first 64 entities that are live, have private data, carry `FL_MONSTER`, and are damageable. One scan per
+frame for the whole server, not one per bot -- a per-bot scan of `maxEntities` is the thing this list
+exists to avoid.
+
+The gate on that list is a single question: **is its `CBaseMonster::m_hEnemy` us?** `MonsterCandidate`
+asks `g_pGameProfile->MonsterEnemy(ent) == bot.pEdict` and nothing else beyond a liveness test. A snark
+hunting someone else is ignored; so is every tripmine, satchel and grenade, all of which are `CGrenade`
+descendants carrying `FL_MONSTER` and a null `m_hEnemy`. This is deliberately narrower than "shoot
+monsters": the bot answers threats to itself and does not go hunting.
+
+**The budget does not change.** Monsters are drawn into the *same* weighted reservoir as players and
+compete for the same single discretionary trace, so the per-bot cost is still 1-2 `dont_ignore_monsters`
+traces plus 0-1 world-only. Their gaze term is a fixed `kMonsterGaze = 2.f`, the maximum the player branch
+can produce, because a monster whose `m_hEnemy` is us is facing us by construction. `v.v_angle` and
+`v.fov` are meaningless on a monster and are never read for one -- the same reason `EnemySees` short
+circuits in `bot_combat.cpp`.
+
+**The trace goes to the box centre, not a bone.** `SamplePoint` returns `EntitySoundOrigin` for anything
+without `FL_CLIENT` and never builds a bone set for it. A snark is an 8-unit cube with a zero `view_ofs`,
+so the eye fallback would aim at its feet and the bone cache would fill with models nothing else samples.
+
+The list is emptied by `ResetBoneCache`, which is the wrong name for it and the right call site:
+that is where the two map transitions already flush per-map entity caches, and edict pointers must
+not survive one. Nothing reads the list without bots on the server anyway, since `StartFrame` only
+refreshes it when a bot exists and `crossbot_monsters` refreshes before it prints.
+
+`monSeen`, `monMine`, `monTraces` and `monHits` are cumulative per bot and readable in
+`crossbot_sense_status`. They separate the three ways this can fail: no monsters in the list, monsters in
+the list that never name us, and monsters that name us but whose traces never land.
+
 #### Four consequences, all intended
 
 - **`sense.target` no longer means "nearest visible".** It means "the one I traced and saw". The old strict
@@ -1485,7 +1524,7 @@ because the write happens once, for the winner.
 **The flags differ from the perception trace, deliberately.** This one is `ignore_monsters`; the one above
 is `dont_ignore_monsters` and has to be, or `tr.pHit == ent` could never be true. The two ask different
 questions. Perception asks *can I see this player*. The lead trace asks *is this predicted point inside or
-behind world geometry* -- a teammate, or the target's own body, standing between the eye and a point 80
+behind world geometry* -- another player, or the target's own body, standing between the eye and a point 80
 units past it must not suppress the lead, and under `dont_ignore_monsters` the target itself would be
 `tr.pHit` most of the time. Brush entities still block, which is right: a closed door is a wall. It is the
 same flag and the same question as the fire-side trace in `BotFire::Buttons`.
@@ -1576,6 +1615,17 @@ everything else. The enum order is the priority order so this is a `min` and not
 that a player entry decayed to weight 0.1 still beats a door at 1.0 -- the bot glances at the fading
 contact instead of snapping to the lift. That is why the tier filter runs before `bestWeight` rather than
 after it.
+
+**A monster that is hunting us votes at the player tier.** `Suspicion` carries a `hunting` flag, set in
+`Push` when the entry is a monster whose `m_hEnemy` is this bot, and `Tier(entry)` returns `KIND_PLAYER`
+for it. Without this the rest of the monster work is nearly inert: a bot with any live player contact --
+including one decayed to 0.1 -- would never turn its head toward the snark eating it, because the tier
+vote would have discarded the monster entry before scoring began. Tracing a monster you never look at
+buys nothing.
+
+The flag is stored beside `kind` rather than overwriting it, so `kinds=p:,m:,o:` in
+`crossbot_sense_status` still counts what it says it counts and `hunt=` reports the promotion separately.
+Writing `KIND_PLAYER` into `kind` would have been one line fewer and would have made the status line lie.
 
 ### Nothing is averaged: the winner is one entry, chosen by cone
 
@@ -1805,7 +1855,7 @@ The old behaviour was a **chase**: the last-seen position competed in `SelectGoa
 route across the map. Replacing it with a local shuffle is the point of the whole change -- a bot in a
 firefight should be sidestepping, not commuting.
 
-### Two ways in, five ways out
+### Two ways in, six ways out
 
 Entry is sight (`sense.target`, which is line of sight *this frame*) or damage from a player.
 
@@ -1823,6 +1873,7 @@ Exit, checked every frame:
 | --- | --- |
 | `enemy.Get()` is null | `the enemy handle went stale` |
 | `IGameProfile::IsDead` | `the enemy died` |
+| a monster enemy no longer names us | `the monster stopped hunting us` |
 | `BotSense::Senses` finds nothing | `lost every trace of the enemy` |
 | 5s without line of sight | `went too long without line of sight` |
 | the bot died | `respawned`, from `BotManager` |
@@ -1838,6 +1889,18 @@ probe and re-drop a goal the bot had already given up. It is the same fight.
 **Damage entry stamps `lastSightTime` even though the bot has seen nothing.** Shot in the back, the
 bot gets the same 5s everyone else gets to turn around and find whoever did it; if it never does, the
 sight rule ends the state on schedule.
+
+**A hunting monster is an attacker like any other.** `DamageSource` accepts an inflictor that is not a
+player when `MonsterEnemy` names this bot -- a snark bite reaches combat the same way a bullet does, and
+does not need the `owner` fallback, since the snark *is* the inflictor. `EnemySees` returns true outright
+for a non-`FL_CLIENT` enemy: a monster whose `m_hEnemy` is us has already noticed us by definition, so
+`aware` is always 1 and there is no ambush to open with. It also must not read `v.v_angle` or `v.fov` off
+a monster, which are not view angles there.
+
+That adds the sixth exit: **`the monster stopped hunting us`**, when the enemy is a monster whose
+`m_hEnemy` is no longer this bot. A snark re-targets roughly every two seconds and will pick someone else;
+without this rule the bot would keep duelling something that had lost interest until the sight timeout,
+which is 5s of shooting at a threat that is now someone else's problem.
 
 ### The takeover waits for maneuvers, the state does not
 
@@ -1959,6 +2022,85 @@ contact grenade on the ordinary path; widening the fix to those is a separate ch
 the grenade and the snark, and the `AIM_LEAD` flight-time gate caps the grenade near 600 units and the
 snark near 300. When nothing survives, `PickAmbush` returns -1 and the frame falls through to ordinary
 selection -- which is exactly "blast him with whatever is in hand", written by not writing it.
+
+### Mirroring an opponent who draws melee
+
+If the enemy has melee out, the bot draws melee too and fights the duel properly: close, swing, back
+off, close again. Two flags carry it, and neither latches -- unlike `enemyAware`, a duel is over the
+moment the opponent draws a gun.
+
+`enemyMelee` is `BotWeapons::ActiveWeaponId(enemy) == MeleeWeapon()`. That reader is new and
+deliberately not `BotWeapons::Read`: the full walk exists to build an inventory, and it validates
+every slot through `ItemEdict`, which calls `GameData::Fatal` on a bad pointer. That is a reasonable
+trade once a frame for a bot's own inventory and an unreasonable one for a question this narrow, so
+`ActiveWeaponId` is two derefs -- `m_pActiveItem`, then `m_iId` -- with no validation, returning 0 for
+"no idea". `m_pActiveItem` is a `CBasePlayer` offset, so the read is gated on `FL_CLIENT`; monsters
+never duel. `crossbot_weapons` cross-checks the shortcut against the full walk's own `activeIndex`
+and prints match/MISMATCH, in the same spirit as the existing `pev->weapons` mask check.
+
+**The flag is only refreshed on a frame the bot can see them.** Reading private data works through a
+wall, but a human reads the crowbar off someone's hands, and that is the same restraint `EnemySees`
+already observes. Between sightings the last verdict stands, which `kSightTimeout` bounds at 5s.
+
+`enemyInArea` asks whether the enemy stands in **the bot's own area** -- deliberately that way round.
+"Which area is the enemy in" would be `FindAreaNearest`, which is up to three full linear passes over
+every area in the mesh and has no spatial index; "is the enemy in *this* one" is `FindAreaById`, an
+O(1) direct index, plus a single `AreaContainsPoint`. It uses `TestArea`'s idiom for `TestArea`'s
+reason -- nav areas are duck-origin z-space, so the honest test is XY against the area's own centroid
+z -- and then a 72-unit z window, because XY containment alone matches someone on a walkway directly
+overhead who cannot be charged.
+
+Both edges of the combined predicate zero `fire.nextSelectTime`. Entering, so the bot does not spend
+`kSelectInterval` holding a shotgun at a charging crowbar; leaving, so it does not spend it holding a
+crowbar at someone who just drew an MP5. `SetAware` already does this in one direction.
+
+Selection is the ambush block's shape with one difference. `PASS_MELEE` already exists and is a pure
+identity test against `MeleeWeapon()`, so `PickBest` on that pass is the whole picker -- but
+`BuildChoices` is called with `geometry=false`, routing through `ModeViable` instead of `ModeUsable`.
+That drops the range gate while keeping the pin and ammo checks. The ambush wants a weapon usable
+*now*; the duel wants one usable *after walking*, and gating on range here would refuse the crowbar at
+every distance the bot still has to close. The block sits after the ambush and before `TryKeep`: an
+unaware enemy is the better opportunity, and `PickAmbush` tries melee first anyway, so at contact
+range the two agree.
+
+### The duel is a scoped reintroduction of approach movement
+
+`BotCombat` deleted the chase on purpose, and the shuffle above scores spots on exposure alone with
+the enemy explicitly not an input. The duel is the one exception, and it *replaces* the probe rather
+than blending with it -- `haveProbe` is dropped on entry, or a stale `probePoint` resurfaces the
+moment the duel ends.
+
+It is reachable only with melee **actually in hand** against a melee opponent in the same area. The
+weapon in hand is the condition rather than the intent to hold it, so a failed selection cannot leave
+a bot charging bare-handed. Three states:
+
+| Condition | Movement |
+| --- | --- |
+| swung within `kDuelBackoff` (0.4s) | away from the enemy |
+| `dist > range * 0.8` | toward the enemy |
+| otherwise | stand still and swing |
+
+The reach comes from the melee spec's own `primary.range`, never from a constant here. 0.4s is a
+little under the crowbar's own refire, so the bot is back in range for the next swing. In practice
+`swinging` is the rarest of the three: the bot fires as soon as it is inside 32 units, which puts it
+straight into the backoff window.
+
+Steering goes through `ResolveSpot`, not at the raw origin. Areas merge into **non-convex** prisms, so
+a straight line between two points in one area can still leave it; when `ResolveSpot` fails there is
+nowhere safe to charge and the probe gets the frame back. Everything below the direction choice is
+untouched -- `SolveDrive`, the ducking divisor, `Bot_DecomposeMove`, the deadzone, the crouch flag.
+Negating `moveDir` to retreat is what `bot_break.cpp` already does for its standoff.
+
+Aim is untouched too, which is what turns the retreat into a backpedal rather than a turn-and-run.
+
+**Knowing a swing happened.** There is no per-shot callback anywhere; `fire.pressed` is a one-frame
+flag that `CountShots` consumes on the following frame. The one corroborated signal is the rising edge
+on the weapon's refire countdown, and that closes the loop for instant-hit weapons specifically --
+the crowbar named first. `fire.lastShotTime` is set there, beside every `++fire.shots`.
+
+**Two mirroring bots never back down.** Both draw crowbars and both charge, which is the intended
+outcome, but `kSightTimeout` and death are then the only exits. If that reads badly in play the fix is
+a duel timeout, not a change to the mirror rule.
 
 ## bot_fire.cpp
 
@@ -2216,6 +2358,64 @@ The residual roll is not modelled and is not going to be. Simulating `BounceTouc
 and the ONGROUND damping is a bigger job than the whole solve, and 250 units of splash forgives more
 than it would buy. It is the honest cost of throwing immediately instead of cooking.
 
+### The sticky trigger spans two mechanisms, because the window outlives the aim queue
+
+A bot that releases the trigger the instant `RayOnTarget` fails stutters in a way no human does. A
+player holding an MP5 does not blip the trigger every time the crosshair crosses the edge of a hitbox,
+and does not stop the moment someone steps behind a doorframe. `WPN_Q_STICKY` (see `doc/game.md` for
+which seven modes carry it and why it is not a `cycleTime` field) says the trigger may stay down.
+
+The condition is `gpGlobals->time - bot.sense.targetTime <= kStickyWindow`, half a second.
+`sense.targetTime` is stamped every frame the target passes `TraceVisible`, so it is exactly "last
+seen" and not "last aimed at". **The "am I in combat" half of that needs no separate test**: combat is
+already `now - targetTime <= kCombatMemory`, three seconds, so half a second is inside it by
+construction.
+
+What makes this two changes rather than one is that the trigger has to survive a boundary. `ReadDelayed`
+returns false once the newest queued sample is older than `crossbot_aim_delay`, so from the last
+visible frame:
+
+```
+0 ───────────── 0.25s ───────────── 0.5s
+  haveTarget true      haveTarget false      window closed
+  aim point served     mode would be         ClearAim + Idle
+  → relax the box      dropped by Idle       (today's behaviour)
+    test in Buttons    → hold it in Think
+```
+
+**Before the boundary, `Buttons` relaxes the box test.** `RayOnTarget` had three different refusals
+behind one `bool`, so it now returns a `RayVeto` — `RAY_HIT`, `RAY_WIDE`, `RAY_BLOCKED`, `RAY_SELF` —
+and sticky overrides **`RAY_WIDE` alone**:
+
+- `RAY_WIDE` is "the crosshair has not converged", which is precisely what a spraying human looks like.
+- `RAY_BLOCKED` is the one case where the bot has positive knowledge the shot cannot arrive. Spending
+  ammo against positive knowledge is a bug, not humanness.
+- `RAY_SELF` cannot happen here at all: **every sticky mode has `splash == 0`**.
+
+The honest cost is that a sticky press runs no wall trace, because `RAY_WIDE` returns before
+`RayOnTarget` traces anything. A bot that loses its target while facing a near wall sprays it for up to
+half a second. All seven modes are cheap-per-shot hitscan, beam or hornet, so the waste is bounded, and
+letting `RAY_BLOCKED` through as well is a one-line change if it ever reads better.
+
+**After the boundary, `Think` keeps the state alive.** The no-target branch used to be "not holding →
+`ClearAim` + `Idle`", and `Idle` drops `fire.mode`, which sends `Buttons` to `IdleReloadButton`. It now
+tests sticky between the holding case and the idle case, and **skipping `ClearAim` is the whole
+trick** — the same trick `COMMIT_GUIDE` already uses. `aimValid` stays true, `aimPoint` stays parked on
+the last known position, and `BotFire::AimPoint` keeps serving it with no new plumbing. `fire.mode` and
+`fire.weaponId` still hold last frame's selection, so `StickyHold` needs no new state to know which
+mode to test; it looks the spec up and requires the active weapon to still match.
+
+That second half needs **no second special case in `Buttons`**. Once the state is alive the ordinary
+path runs against the stale aim point: crosshair still parked on it and the bot fires with
+`why=firing`, crosshair drifted off and the `RAY_WIDE` override presses anyway.
+
+Like `holding`, the sticky branch returns before the selection loop, so it bypasses `ModeUsable` for
+the same reason and the same half second. It self-clears when the window closes.
+
+`stickyShots` rides `fire.pressedSticky` through `CountShots` exactly as `leadShots` rides
+`pressedLead`, so it is a real per-life shot count rather than a frame tally — and, as ever, the thing
+the test asserts on, never `why=sticky`.
+
 ### The lead solve, and why four passes with no convergence test
 
 `AIM_LEAD` needs the point where the target will be when the projectile arrives, and the flight time
@@ -2381,7 +2581,20 @@ which drops the mode and clears the commit — and a bot that then pressed again
 weapon's own flag closes it, and picks up the free case of a bot that inherits somebody else's primed
 grenade off the floor.
 
-`COMMIT_GUIDE` is entered only when `nextPrimaryAttack <= 0`, and that condition is load-bearing.
+**Both `COMMIT_THROW` and `COMMIT_GUIDE` are entered only when the weapon's own attack timer has
+expired, and that condition is load-bearing.** `Buttons` checks the *player's* `m_flNextAttack`
+(`inv.nextAttack`) before it reaches either, and that is a different timer from the weapon's. A commit
+opened on a press the weapon rejected can never latch `commitSeen`, so it runs to its cap and wastes
+the whole valve.
+
+The grenade proves it. `CHandGrenade::WeaponIdle` sets `m_flNextPrimaryAttack = 0.5` *after* the throw
+(`handgrenade.cpp:178`), while `m_flStartThrow` goes back to zero at the same moment. So the guards
+that read pin state — `commit == COMMIT_THROW`, `throwStart != 0` — both clear half a second before
+the weapon will accept another press, and a bot with a target still in range presses into that gap.
+`ItemPostFrame` skips `PrimaryAttack`, no pin is pulled, and 1.5s later `kTapTimeout` fires. It cost
+six capped commits in a 60-second pinned phase before the timer check went in.
+
+`COMMIT_GUIDE` had the same hole for a different reason.
 `Buttons` presses a `FIRE_HOLD` weapon every frame it likes the shot, which is how the engine's
 level-triggered dispatcher is meant to be driven — the game fires when it is ready and ignores the
 rest. But `CRpg::Reload` pushes `m_flNextPrimaryAttack` half a second forward on **every** frame the
@@ -2658,6 +2871,12 @@ no path by which one throw could be counted twice.
 counts commits released by their cap instead of by the game's own state, and it is the one to assert
 on: it has exactly the standing `charge-timeout` has on the gauss. Non-zero there means a pin was
 pulled that never reached the weapon, or `m_cActiveRockets` never came back to zero.
+
+`stickyShots` is the same press-flag mechanism as `leadShots` and `arcShots`, and it inherits their
+one blind spot: **`CGauss::PrimaryAttack` moves no weapon timer**, only `m_flTimeWeaponIdle` and the
+player's `m_flNextAttack`, so the `fired` edge never sees a gauss primary shot and never has. Gauss
+primary is sticky and its sticky shots do not reach the counter. That is why the test asserts on the
+duel, where every bot carries a glock, rather than on a pinned gauss.
 
 `reloads` counts the rising edge of `wantReload`, because the state itself lasts one frame and is
 invisible to any poll. `selfVetoes` counts refusals to fire into a blast nearer the bot than the

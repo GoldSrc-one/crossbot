@@ -1,5 +1,6 @@
 # Local test environment (large binary downloads, not part of source)
 /hlds/
+/hlds-do-not-use/
 
 # Build output
 /build/

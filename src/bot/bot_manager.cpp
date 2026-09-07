@@ -17,9 +17,11 @@
 #include "bot_sense.h"
 #include "bot_timing.h"
 #include "bot_weapons.h"
+#include "../game/gamedata.h"
 #include "../game/game_profile.h"
 #include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
+#include "../nav/nav_math.h"
 
 #include <cmath>
 #include <string>
@@ -165,6 +167,9 @@ void StartFrame()
 	bool anyBot = false;
 	for (const auto &bot : g_bots)
 		anyBot = anyBot || bot.inUse;
+
+	if (anyBot)
+		BotSense::RefreshMonsters();
 
 	if (anyBot && !g_driftSpeedChecked)
 	{
@@ -460,7 +465,7 @@ void PrintAimStatus()
 		snprintf(line, sizeof(line),
 			"CrossBot: %s target=%s bone=%d leadblk=%d queue=%zu/%zu hist=%.2fs served=%.3fs "
 			"hand=%.0f deg/s brake=(%.3f,%.3f) fov=%.0f quant=%.4f view=(%.1f,%.1f) err=%s\n",
-			bot.name, target ? CBotPlayerNameOf(target) : "-", bot.sense.targetBone,
+			bot.name, target ? CBotTargetNameOf(target) : "-", bot.sense.targetBone,
 			bot.sense.leadVetoes, bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot),
 			bot.aim.servedDelay, BotAim::ViewSpeed(bot), bot.aim.brakeYaw, bot.aim.brakePitch,
 			fov, BotAim::Quantum() * fov / 90.f, view.x, view.y, errBuf);
@@ -505,24 +510,28 @@ void PrintSenseStatus()
 
 		int kinds[BotSense::KIND_COUNT];
 		int live = BotSense::LiveCounts(bot, kinds);
+		int hunting = BotSense::LiveHunting(bot);
 
 		const unsigned int *pushes = bot.sense.pushes;
 
-		char line[640];
+		char line[768];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s target=%s enemy=%s enemyAge=%.1fs bone=%d leadblk=%d "
 			"cands=%d keep=%s keeps=inc:%u,new:%u susp=%d/%zu "
-			"kinds=p:%d,m:%d,o:%d "
+			"kinds=p:%d,m:%d,o:%d hunt=%d "
+			"mon=list:%d,seen:%u,mine:%u,trc:%u,hit:%u "
 			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u\n",
-			bot.name, target ? CBotPlayerNameOf(target) : "-",
-			enemy ? CBotPlayerNameOf(enemy) : "-",
+			bot.name, target ? CBotTargetNameOf(target) : "-",
+			enemy ? CBotTargetNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f, bot.sense.targetBone,
 			bot.sense.leadVetoes,
 			bot.sense.visionCands, BotSense::KeepName(bot.sense.visionKeep),
 			bot.sense.keeps[BotSense::KEEP_INCUMBENT], bot.sense.keeps[BotSense::KEEP_NEW],
 			live, BotSense::kSuspicionSlots,
 			kinds[BotSense::KIND_PLAYER], kinds[BotSense::KIND_MONSTER],
-			kinds[BotSense::KIND_OTHER],
+			kinds[BotSense::KIND_OTHER], hunting,
+			BotSense::MonsterCount(), bot.sense.monSeen, bot.sense.monMine,
+			bot.sense.monTraces, bot.sense.monHits,
 			bot.sense.lookValid ? BotSense::KindName(bot.sense.lookKind) : "-", freshBuf, lookBuf,
 			pushes[BotSense::SUSP_SIGHT], pushes[BotSense::SUSP_SOUND],
 			pushes[BotSense::SUSP_EVENT], pushes[BotSense::SUSP_DAMAGE]);
@@ -536,13 +545,85 @@ void PrintSenseStatus()
 	SERVER_PRINT(summary);
 }
 
+void PrintMonsters()
+{
+	BotSense::RefreshMonsters();
+
+	int count = 0;
+	for (int i = 1; i < gpGlobals->maxEntities; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!ent || ent->free)
+			continue;
+		if ((ent->v.flags & FL_MONSTER) == 0)
+			continue;
+
+		++count;
+
+		edict_t *foe = g_pGameProfile ? g_pGameProfile->MonsterEnemy(ent) : nullptr;
+		Vector centre = BotSense::EntitySoundOrigin(ent);
+
+		char line[400];
+		snprintf(line, sizeof(line),
+			"CrossBot: monster #%d %s flags=0x%x health=%.0f takedamage=%d solid=%d "
+			"box=(%.0f,%.0f,%.0f) enemy=%d:%s\n",
+			i, CBotClassOf(ent), ent->v.flags, ent->v.health,
+			static_cast<int>(ent->v.takedamage), ent->v.solid,
+			centre.x, centre.y, centre.z,
+			foe ? g_engfuncs.pfnIndexOfEdict(foe) : -1,
+			foe ? CBotTargetNameOf(foe) : "-");
+		SERVER_PRINT(line);
+
+		for (auto &bot : g_bots)
+		{
+			if (!bot.inUse)
+				continue;
+
+			Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+			Vector los = centre - eye;
+			float dist = los.Length();
+
+			bool mine = foe == bot.pEdict;
+
+			bool cone = false;
+			if (dist > 0.001f)
+			{
+				MAKE_VECTORS(bot.pEdict->v.v_angle);
+				float fov = bot.pEdict->v.fov;
+				if (fov <= 0.f)
+					fov = 90.f;
+				cone = DotProduct(gpGlobals->v_forward, los * (1.f / dist)) >=
+					cosf(fov * 0.5f * NavMath::kPiF / 180.f);
+			}
+
+			TraceResult tr;
+			TRACE_LINE(eye, centre, dont_ignore_monsters, bot.pEdict, &tr);
+			bool los_ok = tr.flFraction >= 1.f || tr.pHit == ent;
+
+			char sub[256];
+			snprintf(sub, sizeof(sub),
+				"CrossBot:   %s dist=%.0f mine=%d cone=%d los=%d hit=%s\n",
+				bot.name, dist, mine ? 1 : 0, cone ? 1 : 0, los_ok ? 1 : 0,
+				tr.pHit ? CBotClassOf(tr.pHit) : "-");
+			SERVER_PRINT(sub);
+		}
+	}
+
+	char summary[160];
+	snprintf(summary, sizeof(summary),
+		"CrossBot: %d monster edict(s), %d in the sense list, mon_hEnemy offset %d\n",
+		count, BotSense::MonsterCount(), g_offsets.mon_hEnemy);
+	SERVER_PRINT(summary);
+}
+
 void PrintCombatStatus()
 {
 	char head[128];
 	snprintf(head, sizeof(head),
-		"CrossBot: crossbot_combat=%d crossbot_combat_debug=%d crossbot_ambush=%d\n",
+		"CrossBot: crossbot_combat=%d crossbot_combat_debug=%d crossbot_ambush=%d "
+		"crossbot_duel=%d\n",
 		BotCombat::Enabled() ? 1 : 0, BotCombat::DebugEnabled() ? 1 : 0,
-		BotCombat::AmbushEnabled() ? 1 : 0);
+		BotCombat::AmbushEnabled() ? 1 : 0, BotCombat::DuelEnabled() ? 1 : 0);
 	SERVER_PRINT(head);
 
 	for (auto &bot : g_bots)
@@ -563,11 +644,13 @@ void PrintCombatStatus()
 		}
 
 		snprintf(line, sizeof(line),
-			"CrossBot: %s fighting %s for %.1fs, unseen %.1fs, aware=%d ambush=%d, driving=%d "
-			"area %d\n", bot.name, enemy ? CBotPlayerNameOf(enemy) : "-",
+			"CrossBot: %s fighting %s for %.1fs, unseen %.1fs, aware=%d ambush=%d, "
+			"melee=%d inarea=%d duel=%d, driving=%d area %d\n",
+			bot.name, enemy ? CBotTargetNameOf(enemy) : "-",
 			gpGlobals->time - st.startTime, gpGlobals->time - st.lastSightTime,
-			st.enemyAware ? 1 : 0, BotCombat::Ambushing(bot) ? 1 : 0, st.driving ? 1 : 0,
-			bot.currentAreaId);
+			st.enemyAware ? 1 : 0, BotCombat::Ambushing(bot) ? 1 : 0,
+			st.enemyMelee ? 1 : 0, st.enemyInArea ? 1 : 0, BotCombat::Dueling(bot) ? 1 : 0,
+			st.driving ? 1 : 0, bot.currentAreaId);
 		SERVER_PRINT(line);
 
 		if (st.haveProbe)
@@ -713,17 +796,18 @@ void PrintFireStatus()
 		char line[768];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s held=%s zoom=%d mode=%s why=%s %s %s commit=%s for=%.2f shots=%d "
-			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d uphill=%d "
-			"selfveto=%d aimveto=%d targetaims=%d switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
-			"idlereload=%d ambush=%d target=%s\n",
+			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d "
+			"stickyshots=%d uphill=%d selfveto=%d aimveto=%d targetaims=%d "
+			"switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
+			"idlereload=%d ambush=%d duel=%d target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
 			fire.leadShots, fire.chargeShots, fire.arcShots, fire.throwShots, fire.guides,
-			fire.commitCaps,
+			fire.commitCaps, fire.stickyShots,
 			fire.uphillVetoes, fire.selfVetoes, fire.aimVetoes, fire.targetAims,
 			fire.switches, fire.reloads,
-			fire.emptySwitches, fire.idleSwitches, fire.idleReloads, fire.ambushes,
-			target ? CBotPlayerNameOf(target) : "-");
+			fire.emptySwitches, fire.idleSwitches, fire.idleReloads, fire.ambushes, fire.duels,
+			target ? CBotTargetNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}
 
@@ -920,9 +1004,11 @@ void PrintNavStatus()
 		}
 
 		edict_t *enemy = bot.sense.enemy.Get();
-		snprintf(line, sizeof(line), " combat=%d aware=%d enemy=%s enemyAge=%.1fs ready=%.2f",
+		snprintf(line, sizeof(line),
+			" combat=%d aware=%d duel=%d enemy=%s enemyAge=%.1fs ready=%.2f",
 			bot.combat.active ? 1 : 0, bot.combat.enemyAware ? 1 : 0,
-			enemy ? CBotPlayerNameOf(enemy) : "-",
+			BotCombat::Dueling(bot) ? 1 : 0,
+			enemy ? CBotTargetNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f,
 			g_pGameProfile ? g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory) : 0.f);
 		msg += line;

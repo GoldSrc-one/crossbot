@@ -23,6 +23,7 @@ struct GameOffsets
 	int rpg_cActiveRockets;
 
 	int mon_flNextAttack;
+	int mon_hEnemy;
 
 	int plr_pActiveItem;
 	int plr_rgpPlayerItems;

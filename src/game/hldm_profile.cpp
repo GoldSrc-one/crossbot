@@ -9,6 +9,7 @@
 #include "../bot/bot_timing.h"
 #include "../bot/bot_weapons.h"
 #include "ent_handle.h"
+#include "gamedata.h"
 #include "hldm_profile.h"
 #include "hldm_weapons.h"
 
@@ -94,6 +95,26 @@ bool CHLDMProfile::Detect() const
 bool CHLDMProfile::IsDead(edict_t *pEdict) const
 {
 	return pEdict->v.deadflag != DEAD_NO || pEdict->v.health <= 0.0f;
+}
+
+edict_t *CHLDMProfile::MonsterEnemy(edict_t *ent) const
+{
+	if (!ent || ent->free || !ent->pvPrivateData)
+		return nullptr;
+	if ((ent->v.flags & FL_MONSTER) == 0)
+		return nullptr;
+	if (g_offsets.mon_hEnemy < 0)
+		return nullptr;
+
+	edict_t *foe = GameData::Peek<edict_t *>(ent->pvPrivateData, g_offsets.mon_hEnemy);
+	if (!foe || foe->free)
+		return nullptr;
+
+	int serial = GameData::Peek<int>(ent->pvPrivateData, g_offsets.mon_hEnemy + 4);
+	if (foe->serialnumber != serial)
+		return nullptr;
+
+	return foe;
 }
 
 float CHLDMProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const

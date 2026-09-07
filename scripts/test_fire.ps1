@@ -124,6 +124,8 @@ function Update-FireState {
         if ($line -match 'arcshots=(\d+)') { $arcShots = [int]$Matches[1] }
         $throwShots = 0
         if ($line -match 'throwshots=(\d+)') { $throwShots = [int]$Matches[1] }
+        $stickyShots = 0
+        if ($line -match 'stickyshots=(\d+)') { $stickyShots = [int]$Matches[1] }
         $guides = 0
         if ($line -match 'guides=(\d+)') { $guides = [int]$Matches[1] }
         if ($line -match 'capped=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.Capped++ } }
@@ -149,6 +151,7 @@ function Update-FireState {
                 Charge = $chargeShots; BaseCharge = $chargeShots; TotalCharge = 0
                 Arc = $arcShots; BaseArc = $arcShots; TotalArc = 0
                 Throw = $throwShots; BaseThrow = $throwShots; TotalThrow = 0
+                Sticky = $stickyShots; BaseSticky = $stickyShots; TotalSticky = 0
                 Guides = $guides; BaseGuides = $guides; TotalGuides = 0
                 Base = $shots; BaseSwitches = $switches; BaseReloads = $reloads; BaseLead = $leadShots
                 Total = 0; TotalSwitches = 0; TotalReloads = 0; TotalLead = 0; Deaths = 0
@@ -172,12 +175,14 @@ function Update-FireState {
             $bot.TotalCharge += $bot.Charge - $bot.BaseCharge
             $bot.TotalArc += $bot.Arc - $bot.BaseArc
             $bot.TotalThrow += $bot.Throw - $bot.BaseThrow
+            $bot.TotalSticky += $bot.Sticky - $bot.BaseSticky
             $bot.TotalGuides += $bot.Guides - $bot.BaseGuides
             $bot.TotalEmptySw += $bot.EmptySw - $bot.BaseEmptySw
             $bot.TotalIdleSw += $bot.IdleSw - $bot.BaseIdleSw
             $bot.TotalIdleRel += $bot.IdleRel - $bot.BaseIdleRel
             $bot.Base = 0; $bot.BaseSwitches = 0; $bot.BaseReloads = 0; $bot.BaseLead = 0
             $bot.BaseCharge = 0; $bot.BaseArc = 0; $bot.BaseThrow = 0; $bot.BaseGuides = 0
+            $bot.BaseSticky = 0
             $bot.BaseEmptySw = 0; $bot.BaseIdleSw = 0; $bot.BaseIdleRel = 0
             $bot.Deaths++
         }
@@ -189,6 +194,7 @@ function Update-FireState {
             $bot.TotalCharge += $chargeShots - $bot.Charge
             $bot.TotalArc += $arcShots - $bot.Arc
             $bot.TotalThrow += $throwShots - $bot.Throw
+            $bot.TotalSticky += $stickyShots - $bot.Sticky
             $bot.TotalGuides += $guides - $bot.Guides
             $bot.TotalEmptySw += $emptySwitches - $bot.EmptySw
             $bot.TotalIdleSw += $idleSwitches - $bot.IdleSw
@@ -204,6 +210,7 @@ function Update-FireState {
         $bot.Charge = $chargeShots
         $bot.Arc = $arcShots
         $bot.Throw = $throwShots
+        $bot.Sticky = $stickyShots
         $bot.Guides = $guides
 
         # Ammo actually consumed, read independently of anything the plugin
@@ -251,6 +258,13 @@ function Get-TotalArc {
     param([hashtable]$state)
     $sum = 0
     foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalArc + $bot.Arc - $bot.BaseArc }
+    return $sum
+}
+
+function Get-TotalSticky {
+    param([hashtable]$state)
+    $sum = 0
+    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalSticky + $bot.Sticky - $bot.BaseSticky }
     return $sum
 }
 
@@ -593,11 +607,13 @@ try {
     $duelIdleSw = Get-TotalIdleSwitch $duel
     $duelIdleRel = Get-TotalIdleReload $duel
     $duelCarry = Get-CarrySpread
+    $duelSticky = Get-TotalSticky $duel
 
     Write-Host ("  shots={0} burned={1} firing={2} targets={3} deaths={4} switches={5} reloads={6}" -f `
         $duelShots, $duelBurned, $duel.Firing, $duel.Targets, $deaths, $switches, $reloads)
-    Write-Host ("  emptyswitch={0} idleswitch={1} idlereload={2} carry spread: {3}" -f `
-        $duelEmptySw, $duelIdleSw, $duelIdleRel, $duelCarry.Detail)
+    Write-Host ("  emptyswitch={0} idleswitch={1} idlereload={2} stickyshots={3}" -f `
+        $duelEmptySw, $duelIdleSw, $duelIdleRel, $duelSticky)
+    Write-Host ("  carry spread: {0}" -f $duelCarry.Detail)
     Write-Host ("  weapons held: {0}" -f (($duel.Weapons.Keys | Sort-Object) -join ','))
     Write-Host ("  reasons: {0}" -f (($duel.Reasons.Keys | Sort-Object | ForEach-Object { "$_=$($duel.Reasons[$_])" }) -join ' '))
     Write-Host ("  suspicion sources seen: {0}" -f (($senseSeen.Keys | Sort-Object) -join ','))
@@ -609,6 +625,13 @@ try {
     if ($duel.Firing -eq 0) { $failures += "DUEL: no bot ever decided to fire" }
     if ($duelShots -eq 0) { $failures += "DUEL: no shot was observed leaving a weapon" }
     if ($duelBurned -eq 0) { $failures += "DUEL: no ammo was spent" }
+    # Every bot spawns with a glock and both its modes are sticky, so the duel is
+    # the cheapest witness there is -- a pinned phase would cost another minute of
+    # runtime to prove the same thing. Counted off the press flag like leadshots,
+    # never off a why= string.
+    if ($duelSticky -eq 0) {
+        $failures += "DUEL: no shot was ever held through an off-target frame, so the sticky trigger is not running"
+    }
 
     # Only under -Full. Each of these needs a bot to run a clip dry with a loaded
     # spare in the bag, or to survive three seconds unseen with a part-empty
@@ -732,14 +755,26 @@ try {
             }
             'weapon_hornetgun' {
                 # Primary is the homing cone, secondary's dart is genuinely led.
-                if (-not $proj.Aims.ContainsKey('homing')) { $projFailures += "WEAPON ${pin}: aim=homing never appeared" }
+                # leadshots is the cumulative witness; aim=homing is one frame
+                # sampled every two seconds and cannot carry an assertion.
+                if ($shots -eq 0) { $projFailures += "WEAPON ${pin}: nothing was fired" }
                 if ($lead -ge $shots) {
                     $projFailures += "WEAPON ${pin}: every shot was a solved lead, so the cone never replaced the solve"
                 }
             }
             'weapon_snark' {
-                if (-not $proj.Aims.ContainsKey('homing')) { $projFailures += "WEAPON ${pin}: aim=homing never appeared" }
+                # The snark's whole claim is "homing, so never solved", and the
+                # cumulative form of that is shots>0 with leadshots==0: a press
+                # carrying a solved lead would have moved leadshots. Without the
+                # shots>0 half, leadshots==0 passes on a phase that fired nothing.
+                # aim=homing used to carry this and cannot -- the snark is usable
+                # inside 300 units, so most two-second polls catch it with no
+                # target at all and the aim= field never appears.
+                if ($shots -eq 0) { $projFailures += "WEAPON ${pin}: nothing was thrown" }
                 if ($lead -ne 0) { $projFailures += "WEAPON ${pin}: $lead shot(s) were led, and a thrown snark is never led" }
+                if ($proj.TargetAims -ne 0) {
+                    $projFailures += "WEAPON ${pin}: $($proj.TargetAims) poll(s) published an aim=target, and the snark's only mode is AIM_LEAD"
+                }
                 if ($proj.Uphill -eq 0) {
                     $projFailures += "WEAPON ${pin}: the uphill veto never fired, so it is not running"
                 }
@@ -761,11 +796,12 @@ try {
                 # never sees its own grenade leave -- m_flStartThrow going back to
                 # zero is what closes the commit, so a throw count that moves is
                 # the proof the field is being read rather than assumed.
+                # throwshots carries all of it. A throw can only be reached through
+                # ArcOnTarget, so it proves the arc path; and it counts the falling
+                # edge of m_flStartThrow, so it proves the pin field is read rather
+                # than assumed. aim=arc and why=primed said the same two things off a
+                # two-second sample, and a sampled string cannot carry an assertion.
                 if ($thrown -eq 0) { $projFailures += "WEAPON ${pin}: no grenade was ever thrown" }
-                if (-not $proj.Aims.ContainsKey('arc')) { $projFailures += "WEAPON ${pin}: aim=arc never appeared" }
-                if (-not $proj.Reasons.ContainsKey('primed')) {
-                    $projFailures += "WEAPON ${pin}: no bot ever held a pulled pin, so the commit is not running"
-                }
                 # selfveto is the cumulative counter, so a single refusal anywhere in
                 # the phase reaches the poll. The reason strings are a two-second
                 # sample of one frame and miss most of what they describe, so they
@@ -782,10 +818,10 @@ try {
             'weapon_rpg' {
                 # The rocket is tracked, never led: the laser spot sits under the
                 # crosshair, so leading it would steer the rocket off the target.
+                # guides counts the commit opening and capped proves it closed on the
+                # rocket rather than the valve; between them KEEP_AIMING is shown to
+                # run. why=guiding was a sampled restatement of the same fact.
                 if ($guided -eq 0) { $projFailures += "WEAPON ${pin}: no launch ever opened a guide window" }
-                if (-not $proj.Reasons.ContainsKey('guiding')) {
-                    $projFailures += "WEAPON ${pin}: why=guiding never appeared, so KEEP_AIMING is not holding the bot"
-                }
                 if ($proj.Aims.ContainsKey('arc') -or $proj.Aims.ContainsKey('lead')) {
                     $projFailures += "WEAPON ${pin}: aim was $(($proj.Aims.Keys | Sort-Object) -join ','), and a guided rocket is aimed at the target"
                 }
@@ -802,7 +838,9 @@ try {
                 # The contact grenade is the only plain parabola in the game, so
                 # it is the only witness the elevation solve and the traced
                 # flight sim have.
-                if (-not $proj.Aims.ContainsKey('arc')) { $projFailures += "WEAPON ${pin}: aim=arc never appeared" }
+                # arcshots == shots is the cumulative form, but it passes on a phase
+                # that fired nothing, so it needs the shots>0 half beside it.
+                if ($shots -eq 0) { $projFailures += "WEAPON ${pin}: nothing was fired" }
                 if ($arced -ne $shots) {
                     $projFailures += "WEAPON ${pin}: $arced of $shots shot(s) went through the arc path"
                 }

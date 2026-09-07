@@ -179,7 +179,7 @@ try {
                 if ($n -gt [int]$lastPushed[$p[0]]) { $lastPushed[$p[0]] = $n }
             }
         }
-        foreach ($m in [regex]::Matches($out, 'kinds=p:(\d+),m:\d+,o:\d+ tier=(\w+)')) {
+        foreach ($m in [regex]::Matches($out, 'kinds=p:(\d+),m:\d+,o:\d+.*? tier=(\w+)')) {
             if ([int]$m.Groups[1].Value -le 0) { continue }
             $tierChecks++
             if ($m.Groups[2].Value -ne 'PLAYER') { $tierViolations++ }
@@ -199,6 +199,14 @@ try {
 
     if ($tierChecks -gt 0 -and $tierViolations -gt 0) {
         Write-Host "FAIL: a live player entry lost the vote to a lower tier -- check LookDirection's tier pass"
+        $failed = $true
+    }
+    # Zero checks is not a pass. Two bots roaming crossfire always produce some poll with a live
+    # player entry, so an empty tally means the regex stopped matching the status line rather than
+    # that the tier rule held -- which is exactly what happened when kinds= gained hunt= and mon=
+    # fields between it and tier=.
+    if ($tierChecks -eq 0) {
+        Write-Host "FAIL: no poll had a live player entry -- the tier assertion never ran, check the kinds=/tier= regex against crossbot_sense_status"
         $failed = $true
     }
     if ($fired -notcontains 'SIGHT' -or $fired -notcontains 'SOUND') {

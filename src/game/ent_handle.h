@@ -33,4 +33,6 @@ const char *CBotClassOf(const edict_t *ent);
 
 const char *CBotPlayerNameOf(const edict_t *ent);
 
+const char *CBotTargetNameOf(const edict_t *ent);
+
 bool CBotIsLivePlayer(const edict_t *ent);

@@ -104,6 +104,23 @@ void Read(edict_t *player, BotInventory &out)
 	}
 }
 
+// The weapon in an arbitrary player's hands, without walking the item chain. Read's full sweep
+// exists to build an inventory and validates every slot through ItemEdict, which aborts the server
+// on a bad pointer -- worth it once a frame for a bot's own inventory, not worth it for a question
+// this narrow. Two derefs and no validation, because the caller only compares the answer against a
+// known id. 0 means "no idea", which is never a weapon.
+int ActiveWeaponId(edict_t *player)
+{
+	if (!player || player->free || !player->pvPrivateData)
+		return 0;
+
+	void *item = Peek<void *>(player->pvPrivateData, g_offsets.plr_pActiveItem);
+	if (!item)
+		return 0;
+
+	return Peek<int>(item, g_offsets.item_iId);
+}
+
 void Refresh(CBot &bot)
 {
 	Read(bot.pEdict, bot.inventory);

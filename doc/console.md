@@ -42,6 +42,11 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   one way the id-keyed table can be wrong; see `doc/game.md`, `weapon_spec.h`
 - `crossbot_equip <classname> [name]` — spawn an item at the target's feet and touch them with it,
   which is what the game's own `give` does. Default target is every bot
+- `crossbot_spawn <classname> [name] [distance]` — spawn a loose entity in front of the target instead of
+  in its hands, traced out to `distance` (default 96) so it lands short of a wall rather than inside one.
+  Default target is every bot. This is how `test_monster.ps1` produces live `monster_snark`s: letting the
+  bots throw them does not work, because the snark is only reachable through the ambush path and the
+  uphill veto refuses the throw almost everywhere on crossfire
 - `crossbot_aim_test <bot> <yawDelta> [pitchDelta] [fov]` — command a flick relative to the bot's current view
   and print settle time and peak hand speed; the only check on the 180-in-0.4s derivation. Overrides
   navigation aim for 3 seconds. Two seconds in it also prints a **rest error**: the miss still standing once
@@ -63,7 +68,18 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   incumbent enemy held, `new` for a fresh weighted-random pick, `none` when nothing was visible; a duel
   should read `inc` on nearly every frame, and a run of `new` means the lock is broken.
   `fresh` is the freshest entry overall rather than within the winning tier, so it can name an entity the
-  vote ignored; see `doc/bot.md`, `bot_sense.cpp`
+  vote ignored. `hunt` is how many live entries are monsters hunting this bot — those vote at the player
+  tier, so `tier=PLAYER` with `kinds=p:0 hunt=1` is correct and not a contradiction. `mon` is the monster
+  vision path in five numbers: `list` is the shared per-frame monster list, `seen` how many of those this
+  bot considered, `mine` how many named it as their enemy, `trc` tracelines spent on monsters and `hit`
+  how many landed. `mine:0` with `list` nonzero means nothing is hunting this bot; `mine` nonzero with
+  `hit:0` means it is hunted but never has line of sight; see `doc/bot.md`, `bot_sense.cpp`
+- `crossbot_monsters` — one line per `FL_MONSTER` edict on the map with its classname, flags, health,
+  `takedamage`, solid type, box centre and the enemy its `m_hEnemy` names, then one indented line per bot
+  giving distance, whether the monster is in that bot's view cone, and whether a live traceline to the box
+  centre reaches it. This is the command that separates "the bot ignores snarks" from "there are no
+  snarks" and from "the offset is wrong": the trailing summary prints the resolved `mon_hEnemy` offset.
+  It refreshes the shared monster list before printing, so it is safe with no bots on the server
 - `crossbot_fire_status` — per bot: the weapon held, whether it is `zoom`ed, the fire mode chosen, why
   the bot is or is not shooting, live clip and ammo, and `miss`/`tol` — the angle from the fire ray to
   the aim point against the tolerance allowed there, which is the whole aim gate in two numbers. `aim`
@@ -77,9 +93,12 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   up), `throw` (handgrenade pin pulled, waiting for the engine to let go of it) or `guide` (rocket in
   the air) — and `for` is how many seconds it has been in it, or -1. `why=primed` and `why=guiding`
   are the two commits seen from the trigger's side, and `why=splash-self` is the direct-fire twin of
-`arc-self` — the same rule, refusing a rocket rather than a shell.
+`arc-self` — the same rule, refusing a rocket rather than a shell. `why=sticky` is the trigger being
+held through a frame the crosshair is off the target, which on a `WPN_Q_STICKY` weapon is deliberate;
+it appears from both sides of the aim-queue boundary and means the same thing on each.
 
-  `shots`, `leadshots`, `chargeshots`, `arcshots`, `throwshots`, `guides`, `uphill`, `selfveto`,
+  `shots`, `leadshots`, `chargeshots`, `arcshots`, `throwshots`, `guides`, `stickyshots`, `uphill`,
+  `selfveto`,
   `switches`, `reloads`, `emptyswitch`, `idleswitch` and `idlereload` are **per life**: respawn zeroes
   them, so a drop is a death. The carry table that drives selection is the one thing that does *not*
   reset — read it with `crossbot_weapon_carry`. `emptyswitch` counts fights the bot left a dry clip in
@@ -88,7 +107,9 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   `throwshots` and `chargeshots` are counted from the game DLL's own state rather than from an attack timer,
   because neither weapon moves one when the bot presses. `guides` is one per rocket launched, and
   `capped` counts commits released by their safety valve rather than by the game's own state —
-  non-zero is a fault, with the same standing `charge-timeout` has on the gauss. `uphill` and `selfveto` count rejections rather than
+  non-zero is a fault, with the same standing `charge-timeout` has on the gauss. `stickyshots` is the
+  subset of `shots` that only happened because the trigger stayed down off-target; it never counts a
+  gauss primary shot, because that weapon moves no attack timer for the counter to see. `uphill` and `selfveto` count rejections rather than
   situations — both predicates run per weapon per mode per frame — so read them as a yes/no; see
   `doc/bot.md`, `bot_fire.cpp`
 - `crossbot_weapon_carry [name]` — per bot: the weapon held, then `classname=carry/score` for every
@@ -197,6 +218,12 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   logged either way. Inert without `crossbot_combat`, which owns the flag, and it decides nothing on
   its own: an ambush weapon is only ever *offered*, and if none is usable at that range the ordinary
   selection runs untouched
+- `crossbot_duel` — mirror an opponent who has melee out: draw melee too, charge until in reach, back
+  off after each swing. Default 1. Gated on the enemy standing in the bot's *own* nav area, so how far
+  a duel can start from is the map's business, not a tunable. Off, the bot fights a crowbar opponent
+  with whatever it would otherwise have picked, and the `melee=`/`inarea=` flags are still reported so
+  the A/B is readable. Inert without `crossbot_combat`. Note that a bot holding melee out of range is
+  the *point* here rather than a bug: the charge is what closes the gap
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`

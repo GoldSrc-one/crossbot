@@ -51,6 +51,7 @@ struct Suspicion
 	CBotEntHandle ent;
 	SuspicionSource source = SUSP_SOUND;
 	SuspicionKind kind = KIND_OTHER;
+	bool hunting = false;
 };
 
 // Which trace won this frame. KEEP_INCUMBENT is the enemy the bot was already fighting; KEEP_NEW
@@ -85,6 +86,11 @@ struct State
 	// few seconds reads none almost always -- a bot holds a target on well under half of frames, so
 	// sampling proves nothing about whether the incumbent lock works. These cannot miss.
 	unsigned int keeps[3] = {};
+
+	unsigned int monSeen = 0;
+	unsigned int monMine = 0;
+	unsigned int monTraces = 0;
+	unsigned int monHits = 0;
 
 	CBotEntHandle enemy;
 	Vector enemyPos;
@@ -122,6 +128,10 @@ void Notice(CBot &bot, const edict_t *invoker);
 
 void ResetBoneCache();
 
+void RefreshMonsters();
+
+int MonsterCount();
+
 void Update(CBot &bot);
 
 void ForgetEnemy(CBot &bot);
@@ -133,6 +143,8 @@ bool ApplyLook(CBot &bot);
 int LiveCount(const CBot &bot);
 
 int LiveCounts(const CBot &bot, int counts[KIND_COUNT]);
+
+int LiveHunting(const CBot &bot);
 
 const Suspicion *Freshest(const CBot &bot);
 

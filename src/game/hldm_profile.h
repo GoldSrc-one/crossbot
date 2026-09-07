@@ -10,6 +10,7 @@ public:
 
 	bool Detect() const override;
 	bool IsDead(edict_t *pEdict) const override;
+	edict_t *MonsterEnemy(edict_t *ent) const override;
 	float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const override;
 	void Respawn(edict_t *pEdict) const override;
 

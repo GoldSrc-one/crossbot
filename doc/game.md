@@ -15,6 +15,10 @@ describes is a table rather than a policy — see `weapon_spec.h` below. It take
 inventory walk produces, so the caller needs no weapon vocabulary of its own, and returns null for any
 id this game has no weapon for.
 
+`MonsterEnemy(ent)` answers "who is this monster hunting", as an edict or null. It is the only reason
+`src/bot/` can gate monster engagement without knowing what a `CBaseMonster` is; see `gamedata.cpp`,
+`mon_hEnemy`, for the read itself and why the serial check is not optional.
+
 `ThrowLaunch(mode, viewPitch, elevation, speed)` is here for the one thing a table of floats could not
 hold: a weapon whose launch direction and launch speed are the *same* parameter. It maps the pitch the
 bot is holding to what leaves the hand, and returns false for any mode without `WPN_Q_THROW_ARC`. It
@@ -193,6 +197,25 @@ The rule is otherwise unchanged, and this is the only exception. `CRpg::m_fSpotA
 below the counter and is *not* requested: the same gate would make it safe, but see "The deployables"
 below for why nothing wants it.
 
+### mon_hEnemy, and why the read lives in the profile
+
+`CBaseMonster::m_hEnemy` (offset 244) is who a monster is currently hunting, and it is the whole gate on
+monster engagement: a bot traces and fights a monster if and only if this field names that bot (see
+`doc/bot.md`, `bot_sense.cpp`). It is an `EHANDLE`, which is 8 bytes of `{ edict_t *m_pent; int
+m_serialnumber; }` — so the read is two peeks, and the serial has to match `m_pent->serialnumber` or the
+handle is stale. That is the same rule `CBotEntHandle::Get` applies, and skipping it means resolving a
+recycled edict slot to whatever now lives in it.
+
+It is requested off `CBaseMonster` and read off things that are not obviously monsters. Everything in
+valve that sets `FL_MONSTER` is a `CBaseMonster` descendant — snarks, tripmines and satchels all reach it
+through `CGrenade` — so `FL_MONSTER` plus a non-null `pvPrivateData` is what makes the peek legal, and
+the serial check is what catches it if a mod ever violates that.
+
+**The read is `IGameProfile::MonsterEnemy`, not a helper in `src/bot/`.** "Which entity is this monster
+hunting" is a question only the mod can answer, and `src/bot/` is not allowed to know that the answer is
+a field at 244. The bot layer asks the profile and compares the result to its own edict; a profile for a
+mod with a different monster base class answers differently and nothing in `bot_sense.cpp` changes.
+
 ### The fun-goal offsets, and why entvars_t is not enough
 
 The fun goal tier (`doc/bot.md`, `bot_fun.cpp`) added a block of offsets that have nothing to do with
@@ -339,6 +362,18 @@ console command keeps its own message at the call site.
 the map. It is defined locally rather than pulled from the SDK header because the plugin does not
 include `weapons.h`.
 
+`GiveItem::Spawn(classname, origin)` is the same call sequence without the `pfnTouch`: it leaves the
+entity standing in the world instead of handing it to anyone, and returns the edict so the caller can
+report it. It exists for `crossbot_spawn` and the monster test, which needs live `monster_snark`s and
+cannot get them from the bots (see `doc/testing.md`, `test_monster.ps1`). It checks `pent->free` after
+`pfnSpawn`, because a mod entity is free to remove itself during spawn and the caller would otherwise
+be handed a dead edict.
+
+It takes no owner. A snark reads `pev->owner` into `m_hOwner` during spawn and then treats that player
+differently, which is exactly wrong for a test that wants it to hunt whoever is nearest — so the
+parameter is absent rather than defaulted, and anything that genuinely needs an owned entity should add
+it deliberately.
+
 ## ent_handle.h
 
 ### CBotEntHandle
@@ -351,7 +386,7 @@ unrelated entity that happened to reuse the slot.
 does not need to — a `CBaseEntity` never outlives its edict — but a memo entry does, and a freed
 edict keeps its old serial number until the slot is reused.
 
-### CBotPlayerNameOf / CBotIsLivePlayer
+### CBotPlayerNameOf / CBotTargetNameOf / CBotIsLivePlayer
 
 Two one-liners in `ent_handle.cpp`, for walking `pfnPEntityOfEntIndex(1..maxClients)`. They lived as
 statics in `commands.cpp` until the aim gaze scaffold needed the same scan from `bot_aim.cpp`; they are
@@ -360,6 +395,11 @@ of thing that silently diverges.
 
 `CBotClassOf` is declared alongside them but defined in `hldm_profile.cpp`, which is a wart — nothing
 about it is mod-specific.
+
+`CBotTargetNameOf` is the one to use in any line that can name a non-player. It returns the netname for a
+client and the classname for everything else, because `v.netname` on a monster is empty and
+`CBotPlayerNameOf` renders that as `?` — which is what every combat log line said about a snark before
+monsters could be fought at all.
 
 ## weapon_spec.h
 
@@ -434,6 +474,11 @@ There are **two** reasons a bot must not, and the table uses the same value for 
 
 Anyone comparing this table against the SDK will find no mechanism behind `FIRE_TAP` and be tempted to
 delete it. It is not redundant.
+
+**And `FIRE_HOLD` is not the opposite of it.** It means only "the bot may hold this button", which is
+equally true of the shotgun, the python, the crossbow, the RPG and the snark. If full auto is the
+mechanism everywhere, then what separates a weapon you *spray* from one you *place shots with* is not
+in this enum at all — it is cycle time. `WPN_Q_STICKY` below is where that lands.
 
 `FIRE_CHARGE` is the inverse: releasing is what fires, deliberately, after a hold that is worth
 something. `ItemPostFrame` reaches `WeaponIdle()` the same way, but only the gauss has a charge that
@@ -566,6 +611,39 @@ gate rather than a category: every mode with `splash > 0` has its predicted impa
 "closer to them than to me", so a weapon that steers itself is judged on where it lands like any
 other. The snark's splash is 0 regardless.
 
+### WPN_Q_STICKY names a cycle time without storing one
+
+Every weapon is full auto, so "is this a sprayer" is purely a question of how fast the cycle is. The
+SDK ladder has an obvious cliff in it:
+
+| mode | cycle | |
+|---|---|---|
+| MP5 primary, hornetgun secondary | 0.10s | sticky |
+| gauss primary, glock secondary | 0.20s | sticky |
+| egon primary, hornetgun primary | 0.25s | sticky |
+| glock primary | 0.30s | sticky |
+| shotgun, python, crossbow primary | 0.75s | not |
+| MP5 secondary, RPG, shotgun secondary | 1.0s+ | not |
+
+`WPN_Q_STICKY` marks the seven at or under 0.30s. It tells `bot_fire.cpp` that the trigger may stay
+down through a frame the crosshair is not on the target — see `doc/bot.md` — and it is the only
+consumer.
+
+**It is a quirk and not a `cycleTime` field, deliberately.** `cycleTime` is in the rejected-fields
+table below and stayed rejected when this was written, for the reason given there: the live
+`nextPrimaryAttack` on the weapon in hand is authoritative, so a table copy of it would be a second
+source of truth for something already known. What this bit records is not the number — it is the
+*judgement* that 0.30 is where spraying stops being sensible. Storing the number and comparing it to a
+threshold hidden in `src/bot/` would put the judgement somewhere nobody would look for it, and would
+imply a precision the choice does not have.
+
+Two consequences worth knowing. **Gauss primary sets no weapon timer at all** — `CGauss::PrimaryAttack`
+moves `m_flTimeWeaponIdle` and the player's `m_flNextAttack`, nothing else — so its 0.20s is the
+player timer's, and no shot counter that watches `nextPrimaryAttack` will ever see a gauss primary
+shot. And **hornetgun primary is also `WPN_Q_HOMING`**, whose 20-degree cone already passes almost
+every frame, so the sticky bit on that one row is close to a no-op. It is set anyway, because the
+table describes the weapon rather than the code path that happens to consume it.
+
 ### Why ammo is a field when the inventory already has counts
 
 `BotWeapon` carries `primaryAmmoType`, `secondaryAmmoType` and the counts, so `WeaponAmmo` looks
@@ -654,6 +732,7 @@ do not get re-proposed:
 | a `selfPush` quirk | The gauss jump is a movement capability, not a firing instruction. |
 | the throw-law coefficients | Five floats on every one of 42 rows to describe one weapon's pitch-to-speed curve. `WPN_Q_THROW_ARC` names the law and `IGameProfile::ThrowLaunch` implements it. |
 | a `guided` quirk | Redundant with `WPN_Q_KEEP_AIMING`. The reason you must keep pointing *is* that the projectile follows where you point. |
+| `cycleTime`, reconsidered | Raised again by the sticky trigger, which needs to know which weapons spray. Still rejected: the live timer is authoritative, and what the bot actually needs is the judgement about where the cliff is, not the number. `WPN_Q_STICKY` records the judgement. |
 
 Spread cones, pellet counts, damage values and projectile lifetimes are likewise not fields. Some are
 noted below because they were expensive to establish, but they belong to the accuracy and selection

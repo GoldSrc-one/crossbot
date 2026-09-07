@@ -27,6 +27,13 @@ struct State
 	// false, so a bot that opens an ambush stops ambushing the moment it is spotted.
 	bool enemyAware = false;
 
+	// Does the enemy have melee out, and are they near enough to charge? Unlike enemyAware these
+	// do not latch: the duel is over the moment they draw a gun or leave the area. enemyMelee is
+	// refreshed only on a frame the bot can see them, so it reads hands rather than memory.
+	bool enemyMelee = false;
+	bool enemyInArea = false;
+	bool dueling = false;
+
 	bool haveProbe = false;
 	Vector probePoint;
 	float probeExposure = 0.f;
@@ -46,6 +53,8 @@ bool DebugEnabled();
 
 bool AmbushEnabled();
 
+bool DuelEnabled();
+
 void Update(CBot &bot);
 
 bool Run(CBot &bot, const Nav::NavMesh &mesh);
@@ -57,6 +66,8 @@ void OnRespawn(CBot &bot);
 bool Active(const CBot &bot);
 
 bool Ambushing(const CBot &bot);
+
+bool Dueling(const CBot &bot);
 
 edict_t *Enemy(const CBot &bot);
 

@@ -26,6 +26,7 @@ namespace
 	constexpr float kSelectInterval = 0.5f;
 	constexpr float kIdleSelectInterval = 3.f;
 	constexpr float kCombatMemory = 3.f;
+	constexpr float kStickyWindow = 0.5f;
 	constexpr float kCarryEpsilon = 0.05f;
 	constexpr float kEquipInterval = 0.5f;
 
@@ -157,6 +158,16 @@ namespace
 	bool ArcDetonates(const WeaponMode &m)
 	{
 		return IsArc(m) && !IsThrow(m);
+	}
+
+	bool IsSticky(const WeaponMode &m)
+	{
+		return (m.quirks & WPN_Q_STICKY) != 0;
+	}
+
+	bool StickyAllowed(const CBot &bot, const WeaponMode &m)
+	{
+		return IsSticky(m) && gpGlobals->time - bot.sense.targetTime <= kStickyWindow;
 	}
 
 	bool IsGuided(const WeaponMode &m)
@@ -501,9 +512,11 @@ namespace
 		bool pressed = fire.pressed;
 		bool pressedLead = fire.pressedLead;
 		bool pressedArc = fire.pressedArc;
+		bool pressedSticky = fire.pressedSticky;
 		fire.pressed = false;
 		fire.pressedLead = false;
 		fire.pressedArc = false;
+		fire.pressedSticky = false;
 
 		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
 		{
@@ -523,22 +536,27 @@ namespace
 				if (fired)
 				{
 					++fire.shots;
+					fire.lastShotTime = gpGlobals->time;
 					if (pressedLead)
 						++fire.leadShots;
 					if (pressedArc)
 						++fire.arcShots;
+					if (pressedSticky)
+						++fire.stickyShots;
 				}
 			}
 
 			if (fire.lastChargeState != 0 && w.chargeState == 0)
 			{
 				++fire.shots;
+				fire.lastShotTime = gpGlobals->time;
 				++fire.chargeShots;
 			}
 
 			if (fire.lastThrowStart != 0.f && w.throwStart == 0.f)
 			{
 				++fire.shots;
+				fire.lastShotTime = gpGlobals->time;
 				++fire.throwShots;
 			}
 		}
@@ -560,7 +578,36 @@ namespace
 		fire.lastReason = reason;
 	}
 
-	bool RayOnTarget(CBot &bot, const Vector &angles, const WeaponMode &m, const Vector &eye)
+	bool StickyHold(CBot &bot)
+	{
+		BotFire::State &fire = bot.fire;
+
+		if (fire.mode == BotFire::MODE_NONE || !fire.aimValid || !g_pGameProfile)
+			return false;
+
+		const BotInventory &inv = bot.inventory;
+		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
+			return false;
+		if (inv.weapons[inv.activeIndex].id != fire.weaponId)
+			return false;
+
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(fire.weaponId);
+		if (!spec)
+			return false;
+
+		const WeaponMode *m = BotFire::ModeOf(*spec, fire.mode, fire.zoomed);
+		return m && StickyAllowed(bot, *m);
+	}
+
+	enum RayVeto
+	{
+		RAY_HIT = 0,
+		RAY_WIDE,
+		RAY_BLOCKED,
+		RAY_SELF,
+	};
+
+	RayVeto RayOnTarget(CBot &bot, const Vector &angles, const WeaponMode &m, const Vector &eye)
 	{
 		BotFire::State &fire = bot.fire;
 		edict_t *pEdict = bot.pEdict;
@@ -606,7 +653,7 @@ namespace
 		{
 			fire.lastReason = "off-target";
 			++fire.aimVetoes;
-			return false;
+			return RAY_WIDE;
 		}
 
 		TraceResult tr;
@@ -615,16 +662,16 @@ namespace
 		if (reach < entry)
 		{
 			fire.lastReason = "blocked";
-			return false;
+			return RAY_BLOCKED;
 		}
 
 		if (m.splash > 0.f && !SplashSafe(fire, eye, eye + dir * entry))
 		{
 			fire.lastReason = "splash-self";
-			return false;
+			return RAY_SELF;
 		}
 
-		return true;
+		return RAY_HIT;
 	}
 
 	bool ArcImpactHits(CBot &bot, const WeaponMode &m, const Vector &eye, const Vector &impact,
@@ -759,6 +806,11 @@ namespace
 			fire.lastReason = "primed";
 			return 0;
 		}
+
+		float timer = (fire.mode == BotFire::MODE_SECONDARY)
+			? w.nextSecondaryAttack : w.nextPrimaryAttack;
+		if (timer > 0.f)
+			return 0;
 
 		if (!onTarget)
 			return 0;
@@ -1615,20 +1667,26 @@ void Think(CBot &bot)
 
 	if (!haveTarget)
 	{
-		if (!holding)
+		if (holding)
 		{
-			ClearAim(fire);
-			Idle(fire, "no-target");
+			if (fire.commit != COMMIT_GUIDE)
+				ClearAim(fire);
 
-			if (gpGlobals->time - bot.sense.targetTime > kCombatMemory)
-				IdleSelect(bot);
+			fire.lastReason = (fire.commit == COMMIT_GUIDE) ? "guiding" : "carrying";
 			return;
 		}
 
-		if (fire.commit != COMMIT_GUIDE)
-			ClearAim(fire);
+		if (StickyHold(bot))
+		{
+			fire.lastReason = "sticky";
+			return;
+		}
 
-		fire.lastReason = (fire.commit == COMMIT_GUIDE) ? "guiding" : "carrying";
+		ClearAim(fire);
+		Idle(fire, "no-target");
+
+		if (gpGlobals->time - bot.sense.targetTime > kCombatMemory)
+			IdleSelect(bot);
 		return;
 	}
 
@@ -1665,6 +1723,28 @@ void Think(CBot &bot)
 		if (pick >= 0 && SelectWeapon(bot, choices[pick], "ambush"))
 		{
 			++fire.ambushes;
+			return;
+		}
+	}
+
+	// The duel: they drew melee, so we draw melee. Same three guards as the ambush above and for
+	// the same reasons, and it sits after it because an unaware enemy is the better opportunity --
+	// PickAmbush tries melee first anyway, so at contact range the two agree.
+	//
+	// geometry=false, unlike the ambush. That routes BuildChoices through ModeViable instead of
+	// ModeUsable, dropping the range gate but keeping the pin and ammo checks. The ambush wants a
+	// weapon usable now; the duel wants one usable after walking, and gating on range here would
+	// refuse the crowbar at every distance the bot still has to close.
+	int meleeId = g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
+	if (!throttled && !holding && meleeId != 0 && BotCombat::Dueling(bot) &&
+		(!active || active->id != meleeId))
+	{
+		int count = BuildChoices(bot, true, false, dist, rise, 0, choices, kMaxChoices);
+		int pick = PickBest(bot, choices, count, PASS_MELEE, dist);
+
+		if (pick >= 0 && SelectWeapon(bot, choices[pick], "duel"))
+		{
+			++fire.duels;
 			return;
 		}
 	}
@@ -1802,8 +1882,22 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 		}
 	}
 
-	bool onTarget = fire.aimValid &&
-		(IsArc(*m) ? ArcOnTarget(bot, angles, *m, eye) : RayOnTarget(bot, angles, *m, eye));
+	bool onTarget = false;
+	bool stickyable = false;
+
+	if (fire.aimValid)
+	{
+		if (IsArc(*m))
+		{
+			onTarget = ArcOnTarget(bot, angles, *m, eye);
+		}
+		else
+		{
+			RayVeto veto = RayOnTarget(bot, angles, *m, eye);
+			onTarget = veto == RAY_HIT;
+			stickyable = veto == RAY_WIDE;
+		}
+	}
 
 	if (charge)
 	{
@@ -1816,7 +1910,15 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	}
 
 	if (!onTarget)
-		return 0;
+	{
+		if (!stickyable || !StickyAllowed(bot, *m))
+			return 0;
+
+		fire.lastReason = "sticky";
+		fire.pressed = true;
+		fire.pressedSticky = true;
+		return AttackButton(fire.mode);
+	}
 
 	if (IsGuided(*m) && w.nextPrimaryAttack <= 0.f)
 	{

@@ -50,6 +50,18 @@ namespace
 
 	constexpr float kMoveButtonDeadzone = 0.01f;
 
+	// XY containment alone would match someone on a walkway directly overhead, who cannot be
+	// charged. One standing player's height is the whole justification for the number.
+	constexpr float kDuelSameFloor = 72.f;
+
+	// Long enough to break contact after a swing, short enough to be back in range for the next
+	// one -- the crowbar's own refire is about half a second.
+	constexpr float kDuelBackoff = 0.4f;
+
+	// Stop closing a little inside the weapon's reach, so one step of overshoot does not leave the
+	// bot outside it. The reach itself comes from the melee spec, never from a constant here.
+	constexpr float kDuelCloseFrac = 0.8f;
+
 	struct Spot
 	{
 		Vector origin;
@@ -154,6 +166,9 @@ namespace
 	// costs one badly chosen opening weapon.
 	bool EnemySees(const CBot &bot, edict_t *enemy)
 	{
+		if ((enemy->v.flags & FL_CLIENT) == 0)
+			return true;
+
 		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
 		Vector theirEye = enemy->v.origin + enemy->v.view_ofs;
 
@@ -195,6 +210,82 @@ namespace
 			BOT_VLOG("CrossBot: %s is spotted (%s), ambush off\n", bot.name, how);
 	}
 
+	int MeleeId()
+	{
+		return g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
+	}
+
+	// Is the enemy standing in the bot's own area? Asked this way round on purpose. The question
+	// is not "which area is the enemy in", which would be FindAreaNearest and up to three full
+	// linear passes over every area in the mesh; it is "is the enemy in this one", which is an
+	// O(1) id lookup and a single plane test.
+	bool EnemyInOurArea(const CBot &bot, edict_t *enemy)
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh || bot.currentAreaId < 0)
+			return false;
+
+		const Nav::Area *cur = Nav::FindAreaById(*mesh, static_cast<uint32_t>(bot.currentAreaId));
+		if (!cur)
+			return false;
+
+		// TestArea's idiom, for TestArea's reason: nav areas are duck-origin z-space, so a
+		// standing origin sits kAreaStandLift above one and the honest test is XY against the
+		// area's own z.
+		Vector spot(enemy->v.origin.x, enemy->v.origin.y, cur->centroid.z);
+		if (!Nav::AreaContainsPoint(*cur, spot))
+			return false;
+
+		return fabsf(enemy->v.origin.z - bot.pEdict->v.origin.z) <= kDuelSameFloor;
+	}
+
+	// Both halves of the duel predicate, refreshed together so the edge below sees a settled
+	// answer. enemyMelee is only refreshed when the bot can see them: reading m_pActiveItem works
+	// through a wall, but a human reads the crowbar off someone's hands, and the same restraint
+	// is already what EnemySees observes. Between sightings the last verdict stands, which
+	// kSightTimeout bounds at five seconds.
+	void UpdateDuel(CBot &bot, edict_t *enemy, bool visible)
+	{
+		BotCombat::State &st = bot.combat;
+
+		int melee = MeleeId();
+
+		// ActiveWeaponId peeks m_pActiveItem, which is a CBasePlayer offset -- reading it off a
+		// monster's private data would be garbage. Monsters never duel.
+		if (visible)
+			st.enemyMelee = melee != 0 && (enemy->v.flags & FL_CLIENT) != 0 &&
+				BotWeapons::ActiveWeaponId(enemy) == melee;
+
+		// Ordered so the geometry only runs once a duel is actually plausible.
+		st.enemyInArea = st.enemyMelee && EnemyInOurArea(bot, enemy);
+
+		bool now = st.enemyMelee && st.enemyInArea && BotCombat::DuelEnabled();
+		if (now == st.dueling)
+			return;
+
+		st.dueling = now;
+
+		// Both edges matter. Entering, so the bot does not spend kSelectInterval holding a shotgun
+		// at a charging crowbar; leaving, so it does not spend it holding a crowbar at someone who
+		// just drew an MP5.
+		bot.fire.nextSelectTime = 0.f;
+
+		if (BotCombat::DebugEnabled())
+		{
+			BOT_VLOG("CrossBot: %s %s a duel with %s (melee=%d area=%d)\n", bot.name,
+				now ? "enters" : "leaves", CBotTargetNameOf(enemy), st.enemyMelee ? 1 : 0,
+				st.enemyInArea ? 1 : 0);
+		}
+	}
+
+	void ClearDuel(CBot &bot)
+	{
+		BotCombat::State &st = bot.combat;
+		st.enemyMelee = false;
+		st.enemyInArea = false;
+		st.dueling = false;
+	}
+
 	void Enter(CBot &bot, edict_t *enemy, const char *how, bool aware)
 	{
 		BotCombat::State &st = bot.combat;
@@ -210,8 +301,13 @@ namespace
 		st.nextProbeTime = 0.f;
 		st.lastReason = how;
 
-		BOT_VLOG("CrossBot: %s entered combat with %s (%s, aware=%d)\n", bot.name,
-			CBotPlayerNameOf(enemy), how, aware ? 1 : 0);
+		// ClearDuel first so a previous fight's verdict cannot survive into this one. A damage
+		// entry has no sight this frame, so the melee read waits for one rather than guessing.
+		ClearDuel(bot);
+		UpdateDuel(bot, enemy, bot.sense.target.Get() == enemy);
+
+		BOT_VLOG("CrossBot: %s entered combat with %s (%s, aware=%d, melee=%d)\n", bot.name,
+			CBotTargetNameOf(enemy), how, aware ? 1 : 0, st.enemyMelee ? 1 : 0);
 	}
 
 	// Pick where to stand next. One random direction, scored on exposure alone; if it is no
@@ -297,6 +393,100 @@ namespace
 				st.probeArea, st.probeExposure, st.hereExposure);
 		}
 	}
+
+	int HeldId(const CBot &bot)
+	{
+		const BotInventory &inv = bot.inventory;
+		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
+			return 0;
+		return inv.weapons[inv.activeIndex].id;
+	}
+
+	// The duel replaces the cover shuffle rather than blending with it: close, swing, back off,
+	// close again. Reachable only with melee actually in hand against a melee opponent in the same
+	// area, which is what keeps this narrow -- BotCombat deleted the chase on purpose, and this is
+	// a scoped reintroduction of approach movement, not a general one.
+	//
+	// Returns false to leave the probe in charge.
+	bool DuelDrive(CBot &bot, const Nav::NavMesh &mesh, const PmSim::PmPhysics &physics,
+		Vector &moveDir, float &drive)
+	{
+		BotCombat::State &st = bot.combat;
+
+		if (!BotCombat::Dueling(bot))
+			return false;
+
+		int melee = MeleeId();
+
+		// A failed selection must not leave the bot charging bare-handed, so the weapon in hand is
+		// the condition, not the intent to hold it.
+		if (melee == 0 || HeldId(bot) != melee)
+			return false;
+
+		edict_t *enemy = st.enemy.Get();
+		if (!enemy)
+			return false;
+
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(melee);
+		if (!spec)
+			return false;
+
+		edict_t *pEdict = bot.pEdict;
+		Vector to(enemy->v.origin.x - pEdict->v.origin.x, enemy->v.origin.y - pEdict->v.origin.y,
+			0.f);
+		float dist = to.Length();
+
+		// Areas merge into non-convex prisms, so a straight line between two points in one area
+		// can still leave it. ResolveSpot is this file's own answer to that and covers the
+		// walk-connected neighbours too; when it fails there is nowhere safe to charge and the
+		// probe gets the frame back.
+		Spot spot;
+		bool backing = gpGlobals->time - bot.fire.lastShotTime < kDuelBackoff;
+
+		if (backing)
+		{
+			if (dist < 0.001f)
+				return false;
+			if (!ResolveAlongRay(mesh, bot, pEdict->v.origin, Norm2D(to) * -1.f, spot))
+				return false;
+			st.lastReason = "backing off";
+		}
+		else if (dist > spec->primary.range * kDuelCloseFrac)
+		{
+			if (!ResolveSpot(mesh, bot, enemy->v.origin, spot))
+				return false;
+			st.lastReason = "charging";
+		}
+		else
+		{
+			// In reach and the swing is ready. Stand and hit them.
+			moveDir = Vector(0.f, 0.f, 0.f);
+			drive = 0.f;
+			st.lastReason = "swinging";
+			return true;
+		}
+
+		Vector step(spot.origin.x - pEdict->v.origin.x, spot.origin.y - pEdict->v.origin.y, 0.f);
+		if (step.Length() <= 1.f)
+		{
+			moveDir = Vector(0.f, 0.f, 0.f);
+			drive = 0.f;
+			return true;
+		}
+
+		moveDir = Norm2D(step);
+		drive = Bot_MaxSpeed(pEdict);
+
+		NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
+			physics);
+		if (solved.wishSpeed > 0.f)
+		{
+			moveDir = solved.wishDir;
+			drive = solved.wishSpeed;
+		}
+
+		return true;
+	}
 }
 
 bool BotCombat::Enabled()
@@ -314,6 +504,17 @@ bool BotCombat::AmbushEnabled()
 bool BotCombat::Ambushing(const CBot &bot)
 {
 	return bot.combat.active && !bot.combat.enemyAware && AmbushEnabled();
+}
+
+bool BotCombat::DuelEnabled()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_duel");
+	return !cvar || cvar->value != 0.f;
+}
+
+bool BotCombat::Dueling(const CBot &bot)
+{
+	return bot.combat.active && bot.combat.dueling;
 }
 
 bool BotCombat::DebugEnabled()
@@ -350,6 +551,10 @@ edict_t *BotCombat::DamageSource(edict_t *pEdict)
 	if (g_engfuncs.pfnIndexOfEdict(ent) == 0)
 		return nullptr;
 
+	if (!CBotIsLivePlayer(ent) && g_pGameProfile &&
+		g_pGameProfile->MonsterEnemy(ent) == pEdict && !g_pGameProfile->IsDead(ent))
+		return ent;
+
 	if (!CBotIsLivePlayer(ent))
 		ent = ent->v.owner;
 
@@ -366,6 +571,9 @@ void BotCombat::Exit(CBot &bot, const char *why)
 	State &st = bot.combat;
 	bool was = st.active;
 
+	edict_t *had = st.enemy.ent;
+	const char *hadName = (was && had) ? CBotTargetNameOf(had) : "-";
+
 	st.active = false;
 	st.driving = false;
 	st.enemy.Clear();
@@ -375,10 +583,12 @@ void BotCombat::Exit(CBot &bot, const char *why)
 	st.nextProbeTime = 0.f;
 	st.lastReason = why;
 
+	ClearDuel(bot);
+
 	if (!was)
 		return;
 
-	BOT_VLOG("CrossBot: %s left combat after %.1fs: %s\n", bot.name,
+	BOT_VLOG("CrossBot: %s left combat with %s after %.1fs: %s\n", bot.name, hadName,
 		gpGlobals->time - st.startTime, why);
 
 	// Whatever it was walking to was dropped when combat took over, so choose again now rather
@@ -413,12 +623,15 @@ void BotCombat::Update(CBot &bot)
 			Exit(bot, "the enemy handle went stale");
 		else if (g_pGameProfile && g_pGameProfile->IsDead(enemy))
 			Exit(bot, "the enemy died");
+		else if ((enemy->v.flags & FL_CLIENT) == 0 && g_pGameProfile &&
+			g_pGameProfile->MonsterEnemy(enemy) != bot.pEdict)
+			Exit(bot, "the monster stopped hunting us");
 		else if (seen && seen != enemy)
 		{
 			// Still a fight, just a different opponent. Dropping out and re-entering would
 			// throw away the probe and the goal it already gave up, for nothing.
 			BOT_VLOG("CrossBot: %s switches from %s to %s\n", bot.name,
-				CBotPlayerNameOf(enemy), CBotPlayerNameOf(seen));
+				CBotTargetNameOf(enemy), CBotTargetNameOf(seen));
 			st.enemy.Set(seen);
 			st.lastSightTime = gpGlobals->time;
 
@@ -429,6 +642,11 @@ void BotCombat::Update(CBot &bot)
 			st.enemyAware = false;
 			if (EnemySees(bot, seen))
 				SetAware(bot, "new opponent");
+
+			// Same trap, same fix: the duel verdict is about one opponent's hands and cannot be
+			// carried over to the next one.
+			ClearDuel(bot);
+			UpdateDuel(bot, seen, true);
 		}
 		else
 		{
@@ -443,6 +661,8 @@ void BotCombat::Update(CBot &bot)
 			// Being shot settles it whether or not the bot can see them.
 			if (!st.enemyAware && DamageSource(bot.pEdict) == enemy)
 				SetAware(bot, "shot at us");
+
+			UpdateDuel(bot, enemy, seen == enemy);
 
 			if (!BotSense::Senses(bot, enemy))
 				Exit(bot, "lost every trace of the enemy");
@@ -499,28 +719,39 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 	BotSense::ApplyLook(bot);
 	Vector angles = Bot_UpdateFacing(bot);
 
-	UpdateProbe(bot, mesh);
-
 	PmSim::PmPhysics physics = Bot_DrivePhysics(pEdict);
 
 	Vector moveDir(0.f, 0.f, 0.f);
 	float drive = 0.f;
-	if (st.haveProbe)
-	{
-		Vector to(st.probePoint.x - pEdict->v.origin.x, st.probePoint.y - pEdict->v.origin.y,
-			0.f);
-		float dist = to.Length();
-		if (dist > 1.f)
-		{
-			moveDir = Norm2D(to);
-			drive = Bot_MaxSpeed(pEdict);
 
-			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
-				physics);
-			if (solved.wishSpeed > 0.f)
+	// The duel owns movement outright while it is on. Drop the probe rather than leaving it
+	// standing, or a stale probePoint resurfaces the moment the duel ends.
+	if (DuelDrive(bot, mesh, physics, moveDir, drive))
+	{
+		st.haveProbe = false;
+		st.probeArea = -1;
+	}
+	else
+	{
+		UpdateProbe(bot, mesh);
+
+		if (st.haveProbe)
+		{
+			Vector to(st.probePoint.x - pEdict->v.origin.x,
+				st.probePoint.y - pEdict->v.origin.y, 0.f);
+			float dist = to.Length();
+			if (dist > 1.f)
 			{
-				moveDir = solved.wishDir;
-				drive = solved.wishSpeed;
+				moveDir = Norm2D(to);
+				drive = Bot_MaxSpeed(pEdict);
+
+				NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive,
+					pEdict->v.velocity, physics);
+				if (solved.wishSpeed > 0.f)
+				{
+					moveDir = solved.wishDir;
+					drive = solved.wishSpeed;
+				}
 			}
 		}
 	}
