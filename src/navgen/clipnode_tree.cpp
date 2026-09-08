@@ -187,21 +187,40 @@ int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point)
 namespace
 {
 
-bool RecursiveHullCheck(const HullTree &hull, int headnode, int nodeIndex, double p1f, double p2f,
-	const Vec3 &p1, const Vec3 &p2, TraceResult &trace)
+enum class HullStep
+{
+	Continue,
+	Stop,
+	Clear
+};
+
+struct NullTrace
+{
+};
+
+template <bool BoolOnly, typename Trace>
+HullStep HullCheck(const HullTree &hull, int headnode, int nodeIndex, double p1f, double p2f,
+	const Vec3 &p1, const Vec3 &p2, Trace &trace)
 {
 	if (nodeIndex < 0)
 	{
-		if (nodeIndex != CONTENTS_SOLID)
+		if constexpr (BoolOnly)
 		{
-			trace.allsolid = false;
-			trace.contents = nodeIndex;
+			return (nodeIndex == CONTENTS_SOLID) ? HullStep::Stop : HullStep::Continue;
 		}
 		else
 		{
-			trace.startsolid = true;
+			if (nodeIndex != CONTENTS_SOLID)
+			{
+				trace.allsolid = false;
+				trace.contents = nodeIndex;
+			}
+			else
+			{
+				trace.startsolid = true;
+			}
+			return HullStep::Continue;
 		}
-		return true;
 	}
 
 	const dclipnode_t &node = hull.clipnodes[static_cast<size_t>(nodeIndex)];
@@ -211,9 +230,9 @@ bool RecursiveHullCheck(const HullTree &hull, int headnode, int nodeIndex, doubl
 	double t2 = PlaneDiff(plane, p2);
 
 	if (t1 >= 0.0 && t2 >= 0.0)
-		return RecursiveHullCheck(hull, headnode, node.children[0], p1f, p2f, p1, p2, trace);
+		return HullCheck<BoolOnly>(hull, headnode, node.children[0], p1f, p2f, p1, p2, trace);
 	if (t1 < 0.0 && t2 < 0.0)
-		return RecursiveHullCheck(hull, headnode, node.children[1], p1f, p2f, p1, p2, trace);
+		return HullCheck<BoolOnly>(hull, headnode, node.children[1], p1f, p2f, p1, p2, trace);
 
 	double frac = (t1 < 0.0)
 		? (t1 + kDistEpsilon) / (t1 - t2)
@@ -228,36 +247,160 @@ bool RecursiveHullCheck(const HullTree &hull, int headnode, int nodeIndex, doubl
 
 	int side = (t1 < 0.0) ? 1 : 0;
 
-	if (!RecursiveHullCheck(hull, headnode, node.children[side], p1f, midf, p1, mid, trace))
-		return false;
+	HullStep nearStep = HullCheck<BoolOnly>(hull, headnode, node.children[side], p1f, midf, p1, mid,
+		trace);
+	if (nearStep != HullStep::Continue)
+		return nearStep;
 
 	if (ClassifyPoint(hull, node.children[side ^ 1], mid) != CONTENTS_SOLID)
-		return RecursiveHullCheck(hull, headnode, node.children[side ^ 1], midf, p2f, mid, p2, trace);
+		return HullCheck<BoolOnly>(hull, headnode, node.children[side ^ 1], midf, p2f, mid, p2, trace);
 
-	if (trace.allsolid)
-		return false;
-
-	if (side == 0)
-		trace.planeNormal = Vec3(plane.normal[0], plane.normal[1], plane.normal[2]);
+	if constexpr (BoolOnly)
+	{
+		if (static_cast<float>(midf) < 1.0f)
+			return HullStep::Stop;
+	}
 	else
-		trace.planeNormal = Vec3(-plane.normal[0], -plane.normal[1], -plane.normal[2]);
+	{
+		if (trace.allsolid)
+			return HullStep::Stop;
+
+		if (side == 0)
+			trace.planeNormal = Vec3(plane.normal[0], plane.normal[1], plane.normal[2]);
+		else
+			trace.planeNormal = Vec3(-plane.normal[0], -plane.normal[1], -plane.normal[2]);
+	}
 
 	while (ClassifyPoint(hull, headnode, mid) == CONTENTS_SOLID)
 	{
 		frac -= 0.1;
 		if (frac < 0.0)
-		{
-			trace.fraction = static_cast<float>(midf);
-			trace.endpos = mid;
-			return false;
-		}
+			break;
 		midf = p1f + (p2f - p1f) * frac;
 		mid = p1 + (p2 - p1) * frac;
 	}
 
-	trace.fraction = static_cast<float>(midf);
-	trace.endpos = mid;
-	return false;
+	if constexpr (BoolOnly)
+	{
+		return (static_cast<float>(midf) < 1.0f) ? HullStep::Stop : HullStep::Clear;
+	}
+	else
+	{
+		trace.fraction = static_cast<float>(midf);
+		trace.endpos = mid;
+		return HullStep::Stop;
+	}
+}
+
+void BuildOriginChain(const HullTree &hull, int headnode, const Vec3 &start, HullOriginChain &chain)
+{
+	chain.steps.clear();
+	chain.origin = start;
+	chain.clipnodes = hull.clipnodes;
+	chain.headnode = headnode;
+
+	int nodeIndex = headnode;
+	while (nodeIndex >= 0)
+	{
+		const dclipnode_t &node = hull.clipnodes[static_cast<size_t>(nodeIndex)];
+		const dplane_t &plane = hull.planes[static_cast<size_t>(node.planenum)];
+
+		HullChainStep step;
+		step.t1 = PlaneDiff(plane, start);
+		step.normal[0] = plane.normal[0];
+		step.normal[1] = plane.normal[1];
+		step.normal[2] = plane.normal[2];
+		step.dist = plane.dist;
+
+		int side = (step.t1 < 0.0) ? 1 : 0;
+		step.farChild = node.children[side ^ 1];
+		chain.steps.push_back(step);
+
+		nodeIndex = node.children[side];
+	}
+
+	chain.leafContents = nodeIndex;
+	chain.valid = true;
+}
+
+bool SegmentBlockedCached(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end,
+	HullOriginChain &chain)
+{
+	const double p1f = 0.0;
+	double p2f = 1.0;
+	Vec3 p2 = end;
+
+	chain.splits.clear();
+
+	for (const HullChainStep &step : chain.steps)
+	{
+		double t1 = step.t1;
+		double t2 = static_cast<double>(step.normal[0]) * p2.x +
+			static_cast<double>(step.normal[1]) * p2.y +
+			static_cast<double>(step.normal[2]) * p2.z - step.dist;
+
+		if (t1 >= 0.0 && t2 >= 0.0)
+			continue;
+		if (t1 < 0.0 && t2 < 0.0)
+			continue;
+
+		double frac = (t1 < 0.0)
+			? (t1 + kDistEpsilon) / (t1 - t2)
+			: (t1 - kDistEpsilon) / (t1 - t2);
+		if (frac < 0.0)
+			frac = 0.0;
+		else if (frac > 1.0)
+			frac = 1.0;
+
+		HullChainSplit split;
+		split.frac = frac;
+		split.midf = p1f + (p2f - p1f) * frac;
+		split.p2f = p2f;
+		split.mid = start + (p2 - start) * frac;
+		split.p2 = p2;
+		split.farChild = step.farChild;
+		chain.splits.push_back(split);
+
+		p2f = split.midf;
+		p2 = split.mid;
+	}
+
+	HullStep result = (chain.leafContents == CONTENTS_SOLID) ? HullStep::Stop : HullStep::Continue;
+
+	for (size_t k = chain.splits.size(); k-- > 0; )
+	{
+		if (result != HullStep::Continue)
+			break;
+
+		const HullChainSplit &e = chain.splits[k];
+
+		if (ClassifyPoint(hull, e.farChild, e.mid) != CONTENTS_SOLID)
+		{
+			NullTrace nullTrace;
+			result = HullCheck<true>(hull, headnode, e.farChild, e.midf, e.p2f, e.mid, e.p2,
+				nullTrace);
+			continue;
+		}
+
+		if (static_cast<float>(e.midf) < 1.0f)
+			return true;
+
+		double frac = e.frac;
+		double midf = e.midf;
+		Vec3 mid = e.mid;
+		while (ClassifyPoint(hull, headnode, mid) == CONTENTS_SOLID)
+		{
+			frac -= 0.1;
+			if (frac < 0.0)
+				break;
+			midf = p1f + (e.p2f - p1f) * frac;
+			mid = start + (e.p2 - start) * frac;
+		}
+
+		return static_cast<float>(midf) < 1.0f;
+	}
+
+	return result == HullStep::Stop;
 }
 
 }
@@ -278,9 +421,28 @@ TraceResult TraceHull(const HullTree &hull, int headnode, const Vec3 &start, con
 	trace.startsolid = false;
 	trace.contents = CONTENTS_EMPTY;
 
-	RecursiveHullCheck(hull, headnode, headnode, 0.0, 1.0, start, end, trace);
+	HullCheck<false>(hull, headnode, headnode, 0.0, 1.0, start, end, trace);
 
 	return trace;
+}
+
+bool SegmentBlocked(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end)
+{
+	NullTrace trace;
+	return HullCheck<true>(hull, headnode, headnode, 0.0, 1.0, start, end, trace) ==
+		HullStep::Stop;
+}
+
+bool SegmentBlocked(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end,
+	HullOriginChain &chain)
+{
+	if (!chain.valid || chain.clipnodes != hull.clipnodes || chain.headnode != headnode ||
+		chain.origin.x != start.x || chain.origin.y != start.y || chain.origin.z != start.z)
+	{
+		BuildOriginChain(hull, headnode, start, chain);
+	}
+
+	return SegmentBlockedCached(hull, headnode, start, end, chain);
 }
 
 TraceResult TraceHullWithEntities(const BspFile &bsp, int worldHeadnode,

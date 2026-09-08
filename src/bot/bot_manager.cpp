@@ -20,6 +20,8 @@
 #include "../game/crossplay.h"
 #include "../game/gamedata.h"
 #include "../game/game_profile.h"
+#include "../game/player_models.h"
+#include "../game/teams.h"
 #include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
@@ -110,6 +112,7 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 	BotFun::ResetMap();
 
 	XPlay::DetectProfiles();
+	Teams::DetectMap();
 
 	if (XPlay::PickRandomSupported() < 0)
 		SERVER_PRINT("CrossBot: no loaded game is playable; bots disabled.\n");
@@ -131,6 +134,8 @@ void ServerDeactivate()
 	BotFun::ResetMap();
 
 	XPlay::ForgetProfiles();
+	Teams::ForgetMap();
+	PlayerModels::Forget();
 	Nav::Unload();
 }
 
@@ -322,7 +327,7 @@ void Touch(edict_t *pentTouched, edict_t *pentOther)
 	});
 }
 
-bool AddBot(int iGame, const char *name)
+bool AddBot(int iGame, const char *name, const char *arg)
 {
 	char why[256];
 	if (!XPlay::Supported(iGame))
@@ -357,6 +362,14 @@ bool AddBot(int iGame, const char *name)
 		return false;
 	}
 
+	// Whatever the third crossbot_add argument meant to this game -- a player model here, a team
+	// in a mod that has them. Deliberately outside the InGame scope: this is a plain engine call
+	// on an edict, and only CREATE_FAKE_CLIENT needs CrossPlay's context (doc/crossplay.md). It
+	// runs before ClientConnect so the game DLL reads a finished userinfo buffer, the order a
+	// real client arrives in. Supported(iGame) above already guarantees the profile is there.
+	char chose[32] = {};
+	XPlay::ProfileFor(iGame)->ApplyAddArg(iGame, pEdict, arg, chose, sizeof(chose));
+
 	char rejectReason[128] = {};
 	MDLL_ClientConnect(pEdict, botName, "127.0.0.1", rejectReason);
 
@@ -377,7 +390,8 @@ bool AddBot(int iGame, const char *name)
 	snprintf(pSlot->name, sizeof(pSlot->name), "%s", botName);
 
 	char msg[192];
-	snprintf(msg, sizeof(msg), "CrossBot: added %s to '%s'.\n", botName, XPlay::GameDir(iGame));
+	snprintf(msg, sizeof(msg), "CrossBot: added %s to '%s' as '%s'.\n", botName,
+		XPlay::GameDir(iGame), chose[0] ? chose : "default");
 	SERVER_PRINT(msg);
 
 	return true;
@@ -555,12 +569,12 @@ void PrintSenseStatus()
 
 		char line[768];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s target=%s enemy=%s enemyAge=%.1fs bone=%d leadblk=%d "
+			"CrossBot: %s team=%d target=%s enemy=%s enemyAge=%.1fs bone=%d leadblk=%d "
 			"cands=%d keep=%s keeps=inc:%u,new:%u susp=%d/%zu "
 			"kinds=p:%d,m:%d,o:%d hunt=%d "
 			"mon=list:%d,seen:%u,mine:%u,trc:%u,hit:%u "
 			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u\n",
-			bot.name, target ? CBotTargetNameOf(target) : "-",
+			bot.name, Teams::TeamOf(bot.pEdict), target ? CBotTargetNameOf(target) : "-",
 			enemy ? CBotTargetNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f, bot.sense.targetBone,
 			bot.sense.leadVetoes,
@@ -579,8 +593,8 @@ void PrintSenseStatus()
 
 	char summary[160];
 	snprintf(summary, sizeof(summary),
-		"CrossBot: %d bot(s), sense=%d sense_decay=%.2f\n", shown,
-		BotSense::Enabled() ? 1 : 0, BotSense::Decay());
+		"CrossBot: %d bot(s), sense=%d sense_decay=%.2f teams=%d\n", shown,
+		BotSense::Enabled() ? 1 : 0, BotSense::Decay(), Teams::Enabled() ? 1 : 0);
 	SERVER_PRINT(summary);
 }
 
@@ -657,6 +671,43 @@ void PrintMonsters()
 	SERVER_PRINT(summary);
 }
 
+void PrintTeamsStatus()
+{
+	char head[192];
+	snprintf(head, sizeof(head),
+		"CrossBot: map owner '%s' teamgame=%d crossbot_teams=%d -> teams %s\n",
+		Teams::MapGameDir(), Teams::MapTeamplay() ? 1 : 0, Teams::Enabled() ? 1 : 0,
+		Teams::Enabled() ? "on" : "off");
+	SERVER_PRINT(head);
+
+	for (int i = 1; i <= gpGlobals->maxClients; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!CBotIsLivePlayer(ent))
+			continue;
+
+		char line[320];
+		int written = snprintf(line, sizeof(line),
+			"CrossBot: player #%d %s team=%d bot=%d", i, CBotPlayerNameOf(ent),
+			Teams::TeamOf(ent), FindBot(ent) ? 1 : 0);
+
+		for (auto &bot : g_bots)
+		{
+			if (!bot.inUse || bot.pEdict == ent)
+				continue;
+			if (written < 0 || written >= static_cast<int>(sizeof(line)))
+				break;
+
+			written += snprintf(line + written, sizeof(line) - written, " | %s:%s shoot=%d",
+				bot.name, Teams::RelationName(Teams::Of(bot.pEdict, ent)),
+				Teams::Attackable(bot.pEdict, ent) ? 1 : 0);
+		}
+
+		SERVER_PRINT(line);
+		SERVER_PRINT("\n");
+	}
+}
+
 void PrintCombatStatus()
 {
 	char head[128];
@@ -708,6 +759,73 @@ void PrintCombatStatus()
 	}
 }
 
+void PrintCampStatus(const Vector *at)
+{
+	const Nav::NavMesh *mesh = Nav::Get();
+	if (!mesh || mesh->camps.empty())
+	{
+		SERVER_PRINT("CrossBot: no camp spots loaded\n");
+		return;
+	}
+
+	char head[192];
+	snprintf(head, sizeof(head), "CrossBot: %d camp spots\n",
+		static_cast<int>(mesh->camps.size()));
+	SERVER_PRINT(head);
+
+	auto report = [&](const char *who, const Vector &origin)
+	{
+		const Nav::CampSpot *best = nullptr;
+		float bestDist = 0.f;
+		for (const Nav::CampSpot &spot : mesh->camps)
+		{
+			float d = (spot.pos - origin).Length();
+			if (!best || d < bestDist)
+			{
+				best = &spot;
+				bestDist = d;
+			}
+		}
+
+		if (!best)
+			return;
+
+		char line[320];
+		snprintf(line, sizeof(line),
+			"CrossBot: %s at (%.0f,%.0f,%.0f): nearest camp %.1f away at (%.0f,%.0f,%.0f) "
+			"area %d, yaw %.1f pitch %.1f, score %.2f%s\n",
+			who, origin.x, origin.y, origin.z, bestDist, best->pos.x, best->pos.y, best->pos.z,
+			best->areaId, best->yaw, best->pitch, best->score,
+			(best->flags & crossbot_nav::CAMP_NO_STAND) ? " (crouch only)" : "");
+		SERVER_PRINT(line);
+
+		snprintf(line, sizeof(line),
+			"CrossBot:   stand  90/45/22.5/11.25: %.2f %.2f %.2f %.2f\n",
+			best->stand[0], best->stand[1], best->stand[2], best->stand[3]);
+		SERVER_PRINT(line);
+
+		snprintf(line, sizeof(line),
+			"CrossBot:   crouch 90/45/22.5/11.25: %.2f %.2f %.2f %.2f\n",
+			best->crouch[0], best->crouch[1], best->crouch[2], best->crouch[3]);
+		SERVER_PRINT(line);
+	};
+
+	if (at)
+	{
+		report("point", *at);
+		return;
+	}
+
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		ScopedGame ctx(bot.gameDll);
+		report(bot.name, bot.pEdict->v.origin);
+	}
+}
+
 void PrintVantageStatus(const Vector *at)
 {
 	const Nav::NavMesh *mesh = Nav::Get();
@@ -744,10 +862,9 @@ void PrintVantageStatus(const Vector *at)
 		char head[256];
 		snprintf(head, sizeof(head),
 			"CrossBot: %s at (%.0f,%.0f,%.0f): %d neighbors, nearest %.1f, exposure %.4f "
-			"(%.2f of max), focus %.2f/%.2f/%.2f/%.2f\n",
+			"(%.2f of max)\n",
 			who, eye.x, eye.y, eye.z, blend.neighbors, blend.nearestDist, blend.exposure,
-			field.maxExposure > 0.f ? blend.exposure / field.maxExposure : 0.f,
-			blend.focus[0], blend.focus[1], blend.focus[2], blend.focus[3]);
+			field.maxExposure > 0.f ? blend.exposure / field.maxExposure : 0.f);
 		SERVER_PRINT(head);
 
 		for (int i = 0; i < blend.watchCount; ++i)

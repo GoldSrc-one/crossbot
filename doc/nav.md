@@ -250,7 +250,7 @@ Direct index lookup with fallback to linear search.
 
 ### LoadNavFile
 Loads and validates .nav file:
-- Checks magic ("CBNV") and version (18)
+- Checks magic ("CBNV") and version (21)
 - Reads area records, connection records, area-connection indices, area planes, activation detours and
   detour points, then the vantage section
 - Verifies BSP checksum against live map
@@ -263,11 +263,30 @@ The version check is a hard equality, not a floor, so a file from an older navge
 rather than read with a shifted layout. Every record is `fread` straight into its struct, so any layout
 change is a version bump and a full regeneration of every `.nav`.
 
+## nav_camp.h
+
+### Camp spots are carried, not consumed
+navgen picks a reduced list of camp spots -- position, one facing, and four arc ratios per stance --
+and the loader lands them on `NavMesh::camps` as a flat vector. Nothing in the bot reads them yet.
+When to camp, for how long, and how to choose between spots is a separate design; this change is the
+data and the tooling to look at it (`crossbot_camp_status`, and `--dump-camp-svg` on the navgen side).
+
+There is deliberately no spatial index. `FindAreaExact` is still a linear scan and camp spots are a
+hundred-odd records, so a consumer that needs the nearest one can scan; the vantage field got a CSR grid
+only because it is blended per bot at 10 Hz.
+
+### Why this is not part of the vantage field
+The vantage field is a *continuous* signature: `exposure` and the watch cones are properties of a
+neighbourhood, so IDW between the four nearest samples gives a meaningful answer anywhere. Camping is
+discrete. The midpoint between two camping spots is usually not a camping spot, and the old `focus[4]`
+was measured around each probe's own `watch[0]`, so blending two probes with different main directions
+blended two numbers that were never about the same facing. `focus[]` is gone from the format.
+
 ## nav_vantage.cpp
 
 ### What the field is for
 navgen samples, for every reduced vantage, up to four `WatchDir{yaw, pitch, spread, amount}` — the cones
-that everything with line of sight to that spot arrives *through* — plus `exposure` and `focus[4]`
+that everything with line of sight to that spot arrives *through* — plus `exposure`
 (`doc/navgen.md`, *vantage_sampler.cpp*). This is the runtime half: turn a bot's eye position into a
 blended signature it can steer by. `bot_sense.cpp` refreshes one per bot every 0.1 s.
 
@@ -283,7 +302,7 @@ searched ring's inner radius — the ring is a cube shell, so its inscribed radi
 anything closer than that cannot be hiding in an unsearched cell.
 
 ### Blending: scalars interpolate, directions do not
-`exposure` and `focus[]` are IDW-weighted over the four nearest with `1 / (d^2 + 1)` — the same weight
+`exposure` is IDW-weighted over the four nearest with `1 / (d^2 + 1)` — the same weight
 and the same epsilon navgen's reduction scores its own decimation against, so the runtime reproduces the
 interpolation the decimation assumed was possible.
 
@@ -1566,10 +1585,11 @@ larger change than this one.
 
 ## nav_format.h
 
-### Nav File Format (version 20)
+### Nav File Format (version 21)
 - Magic: "CBNV"
-- Header: magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex, areaPlanes,
-  detours, detourPoints)
+- Header (128 B): magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex,
+  areaPlanes, detours, detourPoints), designMaxSpeed, vantageCount, vantageSpacing, maxExposure,
+  waterVolumeCount, campCount
 - AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount, waterVolume, pad1[3], submergeZ, driftVelocity[3]
 - ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity, waterVolume, pad2[3], submergeZ, drift
 - `gravity` is the `pev->gravity` multiplier the air move was sampled at (1.0 for every other
@@ -1578,10 +1598,17 @@ larger change than this one.
 - `drift` is a `DriftTerm`: length, along, perp, alongMin, alongMax. Speed-independent by design;
   see "drift.h: direction-aware cost" above
 - `driftVelocity` is the area's conveyor plus push-field velocity, used by the speed profile
+- NavWatchDir (16 B): yaw, pitch, spread, amount
+- NavVantageRecord (80 B): pos[3], exposure, watch[4]. It used to carry a `focus[4]` block; camping is
+  now its own section and the field is gone
+- NavCampRecord (64 B): pos[3], yaw, pitch, score, stand[4], crouch[4], areaId, flags. `pos` is the nav
+  floor point, which is a ducking player's origin, so the standing eye is +46 and the crouching eye +12.
+  `CAMP_NO_STAND` means standing there is impossible and `stand[]` is all zero
 - ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
 - DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
 
-Section order on disk is header, areas, conns, areaConnIndex, areaPlanes, detours, detourPoints. The detour
+Section order on disk is header, areas, conns, areaConnIndex, areaPlanes, detours, detourPoints, vantages,
+water volumes, camp spots. The detour
 offsets are `uint32_t`; `connOffset`/`planeOffset` remain `uint16_t` into the global arrays and throw past
 65535. Each record has explicit padding and a `static_assert` on its size, because they are written raw.
 

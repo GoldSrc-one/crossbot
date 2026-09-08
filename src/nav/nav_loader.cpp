@@ -64,6 +64,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	std::vector<NavDetourPointRecord> detourPoints;
 	std::vector<NavVantageRecord> vantageRecords;
 	std::vector<NavWaterVolumeRecord> waterRecords;
+	std::vector<NavCampRecord> campRecords;
 
 	bool ok = ReadArray(f, header.areaCount, areaRecords) &&
 		ReadArray(f, header.connCount, connRecords) &&
@@ -72,7 +73,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		ReadArray(f, header.detourCount, detourRecords) &&
 		ReadArray(f, header.detourPointCount, detourPoints) &&
 		ReadArray(f, header.vantageCount, vantageRecords) &&
-		ReadArray(f, header.waterVolumeCount, waterRecords);
+		ReadArray(f, header.waterVolumeCount, waterRecords) &&
+		ReadArray(f, header.campCount, campRecords);
 	std::fclose(f);
 
 	if (!ok)
@@ -281,9 +283,6 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		Vantage &v = mesh->vantageField.vantages[i];
 		v.pos = Vector(rec.pos[0], rec.pos[1], rec.pos[2]);
 		v.exposure = rec.exposure;
-		for (size_t k = 0; k < kNavFocusLevels; ++k)
-			v.focus[k] = rec.focus[k];
-
 		v.watchCount = 0;
 		for (size_t k = 0; k < kNavWatchDirs; ++k)
 		{
@@ -297,6 +296,24 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		}
 	}
 	BuildVantageGrid(mesh->vantageField);
+
+	mesh->camps.resize(campRecords.size());
+	for (size_t i = 0; i < campRecords.size(); ++i)
+	{
+		const NavCampRecord &rec = campRecords[i];
+		CampSpot &spot = mesh->camps[i];
+		spot.pos = Vector(rec.pos[0], rec.pos[1], rec.pos[2]);
+		spot.yaw = rec.yaw;
+		spot.pitch = rec.pitch;
+		spot.score = rec.score;
+		for (size_t k = 0; k < kNavCampArcs; ++k)
+		{
+			spot.stand[k] = rec.stand[k];
+			spot.crouch[k] = rec.crouch[k];
+		}
+		spot.areaId = static_cast<int>(rec.areaId);
+		spot.flags = rec.flags;
+	}
 
 	float exposureSum = 0.f;
 	size_t exposureKnown = 0;
@@ -334,9 +351,9 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 
 	char msg[700];
 	snprintf(msg, sizeof(msg),
-		"CrossBot: loaded nav file %s (%zu areas, %zu connections, %zu vantages); "
+		"CrossBot: loaded nav file %s (%zu areas, %zu connections, %zu vantages, %zu camps); "
 		"connection exposure known %zu, mean %.3f, min %.3f.\n",
-		navPath, mesh->areas.size(), mesh->conns.size(), mesh->vantageField.vantages.size(),
+		navPath, mesh->areas.size(), mesh->conns.size(), mesh->vantageField.vantages.size(), mesh->camps.size(),
 		exposureKnown, exposureKnown > 0 ? exposureSum / static_cast<float>(exposureKnown) : 1.f,
 		mesh->minConnExposure);
 	SERVER_PRINT(msg);

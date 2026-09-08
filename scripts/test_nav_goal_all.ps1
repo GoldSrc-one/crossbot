@@ -132,6 +132,19 @@ function Stop-ServerOnPort {
             }
         }
     }
+
+    # Each server's stdin pipe is held open by a `waitfor` tagged with its port -- see
+    # the launch note in test_server_start.ps1. Killing the server leaves it waiting.
+    $writers = @(Get-CimInstance Win32_Process -Filter "Name='waitfor.exe'" -ErrorAction SilentlyContinue)
+    foreach ($w in $writers) {
+        foreach ($port in $Ports) {
+            if ($w.CommandLine -and $w.CommandLine -match "cbstdin$port(\s|$)") {
+                Stop-Process -Id $w.ProcessId -Force -ErrorAction SilentlyContinue
+                break
+            }
+        }
+    }
+
     return $killed
 }
 
@@ -195,6 +208,9 @@ for ($i = 0; $i -lt $mapFiles.Count; $i++) {
                 Write-Host "  deadline exceeded for $($t.Map), killing"
                 Stop-Process -Id $t.Proc.Id -Force -ErrorAction SilentlyContinue
                 Stop-ServerOnPort -Ports @($t.Port) | Out-Null
+                # Clean up config file in case the child didn't get to it
+                $cfgPath = Join-Path $HLDSDir "_crossbot_autotest_$($t.Map).cfg"
+                Remove-Item $cfgPath -ErrorAction SilentlyContinue
                 $t.Killed = $true
             }
         }
@@ -211,6 +227,9 @@ while (@($tracked | Where-Object { -not $_.Proc.HasExited }).Count -gt 0) {
             Write-Host "  deadline exceeded for $($t.Map), killing"
             Stop-Process -Id $t.Proc.Id -Force -ErrorAction SilentlyContinue
             Stop-ServerOnPort -Ports @($t.Port) | Out-Null
+            # Clean up config file in case the child didn't get to it
+            $cfgPath = Join-Path $HLDSDir "_crossbot_autotest_$($t.Map).cfg"
+            Remove-Item $cfgPath -ErrorAction SilentlyContinue
             $t.Killed = $true
         }
     }
@@ -253,6 +272,12 @@ $orphans = Stop-ServerOnPort -Ports $ourPorts
 if ($orphans.Count -gt 0) {
     Write-Host ""
     Write-Host "Cleaned up $($orphans.Count) orphaned server(s): $($orphans -join ', ')"
+}
+
+# Clean up any orphaned config files
+foreach ($mapFile in $mapFiles) {
+    $cfgPath = Join-Path $HLDSDir "_crossbot_autotest_$($mapFile.BaseName).cfg"
+    Remove-Item $cfgPath -ErrorAction SilentlyContinue
 }
 
 Write-Host ""

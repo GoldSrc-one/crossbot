@@ -62,6 +62,40 @@ int ClassifyPoint(const HullTree &hull, int headnode, const Vec3 &point);
 
 TraceResult TraceHull(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end);
 
+bool SegmentBlocked(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end);
+
+struct HullChainStep
+{
+    double t1;
+    float normal[3];
+    float dist;
+    int farChild;
+};
+
+struct HullChainSplit
+{
+    double frac;
+    double midf;
+    double p2f;
+    Vec3 mid;
+    Vec3 p2;
+    int farChild;
+};
+
+struct HullOriginChain
+{
+    Vec3 origin;
+    const dclipnode_t *clipnodes = nullptr;
+    int headnode = 0;
+    int leafContents = 0;
+    bool valid = false;
+    std::vector<HullChainStep> steps;
+    std::vector<HullChainSplit> splits;
+};
+
+bool SegmentBlocked(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end,
+    HullOriginChain &chain);
+
 TraceResult TraceHullWithEntities(const BspFile &bsp, int worldHeadnode,
     const std::vector<BlockingVolume> &blockers, const Vec3 &start, const Vec3 &end);
 

@@ -6,6 +6,7 @@
 #include "area_merger.h"
 #include "clipnode_tree.h"
 #include "polytope.h"
+#include "camp_sampler.h"
 #include "vantage_sampler.h"
 #include "water_volumes.h"
 
@@ -39,6 +40,9 @@ void WriteDebugSvg(const std::string &path, const std::string &mapName, const st
 
 void WriteVantageSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
 	const std::vector<Vantage> &vantages, const VantageStats &stats);
+
+void WriteCampSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
+	const std::vector<CampSpot> &camps, const CampStats &stats);
 
 }
 

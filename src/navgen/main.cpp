@@ -15,6 +15,7 @@
 #include "airmove_prune.h"
 #include "airmove_sampler.h"
 #include "blocking_entities.h"
+#include "camp_sampler.h"
 #include "bsp_file.h"
 #include "bsp_vis.h"
 #include "clipnode_tree.h"
@@ -170,7 +171,7 @@ void PrintUsage(const char *argv0)
 		"                    .mtl): crouch areas are coloured apart, the planned route is a ribbon\n"
 		"  --dump-svg <path> write a top-down SVG of the final area graph, for offline inspection\n"
 		"  --dump-vantage-svg <path> sample the visibility field and write it as a top-down SVG: one\n"
-		"                    glyph per vantage point, with its watch directions, exposure and camp focus\n"
+		"                    glyph per vantage point, with its watch directions and exposure\n"
 		"  --vantage-grid <n> lattice spacing the visibility field is sampled at, in units (default %.0f)\n"
 		"  --vantage-spacing <n> average spacing between vantages after reduction, in units (default\n"
 		"                    %.0f): one kept sample per n-by-n square of walkable floor, spent adaptively\n"
@@ -180,6 +181,19 @@ void PrintUsage(const char *argv0)
 		"                    scan and report mismatches (debug: validates the reduction's grid index)\n"
 		"  --no-vantage      skip the visibility field entirely: the nav file gets no vantage section\n"
 		"                    and bots on it fall back to no idle look and uncone-weighted senses\n"
+		"  --dump-camp-svg <path> write camp spots as their own top-down SVG: one glyph per spot with\n"
+		"                    its facing, a wedge at the tightest arc still scoring at least 1, and the\n"
+		"                    hill-climb path that found it (cancelled climbs in a separate colour)\n"
+		"  --camp-spacing <n> radius of the soft suppression a placed camp spot applies, and the divisor\n"
+		"                    of the budget footprint/spacing^2 (default %.0f). Cost is quadratic in its\n"
+		"                    inverse, so 64 is 16x the work rather than 4x. It sets the count, not the\n"
+		"                    spread: spots cluster on the best ground rather than tiling the map\n"
+		"  --camp-count <n>  override the derived budget with an exact number of camp spots\n"
+		"  --camp-min-visible <n> probes a candidate must be seen by to qualify (default %zu). Without\n"
+		"                    it a spot seeing one thing scores a perfect ratio in every arc\n"
+		"  --camp-climb-steps <n> hard cap on one hill climb (default %zu), the backstop for a plateau\n"
+		"  --no-camp         skip camp spots: the nav file gets no camp section. Implied by --no-vantage,\n"
+		"                    which is what supplies the candidates the camp stage climbs over\n"
 		"  --dump-vis-probe \"x y z x y z\" report what the visibility sampler sees between two world\n"
 		"                    points: the BSP leaf each lands in, whether the PVS links them, and the\n"
 		"                    hull-0 traceline result. Repeatable\n"
@@ -236,7 +250,9 @@ void PrintUsage(const char *argv0)
 		"                    (default: one per logical processor plus one, %zu here). 1 runs serially\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
 		argv0, navgen::kDefaultVantageGrid, navgen::kDefaultVantageSpacing, navgen::kDefaultVantageCone,
-		navgen::kDefaultVantageNeighbors, navgen::PhysicsParams().maxSpeed,
+		navgen::kDefaultVantageNeighbors, navgen::kDefaultCampSpacing,
+		navgen::kDefaultCampMinVisible, navgen::kDefaultCampClimbSteps,
+		navgen::PhysicsParams().maxSpeed,
 		navgen::kDefaultAirmoveWalkRatio, navgen::kDefaultLadderRatio, navgen::kDefaultMaxMergeGroup,
 		navgen::DefaultThreadCount());
 }
@@ -858,6 +874,9 @@ int main(int argc, char **argv)
 	bool noFloorSplit = false;
 	bool noPrune = false;
 	bool noVantage = false;
+	bool noCamp = false;
+	navgen::CampParams campParams;
+	std::string campSvgPath;
 	size_t maxMergeGroup = navgen::kDefaultMaxMergeGroup;
 	float airmoveSamplesPerUnit = navgen::AirmoveSampleParams().samplesPerUnit;
 	double airmoveWalkRatio = navgen::kDefaultAirmoveWalkRatio;
@@ -1183,6 +1202,87 @@ int main(int argc, char **argv)
 		{
 			vantageParams.verifyNeighbors = true;
 		}
+		else if (arg == "--camp-spacing")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 16 || parsed > 4096)
+			{
+				std::fprintf(stderr, "--camp-spacing: expected 16..4096, got \"%s\"\n", value);
+				return 1;
+			}
+			campParams.spacing = static_cast<double>(parsed);
+		}
+		else if (arg == "--camp-count")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1 || parsed > 100000)
+			{
+				std::fprintf(stderr, "--camp-count: expected 1..100000, got \"%s\"\n", value);
+				return 1;
+			}
+			campParams.countOverride = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--camp-min-visible")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1 || parsed > 100000)
+			{
+				std::fprintf(stderr, "--camp-min-visible: expected 1..100000, got \"%s\"\n", value);
+				return 1;
+			}
+			campParams.minVisible = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--camp-climb-steps")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			const char *value = argv[++i];
+			char *parseEnd = nullptr;
+			unsigned long parsed = std::strtoul(value, &parseEnd, 10);
+			if (parseEnd == value || *parseEnd != '\0' || parsed < 1 || parsed > 4096)
+			{
+				std::fprintf(stderr, "--camp-climb-steps: expected 1..4096, got \"%s\"\n", value);
+				return 1;
+			}
+			campParams.maxClimbSteps = static_cast<size_t>(parsed);
+		}
+		else if (arg == "--no-camp")
+		{
+			noCamp = true;
+		}
+		else if (arg == "--dump-camp-svg")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			campSvgPath = argv[++i];
+		}
 		else if (arg == "--no-vantage")
 		{
 			noVantage = true;
@@ -1255,6 +1355,11 @@ int main(int argc, char **argv)
 		threadCount = navgen::DefaultThreadCount();
 
 	vantageParams.threadCount = threadCount;
+	campParams.threadCount = threadCount;
+	campParams.gridSize = vantageParams.gridSize;
+	campParams.yawBins = vantageParams.yawBins;
+	campParams.pitchBins = vantageParams.pitchBins;
+	campParams.pitchRangeDeg = vantageParams.pitchRangeDeg;
 	std::printf("navgen: %zu worker threads\n", threadCount);
 
 	try
@@ -2081,6 +2186,8 @@ int main(int argc, char **argv)
 
 		std::vector<navgen::Vantage> vantages;
 		navgen::VantageStats vantageStats;
+		std::vector<navgen::CampSpot> camps;
+		navgen::CampStats campStats;
 		if (!noVantage)
 		{
 			navgen::VisIndex visIndex(bsp);
@@ -2092,8 +2199,9 @@ int main(int argc, char **argv)
 				noBlockers ? std::vector<navgen::BlockingVolume>()
 					: navgen::ExtractVisBlockers(bsp, entities);
 
+			std::vector<navgen::VantageCandidate> candidates;
 			vantages = navgen::BuildVantages(bsp, visIndex, visBlockers, merged.areas, vantageParams,
-				&vantageStats);
+				&vantageStats, noCamp ? nullptr : &candidates);
 
 			std::printf("%s: vantage field: %zu lattice points, %zu sampled (%zu solid), "
 				"%zu/%zu pairs passed PVS, %zu visible, %zu kept (budget %zu over %.0f sq units), "
@@ -2121,6 +2229,34 @@ int main(int argc, char **argv)
 			std::printf("%s: vantage pair loop on %zu threads: slowest bin %.1fs, fastest %.1fs\n",
 				bspPath.c_str(), vantageStats.threads, vantageStats.binWallMax,
 				vantageStats.binWallMin);
+
+			if (!noCamp)
+			{
+				camps = navgen::BuildCampSpots(bsp, visIndex, visBlockers, candidates, campParams,
+					&campStats);
+
+				double perSpot = (campStats.kept > 0)
+					? static_cast<double>(campStats.evaluations) / static_cast<double>(campStats.kept)
+					: 0.0;
+				double meanBatch = (campStats.batches > 0)
+					? static_cast<double>(campStats.batchItems) / static_cast<double>(campStats.batches)
+					: 0.0;
+				double meanSteps = (campStats.climbs > 0)
+					? static_cast<double>(campStats.climbStepsTotal) / static_cast<double>(campStats.climbs)
+					: 0.0;
+				std::printf("%s: camp spots: %zu kept (budget %zu), %zu queued of %zu candidates "
+					"(%zu gated), %zu climbs = %zu emitted + %zu cancelled + %zu rejected\n",
+					bspPath.c_str(), campStats.kept, campStats.budget, campStats.queued, campStats.targets,
+					campStats.gated, campStats.climbs, campStats.kept, campStats.cancelled,
+					campStats.rejected);
+
+				std::printf("%s: camp climb: %zu evaluations (%.1f per spot), steps mean %.1f "
+					"max %zu, %zu/%zu pairs visible, %.1fs on %zu threads "
+					"(%zu batches, %.1f wide mean)\n",
+					bspPath.c_str(), campStats.evaluations, perSpot, meanSteps, campStats.climbStepsMax,
+					campStats.visiblePairs, campStats.pvsPairs, campStats.buildSeconds, campStats.threads,
+					campStats.batches, meanBatch);
+			}
 
 			if (vantageParams.verifyNeighbors)
 				std::printf("%s: vantage neighbour check: %zu queries, %zu mismatches, %.1fs "
@@ -2392,14 +2528,22 @@ int main(int argc, char **argv)
 			std::printf("wrote %s\n", vantageSvgPath.c_str());
 		}
 
+		if (!campSvgPath.empty())
+		{
+			std::string mapName = DeriveMapName(bspPath);
+			navgen::WriteCampSvg(campSvgPath, mapName, merged.areas, camps, campStats);
+			std::printf("wrote %s\n", campSvgPath.c_str());
+		}
+
 		if (!navPath.empty())
 		{
 			std::string mapName = DeriveMapName(bspPath);
 			navgen::WriteNavFile(navPath, mapName, bsp.Checksum(), merged.areas, merged.conns,
-				physics.maxSpeed, vantages, static_cast<float>(vantageParams.targetSpacing),
+				physics.maxSpeed, vantages, camps, static_cast<float>(vantageParams.targetSpacing),
 				static_cast<float>(vantageStats.maxExposure), liquids.water);
-			std::printf("wrote %s (map \"%s\", checksum 0x%08X, %zu vantages, %zu water volumes)\n",
-				navPath.c_str(), mapName.c_str(), bsp.Checksum(), vantages.size(),
+			std::printf("wrote %s (map \"%s\", checksum 0x%08X, %zu vantages, %zu camp spots, "
+				"%zu water volumes)\n",
+				navPath.c_str(), mapName.c_str(), bsp.Checksum(), vantages.size(), camps.size(),
 				liquids.water.size());
 		}
 	}

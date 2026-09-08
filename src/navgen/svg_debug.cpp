@@ -73,6 +73,9 @@ constexpr double kAreaFillOpacity = 0.7;
 constexpr const char *kVantageArea = "#5a6470";
 constexpr const char *kWatchRank[4] = {"#ff7043", "#ffd54f", "#4fc3f7", "#ab7ddb"};
 constexpr const char *kCampRing = "#ffffff";
+constexpr const char *kCampClimb = "#9aa7b4";
+constexpr const char *kCampArcRank[4] = {"#4fc3f7", "#9ccc65", "#ffd54f", "#ff7043"};
+const double kCampArcHalf[4] = {45.0, 22.5, 11.25, 5.625};
 
 constexpr double kVantageAreaOpacity = 0.35;
 
@@ -635,10 +638,8 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 		double cy = -v.pos.y;
 
 		std::fprintf(f, "<g>\n");
-		std::fprintf(f, "<title>#%zu  pos %.0f %.0f %.0f\nexposure %.4f (%.0f%% of map max)\n"
-			"focus 90/45/22.5/11.25: %.3f %.3f %.3f %.3f",
-			vi, v.pos.x, v.pos.y, v.pos.z, v.exposure, 100.0 * v.exposure / maxExposure,
-			v.focus[0], v.focus[1], v.focus[2], v.focus[3]);
+		std::fprintf(f, "<title>#%zu  pos %.0f %.0f %.0f\nexposure %.4f (%.0f%% of map max)",
+				vi, v.pos.x, v.pos.y, v.pos.z, v.exposure, 100.0 * v.exposure / maxExposure);
 		for (size_t w = 0; w < v.watch.size(); ++w)
 		{
 			std::fprintf(f, "\nwatch %zu: yaw %.1f pitch %.1f spread %.1f amount %.3f", w,
@@ -670,11 +671,10 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 
 		char color[16];
 		ExposureColor(v.exposure / maxExposure, color, sizeof(color));
-		double ring = unit * 1.1 * v.focus[3];
 		std::fprintf(f,
 			"<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%.2f\" "
 			"stroke-opacity=\"0.9\"/>\n",
-			cx, cy, unit * 0.7, color, kCampRing, ring);
+			cx, cy, unit * 0.7, color, kCampRing, unit * 0.15);
 
 		std::fprintf(f, "</g>\n");
 	}
@@ -720,10 +720,6 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 			lx + unit * 13.5, ly, fontSize, kLabelText, stats.maxExposure);
 		ly += lh;
 
-		std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"#888888\" stroke=\"%s\" stroke-width=\"%.2f\"/>\n",
-			lx + swatchW * 0.5, ly - unit * 0.8, unit * 0.7, kCampRing, unit * 1.1);
-		Label("ring thickness: focus at 11.25 FOV (camp)");
-
 		SwatchRow(kWatchRank[0], "watch dir 1 (main)");
 		SwatchRow(kWatchRank[1], "watch dir 2");
 		SwatchRow(kWatchRank[2], "watch dir 3");
@@ -736,6 +732,207 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 		Label(line);
 		std::snprintf(line, sizeof(line), "%zu/%zu pairs visible (%zu passed PVS)", stats.visiblePairs,
 			stats.totalPairs, stats.pvsPairs);
+		Label(line);
+	}
+
+	std::fprintf(f, "</svg>\n");
+	std::fclose(f);
+}
+
+void WriteCampSvg(const std::string &path, const std::string &mapName, const std::vector<Area> &areas,
+	const std::vector<CampSpot> &camps, const CampStats &stats)
+{
+	FILE *f = std::fopen(path.c_str(), "w");
+	if (!f)
+		throw std::runtime_error("cannot open output SVG file: " + path);
+
+	bool haveAny = false;
+	double minX = 1e30, maxX = -1e30, minY = 1e30, maxY = -1e30;
+	auto Consider = [&](double x, double y)
+	{
+		haveAny = true;
+		minX = std::min(minX, x);
+		maxX = std::max(maxX, x);
+		minY = std::min(minY, -y);
+		maxY = std::max(maxY, -y);
+	};
+
+	for (const Area &area : areas)
+		for (const Face &fc : area.polytope.faces)
+			for (const Vec3 &v : fc.winding)
+				Consider(v.x, v.y);
+
+	for (const CampSpot &spot : camps)
+	{
+		Consider(spot.pos.x, spot.pos.y);
+		Consider(spot.climbStart.x, spot.climbStart.y);
+	}
+
+	if (!haveAny)
+	{
+		minX = minY = 0.0;
+		maxX = maxY = 100.0;
+	}
+
+	double spanX = std::max(1.0, maxX - minX);
+	double spanY = std::max(1.0, maxY - minY);
+	double unit = std::max(spanX, spanY) / 100.0;
+	double pad = unit * 6.0;
+
+	WriteHeader(f, mapName, minX - pad, minY - pad, spanX + 2 * pad, spanY + 2 * pad);
+
+	std::vector<size_t> drawOrder(areas.size());
+	std::vector<double> floorZ(areas.size(), 0.0);
+	for (size_t i = 0; i < areas.size(); ++i)
+	{
+		drawOrder[i] = i;
+		floorZ[i] = AreaFloorZ(areas[i]);
+	}
+	std::stable_sort(drawOrder.begin(), drawOrder.end(),
+		[&](size_t a, size_t b) { return floorZ[a] < floorZ[b]; });
+
+	std::fprintf(f, "<g stroke=\"%s\" stroke-width=\"%.2f\" fill=\"%s\" fill-opacity=\"%.2f\">\n",
+		kBackground, unit * 0.2, kVantageArea, kVantageAreaOpacity);
+	for (size_t i : drawOrder)
+	{
+		std::vector<Pt2> poly = AreaFootprint(areas[i]);
+		if (poly.size() < 3)
+			continue;
+
+		std::fprintf(f, "<polygon points=\"");
+		for (const Pt2 &p : poly)
+			std::fprintf(f, "%.1f,%.1f ", p.x, p.y);
+		std::fprintf(f, "\"/>\n");
+	}
+	std::fprintf(f, "</g>\n");
+
+	double maxScore = 1e-9;
+	for (const CampSpot &spot : camps)
+		maxScore = std::max(maxScore, spot.score);
+
+	std::fprintf(f, "<g stroke=\"%s\" stroke-width=\"%.2f\" stroke-opacity=\"0.55\" fill=\"none\">\n",
+		kCampClimb, unit * 0.35);
+	for (const CampSpot &spot : camps)
+	{
+		if (spot.climbSteps == 0)
+			continue;
+
+		std::fprintf(f, "<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\"/>\n",
+			spot.climbStart.x, -spot.climbStart.y, spot.pos.x, -spot.pos.y);
+	}
+	std::fprintf(f, "</g>\n");
+
+	double maxRadius = unit * 8.0;
+
+	for (size_t si = 0; si < camps.size(); ++si)
+	{
+		const CampSpot &spot = camps[si];
+		double cx = spot.pos.x;
+		double cy = -spot.pos.y;
+		double norm = spot.score / maxScore;
+
+		std::fprintf(f, "<g>\n");
+		std::fprintf(f, "<title>#%zu  pos %.0f %.0f %.0f  area %d\nyaw %.1f pitch %.1f  score %.2f "
+			"(%.0f%% of map max)\nstand  90/45/22.5/11.25: %.2f %.2f %.2f %.2f\n"
+			"crouch 90/45/22.5/11.25: %.2f %.2f %.2f %.2f\nclimb %zu steps%s</title>\n",
+			si, spot.pos.x, spot.pos.y, spot.pos.z, spot.areaId, spot.yaw, spot.pitch, spot.score,
+			100.0 * norm, spot.stand[0], spot.stand[1], spot.stand[2], spot.stand[3],
+			spot.crouch[0], spot.crouch[1], spot.crouch[2], spot.crouch[3], spot.climbSteps,
+			(spot.flags & crossbot_nav::CAMP_NO_STAND) ? "  (crouch only)" : "");
+
+		double tightest = 0.0;
+		for (size_t k = 0; k < kCampArcs; ++k)
+		{
+			if (std::max(spot.stand[k], spot.crouch[k]) >= 1.0)
+				tightest = static_cast<double>(k);
+		}
+
+		double half = kCampArcHalf[static_cast<size_t>(tightest)];
+		double radius = std::max(unit * 1.5, maxRadius * norm);
+		double a0 = (spot.yaw - half) * 3.14159265358979323846 / 180.0;
+		double a1 = (spot.yaw + half) * 3.14159265358979323846 / 180.0;
+
+		double x0 = spot.pos.x + std::cos(a0) * radius;
+		double y0 = -(spot.pos.y + std::sin(a0) * radius);
+		double x1 = spot.pos.x + std::cos(a1) * radius;
+		double y1 = -(spot.pos.y + std::sin(a1) * radius);
+
+		int largeArc = (half * 2.0 > 180.0) ? 1 : 0;
+
+		std::fprintf(f,
+			"<path d=\"M%.1f,%.1f L%.1f,%.1f A%.1f,%.1f 0 %d,1 %.1f,%.1f Z\" fill=\"%s\" "
+			"fill-opacity=\"0.45\"/>\n",
+			cx, cy, x0, y0, radius, radius, largeArc, x1, y1,
+			kCampArcRank[static_cast<size_t>(tightest)]);
+
+		char color[16];
+		ExposureColor(norm, color, sizeof(color));
+		std::fprintf(f,
+			"<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%.2f\" "
+			"stroke-opacity=\"0.9\"/>\n",
+			cx, cy, unit * 0.8, color, kCampRing,
+			(spot.flags & crossbot_nav::CAMP_NO_STAND) ? unit * 0.5 : unit * 0.15);
+
+		std::fprintf(f, "</g>\n");
+	}
+
+	{
+		double lx = minX - pad + unit * 1.5;
+		double ly = minY - pad + unit * 4.0;
+		double lh = unit * 3.4;
+		double panelW = unit * 34.0;
+
+		constexpr int kLegendRows = 9;
+		double panelH = lh * (kLegendRows + 2.6);
+		double swatchW = unit * 3.0;
+		double fontSize = unit * 2.6;
+		double textX = lx + unit * 4.5;
+
+		std::fprintf(f, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\" fill-opacity=\"0.85\" stroke=\"#4a5a6a\" stroke-width=\"%.2f\"/>\n",
+			minX - pad, minY - pad, panelW, panelH, kBackground, unit * 0.15);
+
+		auto Label = [&](const char *label)
+		{
+			std::fprintf(f, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"%.2f\" fill=\"%s\">%s</text>\n",
+				textX, ly, fontSize, kLabelText, label);
+			ly += lh;
+		};
+		auto SwatchRow = [&](const char *color, const char *label)
+		{
+			std::fprintf(f, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\" fill-opacity=\"0.7\"/>\n",
+				lx, ly - unit * 1.9, swatchW, unit * 2.2, color);
+			Label(label);
+		};
+
+		std::fprintf(f, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"%.2f\" fill=\"#ffffff\" font-weight=\"bold\">%s camp spots</text>\n",
+			lx, ly - unit * 2.0, unit * 3.4, mapName.c_str());
+		ly += lh * 0.6;
+
+		std::fprintf(f, "<defs><linearGradient id=\"campgrad\"><stop offset=\"0%%\" stop-color=\"#2b3a67\"/>"
+			"<stop offset=\"50%%\" stop-color=\"#f0d43a\"/><stop offset=\"100%%\" stop-color=\"#e03020\"/>"
+			"</linearGradient></defs>\n");
+		std::fprintf(f, "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"url(#campgrad)\"/>\n",
+			lx, ly - unit * 1.9, unit * 12.0, unit * 2.2);
+		std::fprintf(f, "<text x=\"%.1f\" y=\"%.1f\" font-size=\"%.2f\" fill=\"%s\">dot: score 0 to %.2f</text>\n",
+			lx + unit * 13.5, ly, fontSize, kLabelText, maxScore);
+		ly += lh;
+
+		SwatchRow(kCampArcRank[0], "tightest arc with ratio &gt;= 1: 90 FOV");
+		SwatchRow(kCampArcRank[1], "45 FOV");
+		SwatchRow(kCampArcRank[2], "22.5 FOV");
+		SwatchRow(kCampArcRank[3], "11.25 FOV (sniper)");
+		Label("wedge radius: score, angle: that arc");
+
+		std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"#888888\" stroke=\"%s\" stroke-width=\"%.2f\"/>\n",
+			lx + swatchW * 0.5, ly - unit * 0.8, unit * 0.8, kCampRing, unit * 0.5);
+		Label("fat ring: crouch only");
+
+		char line[160];
+		std::snprintf(line, sizeof(line), "%zu kept of %zu queued (budget %zu)", stats.kept,
+			stats.queued, stats.budget);
+		Label(line);
+		std::snprintf(line, sizeof(line), "%zu evals, %zu climbs, %zu cancelled", stats.evaluations,
+			stats.climbs, stats.cancelled);
 		Label(line);
 	}
 

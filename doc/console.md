@@ -3,9 +3,15 @@
 `commands.cpp` registers every server command in `Register()`. They are thin wrappers — the work lives
 in `BotManager` or `Nav`, and each one is documented where that work is.
 
-- `crossbot_add [gamedir|*] [name]` — add a bot to a loaded game. The first argument is always the
-  game directory; `*` or nothing picks a random playable one, and an unknown name lists what is loaded.
-  A game is playable only with both gamedata and a game profile — see `doc/crossplay.md`.
+- `crossbot_add [gamedir|*] [name] [model|team]` — add a bot to a loaded game. The first argument is
+  always the game directory; `*` or nothing picks a random playable one, and an unknown name lists
+  what is loaded. A game is playable only with both gamedata and a game profile — see
+  `doc/crossplay.md`. The third argument belongs to that game's profile rather than to this command:
+  in deathmatch it is a player model, and in a team mod it will be a team. `*` or nothing means the
+  profile chooses — a random installed model in deathmatch. A model the scan did not find is a
+  warning rather than a refusal: it prints the installed list and uses the name anyway, because
+  models living inside a `.pak` are invisible to the scan. See `doc/game.md`, `player_models.cpp`,
+  for where the list comes from and why CrossPlay may clamp the result.
 - `crossbot_nav_goal <x> <y> <z>` — send all bots to a point
 - `crossbot_teleport <x> <y> <z>` — teleport all bots
 - `crossbot_kill` — suicide every bot; the only way to exercise the respawn path from the console
@@ -60,8 +66,14 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   one number that separates "correctly delayed" from "delayed and also wrong", but it no longer bottoms out
   at zero: it is measured against the target eye while the bot aims at a random hitbox bone, so a couple of
   degrees is the floor. Read its trend across delays, not its value; see `doc/bot.md`, `bot_aim.cpp`
-- `crossbot_sense_status` — per bot: aim target and bone, `cands`/`keep` for the vision pick, live
-  suspicion count with a `kinds` breakdown
+- `crossbot_teams_status` — the map's game (`gEntityOwners[0]`), whether that makes it a team game,
+  the `crossbot_teams` value and the verdict; then one line per live player with its `pev->team` and,
+  per bot, how that bot reads it (`friend` / `enemy` / `unknown`) and whether it may shoot it
+  (`shoot=1`). **Run this first on any cs/tfc/dod map.** Every feature below rests on the mod actually
+  filling `pev->team` for a fake client another game DLL created, and this is the only thing that says
+  whether it does: all-zero teams means teams idle and bots behave exactly as on a deathmatch map
+- `crossbot_sense_status` — per bot: the bot's own `team`, aim target and bone, `cands`/`keep` for the
+  vision pick, live suspicion count with a `kinds` breakdown
   by player/monster/other, the `tier` that won the look vote, the freshest entry with source, age and
   position, the look direction with its authority and how many entries survived the cone refinement, and
   `pushed` — cumulative per-source push counts. `tier` must read `PLAYER` whenever `kinds=p:` is nonzero.
@@ -204,6 +216,11 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 - `crossbot_detour_budget` — seconds of extra travel a bot will accept to pick something up on the way
   to a distant goal. Default 6. 0 disables detours entirely without disabling the tier, so a bot walks
   straight at its target; see `doc/bot.md`, `bot_goal.cpp`
+- `crossbot_teams` — friend/foe gating. Default 1, and inert unless the map belongs to `cstrike`,
+  `tfc` or `dod`. With it on a bot never sights, chases, retaliates against or detonates a satchel on
+  anything that is not a confirmed enemy; with it off every gate returns "attackable" and the bot
+  behaves as it always has. It is the A/B switch for the whole feature — on a `valve` map the two
+  settings must be indistinguishable. See `doc/game.md`, `teams.cpp`
 - `crossbot_combat` — the combat state. Default 1. With it on, a bot that sees an enemy (or is shot
   by one) drops whatever it was walking to and repositions locally instead, until the enemy dies,
   vanishes, stops being sensed, or goes 5s unseen. With it off the bot never enters the state and

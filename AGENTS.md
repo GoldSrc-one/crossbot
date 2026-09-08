@@ -78,7 +78,7 @@ regenerates the debug gallery's `index.html`.
 D:\hlds\hlds.exe -console -game crossplay -xgame1 valve -sgame1 valve +map crossfire
 ```
 `-xgameN` is what CrossPlay loads as `gGameDirs[N-1]`; `-sgameN` is the engine's content search path for
-the same mod. Add a bot with `crossbot_add <gamedir> [name]` — see `doc/console.md`.
+the same mod. Add a bot with `crossbot_add <gamedir> [name] [model|team]` — see `doc/console.md`.
 
 ### Automatic nav goal test (full HLDS run)
 ```powershell

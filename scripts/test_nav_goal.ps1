@@ -492,6 +492,9 @@ finally {
     # Also kill any child processes just in case
     Get-CimInstance Win32_Process -Filter "ParentProcessId=$serverPid" -ErrorAction SilentlyContinue |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    # Clean up autotest config file
+    $cfgPath = Join-Path $HLDSDir "$configName"
+    Remove-Item $cfgPath -ErrorAction SilentlyContinue
 }
 
 if ($result -ne "PASS") { exit 1 }

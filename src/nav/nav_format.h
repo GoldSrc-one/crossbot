@@ -8,9 +8,9 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 20;
+constexpr uint32_t kNavVersion = 21;
 
-constexpr size_t kNavFocusLevels = 4;
+constexpr size_t kNavCampArcs = 4;
 constexpr size_t kNavWatchDirs = 4;
 
 constexpr uint8_t kNoAreaPlane = 0xFF;
@@ -123,9 +123,10 @@ struct NavHeader
 	float vantageSpacing;
 	float maxExposure;
 	uint32_t waterVolumeCount;
+	uint32_t campCount;
 };
 
-static_assert(sizeof(NavHeader) == 124, "NavHeader layout changed without a version bump");
+static_assert(sizeof(NavHeader) == 128, "NavHeader layout changed without a version bump");
 
 struct NavAreaRecord
 {
@@ -247,12 +248,31 @@ struct NavVantageRecord
 {
 	float pos[3];
 	float exposure;
-	float focus[kNavFocusLevels];
 	NavWatchDir watch[kNavWatchDirs];
 };
 
 static_assert(sizeof(NavWatchDir) == 16, "NavWatchDir layout changed without a version bump");
-static_assert(sizeof(NavVantageRecord) == 96, "NavVantageRecord layout changed without a version bump");
+static_assert(sizeof(NavVantageRecord) == 80, "NavVantageRecord layout changed without a version bump");
+
+enum CampFlags : uint32_t
+{
+	CAMP_NONE = 0,
+	CAMP_NO_STAND = 1,
+};
+
+struct NavCampRecord
+{
+	float pos[3];
+	float yaw;
+	float pitch;
+	float score;
+	float stand[kNavCampArcs];
+	float crouch[kNavCampArcs];
+	uint32_t areaId;
+	uint32_t flags;
+};
+
+static_assert(sizeof(NavCampRecord) == 64, "NavCampRecord layout changed without a version bump");
 
 enum GateValidFlags : uint8_t
 {

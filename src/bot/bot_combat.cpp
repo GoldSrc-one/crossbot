@@ -4,6 +4,7 @@
 #include <math.h>
 
 #include "../game/game_profile.h"
+#include "../game/teams.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_mesh.h"
@@ -551,9 +552,13 @@ edict_t *BotCombat::DamageSource(edict_t *pEdict)
 	if (g_engfuncs.pfnIndexOfEdict(ent) == 0)
 		return nullptr;
 
-	if (!CBotIsLivePlayer(ent) && g_pGameProfile &&
-		g_pGameProfile->MonsterEnemy(ent) == pEdict && !g_pGameProfile->IsDead(ent))
-		return ent;
+	if (!CBotIsLivePlayer(ent) && g_pGameProfile && !g_pGameProfile->IsDead(ent))
+	{
+		edict_t *foe = g_pGameProfile->MonsterEnemy(ent);
+		Teams::Relation rel = Teams::Of(pEdict, ent);
+		if (foe && rel != Teams::REL_FRIEND && (rel == Teams::REL_ENEMY || foe == pEdict))
+			return ent;
+	}
 
 	if (!CBotIsLivePlayer(ent))
 		ent = ent->v.owner;
@@ -561,6 +566,8 @@ edict_t *BotCombat::DamageSource(edict_t *pEdict)
 	if (!ent || ent->free || ent == pEdict || !CBotIsLivePlayer(ent))
 		return nullptr;
 	if (g_pGameProfile && g_pGameProfile->IsDead(ent))
+		return nullptr;
+	if (!Teams::Attackable(pEdict, ent))
 		return nullptr;
 
 	return ent;
@@ -623,7 +630,10 @@ void BotCombat::Update(CBot &bot)
 			Exit(bot, "the enemy handle went stale");
 		else if (g_pGameProfile && g_pGameProfile->IsDead(enemy))
 			Exit(bot, "the enemy died");
+		else if (!Teams::Attackable(bot.pEdict, enemy))
+			Exit(bot, "the enemy is on our team");
 		else if ((enemy->v.flags & FL_CLIENT) == 0 && g_pGameProfile &&
+			Teams::Of(bot.pEdict, enemy) != Teams::REL_ENEMY &&
 			g_pGameProfile->MonsterEnemy(enemy) != bot.pEdict)
 			Exit(bot, "the monster stopped hunting us");
 		else if (seen && seen != enemy)

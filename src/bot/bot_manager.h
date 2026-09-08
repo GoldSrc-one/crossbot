@@ -16,7 +16,7 @@ namespace BotManager
 
 	void Touch(edict_t *pentTouched, edict_t *pentOther);
 
-	bool AddBot(int iGame, const char *name);
+	bool AddBot(int iGame, const char *name, const char *arg);
 
 	bool SetGoalForAllBots(const Vector &point);
 
@@ -33,6 +33,9 @@ namespace BotManager
 	void PrintMonsters();
 
 	void PrintVantageStatus(const Vector *at);
+	void PrintCampStatus(const Vector *at);
+
+	void PrintTeamsStatus();
 
 	void PrintCombatStatus();
 

@@ -113,6 +113,14 @@ public:
 
 	virtual void CollectStrategicGoals(const CBot &bot, const Nav::NavMesh &mesh,
 		std::vector<BotGoal::Candidate> &out) const = 0;
+
+	// The optional third crossbot_add argument, whatever this game makes of it: a player model in
+	// deathmatch, a team in a mod that has them. Called once on a fresh fake client, before
+	// MDLL_ClientConnect, so the game DLL reads a finished userinfo buffer at connect. arg is null
+	// when the operator gave none -- the profile picks its own default then, at random where that
+	// makes sense -- and out receives what it settled on, for the console line.
+	virtual void ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
+		unsigned int size) const = 0;
 };
 
 IGameProfile *GameProfile_Detect(const char *gamedir);

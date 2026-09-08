@@ -11,6 +11,8 @@
 #include "clipnode_tree.h"
 #include "floor_support.h"
 #include "hull_defs.h"
+#include "point_grid.h"
+#include "vis_sampling.h"
 #include "work_pool.h"
 
 namespace navgen
@@ -19,285 +21,12 @@ namespace navgen
 namespace
 {
 
-constexpr double kDeg = 3.14159265358979323846 / 180.0;
 constexpr double kColumnMergeZ = 32.0;
 constexpr double kIdwEpsilon = 1.0;
 constexpr double kExposureErrorWeight = 2.0;
 constexpr double kVantagePvsCost = 1.0;
 constexpr double kVantageTraceCost = 18.0;
 constexpr size_t kVantageTileSlots = 256;
-
-const double kFocusHalfAngles[kVantageFocusLevels] = {45.0, 22.5, 11.25, 5.625};
-
-struct VisBlockerBox
-{
-	int headnode = -1;
-	Vec3 origin;
-	Vec3 mins;
-	Vec3 maxs;
-};
-
-bool SegmentHitsBox(const Vec3 &a, const Vec3 &b, const Vec3 &mins, const Vec3 &maxs)
-{
-	double tmin = 0.0;
-	double tmax = 1.0;
-	const double d[3] = {b.x - a.x, b.y - a.y, b.z - a.z};
-	const double o[3] = {a.x, a.y, a.z};
-	const double lo[3] = {mins.x, mins.y, mins.z};
-	const double hi[3] = {maxs.x, maxs.y, maxs.z};
-
-	for (int i = 0; i < 3; ++i)
-	{
-		if (std::fabs(d[i]) < 1e-9)
-		{
-			if (o[i] < lo[i] || o[i] > hi[i])
-				return false;
-			continue;
-		}
-
-		double t1 = (lo[i] - o[i]) / d[i];
-		double t2 = (hi[i] - o[i]) / d[i];
-		if (t1 > t2)
-			std::swap(t1, t2);
-
-		tmin = std::max(tmin, t1);
-		tmax = std::min(tmax, t2);
-		if (tmin > tmax)
-			return false;
-	}
-
-	return true;
-}
-
-Vec3 DirFromAngles(double yawDeg, double pitchDeg)
-{
-	double e = -pitchDeg * kDeg;
-	double y = yawDeg * kDeg;
-	double ce = std::cos(e);
-	return Vec3(std::cos(y) * ce, std::sin(y) * ce, std::sin(e));
-}
-
-void AnglesFromDir(const Vec3 &dir, double &yawDeg, double &pitchDeg)
-{
-	double flat = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-	yawDeg = (flat < 1e-9 && std::fabs(dir.z) < 1e-9) ? 0.0 : std::atan2(dir.y, dir.x) / kDeg;
-	pitchDeg = -std::atan2(dir.z, flat) / kDeg;
-}
-
-class BinLayout
-{
-public:
-
-	BinLayout(int yawBins, int pitchBins, double pitchRange)
-		: m_yawBins(yawBins), m_pitchBins(pitchBins), m_pitchRange(pitchRange)
-	{
-		m_dirs.resize(static_cast<size_t>(m_yawBins) * static_cast<size_t>(m_pitchBins));
-		for (int p = 0; p < m_pitchBins; ++p)
-		{
-			double pitch = -m_pitchRange + (p + 0.5) * (2.0 * m_pitchRange) / m_pitchBins;
-			for (int y = 0; y < m_yawBins; ++y)
-			{
-				double yaw = -180.0 + (y + 0.5) * 360.0 / m_yawBins;
-				m_dirs[Index(y, p)] = DirFromAngles(yaw, pitch);
-			}
-		}
-	}
-
-	size_t Count() const { return m_dirs.size(); }
-
-	const Vec3 &Dir(size_t bin) const { return m_dirs[bin]; }
-
-	size_t Index(int yawBin, int pitchBin) const
-	{
-		return static_cast<size_t>(pitchBin) * static_cast<size_t>(m_yawBins) +
-			static_cast<size_t>(yawBin);
-	}
-
-	size_t BinFor(double yawDeg, double pitchDeg) const
-	{
-		double yn = (yawDeg + 180.0) / 360.0 * m_yawBins;
-		int yb = static_cast<int>(std::floor(yn));
-		yb %= m_yawBins;
-		if (yb < 0)
-			yb += m_yawBins;
-
-		double clamped = std::max(-m_pitchRange, std::min(m_pitchRange, pitchDeg));
-		double pn = (clamped + m_pitchRange) / (2.0 * m_pitchRange) * m_pitchBins;
-		int pb = static_cast<int>(std::floor(pn));
-		pb = std::max(0, std::min(m_pitchBins - 1, pb));
-
-		return Index(yb, pb);
-	}
-
-private:
-	int m_yawBins;
-	int m_pitchBins;
-	double m_pitchRange;
-	std::vector<Vec3> m_dirs;
-};
-
-struct CellKey
-{
-	int x = 0, y = 0, z = 0;
-
-	bool operator==(const CellKey &o) const { return x == o.x && y == o.y && z == o.z; }
-};
-
-struct CellKeyHash
-{
-	size_t operator()(const CellKey &k) const
-	{
-		uint64_t h = static_cast<uint64_t>(static_cast<uint32_t>(k.x)) * 73856093ull;
-		h ^= static_cast<uint64_t>(static_cast<uint32_t>(k.y)) * 19349663ull;
-		h ^= static_cast<uint64_t>(static_cast<uint32_t>(k.z)) * 83492791ull;
-		return static_cast<size_t>(h ^ (h >> 32));
-	}
-};
-
-class VantageGrid
-{
-public:
-
-	VantageGrid(const std::vector<Vec3> &points, double cell)
-		: m_points(points), m_cell(cell)
-	{
-		for (size_t i = 0; i < points.size(); ++i)
-			m_cells[KeyFor(points[i])].push_back(i);
-	}
-
-	void Remove(size_t index)
-	{
-		std::vector<size_t> &bucket = m_cells[KeyFor(m_points[index])];
-		bucket.erase(std::remove(bucket.begin(), bucket.end(), index), bucket.end());
-	}
-
-	void FindNearest(const Vec3 &p, size_t skip, size_t k, size_t aliveCount,
-		std::vector<size_t> &out) const
-	{
-		out.clear();
-		if (k == 0)
-			return;
-
-		std::vector<std::pair<double, size_t>> best;
-		CellKey center = KeyFor(p);
-
-		size_t reachable = (skip < m_points.size()) ? aliveCount - 1 : aliveCount;
-		size_t want = std::min(k, reachable);
-		if (want == 0)
-			return;
-
-		for (int r = 0;; ++r)
-		{
-			GatherRing(center, r, p, skip, best);
-
-			std::sort(best.begin(), best.end());
-			if (best.size() > k)
-				best.resize(k);
-
-			if (best.size() >= want)
-			{
-				double guaranteed = static_cast<double>(r) * m_cell;
-				if (best[want - 1].first <= guaranteed * guaranteed)
-					break;
-			}
-
-			if (r > m_maxRing)
-				break;
-		}
-
-		for (const std::pair<double, size_t> &e : best)
-			out.push_back(e.second);
-	}
-
-	void FindNearestBrute(const Vec3 &p, size_t skip, size_t k, const std::vector<bool> &alive,
-		std::vector<size_t> &out) const
-	{
-		out.clear();
-		std::vector<std::pair<double, size_t>> best;
-		for (size_t i = 0; i < m_points.size(); ++i)
-		{
-			if (i == skip || !alive[i])
-				continue;
-			best.push_back({DistSq(p, m_points[i]), i});
-		}
-		std::sort(best.begin(), best.end());
-		if (best.size() > k)
-			best.resize(k);
-		for (const std::pair<double, size_t> &e : best)
-			out.push_back(e.second);
-	}
-
-	void SetExtent(const Vec3 &mins, const Vec3 &maxs)
-	{
-		double span = std::max(maxs.x - mins.x, std::max(maxs.y - mins.y, maxs.z - mins.z));
-		m_maxRing = static_cast<int>(std::ceil(span / m_cell)) + 2;
-	}
-
-private:
-
-	static double DistSq(const Vec3 &a, const Vec3 &b)
-	{
-		double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-		return dx * dx + dy * dy + dz * dz;
-	}
-
-	CellKey KeyFor(const Vec3 &p) const
-	{
-		CellKey k;
-		k.x = static_cast<int>(std::floor(p.x / m_cell));
-		k.y = static_cast<int>(std::floor(p.y / m_cell));
-		k.z = static_cast<int>(std::floor(p.z / m_cell));
-		return k;
-	}
-
-	void GatherCell(const CellKey &key, const Vec3 &p, size_t skip,
-		std::vector<std::pair<double, size_t>> &best) const
-	{
-		std::unordered_map<CellKey, std::vector<size_t>, CellKeyHash>::const_iterator it =
-			m_cells.find(key);
-		if (it == m_cells.end())
-			return;
-
-		for (size_t idx : it->second)
-		{
-			if (idx == skip)
-				continue;
-			best.push_back({DistSq(p, m_points[idx]), idx});
-		}
-	}
-
-	void GatherRing(const CellKey &center, int r, const Vec3 &p, size_t skip,
-		std::vector<std::pair<double, size_t>> &best) const
-	{
-		if (r == 0)
-		{
-			GatherCell(center, p, skip, best);
-			return;
-		}
-
-		for (int dz = -r; dz <= r; ++dz)
-		{
-			for (int dy = -r; dy <= r; ++dy)
-			{
-				for (int dx = -r; dx <= r; ++dx)
-				{
-					if (std::abs(dx) != r && std::abs(dy) != r && std::abs(dz) != r)
-						continue;
-					CellKey key;
-					key.x = center.x + dx;
-					key.y = center.y + dy;
-					key.z = center.z + dz;
-					GatherCell(key, p, skip, best);
-				}
-			}
-		}
-	}
-
-	const std::vector<Vec3> &m_points;
-	double m_cell;
-	int m_maxRing = 64;
-	std::unordered_map<CellKey, std::vector<size_t>, CellKeyHash> m_cells;
-};
 
 struct ColumnKey
 {
@@ -385,34 +114,14 @@ void CollectCandidates(const std::vector<Area> &areas, const VantageParams &para
 					Vantage v;
 					v.pos = Vec3(x, y, z);
 					v.areaId = area.id;
+					v.floorZ = z - lift;
+					v.areaFlags = area.areaFlags;
 					column.push_back(out.size());
 					out.push_back(v);
 				}
 			}
 		}
 	}
-}
-
-bool Occluded(const HullTree &hull, int worldHeadnode, const std::vector<VisBlockerBox> &blockers,
-	const Vec3 &a, const Vec3 &b, VantageStats &stats)
-{
-	++stats.worldTraces;
-	TraceResult tr = TraceHull(hull, worldHeadnode, a, b);
-	if (tr.fraction < 1.0f || tr.startsolid)
-		return true;
-
-	for (const VisBlockerBox &blocker : blockers)
-	{
-		if (!SegmentHitsBox(a, b, blocker.mins, blocker.maxs))
-			continue;
-
-		++stats.blockerTraces;
-		TraceResult bt = TraceHull(hull, blocker.headnode, a - blocker.origin, b - blocker.origin);
-		if (bt.fraction < 1.0f || bt.startsolid)
-			return true;
-	}
-
-	return false;
 }
 
 void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
@@ -425,7 +134,7 @@ void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
 		return;
 
 	std::vector<double> work = hist;
-	double cosCone = std::cos(params.clusterConeDeg * kDeg);
+	double cosCone = std::cos(params.clusterConeDeg * kVisDeg);
 	double remaining = total;
 
 	for (size_t k = 0; k < params.maxWatchDirs; ++k)
@@ -472,7 +181,7 @@ void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
 			double d = bins.Dir(b).Dot(dir);
 			if (d < cosCone)
 				continue;
-			double angle = std::acos(std::max(-1.0, std::min(1.0, d))) / kDeg;
+			double angle = std::acos(std::max(-1.0, std::min(1.0, d))) / kVisDeg;
 			weight += work[b];
 			angleSq += work[b] * angle * angle;
 			work[b] = 0.0;
@@ -492,24 +201,6 @@ void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
 
 	std::sort(vantage.watch.begin(), vantage.watch.end(),
 		[](const WatchDir &a, const WatchDir &b) { return a.amount > b.amount; });
-
-	if (vantage.watch.empty())
-		return;
-
-	Vec3 main = DirFromAngles(vantage.watch[0].yaw, vantage.watch[0].pitch);
-	for (size_t level = 0; level < kVantageFocusLevels; ++level)
-	{
-		double cosHalf = std::cos(kFocusHalfAngles[level] * kDeg);
-		double sum = 0.0;
-		for (size_t b = 0; b < hist.size(); ++b)
-		{
-			if (hist[b] <= 0.0)
-				continue;
-			if (bins.Dir(b).Dot(main) >= cosHalf)
-				sum += hist[b];
-		}
-		vantage.focus[level] = sum / total;
-	}
 }
 
 double InterpolationError(const std::vector<std::vector<double>> &shape,
@@ -550,7 +241,8 @@ double InterpolationError(const std::vector<std::vector<double>> &shape,
 
 std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	const std::vector<BlockingVolume> &visBlockers, const std::vector<Area> &areas,
-	const VantageParams &params, VantageStats *statsOut)
+	const VantageParams &params, VantageStats *statsOut,
+	std::vector<VantageCandidate> *candidatesOut)
 {
 	VantageStats stats;
 	std::chrono::steady_clock::time_point sampleStart = std::chrono::steady_clock::now();
@@ -587,17 +279,7 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	stats.leafSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now() - leafStart).count();
 
-	std::vector<VisBlockerBox> blockers;
-	blockers.reserve(visBlockers.size());
-	for (const BlockingVolume &b : visBlockers)
-	{
-		VisBlockerBox box;
-		box.headnode = b.headnode;
-		box.origin = b.origin;
-		box.mins = b.mins;
-		box.maxs = b.maxs;
-		blockers.push_back(box);
-	}
+	std::vector<VisBlockerBox> blockers = BuildVisBlockerBoxes(visBlockers);
 
 	size_t count = vantages.size();
 	BinLayout bins(params.yawBins, params.pitchBins, params.pitchRangeDeg);
@@ -677,6 +359,8 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 		std::chrono::steady_clock::time_point binStart = std::chrono::steady_clock::now();
 		VantageStats &local = binStats[binIndex];
 		VisRowReader reader(vis);
+		TraceCounters counters;
+		HullOriginChain chain;
 		double traceTicks = 0.0;
 
 		for (size_t a : workBins[binIndex])
@@ -693,7 +377,7 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 
 				std::chrono::steady_clock::time_point traceStart = std::chrono::steady_clock::now();
 				bool blocked = Occluded(hull, worldHeadnode, blockers, vantages[i].pos, vantages[j].pos,
-					local);
+					counters, chain);
 				traceTicks += std::chrono::duration<double>(
 					std::chrono::steady_clock::now() - traceStart).count();
 
@@ -712,6 +396,8 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 			}
 		}
 
+		local.worldTraces = counters.worldTraces;
+		local.blockerTraces = counters.blockerTraces;
 		local.traceSeconds = traceTicks;
 		binWall[binIndex] = std::chrono::duration<double>(
 			std::chrono::steady_clock::now() - binStart).count();
@@ -758,6 +444,23 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	stats.deriveSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now() - deriveStart).count();
 
+	if (candidatesOut)
+	{
+		candidatesOut->resize(count);
+		for (size_t i = 0; i < count; ++i)
+		{
+			const Vantage &v = vantages[i];
+			VantageCandidate &c = (*candidatesOut)[i];
+			c.eye = v.pos;
+			c.floor = Vec3(v.pos.x, v.pos.y, v.floorZ);
+			c.areaId = v.areaId;
+			c.leaf = v.leaf;
+			c.areaFlags = v.areaFlags;
+			c.exposure = v.exposure;
+			c.mainAmount = v.watch.empty() ? 0.0 : v.watch[0].amount;
+		}
+	}
+
 	std::chrono::steady_clock::time_point reduceStart = std::chrono::steady_clock::now();
 
 	std::vector<std::vector<double>> shape(count);
@@ -794,7 +497,7 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	}
 
 	double cell = std::max(32.0, params.gridSize * 2.0);
-	VantageGrid grid(points, cell);
+	PointGrid grid(points, cell);
 	if (count > 0)
 		grid.SetExtent(extentMins, extentMaxs);
 

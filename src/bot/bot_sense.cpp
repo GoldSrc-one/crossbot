@@ -12,6 +12,7 @@
 #include "bot_move.h"
 #include "bot_perf.h"
 #include "../game/game_profile.h"
+#include "../game/teams.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_mesh.h"
@@ -207,6 +208,8 @@ namespace
 			return false;
 		if (g_pGameProfile && g_pGameProfile->IsDead(ent))
 			return false;
+		if (!Teams::Attackable(bot.pEdict, ent))
+			return false;
 		return true;
 	}
 
@@ -221,11 +224,26 @@ namespace
 
 	bool MonsterCandidate(const CBot &bot, edict_t *ent)
 	{
-		if (!Hunting(bot, ent))
+		if (!ent || ent->free || ent == bot.pEdict || !g_pGameProfile)
+			return false;
+		if ((ent->v.flags & FL_MONSTER) == 0)
 			return false;
 		if (g_pGameProfile->IsDead(ent))
 			return false;
-		return true;
+
+		edict_t *foe = g_pGameProfile->MonsterEnemy(ent);
+		if (!foe)
+			return false;
+
+		switch (Teams::Of(bot.pEdict, ent))
+		{
+		case Teams::REL_ENEMY:
+			return true;
+		case Teams::REL_FRIEND:
+			return false;
+		default:
+			return foe == bot.pEdict;
+		}
 	}
 
 	bool Gated(const CBot &bot)
@@ -899,6 +917,8 @@ const BotSense::Suspicion *BotSense::NearestLive(const CBot &bot, const Vector &
 
 		edict_t *ent = entry.ent.Get();
 		if (ent && ent->v.owner == bot.pEdict)
+			continue;
+		if (livingOnly && !Teams::Attackable(bot.pEdict, ent))
 			continue;
 
 		float dist = (entry.pos - point).Length();

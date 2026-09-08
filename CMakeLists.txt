@@ -143,7 +143,7 @@ find_package(Threads REQUIRED)
 target_link_libraries(navgen PRIVATE Threads::Threads)
 
 if(MSVC)
-    target_compile_options(navgen PRIVATE /W3)
+    target_compile_options(navgen PRIVATE /W3 /Ob2)
     target_compile_definitions(navgen PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(navgen PRIVATE -Wall)

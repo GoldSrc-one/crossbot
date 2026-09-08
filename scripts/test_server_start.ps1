@@ -51,9 +51,11 @@ $errFile = "$LogFile.err"
 Remove-Item $LogFile, $errFile -ErrorAction SilentlyContinue
 
 # cmd.exe runs in $HLDSDir, so its redirection targets have to be absolute -- a caller
-# passing a repo-relative -LogFile would otherwise write next to hlds.exe, or fail.
-$LogFile = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $LogFile))
-$errFile = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $errFile))
+# passing a repo-relative -LogFile would otherwise write next to hlds.exe. Rooted paths
+# are left alone; test_nav_goal_all.ps1 passes one.
+if (-not [System.IO.Path]::IsPathRooted($LogFile)) { $LogFile = Join-Path (Get-Location) $LogFile }
+$LogFile = [System.IO.Path]::GetFullPath($LogFile)
+$errFile = "$LogFile.err"
 
 # qconsole.log is shared - don't delete it here, let the test orchestrator handle it
 # Remove-Item (Join-Path $HLDSDir "qconsole.log") -ErrorAction SilentlyContinue
@@ -149,6 +151,7 @@ if ($ready -and $RequireVerbose) {
 
 if ($ready -and $Commands.Count -gt 0) {
     & "$PSScriptRoot\rcon.ps1" -Port $Port -Command "exec $ConfigName" | Out-Null
+    Remove-Item $cfgPath -ErrorAction SilentlyContinue
 }
 
 if (-not $ready) {

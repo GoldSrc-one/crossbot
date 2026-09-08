@@ -67,7 +67,8 @@ void WriteRaw(FILE *f, const void *data, size_t bytes, const char *what)
 
 void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t bspChecksum,
 	const std::vector<Area> &areas, const std::vector<MergedConnection> &conns, float designMaxSpeed,
-	const std::vector<Vantage> &vantages, float vantageSpacing, float maxExposure,
+	const std::vector<Vantage> &vantages,
+	const std::vector<CampSpot> &camps, float vantageSpacing, float maxExposure,
 	const std::vector<LiquidVolume> &waterVolumes)
 {
 	FILE *f = std::fopen(path.c_str(), "wb");
@@ -221,9 +222,6 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.pos[1] = static_cast<float>(v.pos.y);
 		rec.pos[2] = static_cast<float>(v.pos.z);
 		rec.exposure = static_cast<float>(v.exposure);
-		for (size_t k = 0; k < kVantageFocusLevels; ++k)
-			rec.focus[k] = static_cast<float>(v.focus[k]);
-
 		for (size_t k = 0; k < kMaxWatchDirs; ++k)
 		{
 			NavWatchDir &dst = rec.watch[k];
@@ -239,6 +237,27 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 				dst.yaw = dst.pitch = dst.spread = dst.amount = 0.f;
 			}
 		}
+	}
+
+
+	std::vector<NavCampRecord> campRecords(camps.size());
+	for (size_t i = 0; i < camps.size(); ++i)
+	{
+		const CampSpot &spot = camps[i];
+		NavCampRecord &rec = campRecords[i];
+		rec.pos[0] = static_cast<float>(spot.pos.x);
+		rec.pos[1] = static_cast<float>(spot.pos.y);
+		rec.pos[2] = static_cast<float>(spot.pos.z);
+		rec.yaw = static_cast<float>(spot.yaw);
+		rec.pitch = static_cast<float>(spot.pitch);
+		rec.score = static_cast<float>(spot.score);
+		for (size_t k = 0; k < kCampArcs; ++k)
+		{
+			rec.stand[k] = static_cast<float>(spot.stand[k]);
+			rec.crouch[k] = static_cast<float>(spot.crouch[k]);
+		}
+		rec.areaId = static_cast<uint32_t>(spot.areaId);
+		rec.flags = spot.flags;
 	}
 
 	std::vector<NavWaterVolumeRecord> waterRecords(waterVolumes.size());
@@ -278,6 +297,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	header.vantageSpacing = vantageSpacing;
 	header.maxExposure = maxExposure;
 	header.waterVolumeCount = static_cast<uint32_t>(waterRecords.size());
+	header.campCount = static_cast<uint32_t>(campRecords.size());
 
 	WriteRaw(f, &header, sizeof(header), "header");
 	WriteRaw(f, areaRecords.data(), areaRecords.size() * sizeof(NavAreaRecord), "area records");
@@ -289,6 +309,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	WriteRaw(f, detourPoints.data(), detourPoints.size() * sizeof(NavDetourPointRecord), "detour points");
 	WriteRaw(f, vantageRecords.data(), vantageRecords.size() * sizeof(NavVantageRecord), "vantages");
 	WriteRaw(f, waterRecords.data(), waterRecords.size() * sizeof(NavWaterVolumeRecord), "water volumes");
+	WriteRaw(f, campRecords.data(), campRecords.size() * sizeof(NavCampRecord), "camp spots");
 
 	std::fclose(f);
 }

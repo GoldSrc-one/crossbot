@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <exception>
 #include <thread>
 
@@ -170,6 +171,119 @@ void RunBins(size_t binCount, const std::function<void(size_t)> &body)
 		worker.join();
 
 	for (const std::exception_ptr &error : errors)
+	{
+		if (error)
+			std::rethrow_exception(error);
+	}
+}
+
+
+ThreadPool::ThreadPool(size_t threads)
+	: m_next(0)
+{
+	if (threads < 1)
+		threads = 1;
+
+	m_errors.resize(threads);
+	m_workers.reserve(threads - 1);
+	for (size_t slot = 1; slot < threads; ++slot)
+		m_workers.emplace_back([this, slot]() { WorkerLoop(slot); });
+}
+
+ThreadPool::~ThreadPool()
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_stop = true;
+		++m_generation;
+	}
+
+	m_startCv.notify_all();
+
+	for (std::thread &worker : m_workers)
+	{
+		if (worker.joinable())
+			worker.join();
+	}
+}
+
+void ThreadPool::Drain(size_t slot)
+{
+	for (;;)
+	{
+		size_t item = m_next.fetch_add(1, std::memory_order_relaxed);
+		if (item >= m_count)
+			return;
+
+		try
+		{
+			(*m_body)(item, slot);
+		}
+		catch (...)
+		{
+			if (!m_errors[slot])
+				m_errors[slot] = std::current_exception();
+		}
+	}
+}
+
+void ThreadPool::WorkerLoop(size_t slot)
+{
+	uint64_t seen = 0;
+
+	for (;;)
+	{
+		{
+			std::unique_lock<std::mutex> lock(m_mutex);
+			m_startCv.wait(lock, [this, seen]() { return m_stop || m_generation != seen; });
+			if (m_stop)
+				return;
+			seen = m_generation;
+		}
+
+		Drain(slot);
+
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			--m_active;
+			if (m_active == 0)
+				m_doneCv.notify_one();
+		}
+	}
+}
+
+void ThreadPool::Run(size_t count, const std::function<void(size_t, size_t)> &body)
+{
+	if (count == 0)
+		return;
+
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_body = &body;
+		m_count = count;
+		m_next.store(0, std::memory_order_relaxed);
+		m_active = m_workers.size();
+		for (std::exception_ptr &error : m_errors)
+			error = std::exception_ptr();
+		++m_generation;
+	}
+
+	m_startCv.notify_all();
+
+	Drain(0);
+
+	std::chrono::steady_clock::time_point drained = std::chrono::steady_clock::now();
+
+	{
+		std::unique_lock<std::mutex> lock(m_mutex);
+		m_doneCv.wait(lock, [this]() { return m_active == 0; });
+		m_body = nullptr;
+	}
+
+	m_idleSeconds += std::chrono::duration<double>(
+		std::chrono::steady_clock::now() - drained).count();
+
+	for (const std::exception_ptr &error : m_errors)
 	{
 		if (error)
 			std::rethrow_exception(error);

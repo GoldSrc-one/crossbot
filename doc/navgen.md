@@ -27,13 +27,26 @@ Command-line tool with extensive debug flags:
 - `--dump-obj <path>` - walkable floor of every area as OBJ mesh (+ MTL): crouch areas colored apart, planned route as ribbon
 - `--dump-svg <path>` - top-down SVG of final area graph
 - `--dump-vantage-svg <path>` - sample the visibility field and write it as its own top-down SVG: one glyph
-  per vantage point with its watch directions, exposure and camp focus. Tuned by `--vantage-grid`,
+  per vantage point with its watch directions and exposure. Tuned by `--vantage-grid`,
   `--vantage-spacing`, `--vantage-cone` and `--vantage-neighbors`; see `vantage_sampler.cpp` below
 - `--vantage-verify-neighbors` - cross-check every nearest-neighbour query the reduction makes against a
   brute-force scan and report mismatches
-- `--no-vantage` - skip the visibility field. The `.nav` is still valid and still v20, it just carries no
+- `--no-vantage` - skip the visibility field. The `.nav` is still valid and still v21, it just carries no
   vantage section, and bots on it lose the idle look and the cone weighting. This is the fast-iteration
   switch: the field is the single most expensive thing navgen does (see `vantage_sampler.cpp`)
+- `--dump-camp-svg <path>` - camp spots as their own top-down SVG: one glyph per spot with its
+  chosen facing, a wedge at the tightest arc still scoring at least 1, and the hill-climb path that
+  found it. Cancelled climbs are drawn in a separate colour; see `camp_sampler.cpp` below
+- `--camp-spacing <n>` - radius of the soft suppression a placed camp spot applies, and the divisor
+  of the budget `footprint / spacing^2` (default 256). Cost is quadratic in its inverse: 64 is 16x
+  the work, not 4x. Note it enforces the count but not the spread; see `camp_sampler.cpp`
+- `--camp-count <n>` - override the derived budget with an exact number of camp spots
+- `--camp-min-visible <n>` - probes a candidate must be seen by before it can become a camp spot
+  (default 32). This gate is load-bearing, not a nicety: without it a spot that sees one thing scores
+  a perfect ratio in every arc and outranks a real room
+- `--camp-climb-steps <n>` - hard cap on one hill climb (default 32), the backstop for a plateau
+- `--no-camp` - skip camp spots entirely. The `.nav` is still valid and still v21, it just carries
+  no camp section. Implied by `--no-vantage`, which is what supplies the candidates
 - `--dump-vis-probe "x y z x y z"` - what the visibility sampler sees between two world points: the BSP leaf
   each lands in, whether the PVS links them (both directions), and the hull-0 traceline result. Repeatable.
   This is the primitive for validating the PVS and the synthesized point hull against a known-good answer
@@ -935,12 +948,11 @@ A sampled eye position carrying a visibility signature: where a bot standing the
 | --- | --- |
 | `watch[]` | up to 4 `WatchDir{yaw, pitch, spread, amount}`, `amount`-descending. `amount` is the fraction of everything that can see this spot arriving from that cone; `spread` is the weighted RMS angular deviation inside it, in degrees |
 | `exposure` | fraction of all sampled vantages in the map with line of sight to this one |
-| `focus[4]` | fraction of the *visible* set inside FOV 90 / 45 / 22.5 / 11.25 around `watch[0]`. `focus[3]` near 1 means one narrow facing covers nearly every sightline in: a camping position |
 
 ### The internal datum is a direction histogram
 Sampling accumulates a yaw x pitch weight histogram per vantage (64 x 8 by default), and everything above is derived from it. The histogram is working memory, never output. It is what makes the reduction well-defined: a fixed-length vector has a distance, a variable-length cluster list does not.
 
-Pitch is binned over +/-45 degrees with clamping rather than the full +/-90. Sightlines steeper than that are rare and their exact pitch does not matter, and spending the bins near the horizon is what lets `focus[3]`'s 11.25-degree cone span more than a single bin.
+Pitch is binned over +/-45 degrees with clamping rather than the full +/-90. Sightlines steeper than that are rare and their exact pitch does not matter, and spending the bins near the horizon is what keeps the narrow cones the camp sampler seeds from spanning only a single bin.
 
 ### Grid sampling
 The lattice is **world-aligned**, not area-aligned, so neighbouring areas agree on cell centres and dedup is exact. For each lattice point, every walkable floor face of the area is tested with `Distance2DToWinding` and contributes its own `FloorHeightAt` — per face, not per area, because a prism area (stairs, a ramp) carries several floor faces at different heights and each is a real standing position.
@@ -959,7 +971,7 @@ Visibility is symmetric, so one trace updates both endpoints' histograms — whi
 ### Watch directions: peak extraction, not DBSCAN
 DBSCAN on a sphere with a fixed `eps` degenerates in open areas — everything merges into one cluster. Instead, on a working copy of the histogram: seed at the max bin, mean-shift three passes over the bins inside `--vantage-cone` of the current direction, record the cone's weight/spread, zero those bins, repeat. Stop at 4 directions or when under 5% of the weight is left. This is the same refinement `LookDirection` already does in `bot_sense.cpp`.
 
-`focus[]` is then measured on the *original* histogram — the peak extraction zeroes bins as it goes, so the working copy no longer describes the spot.
+Camping used to be a `focus[]` field measured here on the *original* histogram. It is now its own dataset; see `camp_sampler.cpp`.
 
 ### Reduction: the error metric must be scale-free
 Greedy decimation, lowest interpolation error first, until `kept <= footprintArea / spacing^2`. For each candidate, the `--vantage-neighbors` nearest survivors are found, IDW-weighted by `1/(d^2+1)`, and the candidate is scored on how well that interpolation reproduces it.
@@ -990,6 +1002,20 @@ is the PVS test and histogram binning over all 553M pairs.
 workers contend for memory bandwidth and share L3. It also carries its own measurement cost: two
 `steady_clock` reads per traced pair, worth about 1.8s of the 40.1s (4.5%). It is kept because the
 trace-versus-PVS split is what tells you the tracelines are the only thing worth optimising.
+
+Those figures pre-date two later changes, both measured as whole-run wall time at default threads on the
+same box, alternating the old and new binaries in one sitting because run-to-run variance here is large
+enough to swallow anything under ~5%:
+
+| Change | crossfire | boot_camp |
+| --- | --- | --- |
+| `/Ob2` on the navgen target | 59.0s to 46.0s | - |
+| `SegmentBlocked` for visibility queries | 42.0s to 37.7s (-10%) | 133.9s to 113.7s (-15%) |
+| Shared-origin chain cache | 40.8s to 34.5s (-15%) | 110.4s to 94.6s (-14%) |
+
+The `SegmentBlocked` rows are means of four alternating pairs on crossfire and two on boot_camp; on both
+maps every new run beat every old run, so the ranges do not overlap. `.nav` output is byte-identical
+across the change on all 51 maps under `maps\` plus crossfire and boot_camp.
 
 **Why the histogram is atomic.** A pair `(i, j)` writes *both* `hist[i]` and `hist[j]` — visibility is
 symmetric and one trace updates both endpoints — so no partition of the outer loop gives a worker
@@ -1027,6 +1053,178 @@ figure: at spacing 512 it added 290s of brute-force scanning to a 1.9s reduction
 
 ### Nearest-neighbour queries
 A uniform spatial hash over vantage positions, cell size `max(32, grid*2)`. The ring search **expands until the k-th best distance beats the guaranteed radius** `r * cell` — a point outside the searched Chebyshev-r box of cells is at least that far away. Stopping at a fixed one-ring silently returns wrong neighbours near cell boundaries and as the kept set thins out, which would quietly corrupt every reduction decision, so `--vantage-verify-neighbors` cross-checks every query against a brute-force scan and reports mismatches.
+
+## camp_sampler.cpp
+
+### Camp spots are a separate dataset, not a field
+The vantage field answers "how seen is it around here" and "which way do sightlines run around here".
+Both are properties of a neighbourhood, so the runtime blends them between the four nearest samples and
+gets a meaningful answer anywhere. Camping is not like that. It is discrete -- stand *exactly* here, face
+*exactly* there -- and the midpoint between two camping spots is usually not a camping spot. `focus[4]`
+used to smear that discrete property across the continuous field and it never worked; nothing read it.
+It is gone, and camp spots replace it as their own reduced list with their own record.
+
+A camp spot is a floor position, one facing, and eight numbers:
+
+| Field | Meaning |
+| --- | --- |
+| `pos` | the nav floor point, which is a ducking player's origin |
+| `yaw`, `pitch` | one facing, shared by both stances |
+| `stand[4]` | arc ratios from the standing eye, `pos.z + kStandEyeLift` (+46) |
+| `crouch[4]` | arc ratios from the crouching eye, `pos.z + kDuckEyeLift` (+12) |
+| `score` | the combination the selection ranked on |
+| `flags` | `CAMP_NO_STAND` when standing there is impossible |
+
+The nav floor plane is the hull-3 centre, so it *is* a ducking origin: crouch eye = floor + 12 (the duck
+`view_ofs`), standing origin = floor + 18 and standing eye = floor + 18 + 28 = floor + 46. Both lifts
+already existed in `vantage_sampler.h`; nothing new was measured to get them.
+
+### The arc metric is odds, not a fraction
+For the four FOVs 90 / 45 / 22.5 / 11.25 -- half-angles 45 / 22.5 / 11.25 / 5.625, the same nesting the
+old `kFocusHalfAngles` used -- count visible probe candidates inside the cone and outside it:
+
+```
+ratio(arc, stance) = inside / max(outside, 1)
+score = sum over the four arcs of max(stand_ratio, crouch_ratio)
+```
+
+The odds form `f / (1 - f)` is used instead of the fraction `f` because a fraction saturates exactly
+where camping quality lives: 0.90, 0.95 and 0.99 are visually identical numbers, but as odds they are 9,
+19 and 99. `max(outside, 1)` rather than `outside + 1` keeps a perfectly focused spot's score equal to
+its visible count, so "sees a lot, all of it in front" outranks "sees one thing, technically in front".
+
+Because the arcs nest, `ratio(90) >= ratio(45) >= ratio(22.5) >= ratio(11.25)` always, so the sum is
+dominated by the **widest** arc. That is deliberate: a large `ratio(90)` means "you can see a lot without
+turning your head", which is the primary camping virtue, and the three narrower terms add a bonus for
+tightness on top.
+
+**The dynamic range this produces is enormous and that has consequences.** On crossfire the score runs
+from 2.9 to 282, a 100x spread, because `max(outside, 1)` divides by 1 whenever nothing at all is behind
+you. The top two spots are alcoves at z -1294 that see 269 targets with none behind. That is a real
+camping spot and the ranking is right, but see *Spacing does not control spread* below for what the
+range costs.
+
+**The minimum-visible gate is load-bearing.** A spot that sees a single target scores `1` in every arc
+and so scores 4.0 overall, beating a real room that sees 300 targets across a wide fan.
+`--camp-min-visible` (default 32) removes it, applied on `exposure * (count - 1)` before a candidate ever
+enters the queue.
+
+### Selection: cheap ordering, expensive confirmation
+Camp spots are drawn from the **pre-reduction** probe candidates -- the full 15-unit lattice, after the
+pair loop has given each one an `exposure` and a `watch[]`, but before the decimation discards most of
+them. `BuildVantages` hands that snapshot back through `candidatesOut`. No second lattice exists and
+nothing new is sampled.
+
+The whole point is that the cheap data already in memory decides *where to look*, and the expensive
+two-stance visibility test runs only around the promising places:
+
+```
+gate    candidates seen by fewer than --camp-min-visible probes, plus water and elevator areas
+score   preliminary = watch[0].amount / exposure
+loop    pop the best remaining candidate
+        hill-climb to the local maximum of the arc score
+        emit the summit; consume everything the climb consulted
+        penalise survivors by min(1, d / spacing)
+until   budget reached or the queue empties
+```
+
+`watch[0].amount / exposure` is main-direction strength over exposure: a high `amount` means "what sees
+me, sees me from one place", a low `exposure` means "not much sees me at all". Both terms are already on
+every candidate, so the ordering is free.
+
+### Hill climbing, and why the climb cancels
+The preliminary score is a proxy computed at one eye height from a bin histogram, so it finds a promising
+*basin* but not the best point in it. Each pop is therefore a starting point: evaluate the candidate,
+evaluate its unvisited lattice neighbours, step to the best, repeat. Neighbours are candidates within
+`gridSize * 1.5` in XY -- which reaches the 21-unit diagonals -- and within 32 in z, so a climb follows a
+slope but never jumps between floors stacked in the same column.
+
+A step is only taken when the best neighbour beats where we stand by `kCampMinGain` (2%). Without that
+margin a climb crawls sideways across a near-flat ridge one lattice cell at a time: on xen_dm the mean
+climb was 6.5 steps and cost 112 s, and requiring 2% cut it to 3.8 steps and 59 s for the same 182 spots.
+
+**A climb whose ascent leads into a candidate an earlier climb already consumed is cancelled outright.**
+It is not finding a new spot, it is re-walking someone else's hill from lower down, and the earlier climb
+already stood on that summit and emitted it. Stopping there instead would emit a second camp spot partway
+up the same slope. Note the test is *ascent*, not adjacency: a consumed neighbour that scores lower than
+where we stand means we are on our own summit with someone else's basin beside us, and that emits
+normally.
+
+Every score is cached, including for candidates that were only ever rejected neighbours, so a candidate
+is evaluated at most once in the whole stage. *Cached* and *consumed* are different states, and the
+distinction is what lets the worker pool exist: a score is cached by whoever computed it, but a candidate
+is consumed only when a climb actually consulted it.
+
+**Cancelled climbs must suppress, and this was learned the hard way.** The first implementation skipped
+suppression on a cancelled climb, reasoning that the basin it merged into had already suppressed the
+neighbourhood when it finished. That is false. Suppression only covers `spacing` around the points the
+winning climb *walked*, roughly a dozen cells, whereas the basin of attraction that drains into that
+summit is hundreds of cells wide. Every pop inside the untouched part of the basin started a climb,
+ascended into the consumed summit and cancelled. On xen_dm that was **758 cancelled climbs against 182
+emitted**, 83% of all evaluation work thrown away. Suppressing on cancel drops it to 16.
+
+### Spacing does not control spread
+`--camp-spacing` sets two things: the budget, `footprint / spacing^2`, and the radius of the soft penalty
+`min(1, d / spacing)` applied to every survivor after a climb. The penalty is soft on purpose, so a
+genuinely excellent spot 100 units from another excellent spot loses half its score but can still win
+later, where a hard radius would delete it outright.
+
+**In practice the budget is enforced and the spread is not.** On crossfire 96% of kept spots are closer
+to their nearest neighbour than 256, with a median of 173 and a minimum of 45. The cause is the score
+range: suppression can only ever multiply by a number in `[0, 1]`, and when scores span 100x, a spot 100
+units from a claimed summit keeps 39% of a score that was already ten times its neighbours'. It stays at
+the top of the queue regardless. The result is that camp spots cluster on the genuinely best hills rather
+than tiling the map, and `--camp-spacing` behaves as a count knob.
+
+That is a consequence of the specified rule, not a bug in it, and the output is still usable -- the
+clusters are on real camping ground. If tiling is wanted instead, the lever is a steeper falloff
+(`(d / spacing)^k`) or a hard radius, and both change what the flag means.
+
+### Cost
+The two-stance test runs once per *evaluated* candidate against `footprint / 15^2` targets at two eye
+heights. Writing `E` for evaluations per emitted spot -- the summit, the path, the rejected neighbours
+and everything spent on climbs that cancelled -- and comparing against the pair loop's `A^2 / 101250`:
+
+```
+camp trace-pairs / vantage pair-loop pairs = 900 * E / spacing^2
+```
+
+`E` is the number that decides whether this stage is free or expensive and it cannot be predicted from
+geometry: it depends on how rugged the campiness surface is. Measured at the default 256 spacing:
+
+| map | candidates | spots | E | cancelled | camp stage | share of run |
+| --- | --- | --- | --- | --- | --- | --- |
+| crossfire | 33266 | 114 | 11.5 | 0 | 8.2 s | 13% of 62 s |
+| pool_party | 14998 | 51 | 8.5 | 0 | 2.7 s | 4% of 68 s |
+| xen_dm | 53200 | 182 | 22.5 | 16 | 58.6 s | 23% of 254 s |
+
+The knob is quadratic in the *inverse* of spacing, so `--camp-spacing 64` is 16x this cost, not 4x.
+`--camp-climb-steps` (default 32) is the hard backstop if a plateau ever walks the map anyway. Watch the
+cancellation count: a rate approaching the emitted count means the preliminary score keeps restarting
+inside claimed basins, and that is evaluation spent for no spot.
+
+### Parallelism: a persistent pool that only fills a cache
+Splitting the inner target loop with `RunBins` is the wrong shape here. `RunBins` spawns and joins
+`binCount - 1` threads per call, which is fine for the two calls that cover the whole air-move and
+vantage stages but ruinous for one call per evaluation. So threading goes **across evaluations**, with a
+main thread and a persistent `ThreadPool`.
+
+The main thread runs the serial algorithm unchanged: it pops, climbs, decides and penalises, and asks the
+cache whenever it needs a score. Workers only ever populate that cache. They never mark a candidate
+consumed, never touch the priority queue, never decide anything. That is the constraint the scheme lives
+under and it is not stylistic -- if being evaluated implied being consumed, how far the workers happened
+to run would change which candidates remain available, and the output would depend on thread count and
+timing. `.nav` files are byte-identical at `--threads 1` and `13` because of it.
+
+Most of the parallelism is not speculative: at each climb step every neighbour's score is needed before
+the main thread can choose, so those are dispatched together. Measured batch width is only 3.5 of 13
+threads, because after the first step most neighbours are already cached and the batch shrinks. Feeding
+idle workers neighbours-of-neighbours as pure prefetch hints would recover some of that; it is safe by
+construction, since a wasted prefetch costs one cached score nobody reads. It has not been done because
+the stage is 8-59 s and the complexity is not yet worth it.
+
+Determinism has two other requirements: the priority queue breaks score ties on candidate index, and the
+climb breaks neighbour ties on candidate index.
 
 ## work_pool.cpp
 
@@ -1103,6 +1301,93 @@ GoldSrc RecursiveHullCheck:
 - Entities: trace each blocker in local space, keep earliest hit
 
 The recursion is written against a `HullTree` (a clipnode array plus a plane array), not against `BspFile`, so the same code serves the movement hulls out of `LUMP_CLIPNODES` and the point hull synthesized from `LUMP_NODES` — see `bsp_vis.cpp`. `WorldHull(bsp)` builds the clipnode-lump view, and the `BspFile` overloads of `ClassifyPoint`/`TraceHull` are one-line wrappers over it, so every existing caller is unchanged.
+
+### SegmentBlocked, and why the traversal is a template
+
+Visibility queries do not want a trace, they want a bit. `Occluded` (`vis_sampling.h`) reads exactly two
+fields of the 112-byte `TraceResult` — `fraction` and `startsolid` — and on crossfire it runs 184.8M times,
+so `RecursiveHullCheck` and `ClassifyPoint` between them were 53% of all navgen CPU.
+
+`HullCheck<BoolOnly, Trace>` is therefore one function with two instantiations rather than two copies of an
+epsilon-sensitive algorithm. `TraceHull` instantiates `<false, TraceResult>` and is unchanged in behaviour;
+`SegmentBlocked` instantiates `<true, NullTrace>`, carries no state at all, and returns a `HullStep` of
+`Continue` / `Stop` (blocked) / `Clear` instead of the old `bool`. For the full path `Continue`/`Stop` map
+1:1 onto the old `true`/`false` and `Clear` never occurs.
+
+What the boolean path actually saves is the **back-off loop**, which re-descends the whole tree from
+`headnode` in a `while`. It can be skipped outright. `Occluded` is blocked iff
+`fraction < 1.0f || startsolid`, and:
+
+- A `true` return only ever originates at a leaf, so any `true` bottoms out at one.
+- `fraction` is written only in the terminal block, which runs at most once per top-level trace.
+- `startsolid` is set only on reaching a `CONTENTS_SOLID` leaf.
+- In the terminal block `midf` is non-increasing: `frac` only decreases and `p2f >= p1f`.
+
+Let the boolean path return `Stop` the moment it reaches a solid leaf. Then `allsolid` at the terminal block
+is unreachable — it would mean a leaf was reached and none was non-solid, i.e. a solid leaf was reached,
+which already returned — so `allsolid` drops out of the boolean path entirely. Reaching the terminal block
+therefore implies `startsolid` is false, and the answer is exactly `finalFraction < 1.0f`. Since `midf` only
+falls, `(float)midf < 1.0f` on entry means the final fraction is below 1 whatever the loop does: blocked, no
+loop needed. Only when `(float)midf` rounds to exactly `1.0f` does the loop decide, and there it runs
+verbatim.
+
+Both of the loop's original exits set `fraction`/`endpos` from the current `midf`/`mid` and return, so the
+`frac < 0.0` early return collapses to a `break` with no change in behaviour.
+
+`--vis-probe` still prints a real `TraceHull` fraction, so it remains an independent cross-check that the
+fast path and the full path agree.
+
+### The shared-origin chain cache
+
+Visibility traces come in fans: the vantage pair loop holds `vantages[i].pos` fixed for its whole inner
+loop, and the camp sampler alternates two fixed eye points. On crossfire that is 206M boolean traces
+issued from 33266 probes, and every one of them re-walked the same descent from the root.
+
+In all three branches of `HullCheck` the **first** recursive call descends to the side `p1` is on:
+both-front takes `children[0]` and `t1 >= 0` puts `p1` in front, both-back takes `children[1]`, and on a
+split `side = (t1 < 0) ? 1 : 0` is `p1`'s side as well. Along that near chain `p1` and `p1f` are passed
+through untouched -- only `p2`/`p2f` shrink to `mid`/`midf`. Three consequences:
+
+- The near-chain node sequence is exactly the path `ClassifyPoint(hull, headnode, p1)` walks, so it is a
+  function of the origin alone.
+- Every trace walks it in full, because the recursion only bottoms out at `nodeIndex < 0`. The hit rate
+  is 100%, not "usually".
+- `t1` at each chain node, and the leaf `p1` lands in, are pure functions of the origin.
+
+It is also most of the traversal. Counted directly: the chain is 15.11 of the 25.47 clipnodes a boolean
+trace visits on crossfire (59%), and 14.47 of 25.03 on boot_camp (58%).
+
+`HullOriginChain` caches it. Each `HullChainStep` holds the plane's `normal`/`dist` copied inline, the
+memoized `t1`, and the far child -- 32 bytes, so walking the chain is one sequential read per node
+instead of a random `clipnodes[n]` followed by a dependent random `planes[n.planenum]`, and the `t1`
+half of the plane arithmetic disappears. `SegmentBlockedCached` replaces only the near descent, walking
+the cached steps iteratively and pushing each split onto `chain.splits`; far-side subtrees still go
+through the recursive `HullCheck<true>`, since they start mid-tree from a varying `mid`.
+
+Unwinding the split stack top-down mirrors the recursion's returns exactly. Every branch after the near
+call in `HullCheck` returns, so a non-`Continue` result propagates straight out of the loop, while a far
+subtree that returns `Continue` lets the next shallower split take its turn.
+
+The cache validates itself: the `SegmentBlocked` overload rebuilds whenever the clipnode array, headnode
+or origin differ from what it holds, so no caller has to remember to clear it and a stale chain cannot
+survive a probe change. `vantage_sampler` keeps one per worker, `camp_sampler` two per `SlotState`.
+Blocker traces stay on the plain `SegmentBlocked` -- they are 0.12% of world traces on crossfire and
+3.7% on boot_camp, not worth a keyed slot.
+
+Arithmetic is preserved literally: `p1f` stays an explicit `0.0` term in `p1f + (p2f - p1f) * frac`
+rather than being folded away, and the `kDistEpsilon` expressions are unchanged. `.nav` output is
+byte-identical on all 51 maps under `maps\` plus crossfire and boot_camp, and on crossfire at
+`--threads 1, 3, 7, 13`. On crossfire the vantage stage goes 25.5s to 22.5s with summed trace CPU
+180.9s to 146.3s (0.98 us to 0.79 us per trace), and the camp climb 3.9s to 3.0s.
+
+**Why there is a start leaf but no end leaf.** Knowing that the next trace begins in leaf L does not let
+you skip anything: you still need `t1 = PlaneDiff(plane, newOrigin)` at every node above L to decide the
+splits, which is precisely the work being saved. Harvesting those values on the way out of the previous
+trace does not work either -- what the traversal computes along the path to the end leaf is
+`PlaneDiff(plane, mid)` for assorted `mid`s, not for the endpoint, and computing the right ones costs the
+same k plane evaluations. The airmove path is left out for the same reason: its one genuine shared origin
+is `CatagorizePosition`'s ground probe and the *next* frame's `FlyMove` trace, both from an unmodified
+`m_pos`, which is a 50% hit rate on a stage worth 3.8s of a 46s run.
 
 ## bsp_vis.cpp
 
@@ -1551,7 +1836,7 @@ the search state.
 Serializes MergeResult to crossbot_nav format (v20):
 - Header: magic "CBNV", version 20, mapName[64], bspChecksum, counts (including `detourCount`,
   `detourPointCount` and `vantageCount`), `designMaxSpeed`, `vantageSpacing` and `maxExposure`
-- Vantage records (96 B): `pos[3]`, `exposure`, `focus[4]`, and four `NavWatchDir{yaw, pitch, spread,
+- Vantage records (80 B): `pos[3]`, `exposure`, and four `NavWatchDir{yaw, pitch, spread,
   amount}`. Unused watch slots are all-zero and the loader drops them on `amount == 0`, so the record
   stays fixed-size and the section stays one `fwrite`
 - `exposure` is left raw — the fraction of *all* sampled vantages that can see the spot, before the
@@ -1634,7 +1919,6 @@ A second, separate SVG (`--dump-vantage-svg`), not another overlay on the area g
 Per vantage, inside one `<g>` so the whole glyph shares a hover tooltip:
 - **Watch wedges** — an arc sector per watch direction, radius proportional to `amount`, angular half-width equal to `spread` (clamped to 4..80 degrees), one colour per rank, painted lowest rank first so the main direction lands on top.
 - **The dot** — filled from a blue/yellow/red heatmap over `exposure / maxExposure`, so the most-seen floor in the map is red regardless of the map's absolute scale.
-- **The ring** — the dot's stroke width is proportional to `focus[3]`. A fat white ring means one 11.25-degree facing covers nearly every sightline into the spot: a camping position, readable at a glance across the whole map.
 - **The tooltip** — id, position, raw and normalized exposure, all four focus values, and every watch direction's yaw/pitch/spread/amount.
 
 World Y is flipped (`x, -y`) like the main SVG, so wedge endpoints are computed in world space and flipped rather than reasoning about screen angles. The arc always uses `sweep-flag=1` because the flip turns world-counterclockwise into screen-clockwise.

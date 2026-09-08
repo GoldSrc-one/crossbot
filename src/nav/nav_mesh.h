@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "nav_camp.h"
 #include "nav_format.h"
 #include "nav_vantage.h"
 #include "waypoint_plan.h"
@@ -93,6 +94,7 @@ struct NavMesh
 	std::vector<WaterVolume> waterVolumes;
 
 	VantageField vantageField;
+	std::vector<CampSpot> camps;
 };
 
 }

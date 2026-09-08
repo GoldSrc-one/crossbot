@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "area_merger.h"
@@ -21,7 +22,6 @@ constexpr double kDefaultVantageSpacing = 128.0;
 constexpr double kDefaultVantageCone = 45.0;
 constexpr size_t kDefaultVantageNeighbors = 4;
 
-constexpr size_t kVantageFocusLevels = crossbot_nav::kNavFocusLevels;
 constexpr size_t kMaxWatchDirs = crossbot_nav::kNavWatchDirs;
 
 struct WatchDir
@@ -37,9 +37,21 @@ struct Vantage
 	Vec3 pos;
 	int areaId = -1;
 	int leaf = 0;
+	double floorZ = 0.0;
+	uint32_t areaFlags = 0;
 	double exposure = 0.0;
-	double focus[kVantageFocusLevels] = {0.0, 0.0, 0.0, 0.0};
 	std::vector<WatchDir> watch;
+};
+
+struct VantageCandidate
+{
+	Vec3 eye;
+	Vec3 floor;
+	int areaId = -1;
+	int leaf = 0;
+	uint32_t areaFlags = 0;
+	double exposure = 0.0;
+	double mainAmount = 0.0;
 };
 
 struct VantageParams
@@ -89,6 +101,7 @@ struct VantageStats
 
 std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	const std::vector<BlockingVolume> &visBlockers, const std::vector<Area> &areas,
-	const VantageParams &params, VantageStats *stats);
+	const VantageParams &params, VantageStats *stats,
+	std::vector<VantageCandidate> *candidatesOut = nullptr);
 
 }

@@ -304,8 +304,6 @@ bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &ou
 		wsum += w;
 
 		out.exposure += w * v.exposure;
-		for (size_t k = 0; k < crossbot_nav::kNavFocusLevels; ++k)
-			out.focus[k] += w * v.focus[k];
 
 		for (int k = 0; k < v.watchCount; ++k)
 		{
@@ -323,8 +321,6 @@ bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &ou
 		return false;
 
 	out.exposure /= wsum;
-	for (size_t k = 0; k < crossbot_nav::kNavFocusLevels; ++k)
-		out.focus[k] /= wsum;
 
 	MergeWatchDirs(entries, entryCount, out);
 

@@ -34,8 +34,9 @@ if (-not (Test-Path $exe)) { throw "hlds.exe not found at $exe" }
 $errFile = "$logFile.err"
 
 # cmd.exe runs in $HLDSDir, so its redirection targets have to be absolute.
-$logFile = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $logFile))
-$errFile = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $errFile))
+if (-not [System.IO.Path]::IsPathRooted($logFile)) { $logFile = Join-Path (Get-Location) $logFile }
+$logFile = [System.IO.Path]::GetFullPath($logFile)
+$errFile = "$logFile.err"
 
 $launchArgs = @("-console")
 if (-not $NoConDebug) { $launchArgs += "-condebug" }

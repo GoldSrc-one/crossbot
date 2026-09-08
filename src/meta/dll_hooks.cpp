@@ -39,6 +39,12 @@ cvar_t g_combatCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_teamsCvar = {
+	"crossbot_teams",
+	"1",
+	FCVAR_SERVER
+};
+
 cvar_t g_combatDebugCvar = {
 	"crossbot_combat_debug",
 	"0",
@@ -247,6 +253,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navBreakCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_teamsCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_ambushCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_duelCvar);

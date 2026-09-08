@@ -2,16 +2,19 @@
 #include <meta_api.h>
 #include <in_buttons.h>
 
+#include <stdio.h>
 #include <string.h>
 
 #include "../bot/bot_fire.h"
 #include "../bot/bot_move.h"
 #include "../bot/bot_timing.h"
 #include "../bot/bot_weapons.h"
+#include "crossplay.h"
 #include "ent_handle.h"
 #include "gamedata.h"
 #include "hldm_profile.h"
 #include "hldm_weapons.h"
+#include "player_models.h"
 
 #if defined(_WIN32)
 #define CB_STRICMP _stricmp
@@ -88,6 +91,42 @@ bool CHLDMProfile::Detect(const char *gamedir) const
 		return false;
 
 	return gamedir && CB_STRICMP(gamedir, "valve") == 0;
+}
+
+// Deathmatch reads the third crossbot_add argument as a player model. A name the scan did not find
+// is only a warning: PlayerModels sees loose files, so a model living inside a .pak is legitimate
+// and must not be refused.
+void CHLDMProfile::ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
+	unsigned int size) const
+{
+	if (!out || size == 0)
+		return;
+
+	out[0] = 0;
+
+	if (arg && arg[0])
+	{
+		snprintf(out, size, "%s", arg);
+
+		if (!PlayerModels::Installed(iGame, out))
+		{
+			char msg[192];
+			snprintf(msg, sizeof(msg),
+				"CrossBot: model '%s' is not installed for '%s' -- using it anyway. Installed:\n",
+				out, XPlay::GameDir(iGame));
+			SERVER_PRINT(msg);
+			PlayerModels::PrintList(iGame);
+		}
+	}
+	else if (!PlayerModels::PickRandom(iGame, out, size))
+	{
+		// Nothing installed for this game or for valve. Leave the userinfo alone so the engine
+		// default stands, and report it as such.
+		return;
+	}
+
+	g_engfuncs.pfnSetClientKeyValue(g_engfuncs.pfnIndexOfEdict(pEdict),
+		g_engfuncs.pfnGetInfoKeyBuffer(pEdict), "model", out);
 }
 
 bool CHLDMProfile::IsDead(edict_t *pEdict) const

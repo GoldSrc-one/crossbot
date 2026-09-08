@@ -1412,6 +1412,25 @@ erratic acquisition, not like an aliasing error. And read `v.v_angle` without fl
 the true view angle, unlike `pev->angles`, which is why `bot_deploy.cpp` negates x when it reads a
 tripmine's orientation. Copying that flip here would make every bot prefer targets facing *away* from it.
 
+### Teammates never reach the trace budget
+
+`Candidate` rejects anything `Teams::Attackable` says this bot may not shoot -- see `doc/game.md`,
+`teams.cpp`, for what that means and why it is a no-op on a deathmatch map. The gate goes here rather
+than downstream because "do the POV checks only for enemies" is both the behaviour and the cheaper
+arrangement: a rejected player never enters the weighted reservoir, never costs one of the two
+tracelines, and never becomes `sense.target`. Everything that shoots reads `sense.target` or
+`sense.enemy` and nothing else, so one gate covers `bot_fire.cpp`, the ambush, the duel, the cover
+shuffle and the func_tank in `bot_fun.cpp` at once, and none of them needed an edit.
+
+**Unknown is rejected too, not just a match.** A player whose team reads zero is not shot at while
+teams are active. The bot only ever engages a confirmed enemy; the case where nobody has a team is
+handled one level up, by `Teams::Active` falling back to today's behaviour for the whole bot.
+
+**The suspicion table is deliberately left unfiltered.** `Hear`, `Notice` and `Push` still record
+teammates, so a bot still turns its head toward a friend's footsteps -- that is the gaze, and it looks
+right. The table drives an attack in exactly one place, the satchel, which is gated separately in
+`NearestLive`.
+
 ### Monsters are candidates only while they are hunting us
 
 The scan used to run `1 .. maxClients` and nothing else, and `Candidate` demanded `FL_CLIENT` on top of
@@ -1450,6 +1469,19 @@ refreshes it when a bot exists and `crossbot_monsters` refreshes before it print
 `monSeen`, `monMine`, `monTraces` and `monHits` are cumulative per bot and readable in
 `crossbot_sense_status`. They separate the three ways this can fail: no monsters in the list, monsters in
 the list that never name us, and monsters that name us but whose traces never land.
+
+**With teams on, a hostile monster does not have to be hunting *us*.** `MonsterCandidate` asks
+`Teams::Of` first: a monster on a different non-zero team is a candidate outright, one on our team
+never is, and only `REL_UNKNOWN` -- which is every monster on a deathmatch map, and every monster in a
+mod that leaves `pev->team` alone -- falls back to the `m_hEnemy == us` rule above. A monster carrying
+an owner inherits that owner's team, so an enemy's snark is engaged and a teammate's is not.
+
+**A null `m_hEnemy` is still a hard reject, and it has to be.** Tripmines, satchels and hand grenades
+are all `CGrenade` descendants carrying `FL_MONSTER`, and they all inherit a team from `pev->owner` --
+so the team test alone would have bots shooting at enemy ordnance lying on the floor. Requiring
+`MonsterEnemy(ent)` to name *someone* keeps them out, because only a real `CBaseMonster` ever sets it.
+The widening is therefore "a hostile monster hunting anyone" rather than "anything hostile", which is
+also the honest reading of engaging it before it turns on us.
 
 #### Four consequences, all intended
 
@@ -1786,7 +1818,7 @@ miss a source that fired between polls, and the sampling loop is gone.
 `crossbot_vantage_status` with no arguments reports the loaded field (point count, spacing, resolved
 grid cell and dimensions, `maxExposure`, and the cvar) and then, per bot, the blend at its own eye:
 neighbours used, distance to the nearest, `exposure` raw and as a fraction of the map maximum,
-`focus[4]`, every merged watch direction, and a drive line giving `view=` (actual `v_angle`),
+every merged watch direction, and a drive line giving `view=` (actual `v_angle`),
 `desired=` (what the look code commanded this frame), `look=` (which branch produced it) and the
 waypoint index.
 
@@ -1867,6 +1899,18 @@ resolution rather than needing a list: falling, drowning and crush damage are in
 at edict index 0, a `trigger_hurt` is a brush entity no player owns, and a rocket the bot fired at its
 own feet resolves back to the bot.
 
+`Teams::Attackable` is checked on both halves of that resolution: on the monster branch, and on the
+player the projectile resolved to. It should never fire -- friendly fire is off on every mod that
+turns teams on, so a teammate cannot set `dmg_take` at all -- but this is the one entry into combat
+that does not come through vision, and leaving it ungated would mean the whole feature rested on a
+server setting nothing here reads.
+
+The exit list gained one for the same reason. Combat persists on `BotSense::Senses` -- sound, damage
+and events -- not on sight, so dropping a teammate out of *vision* would leave an already-open fight
+running for the whole decay window if either side changed team mid-fight. `the enemy is on our team`
+is checked before the monster exit, and the monster exit now ignores `m_hEnemy` for an enemy-team
+monster, matching `MonsterCandidate`.
+
 Exit, checked every frame:
 
 | Rule | Reason string |
@@ -1921,11 +1965,13 @@ standable point that way, and compares its `exposure` to the exposure where it s
 the probe is no better, the bot goes the *opposite* way instead -- unscored, by design: the algorithm
 is a random walk biased toward cover, not a search.
 
-**`focus[]` is not part of the score and cannot be.** It measures the fraction of the visible set
-inside a cone around `watch[0]` (`doc/navgen.md`), so it describes one facing rather than the spot.
-A high `focus[3]` says "if you look *there*, you cover nearly every sightline in" -- a fine thing to
-know once you have chosen a spot, and not a way to choose between spots. `exposure` is the only field
-that scores a position independent of where the bot is looking.
+**`exposure` is the only field here that scores a position independent of where the bot is looking,**
+which is why the shuffle uses it alone. This used to be argued against a `focus[]` field on the vantage:
+it measured the fraction of the visible set inside a cone around `watch[0]`, so it described one facing
+rather than the spot, and blending it between probes with different main directions was meaningless.
+That objection stands and the field is gone. Camping is now a separate discrete dataset -- `NavMesh::camps`,
+each a position *paired with* the facing it was measured at (`doc/navgen.md`, *camp_sampler.cpp*) -- which is
+what makes the measurement mean something. Nothing reads it yet; the shuffle is unchanged.
 
 **The enemy is deliberately not consulted.** No line-of-sight trace from the probe to whoever the bot
 is fighting. The bot can shuffle itself out of the fight, and when it does, the 5s rule ends the state
@@ -4539,6 +4585,12 @@ every one reporting `contact 2 away`: `monster_satchel` plays `weapons/g_bounce*
 `BotSense::Hear` pushes a suspicion for the emitter, and the bot blew up its own charge because it
 heard it hit the floor. `NearestLive` now skips `KIND_OTHER` and skips any entity owned by the bot.
 "An entity near the satchel" has to mean something that can be killed.
+
+**And with teams on it also has to be an enemy.** `livingOnly` now means "something that can be killed
+*and* that this bot may shoot at", which is what stops a bot blowing a charge under a teammate walking
+past it. The filter is inside the scan rather than at the call site on purpose: `NearestLive` returns
+only the nearest match, so a teammate standing closer to the satchel would otherwise mask a real enemy
+inside the same 375 units and the charge would never fire.
 
 **The press must be confirmed, not assumed.** The same run counted a detonation on the frame it
 pressed and then re-fired forever. `DETONATE` now presses only when `m_chargeReady == 1` and both the

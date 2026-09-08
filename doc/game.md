@@ -39,6 +39,15 @@ no deployables returns 0 and null and the whole feature idles.
 has not noticed the bot yet. `AmbushKind` is `AMBUSH_GRENADE` / `AMBUSH_SNARK`, which in HLDM are the
 hand grenade and the snark.
 
+`ApplyAddArg(iGame, pEdict, arg, out, size)` is the profile's claim on the optional third
+`crossbot_add` argument. The command does not interpret it — it maps `*` and the empty string to null
+and hands the rest over untouched — because what the argument *means* is per-mod: `CHLDMProfile`
+reads it as a player model, and the team mods will read it as a team. It runs once on a fresh fake
+client, after `CREATE_FAKE_CLIENT` and before `MDLL_ClientConnect`, so the game DLL reads a finished
+userinfo buffer at connect the way it would for a real client, and it writes back what it settled on
+for the `added ... as '...'` console line. A null `arg` means the operator gave none and the profile
+should pick its own default, at random where that makes sense. See `player_models.cpp`.
+
 It has to be a named role and cannot be inferred from the table. `WPN_Q_THROW_ARC` does pick out the
 hand grenade uniquely, but **nothing in `WeaponSpec` separates a snark from a hornet gun** — both are
 `WPN_Q_HOMING`, and the snark is deliberately not `IsArc` because homing wins. Adding a throwable-
@@ -96,6 +105,74 @@ means "there is a `ChargerValue` to watch instead of a touch to wait for", and i
 `OnArrived` and `UpdateGoalItem` branch on. `OnTouch` is the one that had to change: a trigger is
 `SOLID_TRIGGER` and really does fire `pfnTouch` on the bot, so the old charger-only test would have
 ended the goal the instant the bot waded in.
+
+## teams.cpp
+
+The friend/foe half of teamplay and nothing else. No roles, no objectives, no coordination, no team
+join — the module exists so a bot does not aim at, chase, or blow a satchel under someone it is not
+supposed to fight. Friendly fire is off on the mods this covers, so none of it is about damage; it is
+about behaviour that would read as broken.
+
+### Teams are a property of the map, not of the bot
+
+`DetectMap()` reads `XPlay::GameDir(XPlay::MapOwner())` — `gEntityOwners[0]`, the game that owns
+worldspawn — and matches it against `cstrike`, `tfc` and `dod`. It cannot key off the bot's own game:
+today only `valve` has a profile, so every bot is a `valve` bot, and it is the *map* that decides
+whether the server is playing a team game. It cannot be `gpGlobals->teamplay` either, which CrossPlay
+swaps to the *entered* game's value, so inside a `valve` bot's context it reads `valve`'s.
+
+The map owner changes on a map change, which is why `DetectMap()` runs at `ServerActivate` (right
+after `XPlay::DetectProfiles()`) rather than once at load, and `ForgetMap()` at `ServerDeactivate`.
+The one line it prints names the map's game and whether teams came out on; that line is the first
+thing to look for when bots misbehave on a cs/dod/tfc map.
+
+### The team is read live, never cached
+
+`TeamOf(ent)` is `ent->v.team`, falling back to `ent->v.owner->v.team`. The owner hop is what makes a
+rocket, a grenade or a thrown snark inherit its thrower's team, and it is the only reason the satchel
+gate works — a suspicion pushed for a projectile carries the projectile, not the player.
+
+Nothing is stored on `CBot`. A game may reassign a bot at any point — a team-balance move, a forced
+join, a respawn into the other side — and a cached team would be wrong for a life. Reading `v.team` on
+every call costs one dereference and needs no respawn hook. `edict_t::v` is one `entvars_t` shared by
+every CrossPlay game, so a `cstrike` player's team and a `valve` bot's team are the same number space
+and neither read needs a game context.
+
+### Zero is unknown, and unknown is never attacked
+
+`Of(self, ent)` is `REL_ENEMY` only when both teams are non-zero and differ, `REL_FRIEND` when they
+match, and `REL_UNKNOWN` otherwise. `Attackable` is the predicate every gate actually calls, and it
+answers "may this bot shoot at that": `REL_ENEMY`, or teams are not active for this bot at all.
+
+**`Active(self)` is false when the bot's own team is zero, and that fallback is load-bearing.** A mod
+that never fills `pev->team` would otherwise make every bot's team match every other bot's, and the
+whole server would go pacifist. With the fallback, a bot with no team of its own behaves exactly as it
+does on a `valve` map: the failure mode of a mod that ignores `pev->team` is "teams do nothing", not
+"bots do nothing", and `crossbot_teams_status` says which it is.
+
+The same fallback is what makes every gate a strict no-op on a deathmatch map: `Attackable` returns
+true unconditionally, so nothing in the existing test suite can see this feature.
+
+### What the mods actually do, measured
+
+`cstrike` does fill it, on a `valve` fake client, without CrossBot asking. Every bot added to a
+`cs_assault` server came up `team=1`, and after a minute or so of play the mod had moved three of six
+to `team=2` on its own — which is the whole reason the team is re-read live instead of latched at
+`AddBot`. `tfc` and `dod` both report `teams are on` for their own maps.
+
+**The first minute of a round is all-friends, and that is not a bug.** Bots join on one side before the
+mod balances them, and while they are all on one team they will not fight each other — correctly, since
+they *are* teammates. Nothing here joins a team or picks a side; if bots need to start split, that is
+team join, and it is a separate piece of work. `crossbot_teams 0` is the switch for anyone who wants
+the old free-for-all on a team map.
+
+### Where the gates are
+
+Five, and they are all `src/bot/` — see `doc/bot.md` for each. `Candidate` and `MonsterCandidate` in
+`bot_sense.cpp`, `DamageSource` and the enemy-still-valid exit in `bot_combat.cpp`, and `NearestLive`'s
+`livingOnly` filter, which is what stops a satchel going off under a teammate. Everything else that
+shoots — `bot_fire.cpp`, the ambush, the duel, the func_tank in `bot_fun.cpp` — reads `sense.target` or
+`sense.enemy` and is gated by the first two for free.
 
 ## hldm_profile.cpp
 
@@ -311,6 +388,40 @@ Keying by gamedir rather than by `IGameProfile` was already right and is now req
 describe a *game binary*, and the gamedir is what selects which binary got loaded — whereas
 `CHLDMProfile::Detect` reads `gpGlobals->deathmatch_`, which the engine only fills in once it spawns a
 server, so profile detection cannot run this early and stays at `ServerActivate`.
+
+## player_models.cpp
+
+Which player models a game has installed, for the third `crossbot_add` argument. `PickRandom`,
+`Installed`, `PrintList` and `Forget` are the whole interface, and `CHLDMProfile::ApplyAddArg` is the
+only caller.
+
+A model is a directory under `models/player` holding a `.mdl` of the same name —
+`models/player/gordon/gordon.mdl` — and that probe, an `fopen` in the shape `XPlay::FindMapBsp` uses
+for a bsp, is the entire test. It does three jobs at once. It is the existence check. It stands in
+for a directory test, which matters because `readdir`'s `d_type` is `DT_UNKNOWN` on plenty of
+filesystems and a plain file named `gordon` simply fails to open as `gordon/gordon.mdl`. And it is
+what keeps CrossPlay's own `models/player` out of the list — not a hypothetical:
+`crossplay/models/player/` holds 43 entries, but they are CrossPlay's per-game remaps
+(`gordon/gordon_cs4.mdl`, `gordon_dod5.mdl`) with no `gordon.mdl` beside them, so scanning it yields
+nothing.
+
+A game with no `models/player` of its own falls back to `valve`'s. **DMC is the reason.** It is
+Quake-shaped: `dmc/models/` holds one flat `player.mdl` and no player directory at all. That is not a
+broken install — CrossPlay's `crossplay.smc` names Half-Life models in its `dmc` block, so HL models
+are exactly what a DMC player is expected to wear.
+
+Paths are bare gamedir names relative to the HLDS working directory, the same convention
+`FindMapBsp` uses. The scan is cached per game index and dropped in `ServerDeactivate`, so models
+copied in while the server is up are seen on the next map.
+
+### What CrossPlay does to the answer afterwards
+
+`crossplay.smc` carries a per-game model whitelist — `games/valve/teams/DEATHMATCH` is
+`barney;gordon;helmet;zombie;gman` — and clamps anything outside it. Valve has 14 models installed,
+so most random picks get pulled back to one of those five, and a server full of bots shows fewer
+distinct looks than the console lines suggest. **A bot not wearing what the console said it picked is
+CrossPlay, not this code.** Reading that whitelist instead of the disk was considered and rejected:
+scanning keeps CrossBot independent of CrossPlay's config format and still works on a plain HLDS.
 
 ## fake_cmd.cpp
 

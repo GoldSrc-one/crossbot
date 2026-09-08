@@ -229,6 +229,24 @@ namespace
 		BotManager::PrintVantageStatus(&at);
 	}
 
+	void Cmd_CrossBotCampStatus()
+	{
+		if (CMD_ARGC() < 4)
+		{
+			BotManager::PrintCampStatus(nullptr);
+			return;
+		}
+
+		Vector at(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
+			static_cast<float>(atof(CMD_ARGV(3))));
+		BotManager::PrintCampStatus(&at);
+	}
+
+	void Cmd_CrossBotTeamsStatus()
+	{
+		BotManager::PrintTeamsStatus();
+	}
+
 	void Cmd_CrossBotCombatStatus()
 	{
 		BotManager::PrintCombatStatus();
@@ -571,6 +589,12 @@ namespace
 	{
 		const char *dir = CMD_ARGC() > 1 ? CMD_ARGV(1) : nullptr;
 		const char *name = CMD_ARGC() > 2 ? CMD_ARGV(2) : nullptr;
+		const char *arg = CMD_ARGC() > 3 ? CMD_ARGV(3) : nullptr;
+
+		// What the third argument means is the game profile's business, not this command's. '*'
+		// spells "the profile's choice" here exactly as it does for the gamedir.
+		if (arg && (!arg[0] || strcmp(arg, "*") == 0))
+			arg = nullptr;
 
 		int iGame;
 		if (!dir || !dir[0] || strcmp(dir, "*") == 0)
@@ -590,14 +614,15 @@ namespace
 			{
 				char msg[192];
 				snprintf(msg, sizeof(msg),
-					"usage: crossbot_add [gamedir|*] [name] -- '%s' is not a loaded game. Loaded:\n", dir);
+					"usage: crossbot_add [gamedir|*] [name] [model|team] -- "
+					"'%s' is not a loaded game. Loaded:\n", dir);
 				SERVER_PRINT(msg);
 				PrintLoadedGames();
 				return;
 			}
 		}
 
-		BotManager::AddBot(iGame, name);
+		BotManager::AddBot(iGame, name, arg);
 	}
 
 	void Cmd_CrossBotNavGoal()
@@ -879,6 +904,8 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_monsters", Cmd_CrossBotMonsters);
 	ADD_SERVER_COMMAND("crossbot_vantage_status", Cmd_CrossBotVantageStatus);
+	ADD_SERVER_COMMAND("crossbot_camp_status", Cmd_CrossBotCampStatus);
+	ADD_SERVER_COMMAND("crossbot_teams_status", Cmd_CrossBotTeamsStatus);
 	ADD_SERVER_COMMAND("crossbot_combat_status", Cmd_CrossBotCombatStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);

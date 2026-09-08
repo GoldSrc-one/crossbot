@@ -30,7 +30,6 @@ struct Vantage
 {
 	Vector pos;
 	float exposure = 0.f;
-	float focus[crossbot_nav::kNavFocusLevels] = {0.f, 0.f, 0.f, 0.f};
 	VantageWatch watch[crossbot_nav::kNavWatchDirs];
 	int watchCount = 0;
 };
@@ -54,7 +53,6 @@ struct VantageBlend
 	int neighbors = 0;
 	float nearestDist = 0.f;
 	float exposure = 0.f;
-	float focus[crossbot_nav::kNavFocusLevels] = {0.f, 0.f, 0.f, 0.f};
 	VantageWatch watch[crossbot_nav::kNavWatchDirs];
 	int watchCount = 0;
 };
