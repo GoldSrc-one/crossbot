@@ -17,6 +17,7 @@
 #include "bot_fun.h"
 #include "bot_goal.h"
 #include "bot_sense.h"
+#include "bot_strategic.h"
 #include "bot_weapons.h"
 
 struct BotActivation
@@ -72,6 +73,7 @@ struct CBot
 
 	BotGoal::State goal;
 	BotFun::State fun;
+	BotStrategic::State strat;
 
 	CBotEntHandle goalItem;
 	ItemKind goalItemKind = ITEM_NONE;

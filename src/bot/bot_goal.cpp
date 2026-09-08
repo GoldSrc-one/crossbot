@@ -15,12 +15,14 @@
 #include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
+#include "bot_strategic.h"
 
 extern IGameProfile *g_pGameProfile;
 
 namespace
 {
 	constexpr float kSelectRetryInterval = 0.5f;
+	constexpr float kStrategicRefreshInterval = 0.25f;
 	constexpr float kGoalBiasFloor = 2.f;
 	constexpr float kDefaultBias = 2.f;
 	constexpr float kDefaultDetourBudget = 6.f;
@@ -61,6 +63,7 @@ namespace
 		switch (tier)
 		{
 		case BotGoal::GOAL_STRATEGIC:
+			BotStrategic::Collect(bot, mesh, out);
 			if (g_pGameProfile)
 				g_pGameProfile->CollectStrategicGoals(bot, mesh, out);
 			break;
@@ -155,6 +158,9 @@ namespace
 		if (target.tier == BotGoal::GOAL_GATHER)
 			return !BotItems::IsUnavailable(ent, static_cast<ItemKind>(target.payload));
 
+		if (target.tier == BotGoal::GOAL_STRATEGIC)
+			return BotStrategic::ValidFor(bot, ent);
+
 		return true;
 	}
 
@@ -164,6 +170,7 @@ namespace
 
 		BotItems::ForgetGoalItem(bot);
 		BotFun::Forget(bot);
+		BotStrategic::Forget(bot);
 
 		st.stop = stop;
 		st.onDetour = detour;
@@ -180,6 +187,8 @@ namespace
 			BotFun::Accept(bot, cand);
 		else if (stop.tier == BotGoal::GOAL_GATHER)
 			BotItems::Accept(bot, cand);
+		else if (stop.tier == BotGoal::GOAL_STRATEGIC)
+			BotStrategic::Accept(bot, cand);
 
 		bot.goalPoint = stop.point;
 		bot.hasGoal = true;
@@ -347,6 +356,7 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 
 	State &st = bot.goal;
 	st.target = MakeStop(*best);
+	st.targetOrigin = best->ent ? best->ent->v.origin : best->point;
 	st.skipped.clear();
 	st.active = true;
 
@@ -368,6 +378,59 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 
 	PickStop(bot, mesh, costs);
 	return true;
+}
+
+void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
+{
+	State &st = bot.goal;
+
+	if (!st.active || st.target.tier != GOAL_STRATEGIC || bot.strat.arrival)
+		return;
+
+	if (gpGlobals->time < st.nextRefreshTime)
+		return;
+
+	st.nextRefreshTime = gpGlobals->time + kStrategicRefreshInterval;
+
+	edict_t *ent = st.target.ent.Get();
+	if (!BotStrategic::ValidFor(bot, ent))
+	{
+		Clear(bot);
+		return;
+	}
+
+	if ((ent->v.origin - st.targetOrigin).Length() <= BotStrategic::kGoalMoveRadius)
+		return;
+
+	if (bot.currentAreaId < 0)
+		return;
+
+	uint32_t areaId = 0;
+	Vector point;
+	if (!BotStrategic::ResolvePoint(mesh, ent->v.origin, areaId, point))
+	{
+		Clear(bot);
+		return;
+	}
+
+	BOT_VLOG("CrossBot: %s follows the strategic goal to (%.1f,%.1f,%.1f) in area %u\n",
+		bot.name, point.x, point.y, point.z, areaId);
+
+	st.target.areaId = static_cast<int>(areaId);
+	st.target.point = point;
+	st.targetOrigin = ent->v.origin;
+	st.skipped.clear();
+
+	Nav::AreaCostsToGoal(mesh, areaId, st.toTargetCosts, Bot_GravityMultiplier(bot.pEdict),
+		Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
+	st.toTargetArea = st.target.areaId;
+
+	std::vector<float> costs;
+	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
+		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
+
+	PickStop(bot, mesh, costs);
+	Bot_ResetNavPath(bot);
 }
 
 bool Advance(CBot &bot)
@@ -400,7 +463,7 @@ bool OnArrived(CBot &bot)
 {
 	if (bot.goal.stop.tier == GOAL_FUN)
 		BotFun::OnArrived(bot);
-	else
+	else if (bot.goal.stop.tier != GOAL_STRATEGIC)
 		BotItems::OnArrived(bot);
 
 	return Advance(bot);
@@ -412,11 +475,14 @@ void Clear(CBot &bot)
 
 	BotItems::ForgetGoalItem(bot);
 	BotFun::Forget(bot);
+	BotStrategic::Forget(bot);
 
 	st.target = Stop();
 	st.stop = Stop();
 	st.active = false;
 	st.onDetour = false;
+	st.targetOrigin = Vector(0.f, 0.f, 0.f);
+	st.nextRefreshTime = 0.f;
 	st.toTargetCosts.clear();
 	st.toTargetArea = -1;
 	st.skipped.clear();
@@ -447,6 +513,8 @@ void OnRepathFailed(CBot &bot)
 
 	if (st.stop.tier == GOAL_FUN)
 		BotFun::OnRepathFailed(bot);
+	else if (st.stop.tier == GOAL_STRATEGIC)
+		BotStrategic::OnRepathFailed(bot);
 	else
 		BotItems::OnRepathFailed(bot);
 
@@ -475,6 +543,8 @@ void OnBlocked(CBot &bot, const char *what)
 
 	if (st.stop.tier == GOAL_FUN)
 		BotFun::OnBlocked(bot, what);
+	else if (st.stop.tier == GOAL_STRATEGIC)
+		BotStrategic::OnBlocked(bot, what);
 	else
 		BotItems::OnBlocked(bot, what);
 
@@ -485,6 +555,7 @@ void OnRespawn(CBot &bot)
 {
 	BotItems::OnRespawn(bot);
 	BotFun::OnRespawn(bot);
+	BotStrategic::OnRespawn(bot);
 	Clear(bot);
 }
 

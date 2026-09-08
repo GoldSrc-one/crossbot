@@ -450,6 +450,28 @@ bool TeleportAllBots(const Vector &point)
 	return any;
 }
 
+void PrintLong(const std::string &msg)
+{
+	constexpr size_t kConsoleLine = 1000;
+
+	size_t at = 0;
+	while (at < msg.size())
+	{
+		if (msg.size() - at <= kConsoleLine)
+		{
+			SERVER_PRINT(msg.c_str() + at);
+			return;
+		}
+
+		size_t cut = kConsoleLine;
+		while (cut > kConsoleLine / 2 && msg[at + cut] != ' ' && msg[at + cut] != ',')
+			--cut;
+
+		SERVER_PRINT(msg.substr(at, cut).c_str());
+		at += cut;
+	}
+}
+
 void AppendAreaList(std::string &msg, const char *label, const std::vector<uint32_t> &ids, bool fromTail)
 {
 	constexpr size_t kMaxShown = 24;
@@ -1257,7 +1279,7 @@ void PrintNavStatus()
 		}
 
 		msg += "\n";
-		SERVER_PRINT(msg.c_str());
+		PrintLong(msg);
 	}
 }
 

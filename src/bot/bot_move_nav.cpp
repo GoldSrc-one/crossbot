@@ -20,6 +20,7 @@
 #include "bot_opportunist.h"
 #include "bot_log.h"
 #include "bot_perf.h"
+#include "bot_strategic.h"
 #include "../game/game_profile.h"
 #include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
@@ -2146,6 +2147,55 @@ namespace
 	}
 }
 
+void Bot_FaceDir(CBot &bot, const Vector &dir)
+{
+	float flat = sqrtf(dir.x * dir.x + dir.y * dir.y);
+	if (flat > 0.0001f || fabsf(dir.z) > 0.0001f)
+		bot.desiredAngles = Vector(-atan2f(dir.z, flat) * (180.f / kPiF),
+			atan2f(dir.y, dir.x) * (180.f / kPiF), 0.f);
+}
+
+void Bot_DriveTo(CBot &bot, const Vector &angles, const Vector &to, bool stop,
+	unsigned short extra, float speed, float standRadius)
+{
+	edict_t *pEdict = bot.pEdict;
+
+	float drive = 0.f;
+	Vector moveDir(0.f, 0.f, 0.f);
+	Vector flat(to.x - pEdict->v.origin.x, to.y - pEdict->v.origin.y, 0.f);
+	float dist = sqrtf(flat.x * flat.x + flat.y * flat.y);
+
+	if (!stop && dist > standRadius)
+	{
+		moveDir = Norm2D(flat);
+		drive = speed > 0.f ? speed : Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
+
+		NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
+			Bot_DrivePhysics(pEdict));
+		if (solved.wishSpeed > 0.f)
+		{
+			moveDir = solved.wishDir;
+			drive = solved.wishSpeed;
+		}
+	}
+
+	if ((pEdict->v.flags & FL_DUCKING) != 0 && drive > 0.f)
+		drive /= PmSim::kDuckingMultiplier;
+
+	float fmove = 0.f, smove = 0.f;
+	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+	bot.moveForward = fmove;
+	bot.moveSide = smove;
+
+	unsigned short buttons = extra;
+	if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
+	else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
+	if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
+	else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
+
+	Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
+}
+
 PmSim::PmPhysics Bot_DrivePhysics(edict_t *pEdict)
 {
 	PmSim::PmPhysics physics = Bot_Physics(pEdict);
@@ -2428,6 +2478,7 @@ void Bot_MoveNav(CBot &bot)
 
 	{
 		BOTPERF_SCOPE(ZONE_ITEM_SELECT);
+		BotGoal::RefreshStrategic(bot, *mesh);
 		if (!bot.hasGoal && !BotGoal::Select(bot, *mesh))
 		{
 			BotSense::ApplyLook(bot);
@@ -2576,6 +2627,11 @@ void Bot_MoveNav(CBot &bot)
 		if (BotGoal::StopTier(bot) == BotGoal::GOAL_FUN)
 		{
 			if (BotFun::RunArrival(bot))
+				return;
+		}
+		else if (BotGoal::StopTier(bot) == BotGoal::GOAL_STRATEGIC)
+		{
+			if (BotStrategic::RunArrival(bot))
 				return;
 		}
 		else

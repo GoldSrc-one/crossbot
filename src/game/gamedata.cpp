@@ -259,7 +259,7 @@ void Fatal(const char *fmt, ...)
 	vsnprintf(msg, sizeof(msg), fmt, args);
 	va_end(args);
 
-	char line[1100];
+	char line[1024];
 	snprintf(line, sizeof(line), "CrossBot: FATAL: %s\n", msg);
 	SERVER_PRINT(line);
 	SERVER_PRINT("CrossBot: refusing to run without valid gamedata, shutting the server down.\n");

@@ -79,8 +79,8 @@ a timid route finishes that route; carefulness only refreshes on the repaths tha
 
 ## bot_goal.cpp
 
-Owns *what the bot wants*, in three tiers: `GOAL_STRATEGIC` (CS hostages, TFC flags, DOD areas — the
-seam only; `CollectStrategicGoals` is a no-op for HLDM), `GOAL_FUN` (`bot_fun.cpp`), `GOAL_GATHER`
+Owns *what the bot wants*, in three tiers: `GOAL_STRATEGIC` (`bot_strategic.cpp`, plus the
+still-empty `CollectStrategicGoals` profile seam), `GOAL_FUN` (`bot_fun.cpp`), `GOAL_GATHER`
 (`bot_items.cpp`). It knows what none of them are. `Select` asks each in turn, highest first, and the
 first tier with a surviving candidate wins outright — a bot with a tank to mount does not weigh it
 against a shotgun, it goes to the tank.
@@ -165,6 +165,74 @@ target itself goes through the owning tier's `OnRepathFailed` and kills the goal
 `BotCombat` clears the goal outright (`BotGoal::Clear`), target and cached reverse field included.
 That is inherited behaviour — the gather tier did the same before there were tiers — and it means
 that on a small map with several bots, fun goals get re-selected often. Fighting is not a goal.
+
+## bot_strategic.cpp
+
+The top tier's only producer, and a deliberate stepping stone. CrossBot plays `valve` rules on maps
+that belong to `cstrike`, `tfc` and `dod`, where it knows nothing about what the map is *for*. That
+knowledge lives outside this repo, in the AMXX plugin `bot_goal.sma`, which reads CS hostages and
+C4, TFC flags and dropoffs, and DOD control points and capture areas, and publishes its answer as a
+`bot_goal` entity in the world. foxbot, Parabot and marine_bot_dod already consume it; this file is
+CrossBot's half of the same contract. When that logic is eventually ported into
+`IGameProfile::CollectStrategicGoals` this file goes away, which is why it is a standalone module
+and not part of a profile.
+
+### The wire protocol
+
+`bot_goal` is not a registered entity class anywhere. It is a bare `info_target` whose
+`pev->classname` the plugin rewrites at runtime, so **only `entvars_t` fields carry meaning, and no
+game context is needed to read one** — `doc/crossplay.md` rule 3 does not apply, nothing here
+touches private data.
+
+| field | meaning |
+| --- | --- |
+| `v.classname` | `bot_goal` is live; `bot_goal_disabled` is one a map trigger switched off |
+| `v.origin` | where to go |
+| `v.owner` | non-null: the goal belongs to that player edict alone. Null: global, everyone's |
+| `v.aiment` | optional entity to look at and press buttons on (a hostage, the C4, a map button) |
+| `v.button` | bitmask of `IN_DUCK` / `IN_USE` to hold once close enough |
+
+Two producers feed it. The plugin's `goal_think` runs at 1 Hz and creates one **owned** goal per
+cross-game bot, which is exactly CrossBot's bots, moving its origin as the objective changes. A
+mapper can also place a **global** one, in the `.map` or in a `maps/<name>.ent` entity-lump override;
+those carry no owner and every bot sees them.
+
+The distance rule is copied from the three sibling bots rather than invented:
+`dist = max(len2D(dir), |dir.z|)` measured from the eye, gated on `dist <= 128` **or** a clear
+traceline to the aiment; then `dist <= 128` enables `IN_DUCK` and `dist <= 64` enables `IN_USE`. The
+aim point is the aiment's bbox centre, which is Parabot's refinement — a hostage's origin is at its
+feet, and aiming there from two metres away misses the use trace.
+
+### A goal that moves is a re-plan
+
+`Select` bakes `target.point`, `target.areaId` and the reverse field `toTargetCosts` once. A per-bot
+`bot_goal` moves every second, so all three go stale, and `BotGoal::State` therefore also carries
+`targetOrigin` — the raw `v.origin` at bake time, which is **not** the same as the clamped nav
+`target.point` and cannot be compared against it.
+
+`BotGoal::RefreshStrategic` runs from `Bot_MoveNav` immediately before `Select`, at most every
+0.25 s. While the entity has not moved further than `kGoalMoveRadius` (32 units) it does nothing.
+Past that it re-resolves the area, refreshes `targetOrigin`, recomputes `AreaCostsToGoal`, re-runs
+`PickStop` and resets the path. If the entity is gone, or is no longer a `bot_goal` this bot may have,
+the goal is cleared outright and the next `Select` starts over.
+
+### Arrival is a hold, not a touch
+
+`BotStrategic::RunArrival` sits at the `follow.done` site next to `BotFun::RunArrival` and returns
+true to keep holding, re-entered every think because `NavFollow::Track` keeps reporting `done`. It
+faces the aiment, mirrors `v.button` into the bot's buttons, and stays. `v.button` is authoritative and
+the plugin rewrites it every tick, so there is nothing to latch and nothing to pulse.
+
+Standing still **is** the objective for a DOD capture area or a TFC dropoff, and the plugin is what
+ends the hold: it moves or deletes the goal when the objective flips, and its roaming fallback
+re-rolls once the bot is within 256 units. So `RunArrival` returns false on exactly two conditions —
+the entity died, or it moved further than `kGoalMoveRadius` — and the ordinary `reached goal` path
+then re-selects against wherever it went. Combat needs no special case: `BotCombat::Run` runs earlier
+in `Bot_MoveNav` and clears the goal.
+
+A repath failure or a hard block puts that goal on a 10 s per-bot memo rather than killing the tier,
+so an unreachable objective lets fun and gather have a turn instead of trapping the bot in a
+re-select loop against something it can never walk to.
 
 ## bot_fun.cpp
 

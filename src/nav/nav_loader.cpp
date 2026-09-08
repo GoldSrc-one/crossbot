@@ -90,14 +90,14 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	uint32_t liveChecksum = ComputeLiveBspChecksum(bspPath);
 	if (liveChecksum == 0)
 	{
-		char msg[1100];
+		char msg[1024];
 		snprintf(msg, sizeof(msg), "CrossBot: could not verify %s against live map %s (bot will wander).\n", navPath, bspPath);
 		SERVER_PRINT(msg);
 		return nullptr;
 	}
 	if (liveChecksum != header.bspChecksum)
 	{
-		char msg[1100];
+		char msg[1024];
 		snprintf(msg, sizeof(msg), "CrossBot: %s is stale (checksum mismatch against %s), ignoring.\n", navPath, bspPath);
 		SERVER_PRINT(msg);
 		return nullptr;

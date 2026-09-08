@@ -10,6 +10,7 @@
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
 #include "../bot/bot_move_nav.h"
+#include "../bot/bot_strategic.h"
 #include "../bot/bot_weapons.h"
 #include "../game/crossplay.h"
 #include "../game/ent_handle.h"
@@ -731,6 +732,18 @@ namespace
 		BotFun::PrintCandidates(*mesh);
 	}
 
+	void Cmd_CrossBotListGoals()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+			return;
+		}
+
+		BotStrategic::PrintCandidates(*mesh);
+	}
+
 	void Cmd_CrossBotListGates()
 	{
 		const Nav::NavMesh *mesh = Nav::Get();
@@ -889,6 +902,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_nav_water", Cmd_CrossBotNavWater);
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 	ADD_SERVER_COMMAND("crossbot_list_fun", Cmd_CrossBotListFun);
+	ADD_SERVER_COMMAND("crossbot_list_goals", Cmd_CrossBotListGoals);
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
 	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
 	ADD_SERVER_COMMAND("crossbot_airmove_cache_stats", Cmd_CrossBotAirmoveCache);

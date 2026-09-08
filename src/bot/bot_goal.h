@@ -46,6 +46,9 @@ struct State
 	bool active = false;
 	bool onDetour = false;
 
+	Vector targetOrigin;
+	float nextRefreshTime = 0.f;
+
 	std::vector<float> toTargetCosts;
 	int toTargetArea = -1;
 
@@ -60,6 +63,8 @@ float Bias();
 float DetourBudget();
 
 bool Select(CBot &bot, const Nav::NavMesh &mesh);
+
+void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh);
 
 bool OnArrived(CBot &bot);
 

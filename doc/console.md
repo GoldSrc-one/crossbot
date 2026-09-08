@@ -30,6 +30,11 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   along the track; see `doc/bot.md`, `bot_fun.cpp`. `crossbot_fun_debug 1` also logs every bot death
   with its distance to the tram and its tram phase, which is the only way to separate bots crushed
   attempting a catch from bots run over while walking
+- `crossbot_list_goals` — every `bot_goal` entity in the world with its resolved nav area, the
+  player it belongs to (or `everyone` for a map-placed one), its `aiment` and the buttons it asks
+  for. Ends with a count. Zero on a `valve` map is correct: the entity only exists where the
+  `bot_goal.sma` plugin is running, which is on `cstrike`, `tfc` and `dod` maps; see
+  `doc/bot.md`, `bot_strategic.cpp`
 - `crossbot_list_gates` — every walk gate that could hold a mine: the mesh width, the *measured*
   opening, the chosen surface, the mount point and the rejection reason. A gate that failed only at
   the surface or coverage stage is printed too, so the near misses are visible; ones filtered earlier
@@ -156,6 +161,25 @@ it appears from both sides of the aim-queue boundary and means the same thing on
   a timer, so reloading and clip depletion stay real and only permanent starvation is removed. Before
   this, an RPG run reached one rocket per bot per life.
 
+## No console line may reach 1024 characters
+
+The dedicated server converts every console line to wide characters through
+`CTextConsoleWin32::PrintRaw`, which holds a `WCHAR unicodeStr[1024]` and guards it with
+`if (nSize > sizeof(unicodeStr))` — a count of *characters* tested against a count of *bytes*. Any
+line of 1024 characters or more therefore passes the guard and overruns the buffer by up to 2 KB.
+The symptom is not a crash: hlds stops consuming CPU and sits on an invisible modal
+`Run-Time Check Failure #2 - Stack around the variable 'outputStr' was corrupted` box, so the
+server looks hung and only a kill clears it. That file belongs to CrossPlay and is read-only to us,
+so the limit is ours to respect.
+
+Every fixed print buffer in the tree is therefore 1024 bytes or smaller, which caps a line at 1023
+characters. The one dump built in a `std::string` rather than a fixed buffer, `PrintNavStatus`, is
+unbounded by nature — its `waypoints=[...]` block grows with the route — and goes out through
+`PrintLong`, which splits at a comma or a space below 1000 characters and prints the pieces. It found
+the bug: a bot with a long strategic route on `dod_flash` froze the server on the first
+`crossbot_nav_status`. Any new dump that concatenates per-waypoint or per-area text belongs behind
+the same helper.
+
 `crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
 penalty table is not, and it dies with the map.
@@ -210,6 +234,12 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   to 0** alongside `crossbot_gather 0`, so route behaviour stays comparable against transcripts taken
   before the tier existed
 - `crossbot_fun_debug` — per-frame arrival diagnostics while a bot is at a switch or mounting a tank
+- `crossbot_strategic` — the strategic goal tier, which is whether bots follow `bot_goal`
+  entities at all. Default 1. With it off the top tier is empty and a bot on a `cstrike`, `tfc`
+  or `dod` map falls back to fun and gather, which is the control that separates "the objective
+  logic is wrong" from "the navigation is wrong"
+- `crossbot_strategic_debug` — one line per `bot_goal` per selection saying whether it was
+  taken, left on its cooldown memo, or could not be placed in a nav area
 - `crossbot_goal_bias` — exponent in the fun/strategic weight `1 / (cost + 2)^bias`. Default 2. 0 is
   uniform random across candidates, which is how you tell a selection problem from a distance-weighting
   one; large values collapse to nearest-first. Does not affect gather, which is always cheapest-first

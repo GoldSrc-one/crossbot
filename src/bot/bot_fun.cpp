@@ -89,8 +89,6 @@ namespace
 
 	constexpr int kTrainMaxNodes = 512;
 
-	constexpr float kMoveDeadzone = 0.01f;
-
 	constexpr int kHullDuck = 3;
 
 	struct Track
@@ -920,50 +918,12 @@ namespace
 	void DriveTo(CBot &bot, const Vector &angles, const Vector &to, bool stop,
 		unsigned short extra, float speed = 0.f)
 	{
-		edict_t *pEdict = bot.pEdict;
-
-		float drive = 0.f;
-		Vector moveDir(0.f, 0.f, 0.f);
-		Vector flat(to.x - pEdict->v.origin.x, to.y - pEdict->v.origin.y, 0.f);
-		float dist = sqrtf(flat.x * flat.x + flat.y * flat.y);
-
-		if (!stop && dist > kFunStandRadius)
-		{
-			moveDir = Norm2D(flat);
-			drive = speed > 0.f ? speed : Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
-
-			NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
-				Bot_DrivePhysics(pEdict));
-			if (solved.wishSpeed > 0.f)
-			{
-				moveDir = solved.wishDir;
-				drive = solved.wishSpeed;
-			}
-		}
-
-		if ((pEdict->v.flags & FL_DUCKING) != 0 && drive > 0.f)
-			drive /= PmSim::kDuckingMultiplier;
-
-		float fmove = 0.f, smove = 0.f;
-		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
-		bot.moveForward = fmove;
-		bot.moveSide = smove;
-
-		unsigned short buttons = extra;
-		if (fmove > kMoveDeadzone) buttons |= IN_FORWARD;
-		else if (fmove < -kMoveDeadzone) buttons |= IN_BACK;
-		if (smove > kMoveDeadzone) buttons |= IN_MOVERIGHT;
-		else if (smove < -kMoveDeadzone) buttons |= IN_MOVELEFT;
-
-		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
+		Bot_DriveTo(bot, angles, to, stop, extra, speed, kFunStandRadius);
 	}
 
 	void FaceDir(CBot &bot, const Vector &dir)
 	{
-		float flat = sqrtf(dir.x * dir.x + dir.y * dir.y);
-		if (flat > 0.0001f || fabsf(dir.z) > 0.0001f)
-			bot.desiredAngles = Vector(-atan2f(dir.z, flat) * (180.f / kPiF),
-				atan2f(dir.y, dir.x) * (180.f / kPiF), 0.f);
+		Bot_FaceDir(bot, dir);
 	}
 
 	Vector ForwardFromAngles(const Vector &angles)

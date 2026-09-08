@@ -26,3 +26,8 @@ bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector 
 
 bool Bot_AirmoveArcAt(const BotAirmoveArc &arc, float t, Vector &pos, Vector &vel);
 
+void Bot_FaceDir(CBot &bot, const Vector &dir);
+
+void Bot_DriveTo(CBot &bot, const Vector &angles, const Vector &to, bool stop,
+	unsigned short extra, float speed, float standRadius);
+
