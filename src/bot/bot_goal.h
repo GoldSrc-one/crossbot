@@ -37,6 +37,10 @@ struct Stop
 	int areaId = -1;
 	Vector point;
 	int payload = 0;
+
+	// A camp stop is a detour with no entity behind it: BotCamp picks it, BotGoal only carries it.
+	bool camp = false;
+	int campIndex = -1;
 };
 
 struct State
@@ -69,6 +73,8 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh);
 bool OnArrived(CBot &bot);
 
 bool Advance(CBot &bot);
+
+void CommitCampStop(CBot &bot, const Vector &point, int areaId, int campIndex);
 
 void Clear(CBot &bot);
 

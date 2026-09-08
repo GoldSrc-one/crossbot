@@ -105,6 +105,36 @@ cvar_t g_detourBudgetCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_campCvar = {
+	"crossbot_camp",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_campBudgetCvar = {
+	"crossbot_camp_budget",
+	"3",
+	FCVAR_SERVER
+};
+
+cvar_t g_campRadiusCvar = {
+	"crossbot_camp_radius",
+	"1024",
+	FCVAR_SERVER
+};
+
+cvar_t g_campReachCvar = {
+	"crossbot_camp_reach",
+	"512",
+	FCVAR_SERVER
+};
+
+cvar_t g_campDebugCvar = {
+	"crossbot_camp_debug",
+	"0",
+	FCVAR_SERVER
+};
+
 cvar_t g_oppoJumpCvar = {
 	"crossbot_oppo_jump",
 	"1",
@@ -276,6 +306,11 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_strategicDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_goalBiasCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_detourBudgetCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campBudgetCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campRadiusCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campReachCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);

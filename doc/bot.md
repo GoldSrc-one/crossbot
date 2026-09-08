@@ -166,6 +166,128 @@ target itself goes through the owning tier's `OnRepathFailed` and kills the goal
 That is inherited behaviour — the gather tier did the same before there were tiers — and it means
 that on a small map with several bots, fun goals get re-selected often. Fighting is not a goal.
 
+## bot_camp.cpp
+
+A bot walking to a goal that senses something **closing in on it** breaks off to a camp spot that is
+still on the way, holds there facing the direction the spot was measured at, and resumes as soon as
+nothing is getting closer any more. `NavMesh::camps` had been carried by the `.nav` since v21 with no
+consumer (`doc/nav.md`, *nav_camp.h*); this is the consumer.
+
+Two constraints shaped it, and everything else follows from them:
+
+- **A camp may never cost the bot ground on its target.** Same rule as the gather detour, same line of
+  code: `if (in >= here) continue`.
+- **The trigger cannot run a search.** Camping is a reflex. A Dijkstra on the frame a bot gets
+  frightened is not a reflex.
+
+### The route set: prepared once, tested for free afterwards
+
+`BotGoal::Select` already holds both cost fields it needs when it picks a fun or strategic target --
+the forward `AreaCosts` from the bot and the reverse `AreaCostsToGoal` to the target -- so `BuildRoute`
+is called there and does one linear pass over `mesh.camps`, keeping what passes the gather-detour
+acceptance test. `RefreshStrategic` rebuilds it when a moving strategic goal drags the field with it.
+On crossfire that is 114 camps in, and between 4 and 79 kept.
+
+Each survivor is flattened into a `RouteSpot` -- position, facing, flags, and `toGoal`, the
+cost-to-target of its area. The forward cost is deliberately **not** kept: it was measured from where
+the bot stood when the target was picked and is wrong a second later. `toGoal` is not, because it is a
+property of the target, so the trigger can re-test "still on the way" against
+`toTargetCosts[currentAreaId]` as the bot advances at the cost of two array reads. That is the whole
+reason the set is prepared rather than searched for.
+
+Gather targets get no route set, matching the rule that a gather target is its own stop and is never
+detoured from. A bot sprinting for a health kit does not stop to camp.
+
+### One tracker, two rules
+
+"Something is getting closer" and "nothing has got closer for a second" are the same measurement, so
+there is one running minimum rather than two mechanisms:
+
+```
+contact = BotSense::NearestLive(origin, crossbot_camp_radius, livingOnly)
+if (contact && (!scared || dist < scareDist - 16))   scared = true, scareDist = dist, scareTime = now
+if (scared && now - scareTime > 1.0)                 scared = false        // and stop camping
+```
+
+`NearestLive` has already applied the sense decay, so anything it returns is a contact the bot still
+believes in, and **nothing further gates this on the slot's own age.** An age test was tried and
+removed: footsteps arrive in bursts, and a window tight enough to mean anything flickered the tracker
+on and off between them, several times a second. The cost of dropping it is that walking toward a
+remembered position also reads as closing in -- which is the right answer for somewhere the bot heard
+something a moment ago, and the 5s decay is what stops it being the answer forever.
+
+Because the minimum resets with the scare, a contact that approaches, stops, and approaches again
+frightens the bot twice. Because it is a minimum and not a last-known distance, an enemy that closes
+and then retreats keeps the bot camped for exactly one second past its closest approach.
+
+`Track` is called unconditionally, straight after `BotCombat::Update` and above every early return in
+`Bot_MoveNav`. A gap in its sampling would read back as "nothing has come closer" the moment combat
+handed control back.
+
+### Committing, and the walk
+
+The trigger picks the **nearest** qualifying spot within `crossbot_camp_reach`, which mirrors the
+gather detour's `min out`. It is committed through `BotGoal::CommitCampStop` as an ordinary detour
+stop carrying `Stop::camp` -- so the target survives it, the A* plans to it, `follow.done` detects the
+arrival, and `OnRepathFailed`/`OnBlocked` already know to go straight on. The only new arrival case is
+in `BotGoal::OnArrived`, which hands a camp stop to `BotCamp::OnArrived` instead of advancing past it.
+
+**The reach radius is euclidean, so it cannot tell a camp across the room from a camp across a chasm.**
+The planned route can. `CheckTravel` reads `followProfile.totalTime` on the frame after the commit and
+abandons anything over 3s. On crossfire that fires on about a third of picks -- the map is vertical and
+512 units of straight line is regularly a long way round.
+
+**A stale scare does not abandon the approach.** This was the one thing the first live run got wrong:
+applying the one-second rule to the walk as well as the hold meant the bot gave up on every camp it
+ever picked, because a spot 350 units out is about a second away. The stale rule is about how long to
+*stay*. Arriving somewhere it was going anyway costs the bot nothing, which is exactly what the "never
+further from the target" filter buys.
+
+### Holding
+
+`BotCamp::Run` sits directly below `BotCombat::Run`, so an actual enemy always wins, and returns false
+unless the bot has arrived. It parks the bot and refreshes `lastProgressTime` so the stall detector
+does not read a bot holding a corner as a bot stuck on geometry. Then:
+
+**The camp facing is the base, not an override.** `Run` writes the spot's yaw and pitch into
+`desiredAngles` *before* calling `ApplyLook`, so `LOOK_SENSE` blends away from it toward whatever the
+bot can hear. A camper that ignored the noise it was camping against would be worse than one that
+never camped. With nothing to hear at all, the new `LOOK_CAMP` branch at the top of `ApplyVantageLook`
+holds the measured facing -- ahead of the vantage blend, because the blend describes a neighbourhood
+and the camp facing describes this exact spot.
+
+**Stance is biased toward crouching:** duck unless standing sees more than 5% more
+(`crouch >= 0.95 * stand`, summed over the four arcs), and always duck on `CAMP_NO_STAND`. A camper is
+a smaller and steadier target, so the tie and the near-tie both go to crouch, and only a spot that
+genuinely needs the extra 34 units of eye height gets the bot to stand up.
+
+**Zoom is a property of the spot, not of the moment.** The four arcs are nested FOVs 90/45/22.5/11.25,
+so `arc[2] >= 0.9 * arc[0]` means the 22.5 cone already accounts for nearly everything the 90 cone
+sees: the spot watches one corridor and the scope costs no coverage. `BotFire::ZoomButtons` still owns
+the toggle -- it used to bail on `!fire.aimValid`, which is precisely the camping case, and now asks
+`BotCamp::WantZoom` instead. The camp module holds one opinion at a time and keeps holding it after it
+leaves, until the weapon agrees, which is what gets the scope back down.
+
+### On leaving
+
+`Leave` (stale scare) and `Abandon` (unreachable, blocked, camping switched off) only reset camp state;
+picking the next stop is `BotGoal::Advance`'s job at the call site, because `OnRepathFailed` and
+`OnBlocked` already call it themselves. Either way a 5s cooldown stops a frightened bot chain-camping
+its way across the map.
+
+### Measured
+
+120s on crossfire, six bots, `crossbot_gather 0` so every bot holds a detourable fun target: 63 camps
+committed, 22 abandoned by the travel check, 26 reached and held, 21 ended by the stale rule at 1.0 to
+2.3s each. The five that ended otherwise were taken over by combat, which is the correct outcome.
+
+### cvars
+
+`crossbot_camp` (1), `crossbot_camp_budget` (3s, the detour budget in `BuildRoute` -- tighter than
+`crossbot_detour_budget`'s 6s because camping is a sidestep), `crossbot_camp_radius` (1024),
+`crossbot_camp_reach` (512), `crossbot_camp_debug` (0, gates the per-retarget route line and the
+scare transitions; the commit, arrival and leave lines are plain `BOT_VLOG`).
+
 ## bot_strategic.cpp
 
 The top tier's only producer, and a deliberate stepping stone. CrossBot plays `valve` rules on maps
@@ -2039,7 +2161,9 @@ it measured the fraction of the visible set inside a cone around `watch[0]`, so 
 rather than the spot, and blending it between probes with different main directions was meaningless.
 That objection stands and the field is gone. Camping is now a separate discrete dataset -- `NavMesh::camps`,
 each a position *paired with* the facing it was measured at (`doc/navgen.md`, *camp_sampler.cpp*) -- which is
-what makes the measurement mean something. Nothing reads it yet; the shuffle is unchanged.
+what makes the measurement mean something. `bot_camp.cpp` reads it now; the shuffle is unchanged, and
+the two never run together -- `BotCamp::Run` sits below `BotCombat::Run` in `Bot_MoveNav`, so a bot
+that has an enemy shuffles and a bot that only *suspects* one camps.
 
 **The enemy is deliberately not consulted.** No line-of-sight trace from the probe to whoever the bot
 is fighting. The bot can shuffle itself out of the fight, and when it does, the 5s rule ends the state

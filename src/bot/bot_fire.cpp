@@ -7,6 +7,7 @@
 #include "bot_move.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_camp.h"
 #include "bot_break.h"
 #include "bot_deploy.h"
 #include "bot_fun.h"
@@ -736,11 +737,20 @@ namespace
 
 		if (spec.primaryZoomed.fire == FIRE_NONE || spec.secondary.toggle != TOGGLE_ZOOM)
 			return 0;
-		if (!fire.aimValid || w.nextSecondaryAttack > 0.f)
+		if (w.nextSecondaryAttack > 0.f)
 			return 0;
 
-		float dist = (fire.aimPoint - eye).Length();
-		bool want = fire.zoomed ? (dist >= kZoomOut) : (dist > kZoomIn);
+		bool want = false;
+		if (fire.aimValid)
+		{
+			float dist = (fire.aimPoint - eye).Length();
+			want = fire.zoomed ? (dist >= kZoomOut) : (dist > kZoomIn);
+		}
+		// With no aim there is normally nothing to decide. A camper is the exception: it zooms
+		// into the corridor its spot watches, and owes the weapon a zoom-out when it leaves.
+		else if (!BotCamp::WantZoom(bot, want))
+			return 0;
+
 		if (g_pinZoom >= 0)
 			want = (g_pinZoom != 0);
 		if (want == fire.zoomed)

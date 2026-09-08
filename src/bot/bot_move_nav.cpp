@@ -12,6 +12,7 @@
 #include "bot_sense.h"
 #include "bot_avoid.h"
 #include "bot_break.h"
+#include "bot_camp.h"
 #include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fun.h"
@@ -147,11 +148,7 @@ namespace
 	constexpr float kChargerUseRange = 64.f;
 	constexpr float kChargerNoGainGrace = 0.5f;
 	constexpr float kChargerTimeout = 15.f;
-	// HurtTouch only re-applies every 0.5s (pev->dmgtime), so a healing pool looks stalled for
-	// half a second at a time even while it is working.
 	constexpr float kHealNoGainGrace = 1.2f;
-	// Split in two: a slow pool can legitimately take half a minute to fill the bot, but if the
-	// bot never gets in at all there is nothing to wait for.
 	constexpr float kHealApproachTimeout = 5.f;
 	constexpr float kHealTimeout = 30.f;
 	constexpr float kActivationSameRadius = 8.f;
@@ -2433,6 +2430,10 @@ void Bot_MoveNav(CBot &bot)
 		BotCombat::Update(bot);
 	}
 
+	// Runs unconditionally: the tracker is a running minimum, and a gap in its sampling would
+	// read back as "nothing has come closer" the moment combat hands control back.
+	BotCamp::Track(bot);
+
 	{
 		BOTPERF_SCOPE(ZONE_MEMOS);
 		BotItems::RefreshMemos(bot);
@@ -2465,6 +2466,9 @@ void Bot_MoveNav(CBot &bot)
 			return;
 	}
 
+	if (BotCamp::Run(bot))
+		return;
+
 	{
 		BOTPERF_SCOPE(ZONE_ITEM_GOAL);
 		if (BotItems::UpdateGoalItem(bot))
@@ -2486,6 +2490,14 @@ void Bot_MoveNav(CBot &bot)
 			RunIdleMove(bot, angles);
 			return;
 		}
+	}
+
+	if (BotCamp::Consider(bot))
+	{
+		BotSense::ApplyLook(bot);
+		Vector angles = Bot_UpdateFacing(bot);
+		RunIdleMove(bot, angles);
+		return;
 	}
 
 	if (bot.trackState.progressS > bot.lastProgressS + kProgressEpsilon)
@@ -2513,6 +2525,15 @@ void Bot_MoveNav(CBot &bot)
 	{
 		if (!TryRepath(bot, *mesh, pEdict, forcedRepath ? "forced" : "stalled"))
 			return;
+
+		if (BotCamp::CheckTravel(bot, bot.followProfile.totalTime))
+		{
+			BotGoal::Advance(bot);
+			BotSense::ApplyLook(bot);
+			Vector angles = Bot_UpdateFacing(bot);
+			RunIdleMove(bot, angles);
+			return;
+		}
 	}
 
 	if (curArea && (bot.visitedAreaPath.empty() || bot.visitedAreaPath.back() != curArea->id))

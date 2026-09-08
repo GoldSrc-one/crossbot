@@ -48,10 +48,6 @@ namespace
 		return strncmp(s, prefix, strlen(prefix)) == 0;
 	}
 
-	// A trigger_hurt with negative damage heals whoever stands in it, so maps use it as a
-	// healing pool. Nothing but pev tells the two apart, which is why ClassifyItem takes an
-	// edict. START_OFF is not tested here: it only flips pev->solid, and a targetname lets
-	// the map toggle it back on later, so availability is checked at scan time instead.
 	bool IsHealingHurt(edict_t *ent)
 	{
 		if (ent->v.dmg >= 0.f)
@@ -93,9 +89,6 @@ bool CHLDMProfile::Detect(const char *gamedir) const
 	return gamedir && CB_STRICMP(gamedir, "valve") == 0;
 }
 
-// Deathmatch reads the third crossbot_add argument as a player model. A name the scan did not find
-// is only a warning: PlayerModels sees loose files, so a model living inside a .pak is legitimate
-// and must not be refused.
 void CHLDMProfile::ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
 	unsigned int size) const
 {
@@ -120,8 +113,6 @@ void CHLDMProfile::ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char
 	}
 	else if (!PlayerModels::PickRandom(iGame, out, size))
 	{
-		// Nothing installed for this game or for valve. Leave the userinfo alone so the engine
-		// default stands, and report it as such.
 		return;
 	}
 

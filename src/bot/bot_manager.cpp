@@ -3,6 +3,7 @@
 
 #include "bot_manager.h"
 #include "bot.h"
+#include "bot_camp.h"
 #include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fire.h"
@@ -791,8 +792,8 @@ void PrintCampStatus(const Vector *at)
 	}
 
 	char head[192];
-	snprintf(head, sizeof(head), "CrossBot: %d camp spots\n",
-		static_cast<int>(mesh->camps.size()));
+	snprintf(head, sizeof(head), "CrossBot: %d camp spots, crossbot_camp=%d\n",
+		static_cast<int>(mesh->camps.size()), BotCamp::Enabled() ? 1 : 0);
 	SERVER_PRINT(head);
 
 	auto report = [&](const char *who, const Vector &origin)
@@ -845,6 +846,28 @@ void PrintCampStatus(const Vector *at)
 
 		ScopedGame ctx(bot.gameDll);
 		report(bot.name, bot.pEdict->v.origin);
+
+		const BotCamp::State &camp = bot.camp;
+		char line[320];
+		if (camp.holding)
+			snprintf(line, sizeof(line),
+				"CrossBot:   camping %.1fs at (%.0f,%.0f,%.0f) area %d %s%s, %zu on route, %u so far\n",
+				gpGlobals->time - camp.holdStart, camp.spot.pos.x, camp.spot.pos.y, camp.spot.pos.z,
+				camp.spot.areaId, camp.spot.duck ? "crouched" : "standing",
+				camp.spot.zoom ? " zoomed" : "", camp.route.size(), camp.camps);
+		else
+			snprintf(line, sizeof(line), "CrossBot:   not camping (%s), %zu on route, %u so far\n",
+				gpGlobals->time < camp.nextCampTime ? "cooling down" : "ready", camp.route.size(),
+				camp.camps);
+		SERVER_PRINT(line);
+
+		if (camp.scared)
+			snprintf(line, sizeof(line),
+				"CrossBot:     scared: nearest contact %.0f out, closed in %.1fs ago\n",
+				camp.scareDist, gpGlobals->time - camp.scareTime);
+		else
+			snprintf(line, sizeof(line), "CrossBot:     nothing has come closer\n");
+		SERVER_PRINT(line);
 	}
 }
 

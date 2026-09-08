@@ -267,13 +267,15 @@ change is a version bump and a full regeneration of every `.nav`.
 
 ### Camp spots are carried, not consumed
 navgen picks a reduced list of camp spots -- position, one facing, and four arc ratios per stance --
-and the loader lands them on `NavMesh::camps` as a flat vector. Nothing in the bot reads them yet.
-When to camp, for how long, and how to choose between spots is a separate design; this change is the
-data and the tooling to look at it (`crossbot_camp_status`, and `--dump-camp-svg` on the navgen side).
+and the loader lands them on `NavMesh::camps` as a flat vector. The runtime consumer is
+`bot_camp.cpp` (`doc/bot.md`, *bot_camp.cpp*); `crossbot_camp_status` and `--dump-camp-svg` on the
+navgen side are still how you look at the data itself.
 
-There is deliberately no spatial index. `FindAreaExact` is still a linear scan and camp spots are a
-hundred-odd records, so a consumer that needs the nearest one can scan; the vantage field got a CSR grid
-only because it is blended per bot at 10 Hz.
+There is deliberately no spatial index, and the consumer that arrived did not need one. `FindAreaExact`
+is still a linear scan and camp spots are a hundred-odd records, so the one pass over `mesh.camps` runs
+once per retarget rather than per frame; the vantage field got a CSR grid only because it is blended
+per bot at 10 Hz. Measured on crossfire: 114 camps, and the pass keeps between 4 and 79 of them
+depending on where the bot is and how far off its target is.
 
 ### Why this is not part of the vantage field
 The vantage field is a *continuous* signature: `exposure` and the watch cones are properties of a

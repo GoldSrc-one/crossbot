@@ -9,6 +9,7 @@
 #include "../nav/nav.h"
 #include "../nav/nav_path.h"
 #include "bot.h"
+#include "bot_camp.h"
 #include "bot_fun.h"
 #include "bot_goal.h"
 #include "bot_items.h"
@@ -369,11 +370,13 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		Nav::AreaCostsToGoal(mesh, static_cast<uint32_t>(st.target.areaId), st.toTargetCosts,
 			Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
 		st.toTargetArea = st.target.areaId;
+		BotCamp::BuildRoute(bot, mesh, costs);
 	}
 	else
 	{
 		st.toTargetCosts.clear();
 		st.toTargetArea = -1;
+		BotCamp::Reset(bot);
 	}
 
 	PickStop(bot, mesh, costs);
@@ -429,6 +432,8 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
 
+	BotCamp::BuildRoute(bot, mesh, costs);
+
 	PickStop(bot, mesh, costs);
 	Bot_ResetNavPath(bot);
 }
@@ -459,8 +464,25 @@ bool Advance(CBot &bot)
 	return true;
 }
 
+void CommitCampStop(CBot &bot, const Vector &point, int areaId, int campIndex)
+{
+	Stop stop;
+	stop.tier = GOAL_NONE;
+	stop.areaId = areaId;
+	stop.point = point;
+	stop.camp = true;
+	stop.campIndex = campIndex;
+
+	// A detour, so the target survives it and OnRepathFailed/OnBlocked keep going straight on.
+	CommitStop(bot, stop, true);
+}
+
 bool OnArrived(CBot &bot)
 {
+	// A camp stop is not a leg to advance past: the bot arrived in order to stand still.
+	if (bot.goal.stop.camp)
+		return BotCamp::OnArrived(bot);
+
 	if (bot.goal.stop.tier == GOAL_FUN)
 		BotFun::OnArrived(bot);
 	else if (bot.goal.stop.tier != GOAL_STRATEGIC)
@@ -486,6 +508,7 @@ void Clear(CBot &bot)
 	st.toTargetCosts.clear();
 	st.toTargetArea = -1;
 	st.skipped.clear();
+	BotCamp::Reset(bot);
 
 	bot.hasGoal = false;
 	Bot_ResetNavPath(bot);
@@ -494,6 +517,13 @@ void Clear(CBot &bot)
 void OnRepathFailed(CBot &bot)
 {
 	State &st = bot.goal;
+
+	if (st.active && st.stop.camp)
+	{
+		BotCamp::Abandon(bot, "no route to it");
+		Advance(bot);
+		return;
+	}
 
 	if (st.active && st.onDetour)
 	{
@@ -524,6 +554,13 @@ void OnRepathFailed(CBot &bot)
 void OnBlocked(CBot &bot, const char *what)
 {
 	State &st = bot.goal;
+
+	if (st.active && st.stop.camp)
+	{
+		BotCamp::Abandon(bot, "blocked on the way to it");
+		Advance(bot);
+		return;
+	}
 
 	if (st.active && st.onDetour)
 	{
@@ -556,6 +593,7 @@ void OnRespawn(CBot &bot)
 	BotItems::OnRespawn(bot);
 	BotFun::OnRespawn(bot);
 	BotStrategic::OnRespawn(bot);
+	BotCamp::OnRespawn(bot);
 	Clear(bot);
 }
 

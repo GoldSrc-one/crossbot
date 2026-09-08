@@ -95,9 +95,6 @@ namespace
 
 	using BotItems::Placement;
 
-	// A healing trigger_hurt is a room-sized brush the bot stands inside, not a fixture it walks
-	// up to, so every area overlapping it is a way in. Offering them all lets the cost field in
-	// SelectGoal pick the cheapest entrance instead of guessing one here.
 	void ResolveVolumeAreas(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
 		std::vector<Placement> &out)
 	{
@@ -119,15 +116,11 @@ namespace
 			spot.y = std::max(volMins.y, std::min(volMaxs.y, spot.y));
 			spot = ClampIntoArea(area, spot);
 
-			// Areas merge into non-convex prisms, so the box clamp alone can land outside one.
 			if (!Nav::AreaContainsPoint(area, spot))
 				spot = area.centroid;
 			if (!Nav::AreaContainsPoint(area, spot))
 				continue;
 
-			// Nav areas are in duck-origin space, but the bot stands unless the area says
-			// otherwise, and SV_TouchLinks tests the toucher's origin. Probe where the bot's
-			// origin will actually be.
 			bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 			Vector probe = crouch ? spot : spot + Vector(0.f, 0.f, kStandOriginLift);
 			if (!BotItems::OriginInsideVolume(ent, probe, crouch ? kHullDuck : kHullHuman))
@@ -142,8 +135,6 @@ namespace
 		if (out.size() <= kHealAreaCandidates)
 			return;
 
-		// A map-sized volume must not flood the candidate list; the near entrances are the
-		// only ones that could ever win on travel time anyway.
 		std::partial_sort(out.begin(), out.begin() + kHealAreaCandidates, out.end(),
 			[&from](const Placement &a, const Placement &b) {
 				return (a.point - from).LengthSquared() < (b.point - from).LengthSquared();
@@ -151,9 +142,6 @@ namespace
 		out.resize(kHealAreaCandidates);
 	}
 
-	// Fills one placement per nav area the bot can service the item from: at most one for a
-	// pickup or a charger, one per overlapping area for a healing volume. Returns the item's
-	// own point regardless, so a candidate with no nav area still has somewhere to report.
 	Vector ResolveItemPlacements(const Nav::NavMesh &mesh, edict_t *ent, ItemKind kind,
 		const Vector &from, std::vector<Placement> &out)
 	{
@@ -228,8 +216,6 @@ namespace
 		return nullptr;
 	}
 
-	// Health and armour sources are worth nothing to a bot already at the cap, and walking to
-	// one only to gain nothing costs it a 120s classname blacklist. Ask before travelling.
 	bool Sated(const CBot &bot, ItemKind kind)
 	{
 		return g_pGameProfile->ChargerValue(kind, bot.pEdict) >=
@@ -292,8 +278,6 @@ namespace
 				continue;
 			}
 
-			// Only a selectable item is worth offering from several entrances; a skipped one
-			// says the same thing from all of them, so report it once.
 			size_t count = (cand.reason == SCAN_OK) ? places.size() : 1;
 			for (size_t p = 0; p < count; ++p)
 			{
@@ -414,10 +398,6 @@ bool IsChargerEmpty(edict_t *ent)
 	return !ent || ent->free || ent->v.frame != 0.f;
 }
 
-// SV_TouchLinks does not settle for a box overlap: it point-tests the toucher's origin against
-// the trigger's clip hull, so a spot merely near the brush never fires HurtTouch. A pool brush is
-// also free to be a scatter of separate basins inside one roomy bounding box, which is exactly
-// where a box test goes wrong.
 bool OriginInsideVolume(edict_t *ent, const Vector &origin, int hull)
 {
 	if (!ent || ent->free)
@@ -428,8 +408,6 @@ bool OriginInsideVolume(edict_t *ent, const Vector &origin, int hull)
 	return tr.fStartSolid != 0 || tr.fAllSolid != 0;
 }
 
-// START_OFF spawns the trigger SOLID_NOT, and a trigger with a targetname can be toggled either
-// way mid-map, so solidity is the live answer to whether the pool is running.
 bool IsVolumeInactive(edict_t *ent)
 {
 	if (!ent || ent->free)

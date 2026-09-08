@@ -7,6 +7,7 @@
 #include "bot_sense.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_camp.h"
 #include "bot_combat.h"
 #include "bot_fire.h"
 #include "bot_move.h"
@@ -27,8 +28,6 @@ namespace
 	constexpr float kViewCone = 90.f;
 	constexpr float kViewRange = 4096.f;
 
-	// Numerical guard on the 1/dist term of the vision weight, not a tuning knob: players cannot
-	// overlap, so at roughly a player half-width this never binds in practice.
 	constexpr float kGazeMinDist = 32.f;
 
 	constexpr float kMonsterGaze = 2.f;
@@ -308,9 +307,6 @@ namespace
 		BotSense::Push(bot, BotSense::EntitySoundOrigin(inflictor), BotSense::SUSP_DAMAGE, inflictor);
 	}
 
-	// The one place that spends a vision traceline. Samples a hitbox, traces, and on success
-	// records the sighting. Everything expensive about vision lives here, so the call count of
-	// this function *is* the per-bot cost -- see the ZONE_SN_LOS / ZONE_SN_BONE perf zones.
 	bool TraceVisible(CBot &bot, const Vector &eye, edict_t *ent, Vector &pointOut, int &boneOut)
 	{
 		int bone = -1;
@@ -342,11 +338,6 @@ namespace
 		return true;
 	}
 
-	// Who the bot is already fighting. BotCombat's enemy survives losing line of sight (it retires
-	// on death, a stale handle, kSightTimeout, or losing every trace in the suspicion table), which
-	// is exactly the persistence the incumbent rule wants. Note this reads *last* frame's value:
-	// BotSense::Update runs before BotCombat::Update, which in turn reads this frame's sense.target.
-	// The one-frame lag is deliberate and stable; sense.target covers the frame before combat enters.
 	edict_t *Incumbent(const CBot &bot)
 	{
 		edict_t *ent = BotCombat::Enemy(bot);
@@ -375,9 +366,6 @@ namespace
 		float acc = 0.f;
 		int cands = 0;
 
-		// One pass, no traces. Gate on range and viewcone exactly as before, then choose a single
-		// candidate by weighted reservoir (the idiom from bot_fire.cpp) so the traces below are
-		// bounded at two regardless of how many players are on the server.
 		for (int i = 1; i <= gpGlobals->maxClients; ++i)
 		{
 			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
@@ -396,23 +384,15 @@ namespace
 
 			++cands;
 
-			// The incumbent is traced unconditionally below, so it must not also be drawable --
-			// otherwise a two-player fight would spend both traces on the same entity.
 			if (ent == incumbent)
 			{
 				incumbentSeen = true;
 				continue;
 			}
 
-			// Their view direction, via pfnAngleVectors rather than MAKE_VECTORS: the latter writes
-			// gpGlobals->v_forward, which we are still holding above as this bot's own facing.
-			// v_angle is the true view angle and needs no pitch flip (unlike pev->angles, which is
-			// why bot_deploy.cpp negates x when reading a tripmine's orientation).
 			Vector theirForward, theirRight, theirUp;
 			g_engfuncs.pfnAngleVectors(ent->v.v_angle, theirForward, theirRight, theirUp);
 
-			// dir is bot -> them, so the direction from them to us is -dir. Prefer targets that are
-			// close and looking at us: those are the ones about to shoot.
 			float gaze = DotProduct(theirForward, dir * -1.f) + 1.f;
 			float w = gaze / (dist < kGazeMinDist ? kGazeMinDist : dist);
 			if (w <= 0.f)
@@ -541,6 +521,21 @@ namespace
 
 	bool ApplyVantageLook(CBot &bot)
 	{
+		// A camper looks where its spot was measured from. This sits ahead of the vantage blend
+		// because the blend is about the neighbourhood; the camp facing is about this exact spot.
+		float campYaw = 0.f, campPitch = 0.f;
+		if (BotCamp::Facing(bot, campYaw, campPitch))
+		{
+			if (campPitch > kLookPitchLimit)
+				campPitch = kLookPitchLimit;
+			else if (campPitch < -kLookPitchLimit)
+				campPitch = -kLookPitchLimit;
+
+			bot.sense.lookSource = BotSense::LOOK_CAMP;
+			bot.desiredAngles = Vector(campPitch, campYaw, 0.f);
+			return true;
+		}
+
 		const Nav::VantageBlend &blend = bot.sense.vantage;
 		if (!blend.valid || blend.watchCount <= 0)
 		{
@@ -934,9 +929,6 @@ const BotSense::Suspicion *BotSense::NearestLive(const CBot &bot, const Vector &
 	return best;
 }
 
-// Does anything in the table still point at this entity? Entries expire on Decay() like every
-// other read of the table, so this answers "have I lost every trace of it", not "did I ever see
-// it". Sight, sound, damage and events all count -- a bot that can hear its enemy has not lost it.
 bool BotSense::Senses(const CBot &bot, const edict_t *ent)
 {
 	if (!ent)
@@ -1101,6 +1093,7 @@ const char *BotSense::LookSourceName(LookSource source)
 	case LOOK_GATED: return "gated";
 	case LOOK_AIM: return "aim";
 	case LOOK_SENSE: return "sense";
+	case LOOK_CAMP: return "camp";
 	case LOOK_VANTAGE_IDLE: return "vantage-idle";
 	case LOOK_VANTAGE_PATH: return "vantage-path";
 	case LOOK_VANTAGE_OFFPATH: return "vantage-offpath";

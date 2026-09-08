@@ -11,6 +11,7 @@
 #include "bot_aim.h"
 #include "bot_avoid.h"
 #include "bot_break.h"
+#include "bot_camp.h"
 #include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fire.h"
@@ -173,6 +174,7 @@ struct CBot
 	BotAim::State aim;
 	BotAvoid::State avoid;
 	BotBreak::State brk;
+	BotCamp::State camp;
 	BotCombat::State combat;
 	BotDeploy::State deploy;
 	BotSense::State sense;

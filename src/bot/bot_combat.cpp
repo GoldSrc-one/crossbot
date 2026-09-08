@@ -27,40 +27,24 @@ namespace
 	using NavMath::kPiF;
 	using NavMath::Norm2D;
 
-	// The bot gives up on an enemy it cannot see for this long. Suspicion entries expire on
-	// crossbot_sense_decay, which defaults to the same 5s, so on stock settings the two rules
-	// retire an enemy at about the same moment and either one may be the one that logs it.
 	constexpr float kSightTimeout = 5.f;
 
-	// Fallback when a player has no fov of their own. Matches the bot's own kViewCone in
-	// bot_sense.cpp, which is the cone this is the mirror image of.
 	constexpr float kEnemyViewCone = 90.f;
 
 	constexpr float kProbeDist = 160.f;
 	constexpr float kProbeInterval = 0.7f;
 	constexpr float kProbeReached = 32.f;
 
-	// A full step lands outside the mesh most of the time -- crossfire's areas are routinely
-	// narrower than kProbeDist, and a walk neighbour at a different height fails the z test. Back
-	// off along the same ray rather than throwing the direction away, so "nothing that way" means
-	// the bot really is against something.
 	const float kProbeFractions[] = {1.f, 0.7f, 0.45f, 0.25f};
 
-	// Nav areas are in duck-origin z-space, so a standing origin sits this far above one.
 	constexpr float kAreaStandLift = 18.f;
 
 	constexpr float kMoveButtonDeadzone = 0.01f;
 
-	// XY containment alone would match someone on a walkway directly overhead, who cannot be
-	// charged. One standing player's height is the whole justification for the number.
 	constexpr float kDuelSameFloor = 72.f;
 
-	// Long enough to break contact after a swing, short enough to be back in range for the next
-	// one -- the crowbar's own refire is about half a second.
 	constexpr float kDuelBackoff = 0.4f;
 
-	// Stop closing a little inside the weapon's reach, so one step of overshoot does not leave the
-	// bot outside it. The reach itself comes from the melee spec, never from a constant here.
 	constexpr float kDuelCloseFrac = 0.8f;
 
 	struct Spot
@@ -88,8 +72,6 @@ namespace
 
 	bool TestArea(const Nav::Area &area, const Vector &xy, Spot &out)
 	{
-		// Areas merge into non-convex prisms, so this has to be the bound-plane test rather than
-		// a clamp into the AABB.
 		Vector spot(xy.x, xy.y, area.centroid.z);
 		if (!Nav::AreaContainsPoint(area, spot))
 			return false;
@@ -100,9 +82,6 @@ namespace
 		return true;
 	}
 
-	// Local means local: the bot may stand anywhere in the area it occupies or in one joined to
-	// it by a plain walk. Jumps, ladders, lifts and teleports are route-building, and combat is
-	// what drops routes.
 	bool ResolveSpot(const Nav::NavMesh &mesh, const CBot &bot, const Vector &xy, Spot &out)
 	{
 		if (bot.currentAreaId < 0)
@@ -157,14 +136,6 @@ namespace
 		return true;
 	}
 
-	// Is the bot inside the enemy's view cone? A dot product and nothing else.
-	//
-	// Reciprocal line of sight is assumed, not tested: every caller asks this only on a frame
-	// where the bot can see them, and we take it that they could therefore see the bot. The two
-	// rays are not literally the same one -- UpdateVision clears bot-eye to a hitbox bone, this
-	// reasons eye to eye -- but they are near enough, and vision is budgeted to two tracelines
-	// per bot per frame, which is not a budget to spend on that distinction. Guessing wrong
-	// costs one badly chosen opening weapon.
 	bool EnemySees(const CBot &bot, edict_t *enemy)
 	{
 		if ((enemy->v.flags & FL_CLIENT) == 0)
@@ -178,9 +149,6 @@ namespace
 		if (dist < 0.001f)
 			return true;
 
-		// pfnAngleVectors rather than MAKE_VECTORS, for the reason bot_sense.cpp gives at its own
-		// gaze term: MAKE_VECTORS writes gpGlobals->v_forward, which a caller may still be
-		// holding. v_angle is the true view angle and needs no pitch flip.
 		Vector theirForward, theirRight, theirUp;
 		g_engfuncs.pfnAngleVectors(enemy->v.v_angle, theirForward, theirRight, theirUp);
 
@@ -192,8 +160,6 @@ namespace
 		return DotProduct(theirForward, los * (1.f / dist)) >= cosf(fov * 0.5f * kPiF / 180.f);
 	}
 
-	// One way only. Once an enemy has noticed the bot, nothing they do afterwards makes them
-	// forget, so the ambush is over for the rest of this engagement.
 	void SetAware(CBot &bot, const char *how)
 	{
 		BotCombat::State &st = bot.combat;
@@ -202,9 +168,6 @@ namespace
 
 		st.enemyAware = true;
 
-		// The ambush weapon in the bot's hands is the wrong weapon now. Selection is throttled to
-		// kSelectInterval, so without this the bot spends half a second holding a crowbar at
-		// someone who is aiming back.
 		bot.fire.nextSelectTime = 0.f;
 
 		if (BotCombat::DebugEnabled())
@@ -216,10 +179,6 @@ namespace
 		return g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
 	}
 
-	// Is the enemy standing in the bot's own area? Asked this way round on purpose. The question
-	// is not "which area is the enemy in", which would be FindAreaNearest and up to three full
-	// linear passes over every area in the mesh; it is "is the enemy in this one", which is an
-	// O(1) id lookup and a single plane test.
 	bool EnemyInOurArea(const CBot &bot, edict_t *enemy)
 	{
 		const Nav::NavMesh *mesh = Nav::Get();
@@ -230,9 +189,6 @@ namespace
 		if (!cur)
 			return false;
 
-		// TestArea's idiom, for TestArea's reason: nav areas are duck-origin z-space, so a
-		// standing origin sits kAreaStandLift above one and the honest test is XY against the
-		// area's own z.
 		Vector spot(enemy->v.origin.x, enemy->v.origin.y, cur->centroid.z);
 		if (!Nav::AreaContainsPoint(*cur, spot))
 			return false;
@@ -240,24 +196,16 @@ namespace
 		return fabsf(enemy->v.origin.z - bot.pEdict->v.origin.z) <= kDuelSameFloor;
 	}
 
-	// Both halves of the duel predicate, refreshed together so the edge below sees a settled
-	// answer. enemyMelee is only refreshed when the bot can see them: reading m_pActiveItem works
-	// through a wall, but a human reads the crowbar off someone's hands, and the same restraint
-	// is already what EnemySees observes. Between sightings the last verdict stands, which
-	// kSightTimeout bounds at five seconds.
 	void UpdateDuel(CBot &bot, edict_t *enemy, bool visible)
 	{
 		BotCombat::State &st = bot.combat;
 
 		int melee = MeleeId();
 
-		// ActiveWeaponId peeks m_pActiveItem, which is a CBasePlayer offset -- reading it off a
-		// monster's private data would be garbage. Monsters never duel.
 		if (visible)
 			st.enemyMelee = melee != 0 && (enemy->v.flags & FL_CLIENT) != 0 &&
 				BotWeapons::ActiveWeaponId(enemy) == melee;
 
-		// Ordered so the geometry only runs once a duel is actually plausible.
 		st.enemyInArea = st.enemyMelee && EnemyInOurArea(bot, enemy);
 
 		bool now = st.enemyMelee && st.enemyInArea && BotCombat::DuelEnabled();
@@ -266,9 +214,6 @@ namespace
 
 		st.dueling = now;
 
-		// Both edges matter. Entering, so the bot does not spend kSelectInterval holding a shotgun
-		// at a charging crowbar; leaving, so it does not spend it holding a crowbar at someone who
-		// just drew an MP5.
 		bot.fire.nextSelectTime = 0.f;
 
 		if (BotCombat::DebugEnabled())
@@ -302,8 +247,6 @@ namespace
 		st.nextProbeTime = 0.f;
 		st.lastReason = how;
 
-		// ClearDuel first so a previous fight's verdict cannot survive into this one. A damage
-		// entry has no sight this frame, so the melee read waits for one rather than guessing.
 		ClearDuel(bot);
 		UpdateDuel(bot, enemy, bot.sense.target.Get() == enemy);
 
@@ -311,8 +254,6 @@ namespace
 			CBotTargetNameOf(enemy), how, aware ? 1 : 0, st.enemyMelee ? 1 : 0);
 	}
 
-	// Pick where to stand next. One random direction, scored on exposure alone; if it is no
-	// better than standing still, go the other way instead, unscored.
 	void UpdateProbe(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		BotCombat::State &st = bot.combat;
@@ -344,7 +285,6 @@ namespace
 		Spot spot;
 		bool forward = ResolveAlongRay(mesh, bot, pEdict->v.origin, dir, spot);
 
-		// bot_sense re-blends the bot's own eye every 0.1s, so there is no second blend here.
 		bool haveHere = bot.sense.vantage.valid;
 		st.hereExposure = haveHere ? bot.sense.vantage.exposure : 0.f;
 
@@ -403,12 +343,6 @@ namespace
 		return inv.weapons[inv.activeIndex].id;
 	}
 
-	// The duel replaces the cover shuffle rather than blending with it: close, swing, back off,
-	// close again. Reachable only with melee actually in hand against a melee opponent in the same
-	// area, which is what keeps this narrow -- BotCombat deleted the chase on purpose, and this is
-	// a scoped reintroduction of approach movement, not a general one.
-	//
-	// Returns false to leave the probe in charge.
 	bool DuelDrive(CBot &bot, const Nav::NavMesh &mesh, const PmSim::PmPhysics &physics,
 		Vector &moveDir, float &drive)
 	{
@@ -419,8 +353,6 @@ namespace
 
 		int melee = MeleeId();
 
-		// A failed selection must not leave the bot charging bare-handed, so the weapon in hand is
-		// the condition, not the intent to hold it.
 		if (melee == 0 || HeldId(bot) != melee)
 			return false;
 
@@ -437,10 +369,6 @@ namespace
 			0.f);
 		float dist = to.Length();
 
-		// Areas merge into non-convex prisms, so a straight line between two points in one area
-		// can still leave it. ResolveSpot is this file's own answer to that and covers the
-		// walk-connected neighbours too; when it fails there is nowhere safe to charge and the
-		// probe gets the frame back.
 		Spot spot;
 		bool backing = gpGlobals->time - bot.fire.lastShotTime < kDuelBackoff;
 
@@ -538,9 +466,6 @@ edict_t *BotCombat::Enemy(const CBot &bot)
 	return bot.combat.enemy.Get();
 }
 
-// Who just hurt this bot, if a player hurt it at all. Falling, drowning and crush damage all
-// arrive from worldspawn at edict index 0; a trigger_hurt is a brush entity that no player owns;
-// and a rocket or grenade names itself as the inflictor, carrying its shooter in pev->owner.
 edict_t *BotCombat::DamageSource(edict_t *pEdict)
 {
 	if (!pEdict || pEdict->v.dmg_take == 0.f)
