@@ -740,6 +740,12 @@ void OnRespawn(CBot &bot)
 
 void PrintCandidates(const Nav::NavMesh &mesh)
 {
+	if (!g_pGameProfile)
+	{
+		SERVER_PRINT("CrossBot: no game profile active\n");
+		return;
+	}
+
 	size_t shown = 0;
 
 	for (int i = gpGlobals->maxClients + 1; i < gpGlobals->maxEntities; ++i)
