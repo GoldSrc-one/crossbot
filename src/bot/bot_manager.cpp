@@ -6,6 +6,7 @@
 #include "bot_camp.h"
 #include "bot_combat.h"
 #include "bot_deploy.h"
+#include "bot_difficulty.h"
 #include "bot_fire.h"
 #include "bot_fun.h"
 #include "bot_goal.h"
@@ -35,8 +36,14 @@ IGameProfile *g_pGameProfile = nullptr;
 namespace
 {
 
-bool g_driftSpeedChecked = false;
 	constexpr int kMaxBots = 32;
+
+	constexpr int kMaxDriftSpeeds = 8;
+
+	float g_driftSpeeds[kMaxDriftSpeeds] = {};
+	int g_driftSpeedCount = 0;
+	bool g_driftScanned = false;
+	bool g_meshDrifts = false;
 
 	constexpr float kBeamRefresh = 0.25f;
 
@@ -122,7 +129,9 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 	Nav::LoadForMap(mapName);
 	BspTrace::LoadForMap(mapName);
 
-	g_driftSpeedChecked = false;
+	g_driftSpeedCount = 0;
+	g_driftScanned = false;
+	g_meshDrifts = false;
 }
 
 void ServerDeactivate()
@@ -203,6 +212,61 @@ namespace
 
 		BotTiming::EndBot(bot);
 	}
+
+	bool NoteDriftSpeed(float speed)
+	{
+		for (int i = 0; i < g_driftSpeedCount; ++i)
+		{
+			if (fabsf(g_driftSpeeds[i] - speed) <= 1.f)
+				return false;
+		}
+
+		if (g_driftSpeedCount >= kMaxDriftSpeeds)
+			return false;
+
+		g_driftSpeeds[g_driftSpeedCount++] = speed;
+		return true;
+	}
+
+	void CheckDriftSpeeds()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+			return;
+
+		if (!g_driftScanned)
+		{
+			g_driftScanned = true;
+			for (const Nav::Area &area : mesh->areas)
+			{
+				if (area.driftVelocity.x != 0.f || area.driftVelocity.y != 0.f)
+				{
+					g_meshDrifts = true;
+					break;
+				}
+			}
+		}
+
+		if (!g_meshDrifts || g_driftSpeedCount >= kMaxDriftSpeeds)
+			return;
+
+		for (const auto &bot : g_bots)
+		{
+			if (!bot.inUse || !bot.pEdict || !Bot_MoveMaxSpeedKnown(bot.pEdict))
+				continue;
+
+			float speed = Bot_MaxSpeed(bot.pEdict);
+			if (!NoteDriftSpeed(speed) || fabsf(speed - mesh->designMaxSpeed) <= 1.f)
+				continue;
+
+			char warn[256];
+			snprintf(warn, sizeof(warn),
+				"CrossBot: nav baked at %.0f u/s but %s runs at %.0f; conveyor and push-field "
+				"costs adapt per bot, but navgen pruned at the baked speed.\n",
+				mesh->designMaxSpeed, bot.name, speed);
+			SERVER_PRINT(warn);
+		}
+	}
 }
 
 void StartFrame()
@@ -230,35 +294,8 @@ void StartFrame()
 		XPlay::InGame(mapOwner, [] { BotSense::RefreshMonsters(); });
 	}
 
-	if (anyBot && !g_driftSpeedChecked)
-	{
-		g_driftSpeedChecked = true;
-
-		const Nav::NavMesh *mesh = Nav::Get();
-		float serverSpeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");
-		if (mesh && serverSpeed > 1.f && fabsf(serverSpeed - mesh->designMaxSpeed) > 1.f)
-		{
-			bool drifts = false;
-			for (const Nav::Area &area : mesh->areas)
-			{
-				if (area.driftVelocity.x != 0.f || area.driftVelocity.y != 0.f)
-				{
-					drifts = true;
-					break;
-				}
-			}
-
-			if (drifts)
-			{
-				char warn[256];
-				snprintf(warn, sizeof(warn),
-					"CrossBot: nav baked at %.0f u/s but sv_maxspeed is %.0f; conveyor and push-field "
-					"costs adapt per bot, but navgen pruned at the baked speed.\n",
-					mesh->designMaxSpeed, serverSpeed);
-				SERVER_PRINT(warn);
-			}
-		}
-	}
+	if (anyBot)
+		CheckDriftSpeeds();
 
 	for (auto &bot : g_bots)
 	{
@@ -537,21 +574,26 @@ void PrintAimStatus()
 
 		char line[512];
 		snprintf(line, sizeof(line),
-			"CrossBot: %s target=%s bone=%d leadblk=%d queue=%zu/%zu hist=%.2fs served=%.3fs "
-			"hand=%.0f deg/s brake=(%.3f,%.3f) fov=%.0f quant=%.4f view=(%.1f,%.1f) err=%s\n",
+			"CrossBot: %s target=%s bone=%d leadblk=%d queue=%zu/%zu hist=%.2fs delay=%.3fs "
+			"pred=%u served=%.3fs hand=%.0f deg/s brake=(%.3f,%.3f) fov=%.0f quant=%.4f "
+			"view=(%.1f,%.1f) err=%s\n",
 			bot.name, target ? CBotTargetNameOf(target) : "-", bot.sense.targetBone,
 			bot.sense.leadVetoes, bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot),
-			bot.aim.servedDelay, BotAim::ViewSpeed(bot), bot.aim.brakeYaw, bot.aim.brakePitch,
+			BotAim::Delay(bot), bot.aim.predicts, bot.aim.servedDelay, BotAim::ViewSpeed(bot), bot.aim.brakeYaw,
+			bot.aim.brakePitch,
 			fov, BotAim::Quantum() * fov / 90.f, view.x, view.y, errBuf);
 		SERVER_PRINT(line);
 	}
 
+	float delayLo = 0.f, delayHi = 0.f;
+	BotDiff::AimDelay(delayLo, delayHi);
+
 	char summary[256];
 	snprintf(summary, sizeof(summary),
-		"CrossBot: %d bot(s), sense=%d aim_delay=%.3f aim_error=%.2f aim_drift=%.2f "
-		"aim_quantum=%.4f aim_impulse=%.1f\n", shown,
-		BotSense::Enabled() ? 1 : 0, BotAim::Delay(), BotAim::ErrorScale(),
-		BotAim::DriftAmplitude(), BotAim::Quantum(), BotAim::Impulse());
+		"CrossBot: %d bot(s), sense=%d difficulty=%s aim_delay=%.3f-%.3f aim_error=%.2f "
+		"aim_drift=%.2f aim_quantum=%.4f aim_impulse=%.1f\n", shown,
+		BotSense::Enabled() ? 1 : 0, BotDiff::Name(BotDiff::Current()), delayLo, delayHi,
+		BotAim::ErrorScale(), BotAim::DriftAmplitude(), BotAim::Quantum(), BotAim::Impulse());
 	SERVER_PRINT(summary);
 }
 
@@ -823,13 +865,13 @@ void PrintCampStatus(const Vector *at)
 		SERVER_PRINT(line);
 
 		snprintf(line, sizeof(line),
-			"CrossBot:   stand  90/45/22.5/11.25: %.2f %.2f %.2f %.2f\n",
-			best->stand[0], best->stand[1], best->stand[2], best->stand[3]);
+			"CrossBot:   stand  score %.2f spread %.1f deg dist %.0f\n",
+			best->standScore, best->standSpread, best->standDist);
 		SERVER_PRINT(line);
 
 		snprintf(line, sizeof(line),
-			"CrossBot:   crouch 90/45/22.5/11.25: %.2f %.2f %.2f %.2f\n",
-			best->crouch[0], best->crouch[1], best->crouch[2], best->crouch[3]);
+			"CrossBot:   crouch score %.2f spread %.1f deg dist %.0f\n",
+			best->crouchScore, best->crouchSpread, best->crouchDist);
 		SERVER_PRINT(line);
 	};
 
@@ -892,7 +934,7 @@ void PrintVantageStatus(const Vector *at)
 	if (field.vantages.empty())
 		return;
 
-	auto report = [&](const char *who, const Vector &eye)
+	auto report = [&](const char *who, const Vector &eye, float yaw)
 	{
 		Nav::VantageBlend blend;
 		if (!Nav::BlendVantage(field, eye, blend))
@@ -917,15 +959,26 @@ void PrintVantageStatus(const Vector *at)
 			const Nav::VantageWatch &w = blend.watch[i];
 			char line[160];
 			snprintf(line, sizeof(line),
-				"CrossBot:   watch %d: yaw %.1f pitch %.1f spread %.1f amount %.3f\n", i, w.yaw,
-				w.pitch, w.spread, w.amount);
+				"CrossBot:   watch %d: yaw %.1f pitch %.1f spread %.1f amount %.3f dist %.0f\n", i,
+				w.yaw, w.pitch, w.spread, w.amount, w.dist);
 			SERVER_PRINT(line);
 		}
+
+		// The number routing actually reads: how far a fight reaches looking each way.
+		char open[224];
+		snprintf(open, sizeof(open),
+			"CrossBot:   open dist: facing(%.0f) %.0f | +x %.0f +y %.0f -x %.0f -y %.0f\n", yaw,
+			Nav::VantageOpenDistance(blend, Bot_YawDir(yaw)),
+			Nav::VantageOpenDistance(blend, Vector(1.f, 0.f, 0.f)),
+			Nav::VantageOpenDistance(blend, Vector(0.f, 1.f, 0.f)),
+			Nav::VantageOpenDistance(blend, Vector(-1.f, 0.f, 0.f)),
+			Nav::VantageOpenDistance(blend, Vector(0.f, -1.f, 0.f)));
+		SERVER_PRINT(open);
 	};
 
 	if (at)
 	{
-		report("point", *at);
+		report("point", *at, 0.f);
 		return;
 	}
 
@@ -938,13 +991,14 @@ void PrintVantageStatus(const Vector *at)
 		ScopedGame ctx(bot.gameDll);
 
 		++shown;
-		report(bot.name, bot.pEdict->v.origin + bot.pEdict->v.view_ofs);
+		report(bot.name, bot.pEdict->v.origin + bot.pEdict->v.view_ofs, bot.pEdict->v.v_angle.y);
 
 		char drive[224];
 		snprintf(drive, sizeof(drive),
-			"CrossBot:   view=(%.1f,%.1f) desired=(%.1f,%.1f) look=%s wp=%zu/%zu\n",
+			"CrossBot:   view=(%.1f,%.1f) desired=(%.1f,%.1f) look=%s glances=%u bhops=%u wp=%zu/%zu\n",
 			bot.pEdict->v.v_angle.x, bot.pEdict->v.v_angle.y, bot.desiredAngles.x,
 			bot.desiredAngles.y, BotSense::LookSourceName(bot.sense.lookSource),
+			bot.sense.backGlances, bot.bunnyHops,
 			bot.waypointIndex, bot.waypoints.size());
 		SERVER_PRINT(drive);
 	}

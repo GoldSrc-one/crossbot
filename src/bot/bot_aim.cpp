@@ -4,8 +4,11 @@
 #include <algorithm>
 
 #include "bot_aim.h"
+#include "bot_difficulty.h"
 #include "bot.h"
+#include "bot_combat.h"
 #include "bot_move.h"
+#include "bot_sense.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
 
@@ -32,7 +35,6 @@ namespace
 	constexpr float kBrakeSpread = 0.06f;
 	constexpr float kFlickMinError = 3.f;
 	constexpr float kFlickGrowth = 0.5f;
-	constexpr float kDefaultErrorScale = 1.f;
 	constexpr float kMaxErrorScale = 4.f;
 
 	constexpr float kDefaultDrift = 1.f;
@@ -46,9 +48,9 @@ namespace
 	constexpr float kDefaultImpulse = 15.f;
 	constexpr float kMaxImpulse = 100.f;
 
-	constexpr float kDefaultDelay = 0.25f;
-
 	constexpr float kDegenerateLos = 0.0001f;
+
+	constexpr float kPredictHorizon = 1.f;
 
 	float FovScale(edict_t *pEdict)
 	{
@@ -103,8 +105,8 @@ namespace
 		aim.flickMag = mag;
 	}
 
-	float StepAxis(float errAngle, float fovScale, float maxAccel, float brake, float dt,
-		float quantum, float impulse, float &vel, float &pending)
+	float StepAxis(float errAngle, float fovScale, float maxAccel, float handSpeed, float brake,
+		float dt, float quantum, float impulse, float &vel, float &pending)
 	{
 		float errHand = errAngle / fovScale;
 		float mag = fabsf(errHand);
@@ -115,8 +117,8 @@ namespace
 		float envelope = (sqrtf(2.f * maxAccel * mag + 0.25f * step * step) - 0.5f * step) * brake;
 		if (envelope < limit)
 			limit = envelope;
-		if (limit > kMaxHandSpeed)
-			limit = kMaxHandSpeed;
+		if (limit > handSpeed)
+			limit = handSpeed;
 
 		if (impulse > 0.f)
 		{
@@ -270,10 +272,28 @@ float BotAim::ViewSpeed(const CBot &bot)
 	return sqrtf(aim.yawVel * aim.yawVel + aim.pitchVel * aim.pitchVel);
 }
 
-float BotAim::Delay()
+void BotAim::RollDelay(CBot &bot)
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_delay");
-	float delay = cvar ? cvar->value : kDefaultDelay;
+	SeedAim(bot);
+
+	float lo = 0.f, hi = 0.f;
+	BotDiff::AimDelay(lo, hi);
+
+	BotAim::State &aim = bot.aim;
+	aim.engagementDelay = lo + RandomUnit(aim) * (hi - lo);
+	aim.delayRolled = true;
+}
+
+float BotAim::Delay(const CBot &bot)
+{
+	float delay = bot.aim.engagementDelay;
+	if (!bot.aim.delayRolled)
+	{
+		float lo = 0.f, hi = 0.f;
+		BotDiff::AimDelay(lo, hi);
+		delay = 0.5f * (lo + hi);
+	}
+
 	if (delay < 0.f)
 		delay = 0.f;
 	else if (delay > kMaxDelay)
@@ -283,8 +303,7 @@ float BotAim::Delay()
 
 float BotAim::ErrorScale()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_error");
-	float scale = cvar ? cvar->value : kDefaultErrorScale;
+	float scale = BotDiff::AimError();
 	if (scale < 0.f)
 		scale = 0.f;
 	else if (scale > kMaxErrorScale)
@@ -330,6 +349,39 @@ void BotAim::ClearDelayQueue(CBot &bot)
 {
 	bot.aim.delayHead = 0;
 	bot.aim.delayCount = 0;
+}
+
+float BotAim::RandomRoll(CBot &bot)
+{
+	SeedAim(bot);
+	return RandomUnit(bot.aim);
+}
+
+bool BotAim::ReadPredicted(CBot &bot, float delay, Vector &point, Vector *vel)
+{
+	bot.aim.predictedNow = false;
+
+	if (ReadDelayed(bot, delay, point, vel))
+		return true;
+
+	BotAim::State &aim = bot.aim;
+	if (aim.delayCount == 0 || !bot.sense.predictLatched || !bot.combat.active)
+		return false;
+
+	size_t newest = (aim.delayHead + BotAim::kDelaySlots - 1) % BotAim::kDelaySlots;
+	const BotAim::DelaySlot &slot = aim.delaySlots[newest];
+
+	float ahead = gpGlobals->time - delay - slot.time;
+	if (ahead <= 0.f || ahead > kPredictHorizon)
+		return false;
+
+	point = slot.point + slot.vel * ahead;
+	if (vel)
+		*vel = slot.vel;
+
+	bot.aim.predictedNow = true;
+	++bot.aim.predicts;
+	return true;
 }
 
 bool BotAim::AnglesToTarget(const CBot &bot, edict_t *target, float &yaw, float &pitch)
@@ -411,12 +463,17 @@ Vector Bot_UpdateFacing(CBot &bot)
 	float quantum = BotAim::Quantum();
 	float impulse = BotAim::Impulse();
 
+	float turn = BotDiff::TurnScale();
+	if (turn < 0.f)
+		turn = 0.f;
+	float handSpeed = kMaxHandSpeed * turn;
+
 	float yaw = Bot_NormalizeAngle(current.y +
-		StepAxis(yawErr, fovScale, kMaxAccelYaw, aim.brakeYaw, dt, quantum, impulse,
-			aim.yawVel, aim.yawPending));
+		StepAxis(yawErr, fovScale, kMaxAccelYaw * turn, handSpeed, aim.brakeYaw, dt, quantum,
+			impulse, aim.yawVel, aim.yawPending));
 	float pitch = current.x +
-		StepAxis(pitchErr, fovScale, kMaxAccelPitch, aim.brakePitch, dt, quantum, impulse,
-			aim.pitchVel, aim.pitchPending);
+		StepAxis(pitchErr, fovScale, kMaxAccelPitch * turn, handSpeed, aim.brakePitch, dt, quantum,
+			impulse, aim.pitchVel, aim.pitchPending);
 
 	if (pitch > kPitchLimit)
 	{

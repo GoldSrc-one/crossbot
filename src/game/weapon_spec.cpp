@@ -42,3 +42,13 @@ const char *WeaponAmmoName(WeaponAmmo ammo)
 	default:             return "none";
 	}
 }
+
+const char *WeaponRangeName(WeaponRangeClass range)
+{
+	switch (range)
+	{
+	case RANGE_CLOSE: return "close";
+	case RANGE_LONG:  return "long";
+	default:          return "none";
+	}
+}

@@ -124,8 +124,8 @@ void CollectCandidates(const std::vector<Area> &areas, const VantageParams &para
 	}
 }
 
-void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
-	const VantageParams &params, Vantage &vantage)
+void ExtractWatchDirs(const std::vector<double> &hist, const std::vector<double> &distHist,
+	const BinLayout &bins, const VantageParams &params, Vantage &vantage)
 {
 	double total = 0.0;
 	for (double w : hist)
@@ -174,6 +174,7 @@ void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
 
 		double weight = 0.0;
 		double angleSq = 0.0;
+		double distAcc = 0.0;
 		for (size_t b = 0; b < work.size(); ++b)
 		{
 			if (work[b] <= 0.0)
@@ -184,6 +185,7 @@ void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
 			double angle = std::acos(std::max(-1.0, std::min(1.0, d))) / kVisDeg;
 			weight += work[b];
 			angleSq += work[b] * angle * angle;
+			distAcc += distHist[b];
 			work[b] = 0.0;
 		}
 
@@ -194,6 +196,7 @@ void ExtractWatchDirs(const std::vector<double> &hist, const BinLayout &bins,
 		AnglesFromDir(dir, wd.yaw, wd.pitch);
 		wd.spread = std::sqrt(angleSq / weight);
 		wd.amount = weight / total;
+		wd.dist = distAcc / weight;
 		vantage.watch.push_back(wd);
 
 		remaining -= weight;
@@ -287,6 +290,12 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 
 	std::vector<std::atomic<uint32_t>> tally(count * binCount);
 	for (std::atomic<uint32_t> &slot : tally)
+		slot.store(0, std::memory_order_relaxed);
+
+	// Sightline lengths, summed per bin alongside the counts. Freed with the tally,
+	// so the extra footprint never overlaps the shape vectors built further down.
+	std::vector<std::atomic<uint32_t>> distTally(count * binCount);
+	for (std::atomic<uint32_t> &slot : distTally)
 		slot.store(0, std::memory_order_relaxed);
 
 	std::vector<size_t> order(count);
@@ -389,10 +398,13 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 				Vec3 d = vantages[j].pos - vantages[i].pos;
 				double yaw = 0.0, pitch = 0.0;
 				AnglesFromDir(d, yaw, pitch);
-				tally[i * binCount + bins.BinFor(yaw, pitch)].fetch_add(1,
-					std::memory_order_relaxed);
-				tally[j * binCount + bins.BinFor(yaw + 180.0, -pitch)].fetch_add(1,
-					std::memory_order_relaxed);
+				uint32_t len = static_cast<uint32_t>(d.Length());
+				size_t forward = i * binCount + bins.BinFor(yaw, pitch);
+				size_t backward = j * binCount + bins.BinFor(yaw + 180.0, -pitch);
+				tally[forward].fetch_add(1, std::memory_order_relaxed);
+				tally[backward].fetch_add(1, std::memory_order_relaxed);
+				distTally[forward].fetch_add(len, std::memory_order_relaxed);
+				distTally[backward].fetch_add(len, std::memory_order_relaxed);
 			}
 		}
 
@@ -419,14 +431,21 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 		std::chrono::steady_clock::now() - pairStart).count();
 
 	std::vector<std::vector<double>> hist(count);
+	std::vector<std::vector<double>> distHist(count);
 	for (size_t i = 0; i < count; ++i)
 	{
 		hist[i].resize(binCount, 0.0);
+		distHist[i].resize(binCount, 0.0);
 		for (size_t b = 0; b < binCount; ++b)
+		{
 			hist[i][b] = static_cast<double>(tally[i * binCount + b].load(std::memory_order_relaxed));
+			distHist[i][b] =
+				static_cast<double>(distTally[i * binCount + b].load(std::memory_order_relaxed));
+		}
 	}
 
 	tally = std::vector<std::atomic<uint32_t>>();
+	distTally = std::vector<std::atomic<uint32_t>>();
 
 	std::chrono::steady_clock::time_point deriveStart = std::chrono::steady_clock::now();
 
@@ -438,8 +457,11 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 			sum += w;
 		vantages[i].exposure = sum / denom;
 		stats.maxExposure = std::max(stats.maxExposure, vantages[i].exposure);
-		ExtractWatchDirs(hist[i], bins, params, vantages[i]);
+		ExtractWatchDirs(hist[i], distHist[i], bins, params, vantages[i]);
 	}
+
+	distHist.clear();
+	distHist.shrink_to_fit();
 
 	stats.deriveSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now() - deriveStart).count();
@@ -602,6 +624,19 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	}
 
 	stats.kept = kept.size();
+
+	double distSum = 0.0;
+	size_t distCount = 0;
+	for (const Vantage &v : kept)
+	{
+		for (const WatchDir &wd : v.watch)
+		{
+			distSum += wd.dist;
+			++distCount;
+			stats.maxWatchDist = std::max(stats.maxWatchDist, wd.dist);
+		}
+	}
+	stats.meanWatchDist = (distCount > 0) ? distSum / static_cast<double>(distCount) : 0.0;
 	stats.reduceSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now() - reduceStart).count() - stats.verifySeconds;
 

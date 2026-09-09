@@ -48,6 +48,8 @@ namespace BotItems
 	void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
 		std::vector<BotGoal::Candidate> &out);
 
+	void Prioritize(std::vector<BotGoal::Candidate> &cands);
+
 	void Accept(CBot &bot, const BotGoal::Candidate &cand);
 
 	bool UpdateGoalItem(CBot &bot);

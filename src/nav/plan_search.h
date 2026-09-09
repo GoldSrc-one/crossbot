@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -8,6 +9,38 @@
 
 namespace NavPlan
 {
+
+// How much the equipped weapon's preferred engagement range should bend a route.
+// weight 0 leaves the search exactly as it was; at 0.5 a route that fights on the
+// right ground may take twice as long in seconds and still win.
+struct RangeBias
+{
+	float weight = 0.f;
+	float shortDist = 512.f;
+	float longDist = 1024.f;
+	bool preferLong = false;
+
+	// 0 = ideal ground for this weapon, 1 = worst.
+	float Mismatch(float openDist) const
+	{
+		float span = std::max(1.f, longDist - shortDist);
+		float t = std::max(0.f, std::min(1.f, (openDist - shortDist) / span));
+		return preferLong ? (1.f - t) : t;
+	}
+
+	// Clamped here rather than at the call sites: a weight above 1 would make the
+	// multiplier negative, which is a negative edge cost in both searches.
+	float Weight() const { return std::max(0.f, std::min(1.f, weight)); }
+
+	float Scale(float openDist) const
+	{
+		float w = Weight();
+		return 1.f - w + w * Mismatch(openDist);
+	}
+
+	// Cheapest multiplier any edge can earn; keeps the A* heuristic admissible.
+	float BestScale() const { return 1.f - Weight(); }
+};
 
 struct PlannedRoute
 {
@@ -28,6 +61,6 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	const std::vector<PlanConnection> &planConns, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint, const PlanTraceContext *traces = nullptr,
 	PlanStats *stats = nullptr, float careful = 0.f, float minExposure = 1.f,
-	float maxSpeed = crossbot_nav::kNavDefaultDesignSpeed);
+	float maxSpeed = crossbot_nav::kNavDefaultDesignSpeed, const RangeBias &range = RangeBias());
 
 }

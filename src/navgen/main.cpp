@@ -2205,12 +2205,13 @@ int main(int argc, char **argv)
 
 			std::printf("%s: vantage field: %zu lattice points, %zu sampled (%zu solid), "
 				"%zu/%zu pairs passed PVS, %zu visible, %zu kept (budget %zu over %.0f sq units), "
-				"reduction err mean %.5f max %.5f\n",
+				"reduction err mean %.5f max %.5f, watch dist mean %.0f max %.0f\n",
 				bspPath.c_str(), vantageStats.latticePoints, vantageStats.sampled,
 				vantageStats.solidRejected, vantageStats.pvsPairs, vantageStats.totalPairs,
 				vantageStats.visiblePairs, vantageStats.kept, vantageStats.budget,
 				vantageStats.footprintArea, vantageStats.meanReductionError,
-				vantageStats.maxReductionError);
+				vantageStats.maxReductionError, vantageStats.meanWatchDist,
+				vantageStats.maxWatchDist);
 
 			double vantageTotal = vantageStats.candidateSeconds + vantageStats.leafSeconds +
 				vantageStats.pairSeconds + vantageStats.deriveSeconds + vantageStats.reduceSeconds;

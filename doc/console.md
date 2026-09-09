@@ -49,8 +49,10 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   and carried counts, both attack timers, and a `*` on the active one; see `doc/bot.md`,
   `bot_weapons.cpp`
 - `crossbot_weaponspec [name]` — how each gun is operated. With no argument, dumps the whole
-  weapon table: per weapon id, the classname and clip size, then one line per firing mode with its
-  button pattern, aim requirement, toggle, ammo pool and ballistics. With a player name, joins that
+  weapon table: per weapon id, the classname, clip size, `value`, range class and scope FOV, then one
+  line per firing mode with its button pattern, aim requirement, toggle, ammo pool and ballistics. The
+  range class is what bends routing toward ground the gun can use (`doc/bot.md`, "Range bias") and the
+  scope FOV is what decides whether a camp spot is worth zooming into. With a player name, joins that
   player's carried weapons against their specs and flags any classname that disagrees, which is the
   one way the id-keyed table can be wrong; see `doc/game.md`, `weapon_spec.h`
 - `crossbot_equip <classname> [name]` — spawn an item at the target's feet and touch them with it,
@@ -160,6 +162,17 @@ it appears from both sides of the aim-queue boundary and means the same thing on
   (`IGameProfile::AmmoEntity`, see `doc/game.md`). It gives only when the mode is *unusable*, never on
   a timer, so reloading and clip depletion stay real and only permanent starvation is removed. Before
   this, an RPG run reached one rocket per bot per life.
+
+## crossbot_difficulty_status
+
+Prints the resolved tier and every row of the difficulty ladder with its effective value and
+whether it came from the tier or from a pinned cvar. This is the only way to audit the ladder from
+a live server: every difficulty-derived cvar defaults to -1 and reads as "tier", so a stale
+`crossbot_aim_delay 0.25` left behind by a test script is otherwise invisible and silently
+overrides the difficulty for the rest of the session. See `doc/bot.md`, `bot_difficulty.cpp`.
+
+The ladder itself is one global setting, `crossbot_difficulty` 0-3 (easy/normal/hard/expert),
+modelled on the CS bot's `cv_bot_difficulty`. Normal is the behaviour that predates it.
 
 ## No console line may reach 1024 characters
 
@@ -276,7 +289,9 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`
-- `crossbot_oppo_jump` — opportunistic jumping. Default 1
+- `crossbot_oppo_jump` — opportunistic jumping. Default -1, following `crossbot_difficulty`,
+  which enables it at every tier; 0 forces it off and 1 forces it on. The retry throttle is
+  `crossbot_oppo_interval`, which easy halves to 0.5s
 - `crossbot_time_debug` — movement-clock diagnostics. Default 0. Once a second prints the server's own
   frame budget, then one line per bot: msec issued versus that budget, how much of it the engine
   actually ran (`SV_RunCmd` silently drops commands while the `clockwindow` guard is armed, which is
@@ -284,14 +299,17 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   a `chain` line showing the whole bot loop in order with the msec each one saw and issued. A bot
   getting less sim time per second than the wall clock is the "honey mode" symptom -- slow running and
   slow gravity together; see `doc/bot.md`, *Bot_BeginFrame and Bot_FrameTime*
-- `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default 0.3. Inert unless
-  `crossbot_sense` is on, since vision is what feeds the queue
+- `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default -1, meaning the
+  delay comes from `crossbot_difficulty` as a per-engagement roll inside that tier's band. Any value
+  `>= 0` pins it to a fixed point value instead. Inert unless `crossbot_sense` is on, since vision is
+  what feeds the queue
 - `crossbot_sense` — the whole sense system: vision, heard sounds and events, damage, and the suspicion
   list that drives where the bot looks when it has no target. Default 1, held there by a 45/45 nav sweep
   at both settings; see `doc/bot.md`, `bot_sense.cpp`
 - `crossbot_sense_decay` — suspicion weight and decay window in seconds, clamped [0.1, 60]. Default 5.
   Doubles as the blend authority: a suspicion this old has zero pull on the view
-- `crossbot_aim_error` — scale on the intentional over/undershoot, clamped [0, 4]. Default 1. At 0 the brake
+- `crossbot_aim_error` — scale on the intentional over/undershoot, clamped [0, 4]. Default -1,
+  following `crossbot_difficulty` (2.0 easy down to 0.35 expert). At 0 the brake
   is forced to exactly 1 and the controller is time-optimal again, which is the regression baseline
   `scripts/test_aim_error.ps1` measures against. Above 1 is for seeing the effect, not for playing against
 - `crossbot_fire` — whether bots shoot at all. Default 1. Inert without `crossbot_sense`, since firing

@@ -74,8 +74,9 @@ constexpr const char *kVantageArea = "#5a6470";
 constexpr const char *kWatchRank[4] = {"#ff7043", "#ffd54f", "#4fc3f7", "#ab7ddb"};
 constexpr const char *kCampRing = "#ffffff";
 constexpr const char *kCampClimb = "#9aa7b4";
-constexpr const char *kCampArcRank[4] = {"#4fc3f7", "#9ccc65", "#ffd54f", "#ff7043"};
-const double kCampArcHalf[4] = {45.0, 22.5, 11.25, 5.625};
+// Banded on the spot's spread, tightest first: a narrow sweep is a sniper's lane.
+constexpr const char *kCampSpreadColor[4] = {"#ff7043", "#ffd54f", "#9ccc65", "#4fc3f7"};
+const double kCampSpreadBand[4] = {5.625, 11.25, 22.5, 45.0};
 
 constexpr double kVantageAreaOpacity = 0.35;
 
@@ -628,6 +629,7 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 	std::fprintf(f, "</g>\n");
 
 	double maxExposure = std::max(1e-9, stats.maxExposure);
+	double maxWatchDist = std::max(1e-9, stats.maxWatchDist);
 	double maxRadius = unit * 7.0;
 	double minRadius = unit * 1.2;
 
@@ -642,8 +644,9 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 				vi, v.pos.x, v.pos.y, v.pos.z, v.exposure, 100.0 * v.exposure / maxExposure);
 		for (size_t w = 0; w < v.watch.size(); ++w)
 		{
-			std::fprintf(f, "\nwatch %zu: yaw %.1f pitch %.1f spread %.1f amount %.3f", w,
-				v.watch[w].yaw, v.watch[w].pitch, v.watch[w].spread, v.watch[w].amount);
+			std::fprintf(f, "\nwatch %zu: yaw %.1f pitch %.1f spread %.1f amount %.3f dist %.0f", w,
+				v.watch[w].yaw, v.watch[w].pitch, v.watch[w].spread, v.watch[w].amount,
+				v.watch[w].dist);
 		}
 		std::fprintf(f, "</title>\n");
 
@@ -651,7 +654,8 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 		{
 			const WatchDir &wd = v.watch[rank];
 			double half = std::max(4.0, std::min(80.0, wd.spread));
-			double radius = std::max(minRadius, maxRadius * wd.amount);
+			// Reach, not weight: the picture is of how far a fight carries each way.
+			double radius = std::max(minRadius, maxRadius * (wd.dist / maxWatchDist));
 			double a0 = (wd.yaw - half) * 3.14159265358979323846 / 180.0;
 			double a1 = (wd.yaw + half) * 3.14159265358979323846 / 180.0;
 
@@ -724,7 +728,7 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 		SwatchRow(kWatchRank[1], "watch dir 2");
 		SwatchRow(kWatchRank[2], "watch dir 3");
 		SwatchRow(kWatchRank[3], "watch dir 4");
-		Label("wedge radius: amount, angle: spread");
+		Label("wedge radius: mean sight distance, angle: spread");
 
 		char line[160];
 		std::snprintf(line, sizeof(line), "%zu sampled -&gt; %zu kept (budget %zu)", stats.sampled,
@@ -807,8 +811,12 @@ void WriteCampSvg(const std::string &path, const std::string &mapName, const std
 	std::fprintf(f, "</g>\n");
 
 	double maxScore = 1e-9;
+	double maxDist = 1e-9;
 	for (const CampSpot &spot : camps)
+	{
 		maxScore = std::max(maxScore, spot.score);
+		maxDist = std::max(maxDist, std::max(spot.standDist, spot.crouchDist));
+	}
 
 	std::fprintf(f, "<g stroke=\"%s\" stroke-width=\"%.2f\" stroke-opacity=\"0.55\" fill=\"none\">\n",
 		kCampClimb, unit * 0.35);
@@ -831,24 +839,33 @@ void WriteCampSvg(const std::string &path, const std::string &mapName, const std
 		double cy = -spot.pos.y;
 		double norm = spot.score / maxScore;
 
+		bool standWins = spot.standScore >= spot.crouchScore &&
+			(spot.flags & crossbot_nav::CAMP_NO_STAND) == 0;
+		double spread = standWins ? spot.standSpread : spot.crouchSpread;
+		double dist = standWins ? spot.standDist : spot.crouchDist;
+
 		std::fprintf(f, "<g>\n");
 		std::fprintf(f, "<title>#%zu  pos %.0f %.0f %.0f  area %d\nyaw %.1f pitch %.1f  score %.2f "
-			"(%.0f%% of map max)\nstand  90/45/22.5/11.25: %.2f %.2f %.2f %.2f\n"
-			"crouch 90/45/22.5/11.25: %.2f %.2f %.2f %.2f\nclimb %zu steps%s</title>\n",
+			"(%.0f%% of map max)\nstand  score %.2f spread %.1f dist %.0f\n"
+			"crouch score %.2f spread %.1f dist %.0f\nclimb %zu steps%s</title>\n",
 			si, spot.pos.x, spot.pos.y, spot.pos.z, spot.areaId, spot.yaw, spot.pitch, spot.score,
-			100.0 * norm, spot.stand[0], spot.stand[1], spot.stand[2], spot.stand[3],
-			spot.crouch[0], spot.crouch[1], spot.crouch[2], spot.crouch[3], spot.climbSteps,
+			100.0 * norm, spot.standScore, spot.standSpread, spot.standDist,
+			spot.crouchScore, spot.crouchSpread, spot.crouchDist, spot.climbSteps,
 			(spot.flags & crossbot_nav::CAMP_NO_STAND) ? "  (crouch only)" : "");
 
-		double tightest = 0.0;
-		for (size_t k = 0; k < kCampArcs; ++k)
+		size_t band = 3;
+		for (size_t k = 0; k < 4; ++k)
 		{
-			if (std::max(spot.stand[k], spot.crouch[k]) >= 1.0)
-				tightest = static_cast<double>(k);
+			if (spread <= kCampSpreadBand[k])
+			{
+				band = k;
+				break;
+			}
 		}
 
-		double half = kCampArcHalf[static_cast<size_t>(tightest)];
-		double radius = std::max(unit * 1.5, maxRadius * norm);
+		// The wedge is what the camper sweeps; its reach is how far the spot actually sees.
+		double half = std::max(1.5, std::min(90.0, spread));
+		double radius = std::max(unit * 1.5, maxRadius * (dist / maxDist));
 		double a0 = (spot.yaw - half) * 3.14159265358979323846 / 180.0;
 		double a1 = (spot.yaw + half) * 3.14159265358979323846 / 180.0;
 
@@ -862,8 +879,7 @@ void WriteCampSvg(const std::string &path, const std::string &mapName, const std
 		std::fprintf(f,
 			"<path d=\"M%.1f,%.1f L%.1f,%.1f A%.1f,%.1f 0 %d,1 %.1f,%.1f Z\" fill=\"%s\" "
 			"fill-opacity=\"0.45\"/>\n",
-			cx, cy, x0, y0, radius, radius, largeArc, x1, y1,
-			kCampArcRank[static_cast<size_t>(tightest)]);
+			cx, cy, x0, y0, radius, radius, largeArc, x1, y1, kCampSpreadColor[band]);
 
 		char color[16];
 		ExposureColor(norm, color, sizeof(color));
@@ -917,11 +933,11 @@ void WriteCampSvg(const std::string &path, const std::string &mapName, const std
 			lx + unit * 13.5, ly, fontSize, kLabelText, maxScore);
 		ly += lh;
 
-		SwatchRow(kCampArcRank[0], "tightest arc with ratio &gt;= 1: 90 FOV");
-		SwatchRow(kCampArcRank[1], "45 FOV");
-		SwatchRow(kCampArcRank[2], "22.5 FOV");
-		SwatchRow(kCampArcRank[3], "11.25 FOV (sniper)");
-		Label("wedge radius: score, angle: that arc");
+		SwatchRow(kCampSpreadColor[0], "spread &lt;= 5.6 deg (sniper)");
+		SwatchRow(kCampSpreadColor[1], "spread &lt;= 11.25 deg");
+		SwatchRow(kCampSpreadColor[2], "spread &lt;= 22.5 deg");
+		SwatchRow(kCampSpreadColor[3], "spread wider");
+		Label("wedge angle: spread, radius: mean sight distance");
 
 		std::fprintf(f, "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.2f\" fill=\"#888888\" stroke=\"%s\" stroke-width=\"%.2f\"/>\n",
 			lx + swatchW * 0.5, ly - unit * 0.8, unit * 0.8, kCampRing, unit * 0.5);

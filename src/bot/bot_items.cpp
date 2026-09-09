@@ -579,6 +579,30 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float>
 	}
 }
 
+void Prioritize(std::vector<BotGoal::Candidate> &cands)
+{
+	if (!g_pGameProfile)
+		return;
+
+	bool any = false;
+	for (const BotGoal::Candidate &cand : cands)
+	{
+		if (g_pGameProfile->ItemPreferred(cand.ent, static_cast<ItemKind>(cand.payload)))
+		{
+			any = true;
+			break;
+		}
+	}
+
+	if (!any)
+		return;
+
+	cands.erase(std::remove_if(cands.begin(), cands.end(),
+		[](const BotGoal::Candidate &cand) {
+			return !g_pGameProfile->ItemPreferred(cand.ent, static_cast<ItemKind>(cand.payload));
+		}), cands.end());
+}
+
 void Accept(CBot &bot, const BotGoal::Candidate &cand)
 {
 	ForgetGoalItem(bot);

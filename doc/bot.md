@@ -77,6 +77,33 @@ distort the cost values.
 **It is sampled once, at repath time, and baked into the route.** A bot that arms itself halfway along
 a timid route finishes that route; carefulness only refreshes on the repaths that already happen.
 
+### Range bias
+
+Carefulness has a mirror. Every weapon is annotated `RANGE_CLOSE` or `RANGE_LONG` in `WeaponSpec`
+(`doc/game.md`), and `Bot_RangeBias` turns the held weapon's class into a `NavPlan::RangeBias` whose
+weight is `readiness` scaled by `crossbot_range_pref` -- the complement of carefulness, which scales
+by `(1 - readiness)`. The two multiply, so neither is lost: a hurt, badly armed bot ignores weapon
+range and just avoids exposed ground, while a healthy, well armed one shapes its route to suit what it
+is holding. It goes to the same two searches, `Nav::PlanPath` from `Repath` and `Nav::AreaCosts` from
+`SelectGoal`, and `BotOppo::RebuildCosts` leaves it at its zero default for the same reason it leaves
+carefulness at 0.
+
+What the route is weighed against is the connection's mean open sight distance in the direction it is
+crossed (`doc/nav.md`, "Range bias: routing to ground the weapon can use"). A shotgun is happy below
+`crossbot_range_short` (512), a crossbow wants above `crossbot_range_long` (1024), and in between the
+penalty ramps. Both are cvars because the right numbers are per map: on crossfire the per-connection
+open distance runs a mean of 530 and a max of 1584, so measure with `crossbot_vantage_status` before
+trusting the defaults.
+
+**Unlike carefulness, this one can invalidate a route in flight.** A route planned for a shotgun is
+the wrong route once the crossbow comes out, so the nav update forces a repath when the live weapon's
+class differs from `bot.plannedRangeClass`. Comparing the class rather than the weapon id means
+swapping between two close-range guns costs nothing.
+
+`crossbot_range_pin` (-1) forces the weight the way `crossbot_careful_pin` does, and
+`crossbot_range_force` (-1, else 1 = close / 2 = long) forces the class without holding the weapon.
+Together they make an A/B of the same start and goal deterministic.
+
 ## bot_goal.cpp
 
 Owns *what the bot wants*, in three tiers: `GOAL_STRATEGIC` (`bot_strategic.cpp`, plus the
@@ -257,16 +284,23 @@ holds the measured facing -- ahead of the vantage blend, because the blend descr
 and the camp facing describes this exact spot.
 
 **Stance is biased toward crouching:** duck unless standing sees more than 5% more
-(`crouch >= 0.95 * stand`, summed over the four arcs), and always duck on `CAMP_NO_STAND`. A camper is
-a smaller and steadier target, so the tie and the near-tie both go to crouch, and only a spot that
-genuinely needs the extra 34 units of eye height gets the bot to stand up.
+(`crouchScore >= 0.95 * standScore`), and always duck on `CAMP_NO_STAND`. A camper is a smaller and
+steadier target, so the tie and the near-tie both go to crouch, and only a spot that genuinely needs
+the extra 34 units of eye height gets the bot to stand up.
 
-**Zoom is a property of the spot, not of the moment.** The four arcs are nested FOVs 90/45/22.5/11.25,
-so `arc[2] >= 0.9 * arc[0]` means the 22.5 cone already accounts for nearly everything the 90 cone
-sees: the spot watches one corridor and the scope costs no coverage. `BotFire::ZoomButtons` still owns
-the toggle -- it used to bail on `!fire.aimValid`, which is precisely the camping case, and now asks
-`BotCamp::WantZoom` instead. The camp module holds one opinion at a time and keeps holding it after it
-leaves, until the weapon agrees, which is what gets the scope back down.
+**Zoom is a property of the spot, not of the moment.** The spot's `spread` is the RMS angle its
+visible targets sit off the measured facing, so twice it is the arc the camper actually has to sweep.
+Zoom when that sweep fits inside the scope -- `spread * 2 <= zoomFov * crossbot_camp_zoom` -- and the
+targets are far enough away for magnification to buy anything (`dist >= crossbot_camp_zoom_dist`).
+`zoomFov` is `WeaponSpec::zoomFov` of whatever the bot holds when `BuildRoute` runs, so a bot with no
+scope never plans to zoom. `BotFire::ZoomButtons` still owns the toggle -- it used to bail on
+`!fire.aimValid`, which is precisely the camping case, and now asks `BotCamp::WantZoom` instead. The
+camp module holds one opinion at a time and keeps holding it after it leaves, until the weapon agrees,
+which is what gets the scope back down.
+
+This replaced a nested-arc test (`arc[2] >= 0.9 * arc[0]` over FOVs 90/45/22.5/11.25). One spread says
+the same thing in one number, and the arcs never carried a range at all, so the "is it far enough to
+be worth a scope" half of the question could not be asked.
 
 ### On leaving
 
@@ -285,8 +319,10 @@ committed, 22 abandoned by the travel check, 26 reached and held, 21 ended by th
 
 `crossbot_camp` (1), `crossbot_camp_budget` (3s, the detour budget in `BuildRoute` -- tighter than
 `crossbot_detour_budget`'s 6s because camping is a sidestep), `crossbot_camp_radius` (1024),
-`crossbot_camp_reach` (512), `crossbot_camp_debug` (0, gates the per-retarget route line and the
-scare transitions; the commit, arrival and leave lines are plain `BOT_VLOG`).
+`crossbot_camp_reach` (512), `crossbot_camp_zoom` (0.85, the share of the zoomed FOV the sweep may
+fill), `crossbot_camp_zoom_dist` (768, the range below which a scope buys nothing),
+`crossbot_camp_debug` (0, gates the per-retarget route line and the scare transitions; the commit,
+arrival and leave lines are plain `BOT_VLOG`).
 
 ## bot_strategic.cpp
 
@@ -921,6 +957,288 @@ model is broken, not the mesh.
 
 It is deliberately verbose: ~130 lines per selection on crossfire, at up to 2 Hz per bot while a bot
 has nothing to go for. Leave it off unless reading the log.
+
+## bot_difficulty.cpp
+
+### One global tier, read fresh every frame
+
+`crossbot_difficulty` is a single server cvar, 0-3, easy/normal/hard/expert. Today's behaviour is
+**normal**: easy is a handicap, hard and expert are additive competence. Nothing is per-bot -- the
+only per-bot variation in the tree is RNG phase, which randomises texture rather than skill.
+
+The model is the CS bot, vendored at `external/hlsdk-full/game_shared/bot/`: one `cv_bot_difficulty`,
+an enum `BOT_EASY..BOT_EXPERT` (`bot_constants.h:27`), tiers that are cumulative.
+
+Every accessor reads its cvar on every call, with no caching. That is deliberate and matches the rest
+of the tree: an `rcon crossbot_difficulty 3` has to land on the next frame, and `CBot` has no natural
+per-frame refresh point -- `Bot_MoveNav` has ten early returns, so "start of frame" is not one place.
+The cost is two `pfnCVarGetPointer` string walks per accessor call, which is noise against the
+traceline budget. If `crossbot_perf` ever disagrees, cache the `cvar_t*` pointers in file statics and
+keep reading `->value` fresh; do not cache values.
+
+### The ladder
+
+| | easy `0` | normal `1` | hard `2` | expert `3` |
+|---|---|---|---|---|
+| `aimDelay` mid -> range | 0.40 -> .32-.48 | 0.30 -> .24-.36 | 0.25 -> .20-.30 | 0.20 -> .16-.24 |
+| `aimError` scale | 2.00 | 1.00 | 0.60 | 0.35 |
+| `turnScale` | 0.85 | 1.00 | 1.10 | 1.20 |
+| `oppoInterval` | 0.50 | 0.25 | 0.25 | 0.25 |
+| `backPeriod` mid -> range | off | off | 1.50 -> 1.0-2.0 | 1.125 -> .75-1.5 |
+| `headPct` | 0 | 0 | 60 | 90 |
+| `predictPct` | 0 | 0 | 70 | 90 |
+| `combatInterrupt` | yes | yes | yes | **no** |
+| `camp` | yes | yes | yes | **no** |
+| `ambushOverride` | yes | yes | yes | **no** |
+| `pickupPriority` | -- | -- | -- | **yes** |
+| `gaussPolicy` | -- | -- | -- | **yes** |
+| `bunnyHop` | -- | -- | -- | **yes** |
+
+Easy and normal differ only in the two handicap numbers. Everything easy would otherwise "lose" is
+behaviour normal already has, so there is nothing to take away.
+
+Both ranges are one midpoint plus a shared spread constant, so the cvar that pins either stays a
+single number: `kDelaySpread = 0.2` and `kBackSpread = 1/3`. The latter reproduces the two requested
+back-check bands exactly. Easy's 0.48 stays under `BotAim::kMaxDelay = 0.5`.
+
+**Normal's aim delay midpoint is 0.30, not 0.25.** Hard has to be *shorter* than normal, so normal is
+the registered cvar default rather than the old compiled fallback `kDefaultDelay = 0.25`. Those two
+disagreed for a long time; this resolves it in favour of the cvar and deletes the constant.
+
+### The pin rule
+
+> A difficulty-derived cvar defaults to `-1`. Negative means *derive from the tier*. Any value `>= 0`
+> is an operator override and wins outright; for booleans `0` forces off and `1` forces on.
+
+Same semantics as `crossbot_careful_pin` and `crossbot_range_pin`, applied to the *existing* cvar
+rather than adding a second knob for one number. The other direction is not implementable: "did the
+operator set this?" is not observable through `cvar_t`, because the engine reallocs `->string` on
+every set.
+
+Three boolean reads had to be rewritten rather than just re-defaulted. `BotCamp::Enabled`,
+`BotOppo::Enabled` and `BotCombat::AmbushEnabled` were all of the form `cvar->value != 0.f`, which
+reads `-1` as *on* and would have silently pinned all three the moment the default changed.
+
+`crossbot_difficulty_status` prints the resolved tier and every row with its effective value and
+whether it came from the tier or a pin. That command is the only way to audit the ladder from a live
+server, so it exists from the first commit rather than being added later.
+
+### What each tier flag reaches
+
+| flag | site |
+|---|---|
+| `aimDelay` | `BotAim::Delay`, feeding the lead push in `UpdateVision`, `ApplyLook` and `BotFire::Think` |
+| `aimError` | `BotAim::ErrorScale` |
+| `turnScale` | `Bot_UpdateFacing`, scaling `kMaxAccelYaw` / `kMaxAccelPitch` / `kMaxHandSpeed` |
+| `oppoInterval` | `BotOppo::TryJump`'s retry throttle |
+| `backPeriod` | the back-check in `BotSense::ApplyLook` |
+| `headPct` | `SamplePoint` via the per-engagement `headLatched` |
+| `predictPct` | `BotAim::ReadPredicted` via the per-loss `predictLatched` |
+| `combatInterrupt` | the movement takeover in `BotCombat::Run` |
+| `camp` | `BotCamp::Enabled`, one choke point over `BuildRoute` / `Consider` / `Run` |
+| `ambushOverride` | `BotCombat::AmbushEnabled`, reaching the ambush branch of `BotFire::Think` |
+| `pickupPriority` | `BotItems::Prioritize`, called from *both* goal paths -- see below |
+| `gaussPolicy` | `ChargeTime`, `WeaponScore`, `ModeViable`, `ZoomButtons` and `BotGauss` |
+| `bunnyHop` | `BotOppo::WantBunnyHop` |
+
+### The delay is rolled per engagement, not per frame
+
+`BotAim::Delay` returns a value rolled once when the engagement starts, at the same site that already
+clears the ring on a target change. This is a correctness constraint, not a flavour one: the delay is
+an *offset into a ring buffer*, and re-rolling it per frame would make the served point jitter
+backwards and forwards through the history.
+
+The idea is YaPB's (`float reaction[2]`, rolled with `rg()` at `src/botlib.cpp:336`). A single scalar
+makes every bot on the server react on the same metronome, which reads as a machine rather than as a
+lobby of players. Measured: two bots on crossfire at hard held 0.177 and 0.233 simultaneously, each
+stable across frames, and re-rolled into easy's band (0.374) on their next target change.
+
+`aimError` and `turnScale` are also YaPB's idea (`aimError`, and the controller stiffening at
+`src/vision.cpp:160`). Without them the tiers differ only in *latency*, which reads as lag rather than
+as skill. Unlike YaPB, expert aim error is 0.35 rather than zero: YaPB's aim error is a random offset,
+so deleting it just makes the bot accurate, whereas this one is a hand model -- drift phase, quantum,
+impulse, brake -- and zeroing it removes the human texture the whole of `bot_aim.cpp` exists to
+produce. An expert should be fast and correct, not inhumanly still.
+
+### Head aiming and shooting blind are probabilities, and both latch
+
+`headPct` and `predictPct` are percentages rather than booleans for the reason YaPB's are: a bot that
+*always* goes for the head and *always* fires through walls reads as a cheat rather than as a strong
+player. Neither reaches 100 even at expert.
+
+Both latch. `headLatched` is rolled once per engagement, because `SamplePoint` re-rolls its bone every
+single frame and a per-frame head/body coin flip makes the aim visibly shaky -- YaPB latches for the
+same stated reason (`m_enemyBodyPartSet`, `src/combat.cpp:746`). `predictLatched` is rolled once per
+loss of sight, or the bot strobes between tracking and forgetting several times a second.
+
+The head bone is found once per model in `BuildBoneSet` by looking for hitgroup 1, so the runtime pick
+is an index rather than a search. `TraceVisible` tries it first and falls back to the ordinary uniform
+pick when the head trace fails, which costs one extra traceline on the engagements that rolled head
+and nothing on the others. Measured on crossfire: expert picked bone 39 on 18 of 18 on-target samples;
+normal spread 8 samples over 8 different bones.
+
+### Predicting an enemy you cannot see
+
+`BotFire::Think` gates everything on `BotAim::ReadDelayed`, and the ring is only fed while the target
+is visible -- so when an enemy breaks line of sight the queue drains and the bot stops both aiming and
+firing. `BotAim::ReadPredicted` wraps it: when the ring is dry it dead-reckons the *newest* slot
+forward using the velocity stored beside it.
+
+Reusing the ring is what makes this small. The newest slot already holds the last point actually seen
+together with the velocity it had, so there is no new last-known state to maintain and no second
+memory to keep in sync with `sense.enemyPos`. The horizon is `kPredictHorizon = 1s`; beyond that the
+extrapolation is fiction.
+
+Leading and the decision to shoot need no new code at all. `SolveLead` already leads `AIM_LEAD` modes
+off the velocity that comes back with the point, so a predicted position is led exactly like a visible
+one, and `RayOnTarget` already boxes the served point and traces for occlusion -- "if the led position
+can be hit, shoot" is the existing gate applied to a new point, and a wall between bot and prediction
+refuses the shot on its own.
+
+`LOOK_PREDICT` under-reports. `BotFire::AimPoint` is consulted first in `ApplyLook`, so a predicted
+shot usually surfaces as `look=aim`. The honest signal is the cumulative `pred=` counter in
+`crossbot_aim_status`, for the same reason `visionKeep` has a cumulative tally beside it: a one-frame
+sample of a one-second window proves nothing. Measured over equal fight time on crossfire: 69 and 68
+predicted reads at expert, 0 at normal.
+
+### The back-check
+
+A periodic weighted-random glance at a watch direction the bot would not otherwise look at, weighted
+by `watch[i].amount`, re-rolled every period and held for `kBackCheckHold = 0.4s`. This closes the
+sweep gap named below.
+
+**It sits above the suspicion blend, not inside `ApplyVantageLook`.** The first attempt put it in the
+vantage branch, which is only reached when there is no live suspicion at all -- and in a busy
+deathmatch suspicion is nearly always live, so one bot glanced three times in twenty seconds and the
+other never glanced once. Sitting under `LOOK_AIM` and above `LOOK_SENSE` is what makes it the rhythm
+it is supposed to be. Two of the exclusions are then free: `Gated` (ladders, buttons, elevators,
+triggers in the next three waypoints) and a live aim target both return before it. Combat needs the
+explicit `bot.combat.active` test, since a bot in combat with no resolved aim point falls through.
+
+**A pick within `kVantagePathSnap` (60 degrees) of the current desired yaw is rejected and the period
+is spent.** That is how the glance coexists with the 60-degree clamp instead of weakening it. The
+clamp exists because `Bot_DecomposeMove` builds the movement basis from yaw alone, so an unbounded
+snap turns a corridor walk into a sideways strafe; the path branch keeps the clamp and owns everything
+*inside* the cone, and the back-check owns everything outside it. The strafe cost is bounded in time
+instead -- 0.4s of hold against a 0.75-2.0s period. If it ever proves disruptive the lever is a longer
+period, not a shorter hold: the aim controller slews at a finite rate and `Bot_DecomposeMove` is fed
+the *actual* post-`Bot_UpdateFacing` yaw, so a 150-degree glance is still swinging back into the next
+period.
+
+It has its own RNG stream (`SeedBack`). Drawing from the vision LCG would shift every subsequent bone
+and candidate pick, changing sweep determinism at the tiers where the feature is off.
+
+Measured on crossfire: 0 glances over 30s at normal; 19 and 11 over 60s at expert, with the difference
+between the two bots being how much of that time each spent `gated`.
+
+### Expert drops the goal for nothing
+
+`combatInterrupt` off means `BotCombat::Run` never takes over movement and never calls
+`BotGoal::Clear`. **It does not stop the bot shooting.** `BotFire::Think` runs before the combat
+branch and `BotFire::Buttons` is folded into `Bot_RunPlayerMove`, both outside `BotCombat::Run`, so
+"shoot and keep running" is what falls out for free. Do not later "fix" this into a full combat
+disable. The state still enters, so `crossbot_combat_status` reports a bot that is `active` but never
+`driving`, and the gate sets `lastReason = "difficulty"` so the status line says why.
+
+`ambushOverride` off means an expert that catches someone unaware skips the grenade-or-crowbar
+override and falls through to the ordinary value-ranked picker -- it opens with its best gun.
+
+### Pickup priority has two call sites, not one
+
+`BotItems::Prioritize` is the same shape as `BotFun::Prioritize`: if any candidate is preferred, erase
+everything that is not; otherwise leave the list alone. That *is* "only if none of these are
+available, go for the less interesting ones", and it leaves `PickCheapest` untouched, so among
+preferred items the bot still takes the nearest.
+
+The preferred set is game-specific and lives behind `IGameProfile::ItemPreferred`, beside
+`MeleeWeapon` and `AmbushWeapon`. HLDM answers yes for the gauss, crossbow and egon, their ammo
+entities (resolved through `AmmoEntity` rather than hardcoding the strings a second time),
+`item_healthkit`, `item_battery`, and every charger and heal volume.
+
+**The tier loop is not the only path to an item.** `BotGoal::PickStop` runs a *second*
+`BotItems::Collect` for detours whenever a fun or strategic goal is active, and filtering only the
+tier loop leaves that path wide open. This was not visible by reading -- an expert bot on crossfire
+still collected `weapon_rpg`, `weapon_9mmAR`, `weapon_357`, `weapon_satchel` and `weapon_snark` as
+goals until `Prioritize` was added to `PickStop` as well. After: gauss, crossbow, egon and their ammo
+only.
+
+### The gauss policy
+
+The numbers come from `external/hlsdk-full/dlls/gauss.cpp`:
+
+- `flDamage = 200 * (charge / 1.5)`, capped at 200 (`:318`). **100 damage is a 0.75s charge.**
+- `velocity -= v_forward * flDamage * 5` (`:344`) -- the push is along the *negative* aim, so looking
+  down pushes up, and at 100 damage it is exactly 500 units/s. In multiplayer `velocity.z` is not
+  restored (`:349`), which is the only reason the jump works at all.
+- Burn is one round to start plus one every 0.1s, stopping at full charge (`:228`). A 0.75s charge
+  costs about 8 uranium, not the 16 `ShotCost` used to compute from `chargeFull`. `ShotCost` now
+  models the charge time actually used, or the bot would refuse its own policy with half a clip.
+- Reflect self-damage is `RadiusDamage(flDamage * n)` when `n = -dot(planeNormal, dir) < 0.5`
+  (`:438`). For a flat floor `n = sin(pitch)`, so the pitch must exceed 30 degrees to avoid it. The
+  jump uses **40-65 degrees** for margin: at 45 the push splits 354 horizontal / 354 up, at 60 it is
+  250/433.
+
+Nothing in the policy names the gauss or the crossbow. A charge weapon is one whose
+`secondary.fire == FIRE_CHARGE` and a scope weapon is one with a `primaryZoomed` and a `TOGGLE_ZOOM`
+secondary, both read straight off the spec table. In HLDM those resolve to exactly the gauss and the
+crossbow, and any other game gets sensible behaviour for free. This also keeps `doc/game.md`'s
+rejection of a `selfPush` weapon quirk intact: the push is modelled in `bot_gauss.cpp`, in the bot,
+not in the spec.
+
+**The gauss has to charge with no target, and that was the missing piece.** `BotFire::Think` idles out
+at `no-target` long before the charge path, so a bot holding a gauss and seeing nobody simply carried
+it. `IdleCharge` starts a secondary-mode charge under the policy; from then on `holding` is true and
+the existing commit machinery keeps it. `ChargeButtons` gained a `releaseCharge` flag so something
+other than an on-target verdict can let go of the button.
+
+`BotGauss::Update` probes four random directions every 0.1s while a charge is held with no aim point,
+builds `launchVel = velocity - dir * 500`, simulates it with `Bot_SimulateAirmoveArc`, and requires a
+landing with no fall damage whose `bot.oppoCosts` gain clears `kMinGainSeconds`. That reverse Dijkstra
+is `BotOppo`'s, unchanged -- and because pickup priority has already filtered the goal to a preferred
+item, "does this get me closer to something worth having" is a question the existing field answers
+with no second search. The chosen direction is published through `BotSense::ApplyLook` as `LOOK_GAUSS`
+rather than written directly, so it arrives through the normal aim ladder and the hand model still has
+to get there; the release waits until the view is actually within `kAimTolerance`, because otherwise
+the bot launches along a half-completed turn. If nothing pays within `kProbeWindow`, it blasts it
+anywhere.
+
+Measured: two jumps in 45s on crossfire at pitch 46 and 51 degrees, both inside the safe band.
+
+### Bunnyhop
+
+Distinct from the opportunistic jump: that one picks a *different* landing area for a shortcut, this
+one jumps *along* the path to go faster, with no search. `BotOppo::WantBunnyHop` fires at maxspeed on
+the ground with a live path, simulates the jump along the current velocity yaw, and returns true only
+when the arc lands within `kBunnyCorridor` of a waypoint still ahead with no fall damage. It adds
+`IN_JUMP` to the ordinary walking frame rather than taking movement over, so the path follower keeps
+steering the whole time -- which is where the airstrafe comes from.
+
+The next six waypoints must be plain ground. A hop into a ladder, launch, elevator, button, trigger,
+teleport, break or crouch waypoint is refused outright.
+
+`PmSim::PreventMegaBunnyJumping` clamps landing speed at 1.7x maxspeed. That is a faithful replication
+of the engine's own anti-bhop rule and must not be touched -- it bounds the gain, it does not block it.
+
+Measured on crossfire: 0 hops at normal; 20 and 15 over 80s at expert.
+
+### cvars
+
+- `crossbot_difficulty` — the tier, 0-3. Default 1. Truncates, so 2.7 is hard
+- `crossbot_back_check` — back-check period midpoint in seconds; 0 disables. Default -1 (tier)
+- `crossbot_turn_scale` — scale on the aim controller's acceleration and hand-speed ceiling.
+  Default -1 (tier)
+- `crossbot_head_pct` — chance per engagement of aiming at the head first. Default -1 (tier)
+- `crossbot_predict_pct` — chance per loss of sight of tracking the enemy through cover.
+  Default -1 (tier)
+- `crossbot_combat_interrupt` — may combat drop the goal and take movement over. Default -1 (tier)
+- `crossbot_pickup_priority` — restrict gathering to the profile's preferred items. Default -1 (tier)
+- `crossbot_gauss` — the charge-weapon policy and the opportunistic gauss jump. Default -1 (tier)
+- `crossbot_bunnyhop` — opportunistic bunnyhop. Default -1 (tier)
+- `crossbot_oppo_interval` — opportunistic-jump retry throttle in seconds. Default -1 (tier)
+
+`crossbot_aim_delay`, `crossbot_aim_error`, `crossbot_camp`, `crossbot_oppo_jump` and
+`crossbot_ambush` now default to -1 and follow the tier; any value `>= 0` still pins them exactly as
+before.
 
 ## bot_aim.cpp
 
@@ -1954,10 +2272,12 @@ traced visibility signature per sampled eye position rather than four compass bu
 `ApplyVantageLook` points the head at its `watch[0]`. Foxbot's cheap version (random yaw every 1-3s,
 rejected unless a 200-unit trace is clear) was the alternative and is not needed.
 
-What is *not* here is a sweep. The head goes to the main watch direction and stays there; it does not
-cycle through `watch[1..3]`, so a stationary bot is now watching the right way but still watching one way.
-The data to sweep over is already loaded -- `watch[]` carries up to four directions with their `amount`
-and `spread` -- so this is a scheduling question, not a data one.
+The sweep exists now, at hard and expert only. `BotDiff::BackCheck` gives `ApplyLook` a period, and a
+weighted-random pick over `watch[0..3]` by `amount` turns the head to one of them for 0.4s before the
+ordinary logic takes it back. A pick within 60 degrees of where the bot already means to look is
+rejected and the period spent, so the glance is always at something the bot was *not* watching. At
+normal and easy the head still goes to `watch[0]` and stays there. See `bot_difficulty.cpp` above for
+why it sits above the suspicion blend rather than inside this function, and for the measured rates.
 
 Footsteps narrow the remaining gap. A running enemy is heard at ~625 units regardless of facing, so a bot
 turns round on its own as soon as anyone moves nearby. The uncovered case is the enemy who is stationary
@@ -3309,6 +3629,28 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
   mid-air and repaths from an airborne origin. The cost of holding the clock open is that a flight which
   never ends is invisible to every other timer, which is why the flight bounds itself — see
   `RunAirmoveFlight`.
+- `Bot_MaxSpeed` returns the cap the *engine* will actually enforce on this bot, which is not any cvar.
+  `PM_CheckParamters` computes it as `min(clientmaxspeed, maxspeed)` and writes it back to
+  `pmove->maxspeed`, so `PM_Move_Post` reads the finished value out of the `playermove_t` and
+  `Bot_NoteMoveMaxSpeed` caches it per edict index; `ClientDisconnect` clears the slot. `pev->maxspeed`
+  then `sv_maxspeed` then `kMoveSpeed` remain as the cold-start fallback chain, for the frames before a
+  bot's first `PM_Move`.
+
+  Reading `sv_maxspeed` was wrong twice over. Under CrossPlay there is no server-wide ground speed at
+  all: each hosted game sets its own before handing the move to the game DLL, so two bots in the same
+  server legitimately have different caps. And even on one game the cvar is only half the `min` — the
+  test server (`D:\hlds\crossplay`) never sets `sv_maxspeed`, so it read the engine default 320 while
+  the valve DLL held players at 270. Every number the planner derives from `physics.maxSpeed` was then
+  designed for a bot 50 u/s faster than the one flying it: on `test54_window` the launch was designed at
+  299, the bot arrived at its real 270, `RunAirmoveApproach` failed `kAirmoveLaunchSpeedTolerance` (0.95)
+  at 90% of design, penalized the connection and forced a repath — which planned the same launch again
+  from a standstill. The bot ping-ponged between two 320-speed routes on the window ledge until the test
+  timed out. Getting the cap right is not a tuning improvement; it is what makes the design speed and
+  the achievable speed the same number.
+
+  `Bot_MoveMaxSpeedKnown` exposes whether a bot's slot has been filled yet, so a caller that must not
+  read the fallback can wait for the real value; `BotManager::CheckDriftSpeeds` is the one that does
+  (`doc/navgen.md`, drift pruning).
 - `Bot_Physics` reads sv_airaccelerate, sv_accelerate, sv_friction, sv_stopspeed, sv_edgefriction and
   sv_maxvelocity, so plan-time physics match a non-default server. Only the first three were read
   before, which silently diverged the profile from the engine. It does *not* read `sv_gravity` — the

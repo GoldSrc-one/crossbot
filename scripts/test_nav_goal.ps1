@@ -203,6 +203,7 @@ Remove-Item $traceLogPath -ErrorAction SilentlyContinue
 # Boot commands: set trace path, add bot, list spawns/targets
 $bootCommands = @(
     "crossbot_trace_path $traceCvarPath",
+    "crossbot_difficulty 1",
     "crossbot_gather 0",
     "crossbot_fun 0",
     "crossbot_deploy 0",

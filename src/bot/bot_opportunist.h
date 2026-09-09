@@ -10,6 +10,10 @@ namespace BotOppo
 
 bool Enabled();
 
+bool RebuildCosts(CBot &bot, const Nav::NavMesh &mesh);
+
+bool WantBunnyHop(CBot &bot, const Nav::NavMesh &mesh);
+
 bool TryJump(CBot &bot, const Nav::NavMesh &mesh);
 
 void OnRepath(CBot &bot);

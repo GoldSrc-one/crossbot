@@ -1,7 +1,5 @@
-sidemove sampling + yawrate in airmove ;-)
-
 integrate namegiver
 
-rename to goldclanker, .nav to .gcn
+gauss wallbang (the rest of hard mode landed as crossbot_difficulty; see doc/bot.md, bot_difficulty.cpp)
 
-hard mode -- oppo bunnyhop, oppo gauss, gauss wallbang, projectile prefire, trace to the head first, prioritize pickups, shoot to the back
+support for flash grenades, conc, smokes

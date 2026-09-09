@@ -245,6 +245,43 @@ const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
 	return HLDM_WeaponSpec(id);
 }
 
+bool CHLDMProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
+{
+	if (ItemKindIsCharger(kind) || ItemKindIsVolume(kind))
+		return true;
+
+	const char *classname = CBotClassOf(ent);
+	if (!classname || !classname[0])
+		return false;
+
+	if (strcmp(classname, "item_healthkit") == 0 || strcmp(classname, "item_battery") == 0)
+		return true;
+
+	static const char *kPreferred[] = { "weapon_gauss", "weapon_crossbow", "weapon_egon" };
+
+	for (size_t i = 0; i < sizeof(kPreferred) / sizeof(kPreferred[0]); ++i)
+	{
+		if (strcmp(classname, kPreferred[i]) == 0)
+			return true;
+
+		for (int slot = 0; slot < kHLDMWeaponSlots; ++slot)
+		{
+			const WeaponSpec *spec = HLDM_WeaponSlot(slot);
+			if (!spec || !spec->classname || strcmp(spec->classname, kPreferred[i]) != 0)
+				continue;
+
+			for (int pool = AMMO_CLIP; pool <= AMMO_SECONDARY; ++pool)
+			{
+				const char *ammo = AmmoEntity(spec->id, static_cast<WeaponAmmo>(pool));
+				if (ammo && strcmp(classname, ammo) == 0)
+					return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 int CHLDMProfile::MeleeWeapon() const
 {
 	return kHLDMMelee;

@@ -122,6 +122,7 @@ try {
         }
     }
 
+    Invoke-Rcon "crossbot_aim_error -1" | Out-Null
     Start-Sleep -Seconds 2
 }
 finally {

@@ -18,8 +18,6 @@ namespace navgen
 namespace
 {
 
-const double kCampArcHalfAngles[kCampArcs] = {45.0, 22.5, 11.25, 5.625};
-
 constexpr size_t kCampSeeds = 8;
 constexpr int kCampRefinePasses = 3;
 constexpr double kCampNeighborScale = 1.5;
@@ -28,13 +26,26 @@ constexpr double kCampGridCell = 32.0;
 constexpr double kCampMinTargetDistSq = 1.0e-6;
 constexpr double kCampMinGain = 1.02;
 
+struct CampTarget
+{
+	Vec3 dir;
+	double dist = 0.0;
+};
+
+struct FovStats
+{
+	double score = 0.0;
+	double spread = 0.0;
+	double dist = 0.0;
+};
+
 struct Evaluation
 {
 	double score = 0.0;
 	double yaw = 0.0;
 	double pitch = 0.0;
-	double stand[kCampArcs] = {0.0, 0.0, 0.0, 0.0};
-	double crouch[kCampArcs] = {0.0, 0.0, 0.0, 0.0};
+	FovStats stand;
+	FovStats crouch;
 	uint32_t flags = 0;
 	bool valid = false;
 };
@@ -46,60 +57,64 @@ struct SlotState
 	HullOriginChain standChain;
 	HullOriginChain crouchChain;
 	TraceCounters counters;
-	std::vector<Vec3> standDirs;
-	std::vector<Vec3> crouchDirs;
+	std::vector<CampTarget> standTargets;
+	std::vector<CampTarget> crouchTargets;
 	std::vector<double> hist;
 	size_t evaluations = 0;
 	size_t pvsPairs = 0;
 	size_t visiblePairs = 0;
 };
 
-void ArcRatios(const std::vector<Vec3> &dirs, const Vec3 &axis, const double *cosHalf, double *ratios)
+// Targets inside the cone against targets outside it, plus how wide an arc those
+// inside actually span and how far away they sit.
+FovStats EvaluateFov(const std::vector<CampTarget> &targets, const Vec3 &axis, double cosHalf)
 {
-	size_t inside[kCampArcs] = {0, 0, 0, 0};
+	FovStats out;
 
-	for (const Vec3 &d : dirs)
+	size_t inside = 0;
+	double angleSq = 0.0;
+	double distSum = 0.0;
+
+	for (const CampTarget &t : targets)
 	{
-		double dot = d.Dot(axis);
-		for (size_t k = 0; k < kCampArcs; ++k)
-		{
-			if (dot < cosHalf[k])
-				break;
-			++inside[k];
-		}
+		double dot = t.dir.Dot(axis);
+		if (dot < cosHalf)
+			continue;
+
+		double angle = std::acos(std::max(-1.0, std::min(1.0, dot))) / kVisDeg;
+		++inside;
+		angleSq += angle * angle;
+		distSum += t.dist;
 	}
 
-	for (size_t k = 0; k < kCampArcs; ++k)
+	size_t outside = targets.size() - inside;
+	double denom = (outside > 0) ? static_cast<double>(outside) : 1.0;
+	out.score = static_cast<double>(inside) / denom;
+
+	if (inside > 0)
 	{
-		size_t outside = dirs.size() - inside[k];
-		double denom = (outside > 0) ? static_cast<double>(outside) : 1.0;
-		ratios[k] = static_cast<double>(inside[k]) / denom;
+		out.spread = std::sqrt(angleSq / static_cast<double>(inside));
+		out.dist = distSum / static_cast<double>(inside);
 	}
+
+	return out;
 }
 
-double CombinedScore(const double *stand, const double *crouch)
-{
-	double total = 0.0;
-	for (size_t k = 0; k < kCampArcs; ++k)
-		total += std::max(stand[k], crouch[k]);
-	return total;
-}
-
-Vec3 RefineAxis(const std::vector<Vec3> &standDirs, const std::vector<Vec3> &crouchDirs, Vec3 axis,
-	double cosWidest)
+Vec3 RefineAxis(const std::vector<CampTarget> &standTargets,
+	const std::vector<CampTarget> &crouchTargets, Vec3 axis, double cosWidest)
 {
 	for (int pass = 0; pass < kCampRefinePasses; ++pass)
 	{
 		Vec3 acc;
-		for (const Vec3 &d : standDirs)
+		for (const CampTarget &t : standTargets)
 		{
-			if (d.Dot(axis) >= cosWidest)
-				acc = acc + d;
+			if (t.dir.Dot(axis) >= cosWidest)
+				acc = acc + t.dir;
 		}
-		for (const Vec3 &d : crouchDirs)
+		for (const CampTarget &t : crouchTargets)
 		{
-			if (d.Dot(axis) >= cosWidest)
-				acc = acc + d;
+			if (t.dir.Dot(axis) >= cosWidest)
+				acc = acc + t.dir;
 		}
 
 		if (acc.Length() < 1e-9)
@@ -146,8 +161,8 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 	const uint8_t *standRow = canStand ? slot.standReader->VisRow(standLeaf) : nullptr;
 	const uint8_t *crouchRow = slot.crouchReader->VisRow(crouchLeaf);
 
-	slot.standDirs.clear();
-	slot.crouchDirs.clear();
+	slot.standTargets.clear();
+	slot.crouchTargets.clear();
 
 	for (size_t j = 0; j < candidates.size(); ++j)
 	{
@@ -170,7 +185,10 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 				!Occluded(ctx.hull, ctx.worldHeadnode, *ctx.blockers, standEye, target.eye, slot.counters,
 					slot.standChain))
 			{
-				slot.standDirs.push_back(delta.Normalized());
+				CampTarget t;
+				t.dist = delta.Length();
+				t.dir = delta * (1.0 / t.dist);
+				slot.standTargets.push_back(t);
 				++slot.visiblePairs;
 			}
 		}
@@ -182,37 +200,38 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 				!Occluded(ctx.hull, ctx.worldHeadnode, *ctx.blockers, crouchEye, target.eye, slot.counters,
 					slot.crouchChain))
 			{
-				slot.crouchDirs.push_back(delta.Normalized());
+				CampTarget t;
+				t.dist = delta.Length();
+				t.dir = delta * (1.0 / t.dist);
+				slot.crouchTargets.push_back(t);
 				++slot.visiblePairs;
 			}
 		}
 	}
 
-	size_t visible = std::max(slot.standDirs.size(), slot.crouchDirs.size());
+	size_t visible = std::max(slot.standTargets.size(), slot.crouchTargets.size());
 	if (visible < ctx.minVisible)
 		return;
 
-	double cosHalf[kCampArcs];
-	for (size_t k = 0; k < kCampArcs; ++k)
-		cosHalf[k] = std::cos(kCampArcHalfAngles[k] * kVisDeg);
+	double cosHalf = std::cos(kCampFovHalfDeg * kVisDeg);
 
 	const BinLayout &bins = *ctx.bins;
 	slot.hist.assign(bins.Count(), 0.0);
 
 	Vec3 centroid;
-	for (const Vec3 &d : slot.standDirs)
+	for (const CampTarget &t : slot.standTargets)
 	{
 		double yaw = 0.0, pitch = 0.0;
-		AnglesFromDir(d, yaw, pitch);
+		AnglesFromDir(t.dir, yaw, pitch);
 		slot.hist[bins.BinFor(yaw, pitch)] += 1.0;
-		centroid = centroid + d;
+		centroid = centroid + t.dir;
 	}
-	for (const Vec3 &d : slot.crouchDirs)
+	for (const CampTarget &t : slot.crouchTargets)
 	{
 		double yaw = 0.0, pitch = 0.0;
-		AnglesFromDir(d, yaw, pitch);
+		AnglesFromDir(t.dir, yaw, pitch);
 		slot.hist[bins.BinFor(yaw, pitch)] += 1.0;
-		centroid = centroid + d;
+		centroid = centroid + t.dir;
 	}
 
 	std::vector<Vec3> seeds;
@@ -244,26 +263,22 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 	bool have = false;
 	for (const Vec3 &seed : seeds)
 	{
-		Vec3 axis = RefineAxis(slot.standDirs, slot.crouchDirs, seed, cosHalf[0]);
+		Vec3 axis = RefineAxis(slot.standTargets, slot.crouchTargets, seed, cosHalf);
 
-		double stand[kCampArcs] = {0.0, 0.0, 0.0, 0.0};
-		double crouch[kCampArcs] = {0.0, 0.0, 0.0, 0.0};
+		FovStats stand;
 		if (canStand)
-			ArcRatios(slot.standDirs, axis, cosHalf, stand);
-		ArcRatios(slot.crouchDirs, axis, cosHalf, crouch);
+			stand = EvaluateFov(slot.standTargets, axis, cosHalf);
+		FovStats crouch = EvaluateFov(slot.crouchTargets, axis, cosHalf);
 
-		double score = CombinedScore(stand, crouch);
+		double score = std::max(stand.score, crouch.score);
 		if (have && score <= out.score)
 			continue;
 
 		have = true;
 		out.score = score;
 		AnglesFromDir(axis, out.yaw, out.pitch);
-		for (size_t k = 0; k < kCampArcs; ++k)
-		{
-			out.stand[k] = stand[k];
-			out.crouch[k] = crouch[k];
-		}
+		out.stand = stand;
+		out.crouch = crouch;
 	}
 
 	if (!have)
@@ -575,11 +590,12 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 		spot.yaw = ev.yaw;
 		spot.pitch = ev.pitch;
 		spot.score = ev.score;
-		for (size_t k = 0; k < kCampArcs; ++k)
-		{
-			spot.stand[k] = ev.stand[k];
-			spot.crouch[k] = ev.crouch[k];
-		}
+		spot.standScore = ev.stand.score;
+		spot.standSpread = ev.stand.spread;
+		spot.standDist = ev.stand.dist;
+		spot.crouchScore = ev.crouch.score;
+		spot.crouchSpread = ev.crouch.spread;
+		spot.crouchDist = ev.crouch.dist;
 		spot.areaId = winner.areaId;
 		spot.flags = ev.flags;
 		spot.climbStart = points[top.index];

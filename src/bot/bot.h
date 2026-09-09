@@ -6,6 +6,7 @@
 
 #include "../game/ent_handle.h"
 #include "../game/game_profile.h"
+#include "../game/weapon_spec.h"
 #include "../nav/nav_path.h"
 #include "../nav/path_follower.h"
 #include "bot_aim.h"
@@ -102,6 +103,7 @@ struct CBot
 	std::vector<Nav::Waypoint> waypoints;
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;
+	WeaponRangeClass plannedRangeClass = RANGE_NONE;
 
 	NavPlan::PlanProfile followProfile;
 	NavFollow::TrackState trackState;
@@ -128,6 +130,15 @@ struct CBot
 	std::vector<float> oppoCosts;
 	int oppoCostsGoalArea = -1;
 	float oppoNextCheck = 0.f;
+
+	bool gaussAiming = false;
+	float gaussYaw = 0.f;
+	float gaussPitch = 0.f;
+	float gaussNextCheck = 0.f;
+	float gaussWindowStart = 0.f;
+
+	float bunnyNextCheck = 0.f;
+	unsigned int bunnyHops = 0;
 
 	bool ladderActive = false;
 	bool ladderUp = false;

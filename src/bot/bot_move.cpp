@@ -11,6 +11,7 @@
 #include "bot_perf.h"
 #include "bot_timing.h"
 #include "../game/game_profile.h"
+#include "../game/hldm_weapons.h"
 #include "../nav/baked_blockers.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
@@ -21,6 +22,8 @@ namespace
 
 	constexpr float kMoveSpeed = 250.f;
 
+	constexpr int kMaxPlayers = 33;
+
 	constexpr int kHullHuman = 1;
 	constexpr int kHullDuck = 3;
 
@@ -30,6 +33,8 @@ namespace
 	using NavMath::kPiF;
 
 	float g_frameTime = 0.f;
+
+	float g_moveMaxSpeed[kMaxPlayers] = {};
 }
 
 bool Bot_HasLongJumpModule(edict_t *pEdict)
@@ -321,8 +326,98 @@ float Bot_Carefulness(const CBot &bot)
 	return (1.f - readiness) * scale;
 }
 
+WeaponRangeClass Bot_RangeClass(const CBot &bot)
+{
+	cvar_t *force = g_engfuncs.pfnCVarGetPointer("crossbot_range_force");
+	if (force && force->value >= 0.f)
+	{
+		int forced = static_cast<int>(force->value);
+		if (forced == RANGE_CLOSE || forced == RANGE_LONG)
+			return static_cast<WeaponRangeClass>(forced);
+		return RANGE_NONE;
+	}
+
+	const BotInventory &inv = bot.inventory;
+	if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
+		return RANGE_NONE;
+
+	const WeaponSpec *spec = HLDM_WeaponSpec(inv.weapons[inv.activeIndex].id);
+	return spec ? spec->rangeClass : RANGE_NONE;
+}
+
+NavPlan::RangeBias Bot_RangeBias(const CBot &bot)
+{
+	NavPlan::RangeBias bias;
+
+	if (!g_pGameProfile || !bot.pEdict)
+		return bias;
+
+	WeaponRangeClass cls = Bot_RangeClass(bot);
+	if (cls == RANGE_NONE)
+		return bias;
+
+	cvar_t *shortCvar = g_engfuncs.pfnCVarGetPointer("crossbot_range_short");
+	cvar_t *longCvar = g_engfuncs.pfnCVarGetPointer("crossbot_range_long");
+	if (shortCvar && shortCvar->value > 0.f)
+		bias.shortDist = shortCvar->value;
+	if (longCvar && longCvar->value > bias.shortDist)
+		bias.longDist = longCvar->value;
+
+	bias.preferLong = (cls == RANGE_LONG);
+
+	cvar_t *pin = g_engfuncs.pfnCVarGetPointer("crossbot_range_pin");
+	if (pin && pin->value >= 0.f)
+	{
+		bias.weight = pin->value > 1.f ? 1.f : pin->value;
+		return bias;
+	}
+
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_range_pref");
+	float scale = cvar ? cvar->value : 0.f;
+	if (scale <= 0.f)
+		return bias;
+	if (scale > 1.f)
+		scale = 1.f;
+
+	// The mirror of carefulness: that weighs exposure by how unready the bot is,
+	// this weighs terrain by how ready it is to use the weapon it holds.
+	float readiness = g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory);
+	if (readiness < 0.f)
+		readiness = 0.f;
+	if (readiness > 1.f)
+		readiness = 1.f;
+
+	bias.weight = readiness * scale;
+	return bias;
+}
+
+void Bot_NoteMoveMaxSpeed(int playerIndex, float maxspeed)
+{
+	int idx = playerIndex + 1;
+	if (idx < 1 || idx >= kMaxPlayers)
+		return;
+	g_moveMaxSpeed[idx] = (maxspeed > 1.f) ? maxspeed : 0.f;
+}
+
+void Bot_ForgetMoveMaxSpeed(edict_t *pEdict)
+{
+	int idx = g_engfuncs.pfnIndexOfEdict(pEdict);
+	if (idx >= 1 && idx < kMaxPlayers)
+		g_moveMaxSpeed[idx] = 0.f;
+}
+
+bool Bot_MoveMaxSpeedKnown(edict_t *pEdict)
+{
+	int idx = g_engfuncs.pfnIndexOfEdict(pEdict);
+	return idx >= 1 && idx < kMaxPlayers && g_moveMaxSpeed[idx] > 1.f;
+}
+
 float Bot_MaxSpeed(edict_t *pEdict)
 {
+	int idx = g_engfuncs.pfnIndexOfEdict(pEdict);
+	if (idx >= 1 && idx < kMaxPlayers && g_moveMaxSpeed[idx] > 1.f)
+		return g_moveMaxSpeed[idx];
+
 	float maxspeed = pEdict->v.maxspeed;
 	if (maxspeed <= 1.f)
 		maxspeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");

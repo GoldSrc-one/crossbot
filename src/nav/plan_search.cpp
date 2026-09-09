@@ -40,7 +40,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	const std::vector<NavAStar::Connection> &graphConns, const std::vector<PlanArea> &planAreas,
 	const std::vector<PlanConnection> &planConns, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint, const PlanTraceContext *traces,
-	PlanStats *stats, float careful, float minExposure, float maxSpeed)
+	PlanStats *stats, float careful, float minExposure, float maxSpeed, const RangeBias &range)
 {
 	PlannedRoute result;
 
@@ -51,7 +51,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	careful = std::max(0.f, std::min(1.f, careful));
 	minExposure = std::max(0.f, std::min(1.f, minExposure));
 
-	const float hScale = 1.f - careful + careful * minExposure;
+	const float hScale = (1.f - careful + careful * minExposure) * range.BestScale();
 
 	auto Heuristic = [&](const Vector &from)
 	{
@@ -130,9 +130,12 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 
 			next.AddCost(gc.costSeconds + drift.seconds);
 
+			float openDist = (gc.areaA == current) ? gc.openDistAB : gc.openDistBA;
+
 			float g = std::max(next.Time(), state[current].g);
 			float score = state[current].score +
-				(g - state[current].g) * (1.f - careful + careful * gc.exposure);
+				(g - state[current].g) * (1.f - careful + careful * gc.exposure) *
+				range.Scale(openDist);
 			if (score + kPlanCostEpsilon >= state[neighbor].score)
 				continue;
 

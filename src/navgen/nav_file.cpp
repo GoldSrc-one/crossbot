@@ -231,10 +231,11 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 				dst.pitch = static_cast<float>(v.watch[k].pitch);
 				dst.spread = static_cast<float>(v.watch[k].spread);
 				dst.amount = static_cast<float>(v.watch[k].amount);
+				dst.dist = static_cast<float>(v.watch[k].dist);
 			}
 			else
 			{
-				dst.yaw = dst.pitch = dst.spread = dst.amount = 0.f;
+				dst.yaw = dst.pitch = dst.spread = dst.amount = dst.dist = 0.f;
 			}
 		}
 	}
@@ -251,11 +252,12 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.yaw = static_cast<float>(spot.yaw);
 		rec.pitch = static_cast<float>(spot.pitch);
 		rec.score = static_cast<float>(spot.score);
-		for (size_t k = 0; k < kCampArcs; ++k)
-		{
-			rec.stand[k] = static_cast<float>(spot.stand[k]);
-			rec.crouch[k] = static_cast<float>(spot.crouch[k]);
-		}
+		rec.standScore = static_cast<float>(spot.standScore);
+		rec.standSpread = static_cast<float>(spot.standSpread);
+		rec.standDist = static_cast<float>(spot.standDist);
+		rec.crouchScore = static_cast<float>(spot.crouchScore);
+		rec.crouchSpread = static_cast<float>(spot.crouchSpread);
+		rec.crouchDist = static_cast<float>(spot.crouchDist);
 		rec.areaId = static_cast<uint32_t>(spot.areaId);
 		rec.flags = spot.flags;
 	}

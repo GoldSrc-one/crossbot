@@ -392,7 +392,16 @@ subtransit and undertow are exposed to this today.
 `PruneUnreachableAreas` evaluates the term at navgen's own `--max-speed`, which is what
 `header.designMaxSpeed` records. Running a server *slower* than the bake leaves areas in the mesh the runtime
 will not route to, which is the safe direction; running it *faster* over-prunes, and `--max-speed` is the
-answer. The plugin prints a warning at load when the two disagree. `--no-drift` disables the whole feature.
+answer. `--no-drift` disables the whole feature.
+
+`BotManager::CheckDriftSpeeds` prints the warning when the two disagree, and it compares against the bot's
+own cap from `Bot_MaxSpeed`, never `sv_maxspeed` — under CrossPlay there is no server-wide ground speed
+to compare against, and the cvar read the engine default 320 on a server whose bots ran at 270, which is
+exactly the case the warning exists to catch (`doc/bot.md`). One line per distinct speed, capped at
+`kMaxDriftSpeeds`, because two bots in different hosted games legitimately differ. The check re-arms every
+frame instead of firing once: a bot's cap is only known after its first `PM_Move`, so a one-shot check on
+the first frame a bot exists would read the cold fallback. It costs a bounded scan of live bots against a
+tiny seen-speed set, and only on a map that has drift areas at all.
 
 ### Door/Breakable Isolation
 A merge never crosses `ExtractedLeaf::passableIndex`. A door or breakable has to stay its own area so it keeps
@@ -1064,28 +1073,37 @@ gets a meaningful answer anywhere. Camping is not like that. It is discrete -- s
 used to smear that discrete property across the continuous field and it never worked; nothing read it.
 It is gone, and camp spots replace it as their own reduced list with their own record.
 
-A camp spot is a floor position, one facing, and eight numbers:
+A camp spot is a floor position, one facing, and three numbers per stance:
 
 | Field | Meaning |
 | --- | --- |
 | `pos` | the nav floor point, which is a ducking player's origin |
 | `yaw`, `pitch` | one facing, shared by both stances |
-| `stand[4]` | arc ratios from the standing eye, `pos.z + kStandEyeLift` (+46) |
-| `crouch[4]` | arc ratios from the crouching eye, `pos.z + kDuckEyeLift` (+12) |
-| `score` | the combination the selection ranked on |
+| `standScore`, `standSpread`, `standDist` | from the standing eye, `pos.z + kStandEyeLift` (+46) |
+| `crouchScore`, `crouchSpread`, `crouchDist` | from the crouching eye, `pos.z + kDuckEyeLift` (+12) |
+| `score` | `max(standScore, crouchScore)`, what the selection ranks on |
 | `flags` | `CAMP_NO_STAND` when standing there is impossible |
+
+`spread` is the RMS angle the targets inside the FOV sit off the axis, in degrees -- how wide an arc a
+camper there has to sweep. `dist` is their mean range. Both replace what used to be four nested arc
+ratios per stance (FOVs 90 / 45 / 22.5 / 11.25): the nesting was only ever a crude way of asking "how
+concentrated is this", which one spread answers directly, and no arc ever carried a distance at all.
+`BotCamp` reads all three -- spread and dist decide the scope, the scores decide the stance
+(`doc/bot.md`).
 
 The nav floor plane is the hull-3 centre, so it *is* a ducking origin: crouch eye = floor + 12 (the duck
 `view_ofs`), standing origin = floor + 18 and standing eye = floor + 18 + 28 = floor + 46. Both lifts
 already existed in `vantage_sampler.h`; nothing new was measured to get them.
 
-### The arc metric is odds, not a fraction
-For the four FOVs 90 / 45 / 22.5 / 11.25 -- half-angles 45 / 22.5 / 11.25 / 5.625, the same nesting the
-old `kFocusHalfAngles` used -- count visible probe candidates inside the cone and outside it:
+### The FOV metric is odds, not a fraction
+For one 90-degree FOV -- half-angle `kCampFovHalfDeg` (45), the widest of the four nested arcs this
+replaced -- count visible probe candidates inside the cone and outside it, per stance:
 
 ```
-ratio(arc, stance) = inside / max(outside, 1)
-score = sum over the four arcs of max(stand_ratio, crouch_ratio)
+score(stance)  = inside / max(outside, 1)
+spread(stance) = sqrt(sum of angle^2 over inside / inside)     degrees off the axis
+dist(stance)   = sum of range over inside / inside
+score          = max(stand_score, crouch_score)
 ```
 
 The odds form `f / (1 - f)` is used instead of the fraction `f` because a fraction saturates exactly
@@ -1093,19 +1111,17 @@ where camping quality lives: 0.90, 0.95 and 0.99 are visually identical numbers,
 19 and 99. `max(outside, 1)` rather than `outside + 1` keeps a perfectly focused spot's score equal to
 its visible count, so "sees a lot, all of it in front" outranks "sees one thing, technically in front".
 
-Because the arcs nest, `ratio(90) >= ratio(45) >= ratio(22.5) >= ratio(11.25)` always, so the sum is
-dominated by the **widest** arc. That is deliberate: a large `ratio(90)` means "you can see a lot without
-turning your head", which is the primary camping virtue, and the three narrower terms add a bonus for
-tightness on top.
+A large score means "you can see a lot without turning your head", which is the primary camping virtue.
+Tightness is no longer a bonus folded into that number: it is `spread`, reported separately, so a wide
+overlook and a sniper's slot can score alike and still be told apart.
 
 **The dynamic range this produces is enormous and that has consequences.** On crossfire the score runs
-from 2.9 to 282, a 100x spread, because `max(outside, 1)` divides by 1 whenever nothing at all is behind
-you. The top two spots are alcoves at z -1294 that see 269 targets with none behind. That is a real
-camping spot and the ranking is right, but see *Spacing does not control spread* below for what the
-range costs.
+into the hundreds because `max(outside, 1)` divides by 1 whenever nothing at all is behind you. The top
+spots are alcoves that see hundreds of targets with none behind. That is a real camping spot and the
+ranking is right, but see *Spacing does not control spread* below for what the range costs.
 
-**The minimum-visible gate is load-bearing.** A spot that sees a single target scores `1` in every arc
-and so scores 4.0 overall, beating a real room that sees 300 targets across a wide fan.
+**The minimum-visible gate is load-bearing.** A spot that sees a single target with nothing behind it
+scores 1.0, beating nothing but competing with real rooms once the odds form is applied.
 `--camp-min-visible` (default 32) removes it, applied on `exposure * (count - 1)` before a candidate ever
 enters the queue.
 
@@ -1122,7 +1138,7 @@ two-stance visibility test runs only around the promising places:
 gate    candidates seen by fewer than --camp-min-visible probes, plus water and elevator areas
 score   preliminary = watch[0].amount / exposure
 loop    pop the best remaining candidate
-        hill-climb to the local maximum of the arc score
+        hill-climb to the local maximum of the FOV score
         emit the summit; consume everything the climb consulted
         penalise survivors by min(1, d / spacing)
 until   budget reached or the queue empties
@@ -1833,12 +1849,17 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v20):
-- Header: magic "CBNV", version 20, mapName[64], bspChecksum, counts (including `detourCount`,
+Serializes MergeResult to crossbot_nav format (v22):
+- Header: magic "CBNV", version 22, mapName[64], bspChecksum, counts (including `detourCount`,
   `detourPointCount` and `vantageCount`), `designMaxSpeed`, `vantageSpacing` and `maxExposure`
-- Vantage records (80 B): `pos[3]`, `exposure`, and four `NavWatchDir{yaw, pitch, spread,
-  amount}`. Unused watch slots are all-zero and the loader drops them on `amount == 0`, so the record
-  stays fixed-size and the section stays one `fwrite`
+- Vantage records (96 B): `pos[3]`, `exposure`, and four `NavWatchDir{yaw, pitch, spread,
+  amount, dist}`. Unused watch slots are all-zero and the loader drops them on `amount == 0`, so the
+  record stays fixed-size and the section stays one `fwrite`
+- `dist` is the mean length of the sightlines that fell in the cone. The pair loop already has the
+  delta vector between every unoccluded pair; it used to bin the direction and throw the length away.
+  A second per-bin tally sums the lengths beside the counts, and `ExtractWatchDirs` divides the two
+  over exactly the bins it folds into each cone. No extra traces, and the tally is freed with the
+  counts before the reduction's shape vectors are built
 - `exposure` is left raw — the fraction of *all* sampled vantages that can see the spot, before the
   reduction throws most of them away. `maxExposure` rides in the header so the runtime can normalise
   against the map's most exposed spot; storing a pre-normalised value instead would make the number

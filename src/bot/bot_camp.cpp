@@ -3,6 +3,7 @@
 
 #include <math.h>
 
+#include "../game/hldm_weapons.h"
 #include "../nav/nav.h"
 #include "../nav/nav_camp.h"
 #include "../nav/nav_format.h"
@@ -11,6 +12,7 @@
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_camp.h"
+#include "bot_difficulty.h"
 #include "bot_goal.h"
 #include "bot_log.h"
 #include "bot_move.h"
@@ -32,16 +34,10 @@ namespace
 	constexpr float kCampCooldown = 5.f;
 	// Duck unless standing sees more than 5% more.
 	constexpr float kCampDuckSlack = 0.95f;
-	// arc[2]/arc[0] above which the spot watches one corridor and is worth zooming into.
-	constexpr float kCampZoomRatio = 0.9f;
-
-	float ArcSum(const float arc[crossbot_nav::kNavCampArcs])
-	{
-		float total = 0.f;
-		for (int i = 0; i < crossbot_nav::kNavCampArcs; ++i)
-			total += arc[i];
-		return total;
-	}
+	// How much of the zoomed field of view the sweep may fill and still be worth zooming into.
+	constexpr float kDefaultZoomShare = 0.85f;
+	// Below this the targets are close enough to find without magnification.
+	constexpr float kDefaultZoomDist = 768.f;
 
 	// Crouching is the default. A camper is a smaller and steadier target, so the tie and the near
 	// tie both go to crouch; only a spot that really needs the extra eye height stands up.
@@ -50,18 +46,34 @@ namespace
 		if ((camp.flags & crossbot_nav::CAMP_NO_STAND) != 0)
 			return true;
 
-		return ArcSum(camp.crouch) >= kCampDuckSlack * ArcSum(camp.stand);
+		return camp.crouchScore >= kCampDuckSlack * camp.standScore;
 	}
 
-	// The four arcs are nested FOVs 90/45/22.5/11.25. When the 22.5 cone already accounts for nearly
-	// everything the 90 cone sees, the spot is watching one corridor and the zoom costs no coverage.
-	bool ChooseZoom(const Nav::CampSpot &camp, bool duck)
+	// The spot's spread is the RMS angle its visible targets sit off the measured facing, so twice
+	// it is the arc the camper actually has to sweep. Zoom when that sweep fits inside the scope
+	// and the targets are far enough away for the magnification to buy anything.
+	bool ChooseZoom(const Nav::CampSpot &camp, bool duck, float zoomFov)
 	{
-		const float *arc = duck ? camp.crouch : camp.stand;
-		if (arc[0] <= 0.f)
+		if (zoomFov <= 0.f)
 			return false;
 
-		return arc[2] >= kCampZoomRatio * arc[0];
+		float spread = duck ? camp.crouchSpread : camp.standSpread;
+		float dist = duck ? camp.crouchDist : camp.standDist;
+		if (spread <= 0.f || dist < BotCamp::ZoomDist())
+			return false;
+
+		return spread * 2.f <= zoomFov * BotCamp::ZoomShare();
+	}
+
+	// The scope of whatever the bot is holding when the route is built, 0 when it has none.
+	float HeldZoomFov(const CBot &bot)
+	{
+		const BotInventory &inv = bot.inventory;
+		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
+			return 0.f;
+
+		const WeaponSpec *spec = HLDM_WeaponSpec(inv.weapons[inv.activeIndex].id);
+		return spec ? spec->zoomFov : 0.f;
 	}
 
 	float CvarValue(const char *name, float fallback)
@@ -77,8 +89,7 @@ namespace BotCamp
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_camp");
-	return !cvar || cvar->value != 0.f;
+	return BotDiff::Camp();
 }
 
 bool DebugEnabled()
@@ -106,6 +117,16 @@ float ReachRadius()
 	return CvarValue("crossbot_camp_reach", kDefaultReachRadius);
 }
 
+float ZoomShare()
+{
+	return CvarValue("crossbot_camp_zoom", kDefaultZoomShare);
+}
+
+float ZoomDist()
+{
+	return CvarValue("crossbot_camp_zoom_dist", kDefaultZoomDist);
+}
+
 bool Holding(const CBot &bot)
 {
 	return bot.camp.holding;
@@ -128,6 +149,7 @@ void BuildRoute(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &f
 		return;
 
 	float budget = Budget();
+	float zoomFov = HeldZoomFov(bot);
 
 	for (size_t i = 0; i < mesh.camps.size(); ++i)
 	{
@@ -158,7 +180,7 @@ void BuildRoute(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &f
 		spot.toGoal = in;
 		spot.flags = camp.flags;
 		spot.duck = ChooseDuck(camp);
-		spot.zoom = ChooseZoom(camp, spot.duck);
+		spot.zoom = ChooseZoom(camp, spot.duck, zoomFov);
 		st.route.push_back(spot);
 	}
 

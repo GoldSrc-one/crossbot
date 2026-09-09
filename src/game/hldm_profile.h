@@ -25,6 +25,8 @@ public:
 
 	const char *AmmoEntity(int weaponId, WeaponAmmo pool) const override;
 
+	bool ItemPreferred(edict_t *ent, ItemKind kind) const override;
+
 	int MeleeWeapon() const override;
 
 	int AmbushWeapon(AmbushKind kind) const override;

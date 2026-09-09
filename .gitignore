@@ -10,6 +10,3 @@ maps/*.lin
 maps/*.pts
 
 graveyard/
-
-# Machine-local symlinks into the CrossPlay project (crossplay_api.h, crossplay.lib)
-external/crossplay/

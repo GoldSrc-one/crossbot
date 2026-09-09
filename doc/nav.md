@@ -110,6 +110,43 @@ quietly return suboptimal routes. Every edge is scaled by at least this bound `(
 search drifts toward Dijkstra — on crossfire one leg goes 45 expansions / 7ms at `careful 0` to 107
 expansions / 21ms at `careful 1`. Bounded, but it is the number to watch.
 
+### Range bias: routing to ground the weapon can use
+
+`PlanPath` also takes a `NavPlan::RangeBias`, and the two factors multiply:
+
+```
+edge score = time * (1 - careful + careful * exposure)
+                  * (1 - weight  + weight  * mismatch)
+```
+
+`RangeBias` (`plan_search.h`) holds a weight, the two distance thresholds, and one bit saying whether
+the weapon wants long range. `Mismatch` is a single lerp: `t` ramps 0 to 1 as the edge's open distance
+goes from `shortDist` to `longDist`, and a close-range weapon takes `t` while a long-range one takes
+`1 - t`. Zero is ideal ground, one is the worst. At `weight = 0.5` the multiplier spans `[0.5, 1]`, so
+a route that fights on the right ground may take twice as long in seconds and still win.
+
+`weight = 0` reproduces the planner exactly as it was, which is what every caller that does not opt in
+gets from the default-constructed `RangeBias`. `Repath` feeds it `Bot_RangeBias`, which is the mirror
+of carefulness: `combat readiness` scaled by `crossbot_range_pref`, zero for a weapon with no opinion
+(`doc/bot.md`, "Range bias"). An unready bot avoids exposure; a ready one picks its terrain.
+
+**Open distance is cached on the connection, per direction.** The same load pass that resolves
+`vantageExposure` reuses its `VantageBlend` to fill `Connection::openDistAB` and `openDistBA` —
+`VantageOpenDistance(blend, dir)` with the XY direction between the two area centroids, and its
+negation. The blend is already paid for; this adds two dot-product sums per connection.
+
+The fallback is **0, not 1**: a connection with no vantage data reads as the shortest possible range.
+That is the honest answer (nothing is visible from there) and it also means a `--no-vantage` map gives
+every edge the same open distance, so the bias cancels out and routing is unchanged.
+
+**The heuristic shrinks again.** `hScale` is multiplied by `RangeBias::BestScale()`, which is
+`1 - weight` — the cheapest multiplier any edge can earn, since `Mismatch >= 0`. Same admissibility
+argument as the exposure bound, and the same cost: a high weight weakens the heuristic.
+
+**A weapon swap invalidates the route.** `bot.plannedRangeClass` records what the current route was
+planned for, and the nav update forces a repath when the live weapon's class differs. It compares the
+*class*, not the weapon id, so swapping between two close-range guns costs nothing.
+
 ## plan_search.cpp
 
 ### NavPlan::PlanRoute
@@ -383,12 +420,14 @@ Being seconds is also what lets `runtimePenalty` be added straight on top in `Bu
 `nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
 everything.
 
-`AreaCosts` takes the same `careful` factor as `PlanPath` and applies it the same way, to
-`travelSeconds + costSeconds + runtimePenalty` as a whole. **Above 0 the values stop being seconds and
-become scores**, which splits the two callers. `BotItems::SelectGoal` passes the bot's carefulness and
-is fine with it — it only ever ranks candidates against each other. `BotOppo::RebuildCosts` must leave
-it at 0, because `TryJump` subtracts two of these values and compares the difference against a real
-simulated flight time (`doc/bot.md`); careful-scaled costs there would silently deflate every gain.
+`AreaCosts` takes the same `careful` factor and the same `RangeBias` as `PlanPath` and applies them the
+same way, to `travelSeconds + costSeconds + runtimePenalty` as a whole; the direction of travel for the
+range term is `from -> to`, so the reverse sweep picks the other stored open distance. **Above 0 the
+values stop being seconds and become scores**, which splits the two callers. `BotItems::SelectGoal`
+passes the bot's carefulness and range bias and is fine with it — it only ever ranks candidates against
+each other. `BotOppo::RebuildCosts` must leave both at their zero defaults, because `TryJump` subtracts
+two of these values and compares the difference against a real simulated flight time (`doc/bot.md`);
+scaled costs there would silently deflate every gain.
 Reachability is unaffected either way: the factor is strictly positive, so nothing that was reachable
 becomes unreachable.
 
@@ -424,11 +463,11 @@ much of the crossing lies in drifting areas), the length-weighted mean `along` a
 `{seconds, passable}` for one direction. `forward` means areaA -> areaB, and reversing it negates `along`
 and swaps which extreme is the worst case.
 
-This is deliberately evaluated per search rather than baked. `Bot_MaxSpeed` reads `pEdict->v.maxspeed`
-before `sv_maxspeed`, so the speed is per-server and per-bot; a 280 u/s belt is walkable upstream at 320
-and impossible at 270, and a mesh that had decided in advance would send a bot onto an edge it cannot
-cross. `EvalDrift` returns `{0, true}` the moment `length` is zero, so on a map with no fields the whole
-feature costs one float compare per edge.
+This is deliberately evaluated per search rather than baked. `Bot_MaxSpeed` reads the cap the engine
+settled on in `PM_Move_Post`, so the speed is per-bot and, under CrossPlay, per hosted game; a 280 u/s
+belt is walkable upstream at 320 and impossible at 270, and a mesh that had decided in advance would
+send a bot onto an edge it cannot cross. `EvalDrift` returns `{0, true}` the moment `length` is zero,
+so on a map with no fields the whole feature costs one float compare per edge.
 
 `seconds` is a **correction on the existing `kNavRunSpeed` baseline**, not a replacement for it: negative
 downstream, positive upstream, and bounded by the crossing's own baseline time. That bound is what keeps
@@ -1293,8 +1332,10 @@ carries the launch's index. The bot then walks straight through the launch point
 
 ### Launch speed is clamped to the server
 `candSpeed` comes out of the nav file's `gateASpeed`, which the sampler produced at navgen's assumed
-`maxSpeed` — 320 by default. The server need not agree: `D:\hlds\valve\server.cfg` ships `sv_maxspeed 270`,
-and `BotPhysics` reads the live value into `PlanTraceContext::physics`. `Cross` therefore clamps
+`maxSpeed` — 320 by default. The bot flying it need not agree, and the number to compare against is
+not a cvar but whatever `PM_CheckParamters` left in `pmove->maxspeed` — 270 for a valve player, whether
+or not `sv_maxspeed` says so (the test server, `D:\hlds\crossplay`, never sets it). `Bot_Physics` reads that
+live value into `PlanTraceContext::physics` — see `Bot_MaxSpeed` in `doc/bot.md`. `Cross` therefore clamps
 `candSpeed` to `physics.maxSpeed` before handing it to `JumpLandsIn`.
 
 This is what keeps a nav file server-independent. Sampling stores the fastest jump the geometry allows;
@@ -1587,7 +1628,7 @@ larger change than this one.
 
 ## nav_format.h
 
-### Nav File Format (version 21)
+### Nav File Format (version 22)
 - Magic: "CBNV"
 - Header (128 B): magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex,
   areaPlanes, detours, detourPoints), designMaxSpeed, vantageCount, vantageSpacing, maxExposure,
@@ -1600,12 +1641,18 @@ larger change than this one.
 - `drift` is a `DriftTerm`: length, along, perp, alongMin, alongMax. Speed-independent by design;
   see "drift.h: direction-aware cost" above
 - `driftVelocity` is the area's conveyor plus push-field velocity, used by the speed profile
-- NavWatchDir (16 B): yaw, pitch, spread, amount
-- NavVantageRecord (80 B): pos[3], exposure, watch[4]. It used to carry a `focus[4]` block; camping is
+- NavWatchDir (20 B): yaw, pitch, spread, amount, dist. `spread` is an angle in degrees and `amount` a
+  fraction of sightlines; `dist` is the mean *distance* to everything visible inside the cone, which is
+  what the range bias reads through `VantageOpenDistance`
+- NavVantageRecord (96 B): pos[3], exposure, watch[4]. It used to carry a `focus[4]` block; camping is
   now its own section and the field is gone
-- NavCampRecord (64 B): pos[3], yaw, pitch, score, stand[4], crouch[4], areaId, flags. `pos` is the nav
-  floor point, which is a ducking player's origin, so the standing eye is +46 and the crouching eye +12.
-  `CAMP_NO_STAND` means standing there is impossible and `stand[]` is all zero
+- NavCampRecord (56 B): pos[3], yaw, pitch, score, standScore, standSpread, standDist, crouchScore,
+  crouchSpread, crouchDist, areaId, flags. `pos` is the nav floor point, which is a ducking player's
+  origin, so the standing eye is +46 and the crouching eye +12. `CAMP_NO_STAND` means standing there is
+  impossible and the three `stand*` fields are zero. Each posture's score is targets inside a
+  90-degree FOV over targets outside it; `spread` is the RMS angle they sit off the axis and `dist`
+  their mean range. It used to store four nested arc ratios per posture (90/45/22.5/11.25); one spread
+  says the same thing in one number, and carries the range the arcs never did
 - ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
 - DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
 

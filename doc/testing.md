@@ -302,9 +302,14 @@ else.
 
 **Regression.** `test_nav_goal.ps1` sets `crossbot_fun 0` alongside `crossbot_gather 0`, so the
 51-map sweep is unaffected by the tier and stays comparable against transcripts taken before it
-existed. All 51 maps pass. `test54_window` used to abandon the goal because navgen could not route to
-it at all (`no route from area 1 to area 18`) — that was the launch rescale, see "Rescaling a missed
-launch" in `doc/nav.md`. `test19_water` also used to abandon, and `test39_skybox` and `test41_skydrop`
+existed. All 51 maps pass. `test54_window` took two fixes. It used to abandon the goal because navgen
+could not route to it at all (`no route from area 1 to area 18`) — that was the launch rescale, see
+"Rescaling a missed launch" in `doc/nav.md`. It then failed a second time, ping-ponging between two
+routes on the window ledge: once the sweep moved onto the CrossPlay server (`D:\hlds\crossplay`, which
+sets no `sv_maxspeed`) the planner designed launches at the engine default 320 while the valve DLL held
+the bot at 270, so every launch was refused for being 90% of design. `Bot_MaxSpeed` now reads the cap
+the engine settled on, in `PM_Move_Post` — see `doc/bot.md`. A map that plans a route but will not
+follow it is the failure mode this sweep exists to catch; navgen alone called it healthy both times. `test19_water` also used to abandon, and `test39_skybox` and `test41_skydrop`
 used to hit the deadline; the skybox pair was the sky prune (see `DropSkyFloorLeaves` in
 `doc/navgen.md`), not the follower.
 

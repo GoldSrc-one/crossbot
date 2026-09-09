@@ -568,6 +568,21 @@ honest place to record what one weapon contributes is next to the weapon. The al
 table keyed by `m_iId` sitting beside this one, which is the same data with an extra way to fall out of
 sync.
 
+### rangeClass and zoomFov fail it the same way, for the same reason
+
+`rangeClass` is `RANGE_CLOSE` or `RANGE_LONG` (`RANGE_NONE` only for the table's empty slots, and it
+means "no opinion"). It says nothing about operating the gun; it says what ground the gun wants, which
+is a judgement about the mod that no runtime observation supplies. `Bot_RangeBias` turns it into a
+routing weight, so a bot holding a shotgun accepts a longer route through tighter ground and a bot
+holding a crossbow does the reverse (`doc/bot.md`, "Range bias"). Its two thresholds are cvars, not
+table fields, because the distance that counts as "long" is a property of the map, not of the gun.
+
+`zoomFov` is the scope's field of view in degrees -- 40 on the python, 20 on the crossbow, 0 for
+everything without `TOGGLE_ZOOM`. `WeaponMode::toggle` already says a zoom *exists*; this says how
+tight it is, which is what lets `BotCamp` ask whether the arc a camp spot has to sweep actually fits
+inside the scope instead of guessing at a distance threshold. It sits on `WeaponSpec` rather than
+`WeaponMode` because a weapon has one scope, not one per firing mode.
+
 The numbers are a coarse ladder, not damage figures: 0.5 for gauss, egon and crossbow, 0.3 for RPG and
 MP5, 0.2 for shotgun, hornetgun and python, 0.1 for everything else. They sum to 3.3 across the table,
 so `arms` saturates at two good weapons rather than requiring the full arsenal — deliberate, because a

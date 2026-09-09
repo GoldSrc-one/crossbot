@@ -1,6 +1,8 @@
 ﻿#pragma once
 
+#include "../game/weapon_spec.h"
 #include "../nav/pm_sim.h"
+#include "../nav/plan_search.h"
 #include "bot.h"
 
 float Bot_NormalizeAngle(float a);
@@ -27,6 +29,16 @@ Vector Bot_DriftVelocity(edict_t *pEdict, const PmSim::PmPushFn &push);
 float Bot_GravityMultiplier(edict_t *pEdict);
 
 float Bot_Carefulness(const CBot &bot);
+
+WeaponRangeClass Bot_RangeClass(const CBot &bot);
+
+NavPlan::RangeBias Bot_RangeBias(const CBot &bot);
+
+void Bot_NoteMoveMaxSpeed(int playerIndex, float maxspeed);
+
+void Bot_ForgetMoveMaxSpeed(edict_t *pEdict);
+
+bool Bot_MoveMaxSpeedKnown(edict_t *pEdict);
 
 float Bot_MaxSpeed(edict_t *pEdict);
 

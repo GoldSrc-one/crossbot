@@ -8,9 +8,12 @@
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_camp.h"
+#include "bot_difficulty.h"
 #include "bot_combat.h"
 #include "bot_fire.h"
+#include "bot_gauss.h"
 #include "bot_move.h"
+#include "bot_move_nav.h"
 #include "bot_perf.h"
 #include "../game/game_profile.h"
 #include "../game/teams.h"
@@ -40,12 +43,14 @@ namespace
 
 	constexpr size_t kMaxBoneSets = 64;
 	constexpr size_t kMaxSampleBones = 32;
+	constexpr int kHitGroupHead = 1;
 
 	constexpr float kLeadEpsilonSq = 1.f;
 
 	constexpr float kVantageInterval = 0.1f;
 	constexpr float kVantageConeFloor = 0.15f;
 	constexpr float kVantagePathSnap = 60.f;
+	constexpr float kBackCheckHold = 0.4f;
 
 	struct BoneSetEntry
 	{
@@ -53,6 +58,8 @@ namespace
 		const void *hdr = nullptr;
 		unsigned char bones[kMaxSampleBones] = {};
 		unsigned char count = 0;
+		unsigned char headBone = 0;
+		bool hasHead = false;
 	};
 
 	BoneSetEntry g_boneSets[kMaxBoneSets];
@@ -96,12 +103,19 @@ namespace
 		entry.modelIndex = ent->v.modelindex;
 		entry.hdr = model;
 		entry.count = 0;
+		entry.hasHead = false;
 
 		for (int i = 0; i < hdr->numhitboxes && entry.count < kMaxSampleBones; ++i)
 		{
 			int bone = boxes[i].bone;
 			if (bone < 0 || bone >= hdr->numbones)
 				continue;
+
+			if (!entry.hasHead && boxes[i].group == kHitGroupHead)
+			{
+				entry.hasHead = true;
+				entry.headBone = static_cast<unsigned char>(bone);
+			}
 
 			bool seen = false;
 			for (unsigned char j = 0; j < entry.count; ++j)
@@ -151,7 +165,7 @@ namespace
 		return &g_boneSets[slot];
 	}
 
-	Vector SamplePoint(CBot &bot, edict_t *ent, int &boneOut)
+	Vector SamplePoint(CBot &bot, edict_t *ent, int &boneOut, bool preferHead)
 	{
 		boneOut = -1;
 
@@ -162,17 +176,91 @@ namespace
 		if (!set || set->count == 0)
 			return ent->v.origin + ent->v.view_ofs;
 
-		unsigned int pick = static_cast<unsigned int>(RandomUnit(bot.sense) * set->count);
-		if (pick >= set->count)
-			pick = set->count - 1;
-
-		int bone = set->bones[pick];
+		int bone;
+		if (preferHead && set->hasHead)
+		{
+			bone = set->headBone;
+		}
+		else
+		{
+			unsigned int pick = static_cast<unsigned int>(RandomUnit(bot.sense) * set->count);
+			if (pick >= set->count)
+				pick = set->count - 1;
+			bone = set->bones[pick];
+		}
 
 		Vector origin;
 		g_engfuncs.pfnGetBonePosition(ent, bone, origin, nullptr);
 
 		boneOut = bone;
 		return origin;
+	}
+
+	float RandomBack(BotSense::State &sense)
+	{
+		sense.backRngState = sense.backRngState * 1664525u + 1013904223u;
+		return static_cast<float>((sense.backRngState >> 8) & 0xFFFFFFu) / 16777216.f;
+	}
+
+	void SeedBack(CBot &bot)
+	{
+		BotSense::State &sense = bot.sense;
+		if (sense.backRngSeeded)
+			return;
+
+		sense.backRngSeeded = true;
+		sense.backRngState = static_cast<unsigned int>(
+			g_engfuncs.pfnIndexOfEdict(bot.pEdict)) * 2246822519u + 4099u;
+	}
+
+	bool BackCheckLook(CBot &bot, const Nav::VantageBlend &blend)
+	{
+		BotSense::State &sense = bot.sense;
+
+		float lo = 0.f, hi = 0.f;
+		if (!BotDiff::BackCheck(lo, hi) || bot.combat.active || Bot_ManeuverActive(bot) ||
+			(bot.pEdict->v.flags & FL_ONGROUND) == 0)
+			return false;
+
+		SeedBack(bot);
+
+		if (gpGlobals->time >= sense.backNextTime)
+		{
+			const Nav::VantageWatch *pick = nullptr;
+			float acc = 0.f;
+			for (int i = 0; i < blend.watchCount; ++i)
+			{
+				float w = blend.watch[i].amount;
+				if (w <= 0.f)
+					continue;
+				acc += w;
+				if (RandomBack(sense) * acc < w)
+					pick = &blend.watch[i];
+			}
+
+			sense.backNextTime = gpGlobals->time + lo + RandomBack(sense) * (hi - lo);
+
+			if (pick && fabsf(Bot_NormalizeAngle(pick->yaw - bot.desiredAngles.y)) > kVantagePathSnap)
+			{
+				float pitch = pick->pitch;
+				if (pitch > kLookPitchLimit)
+					pitch = kLookPitchLimit;
+				else if (pitch < -kLookPitchLimit)
+					pitch = -kLookPitchLimit;
+
+				sense.backYaw = pick->yaw;
+				sense.backPitch = pitch;
+				sense.backHoldUntil = gpGlobals->time + kBackCheckHold;
+				++sense.backGlances;
+			}
+		}
+
+		if (gpGlobals->time >= sense.backHoldUntil)
+			return false;
+
+		sense.lookSource = BotSense::LOOK_BACK_CHECK;
+		bot.desiredAngles = Vector(sense.backPitch, Bot_NormalizeAngle(sense.backYaw), 0.f);
+		return true;
 	}
 
 	void RefreshVantage(CBot &bot)
@@ -309,33 +397,47 @@ namespace
 
 	bool TraceVisible(CBot &bot, const Vector &eye, edict_t *ent, Vector &pointOut, int &boneOut)
 	{
-		int bone = -1;
-		Vector point;
-		{
-			BOTPERF_SCOPE(ZONE_SN_BONE);
-			point = SamplePoint(bot, ent, bone);
-		}
-
 		bool monster = (ent->v.flags & FL_CLIENT) == 0;
-		if (monster)
-			++bot.sense.monTraces;
+		bool head = !monster && bot.sense.headLatched;
 
-		TraceResult tr;
+		for (int attempt = 0; attempt < 2; ++attempt)
 		{
-			BOTPERF_SCOPE(ZONE_SN_LOS);
-			TRACE_LINE(eye, point, dont_ignore_monsters, bot.pEdict, &tr);
+			int bone = -1;
+			Vector point;
+			{
+				BOTPERF_SCOPE(ZONE_SN_BONE);
+				point = SamplePoint(bot, ent, bone, head);
+			}
+
+			if (monster)
+				++bot.sense.monTraces;
+
+			TraceResult tr;
+			{
+				BOTPERF_SCOPE(ZONE_SN_LOS);
+				TRACE_LINE(eye, point, dont_ignore_monsters, bot.pEdict, &tr);
+			}
+			if (tr.flFraction < 1.f && tr.pHit != ent)
+			{
+				if (head)
+				{
+					head = false;
+					continue;
+				}
+				return false;
+			}
+
+			if (monster)
+				++bot.sense.monHits;
+
+			BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
+
+			pointOut = point;
+			boneOut = bone;
+			return true;
 		}
-		if (tr.flFraction < 1.f && tr.pHit != ent)
-			return false;
 
-		if (monster)
-			++bot.sense.monHits;
-
-		BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
-
-		pointOut = point;
-		boneOut = bone;
-		return true;
+		return false;
 	}
 
 	edict_t *Incumbent(const CBot &bot)
@@ -466,7 +568,21 @@ namespace
 		++sense.keeps[sense.visionKeep];
 
 		if (best && best != sense.target.Get())
+		{
 			BotAim::ClearDelayQueue(bot);
+			BotAim::RollDelay(bot);
+
+			int headPct = BotDiff::HeadPct();
+			sense.headLatched = headPct > 0 &&
+				BotAim::RandomRoll(bot) * 100.f < static_cast<float>(headPct);
+		}
+
+		if (!best && sense.target.Get())
+		{
+			int predictPct = BotDiff::PredictPct();
+			sense.predictLatched = predictPct > 0 &&
+				BotAim::RandomRoll(bot) * 100.f < static_cast<float>(predictPct);
+		}
 
 		sense.target.Set(best);
 		sense.targetBone = bestBone;
@@ -481,7 +597,7 @@ namespace
 		sense.enemyPos = best->v.origin;
 		sense.enemyTime = gpGlobals->time;
 
-		float delay = BotAim::Delay();
+		float delay = BotAim::Delay(bot);
 		Vector offset = best->v.velocity * delay;
 		Vector lead = bestPoint + offset;
 
@@ -1016,6 +1132,8 @@ void BotSense::OnRespawn(CBot &bot)
 	State &sense = bot.sense;
 	sense.vantage = Nav::VantageBlend();
 	sense.nextVantageTime = 0.f;
+	sense.backNextTime = 0.f;
+	sense.backHoldUntil = 0.f;
 	ForgetEnemy(bot);
 }
 
@@ -1039,10 +1157,10 @@ bool BotSense::ApplyLook(CBot &bot)
 	float limit = BotAim::PitchLimit();
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
 
-	float delay = BotAim::Delay();
+	float delay = BotAim::Delay(bot);
 	Vector point;
 	float yaw = 0.f, pitch = 0.f;
-	bool have = BotFire::AimPoint(bot, point) || BotAim::ReadDelayed(bot, delay, point);
+	bool have = BotFire::AimPoint(bot, point) || BotAim::ReadPredicted(bot, delay, point);
 	if (have && BotAim::LosAngles(eye, point, yaw, pitch))
 	{
 		if (pitch > limit)
@@ -1052,9 +1170,21 @@ bool BotSense::ApplyLook(CBot &bot)
 
 		bot.aim.servedDelay = delay;
 		bot.desiredAngles = Vector(pitch, yaw, 0.f);
-		sense.lookSource = LOOK_AIM;
+		sense.lookSource = bot.aim.predictedNow ? LOOK_PREDICT : LOOK_AIM;
 		return true;
 	}
+
+	float gaussYaw = 0.f, gaussPitch = 0.f;
+	if (BotGauss::Facing(bot, gaussYaw, gaussPitch))
+	{
+		sense.lookSource = LOOK_GAUSS;
+		bot.desiredAngles = Vector(gaussPitch, Bot_NormalizeAngle(gaussYaw), 0.f);
+		return true;
+	}
+
+	if (sense.vantage.valid && sense.vantage.watchCount > 0 &&
+		BackCheckLook(bot, sense.vantage))
+		return true;
 
 	if (!sense.lookValid || sense.lookAuthority <= 0.f)
 		return ApplyVantageLook(bot);
@@ -1094,6 +1224,9 @@ const char *BotSense::LookSourceName(LookSource source)
 	case LOOK_AIM: return "aim";
 	case LOOK_SENSE: return "sense";
 	case LOOK_CAMP: return "camp";
+	case LOOK_BACK_CHECK: return "back-check";
+	case LOOK_PREDICT: return "predict";
+	case LOOK_GAUSS: return "gauss";
 	case LOOK_VANTAGE_IDLE: return "vantage-idle";
 	case LOOK_VANTAGE_PATH: return "vantage-path";
 	case LOOK_VANTAGE_OFFPATH: return "vantage-offpath";

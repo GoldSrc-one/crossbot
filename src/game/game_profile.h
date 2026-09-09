@@ -98,6 +98,8 @@ public:
 
 	virtual const char *AmmoEntity(int weaponId, WeaponAmmo pool) const = 0;
 
+	virtual bool ItemPreferred(edict_t *ent, ItemKind kind) const = 0;
+
 	virtual int MeleeWeapon() const = 0;
 
 	virtual int AmbushWeapon(AmbushKind kind) const = 0;

@@ -16,6 +16,7 @@
 #include "bot_combat.h"
 #include "bot_deploy.h"
 #include "bot_fun.h"
+#include "bot_gauss.h"
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_opportunist.h"
@@ -1995,10 +1996,11 @@ namespace
 		bot.pushFields = traces.standPush;
 		NavPlan::PlanStats planStats;
 		float careful = Bot_Carefulness(bot);
+		NavPlan::RangeBias range = Bot_RangeBias(bot);
 		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
 		BotPerf::Enter(BotPerf::ZONE_RP_PLAN);
 		Nav::PlannedPath path = Nav::PlanPath(mesh, startArea->id, goalArea->id, pEdict->v.origin,
-			clampedGoal, &traces, &planStats, careful);
+			clampedGoal, &traces, &planStats, careful, range);
 		BotPerf::Leave(BotPerf::ZONE_RP_PLAN);
 		float planMs = std::chrono::duration<float, std::milli>(
 			std::chrono::steady_clock::now() - planBegin).count();
@@ -2011,6 +2013,10 @@ namespace
 				path.airmovesTried, path.airmovesRejected);
 			return false;
 		}
+
+		// Only once the plan stands: a failed search must not mark the route as
+		// already planned for this weapon class, or the retry loses its trigger.
+		bot.plannedRangeClass = Bot_RangeClass(bot);
 
 		bot.waypoints = std::move(path.waypoints);
 		bot.waypointIndex = 0;
@@ -2050,7 +2056,7 @@ namespace
 
 			BOT_VLOG("CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
 				"airmoves=%zu simulated/%zu rescaled/%zu runup-ext/%zu respeeded/%zu kept/%zu retracted/%zu retract-kept/%zu rejected | search %zu areas/%zu sims "
-				"in %.1fms | careful=%.2f route=%.1fs score=%.1f | profile segs=%zu len=%.0f "
+				"in %.1fms | careful=%.2f range=%s/%.2f route=%.1fs score=%.1f | profile segs=%zu len=%.0f "
 				"eta=%.1fs arcs=%zu slowed=%zu shrunk=%zu | penalized=%zu\n",
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				clampedGoal.x, clampedGoal.y, clampedGoal.z, bot.waypoints.size(),
@@ -2059,7 +2065,8 @@ namespace
 				planStats.airmovesRespeedKept, planStats.airmovesRetracted,
 				planStats.airmovesRetractKept,
 				path.airmovesRejected, path.expansions, path.airmovesTried, planMs,
-				careful, path.routeSeconds, path.routeScore,
+				careful, WeaponRangeName(bot.plannedRangeClass), range.Weight(),
+				path.routeSeconds, path.routeScore,
 				bot.followProfile.segs.size(), bot.followProfile.totalLength,
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,
 				bot.followProfile.cornersSlowed, bot.followProfile.cornersShrunk, penalizedOnRoute);
@@ -2509,6 +2516,12 @@ void Bot_MoveNav(CBot &bot)
 	bool swimming = pEdict->v.waterlevel >= kWaterlevelSwimming &&
 		bot.waypointIndex < bot.waypoints.size();
 
+	// A route planned for a shotgun is the wrong route once the crossbow comes out.
+	// Compared on the class, so swapping between two close-range guns costs nothing.
+	if (!bot.waypoints.empty() && bot.nextRepathTime <= 0.f &&
+		Bot_RangeClass(bot) != bot.plannedRangeClass)
+		bot.nextRepathTime = gpGlobals->time;
+
 	bool forcedRepath = RepathDue(bot) && !swimming;
 	bool stalled = !swimming && !bot.waypoints.empty() && bot.lastProgressTime > 0.f &&
 		gpGlobals->time - bot.lastProgressTime > kRepathInterval;
@@ -2581,6 +2594,8 @@ void Bot_MoveNav(CBot &bot)
 		bot.trackState.started = false;
 		return;
 	}
+
+	BotGauss::Update(bot, *mesh);
 
 	BotPerf::Enter(BotPerf::ZONE_OPPO);
 	bool oppoJumped = BotOppo::TryJump(bot, *mesh);
@@ -2826,7 +2841,8 @@ void Bot_MoveNav(CBot &bot)
 
 	if (crouch)
 		buttons |= IN_DUCK;
-	if (ladderEject || (avoid.jump && !OnLadder(pEdict)))
+	if (ladderEject || (avoid.jump && !OnLadder(pEdict)) ||
+		(!OnLadder(pEdict) && BotOppo::WantBunnyHop(bot, *mesh)))
 		buttons |= IN_JUMP;
 
 	if (wp->requiresLadder || OnLadder(pEdict))

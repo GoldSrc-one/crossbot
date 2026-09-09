@@ -45,6 +45,12 @@ struct State
 
 	float servedDelay = 0.f;
 
+	unsigned int predicts = 0;
+	bool predictedNow = false;
+
+	float engagementDelay = 0.f;
+	bool delayRolled = false;
+
 	bool testActive = false;
 	bool testSettled = false;
 	bool testRested = false;
@@ -58,7 +64,9 @@ float ViewSpeed(const CBot &bot);
 
 void BeginTest(CBot &bot, float yawDelta, float pitchDelta);
 
-float Delay();
+float Delay(const CBot &bot);
+
+void RollDelay(CBot &bot);
 
 float ErrorScale();
 
@@ -73,6 +81,10 @@ void ClearDelayQueue(CBot &bot);
 void PushDelaySlot(CBot &bot, const Vector &point, const Vector &vel);
 
 bool ReadDelayed(const CBot &bot, float delay, Vector &point, Vector *vel = nullptr);
+
+bool ReadPredicted(CBot &bot, float delay, Vector &point, Vector *vel = nullptr);
+
+float RandomRoll(CBot &bot);
 
 bool LosAngles(const Vector &from, const Vector &to, float &yaw, float &pitch);
 

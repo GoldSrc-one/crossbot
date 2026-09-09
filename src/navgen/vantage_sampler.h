@@ -30,6 +30,7 @@ struct WatchDir
 	double pitch = 0.0;
 	double spread = 0.0;
 	double amount = 0.0;
+	double dist = 0.0;
 };
 
 struct Vantage
@@ -83,6 +84,8 @@ struct VantageStats
 	double maxExposure = 0.0;
 	double meanReductionError = 0.0;
 	double maxReductionError = 0.0;
+	double meanWatchDist = 0.0;
+	double maxWatchDist = 0.0;
 	size_t neighborChecks = 0;
 	size_t neighborMismatches = 0;
 	size_t worldTraces = 0;

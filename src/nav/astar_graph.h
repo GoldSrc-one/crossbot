@@ -22,6 +22,8 @@ struct Connection
 	crossbot_nav::DriftTerm drift;
 	float costSeconds = 0.f;
 	float exposure = 1.f;
+	float openDistAB = 0.f;
+	float openDistBA = 0.f;
 	Vector crossing = Vector(0.f, 0.f, 0.f);
 };
 

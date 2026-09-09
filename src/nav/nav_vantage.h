@@ -24,6 +24,7 @@ struct VantageWatch
 	float pitch = 0.f;
 	float spread = 0.f;
 	float amount = 0.f;
+	float dist = 0.f;
 };
 
 struct Vantage
@@ -62,5 +63,9 @@ Vector VantageDir(float yaw, float pitch);
 void BuildVantageGrid(VantageField &field);
 
 bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &out);
+
+// Amount-weighted mean open distance looking along dir. Returns 0 when nothing is
+// visible that way, which is correctly the shortest possible engagement range.
+float VantageOpenDistance(const VantageBlend &blend, const Vector &dir);
 
 }

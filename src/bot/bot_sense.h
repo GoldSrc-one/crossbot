@@ -39,6 +39,9 @@ enum LookSource : unsigned char
 	LOOK_AIM,
 	LOOK_SENSE,
 	LOOK_CAMP,
+	LOOK_BACK_CHECK,
+	LOOK_PREDICT,
+	LOOK_GAUSS,
 	LOOK_VANTAGE_IDLE,
 	LOOK_VANTAGE_PATH,
 	LOOK_VANTAGE_OFFPATH,
@@ -100,6 +103,9 @@ struct State
 	unsigned int rngState = 0;
 	bool rngSeeded = false;
 
+	bool headLatched = false;
+	bool predictLatched = false;
+
 	float lookAuthority = 0.f;
 	Vector lookDir;
 	int lookEntries = 0;
@@ -108,6 +114,15 @@ struct State
 
 	Nav::VantageBlend vantage;
 	float nextVantageTime = 0.f;
+
+	float backNextTime = 0.f;
+	float backHoldUntil = 0.f;
+	float backYaw = 0.f;
+	float backPitch = 0.f;
+	unsigned int backGlances = 0;
+	unsigned int backRngState = 0;
+	bool backRngSeeded = false;
+
 	LookSource lookSource = LOOK_NONE;
 };
 

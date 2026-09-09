@@ -1,0 +1,1 @@
+D:/projects/goldsrc.one/crossplay/crossplay_api.h

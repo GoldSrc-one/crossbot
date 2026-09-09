@@ -13,6 +13,7 @@
 #include "../nav/path_follower.h"
 #include "bot.h"
 #include "bot_combat.h"
+#include "bot_difficulty.h"
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
@@ -426,8 +427,7 @@ bool BotCombat::Enabled()
 
 bool BotCombat::AmbushEnabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_ambush");
-	return !cvar || cvar->value != 0.f;
+	return BotDiff::AmbushOverride();
 }
 
 bool BotCombat::Ambushing(const CBot &bot)
@@ -634,6 +634,13 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 	if (Bot_ManeuverActive(bot))
 	{
 		st.lastReason = "finishing a maneuver";
+		return false;
+	}
+
+	if (!BotDiff::CombatInterrupt())
+	{
+		st.driving = false;
+		st.lastReason = "difficulty";
 		return false;
 	}
 

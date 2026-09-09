@@ -31,6 +31,14 @@ enum WeaponAmmo
 	AMMO_SECONDARY,
 };
 
+// The distance band a weapon fights best at. Routing prefers ground that matches.
+enum WeaponRangeClass
+{
+	RANGE_NONE = 0,
+	RANGE_CLOSE,
+	RANGE_LONG,
+};
+
 enum WeaponQuirks : unsigned int
 {
 	WPN_Q_NONE          = 0,
@@ -66,6 +74,8 @@ struct WeaponSpec
 	const char *classname;
 	int clipSize;
 	float value;
+	WeaponRangeClass rangeClass;
+	float zoomFov;
 	WeaponMode primary;
 	WeaponMode primaryZoomed;
 	WeaponMode secondary;
@@ -75,3 +85,4 @@ const char *WeaponFireName(WeaponFire fire);
 const char *WeaponAimName(WeaponAim aim);
 const char *WeaponToggleName(WeaponToggle toggle);
 const char *WeaponAmmoName(WeaponAmmo ammo);
+const char *WeaponRangeName(WeaponRangeClass range);

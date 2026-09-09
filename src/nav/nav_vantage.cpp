@@ -28,6 +28,7 @@ struct MergeEntry
 	Vector dir;
 	float weight;
 	float spread;
+	float dist;
 	bool used;
 };
 
@@ -164,6 +165,7 @@ void MergeWatchDirs(MergeEntry *entries, int count, VantageBlend &out)
 
 		float weight = 0.f;
 		float angleSq = 0.f;
+		float distAcc = 0.f;
 		for (int i = 0; i < count; ++i)
 		{
 			if (entries[i].used)
@@ -175,6 +177,7 @@ void MergeWatchDirs(MergeEntry *entries, int count, VantageBlend &out)
 			float angle = std::acos(std::max(-1.f, std::min(1.f, d))) / kDeg;
 			weight += entries[i].weight;
 			angleSq += entries[i].weight * (angle * angle + entries[i].spread * entries[i].spread);
+			distAcc += entries[i].weight * entries[i].dist;
 			entries[i].used = true;
 		}
 		if (weight <= 0.f)
@@ -186,6 +189,7 @@ void MergeWatchDirs(MergeEntry *entries, int count, VantageBlend &out)
 		wd.pitch = -atan2f(dir.z, flat) / kDeg;
 		wd.spread = std::sqrt(angleSq / weight);
 		wd.amount = weight;
+		wd.dist = distAcc / weight;
 	}
 
 	std::sort(out.watch, out.watch + out.watchCount,
@@ -313,6 +317,7 @@ bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &ou
 			e.dir = VantageDir(v.watch[k].yaw, v.watch[k].pitch);
 			e.weight = w * v.watch[k].amount;
 			e.spread = v.watch[k].spread;
+			e.dist = v.watch[k].dist;
 			e.used = false;
 		}
 	}
@@ -328,6 +333,31 @@ bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &ou
 	out.nearestDist = std::sqrt(best[0].distSq);
 	out.valid = out.watchCount > 0;
 	return out.valid;
+}
+
+float VantageOpenDistance(const VantageBlend &blend, const Vector &dir)
+{
+	float len = dir.Length();
+	if (len <= 0.0001f)
+		return 0.f;
+
+	Vector unit = dir * (1.f / len);
+
+	float weight = 0.f;
+	float acc = 0.f;
+	for (int i = 0; i < blend.watchCount; ++i)
+	{
+		const VantageWatch &wd = blend.watch[i];
+		float facing = DotProduct(VantageDir(wd.yaw, wd.pitch), unit);
+		if (facing <= 0.f)
+			continue;
+
+		float w = wd.amount * facing;
+		weight += w;
+		acc += w * wd.dist;
+	}
+
+	return (weight > 0.f) ? acc / weight : 0.f;
 }
 
 }

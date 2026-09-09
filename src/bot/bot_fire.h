@@ -56,6 +56,7 @@ struct State
 	Commit commit = COMMIT_NONE;
 	float commitStart = 0.f;
 	bool commitSeen = false;
+	bool releaseCharge = false;
 
 	int pendingId = 0;
 	Mode pendingMode = MODE_NONE;
@@ -107,6 +108,7 @@ struct State
 	int ambushes = 0;
 	int duels = 0;
 	int idleReloads = 0;
+	int gaussJumps = 0;
 };
 
 bool Enabled();

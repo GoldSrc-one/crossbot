@@ -3,6 +3,7 @@
 #include <pm_defs.h>
 
 #include "../bot/bot_manager.h"
+#include "../bot/bot_move.h"
 #include "../bot/bot_perf.h"
 #include "../bot/bot_sense.h"
 #include "../bot/bot_timing.h"
@@ -53,7 +54,7 @@ cvar_t g_combatDebugCvar = {
 
 cvar_t g_ambushCvar = {
 	"crossbot_ambush",
-	"1",
+	"-1",
 	FCVAR_SERVER
 };
 
@@ -107,7 +108,7 @@ cvar_t g_detourBudgetCvar = {
 
 cvar_t g_campCvar = {
 	"crossbot_camp",
-	"1",
+	"-1",
 	FCVAR_SERVER
 };
 
@@ -129,6 +130,18 @@ cvar_t g_campReachCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_campZoomCvar = {
+	"crossbot_camp_zoom",
+	"0.85",
+	FCVAR_SERVER
+};
+
+cvar_t g_campZoomDistCvar = {
+	"crossbot_camp_zoom_dist",
+	"768",
+	FCVAR_SERVER
+};
+
 cvar_t g_campDebugCvar = {
 	"crossbot_camp_debug",
 	"0",
@@ -137,13 +150,73 @@ cvar_t g_campDebugCvar = {
 
 cvar_t g_oppoJumpCvar = {
 	"crossbot_oppo_jump",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_difficultyCvar = {
+	"crossbot_difficulty",
 	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_oppoIntervalCvar = {
+	"crossbot_oppo_interval",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_turnScaleCvar = {
+	"crossbot_turn_scale",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_backCheckCvar = {
+	"crossbot_back_check",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_headPctCvar = {
+	"crossbot_head_pct",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_predictPctCvar = {
+	"crossbot_predict_pct",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_combatInterruptCvar = {
+	"crossbot_combat_interrupt",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_pickupPriorityCvar = {
+	"crossbot_pickup_priority",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_gaussCvar = {
+	"crossbot_gauss",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_bunnyHopCvar = {
+	"crossbot_bunnyhop",
+	"-1",
 	FCVAR_SERVER
 };
 
 cvar_t g_aimDelayCvar = {
 	"crossbot_aim_delay",
-	"0.3",
+	"-1",
 	FCVAR_SERVER
 };
 
@@ -161,7 +234,7 @@ cvar_t g_senseDecayCvar = {
 
 cvar_t g_aimErrorCvar = {
 	"crossbot_aim_error",
-	"1",
+	"-1",
 	FCVAR_SERVER
 };
 
@@ -203,6 +276,36 @@ cvar_t g_carefulCvar = {
 
 cvar_t g_carefulPinCvar = {
 	"crossbot_careful_pin",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_rangePrefCvar = {
+	"crossbot_range_pref",
+	"0.5",
+	FCVAR_SERVER
+};
+
+cvar_t g_rangeShortCvar = {
+	"crossbot_range_short",
+	"512",
+	FCVAR_SERVER
+};
+
+cvar_t g_rangeLongCvar = {
+	"crossbot_range_long",
+	"1024",
+	FCVAR_SERVER
+};
+
+cvar_t g_rangePinCvar = {
+	"crossbot_range_pin",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_rangeForceCvar = {
+	"crossbot_range_force",
 	"-1",
 	FCVAR_SERVER
 };
@@ -310,8 +413,20 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_campBudgetCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_campRadiusCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_campReachCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campZoomCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campZoomDistCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_campDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_difficultyCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoIntervalCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_turnScaleCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_backCheckCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_headPctCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_predictPctCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_combatInterruptCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_pickupPriorityCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_gaussCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_bunnyHopCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);
@@ -323,6 +438,11 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_vantageCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulPinCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_rangePrefCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_rangeShortCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_rangeLongCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_rangePinCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_rangeForceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployDebugCvar);
@@ -363,6 +483,7 @@ void ClientPutInServer(edict_t *pEntity)
 
 void ClientDisconnect(edict_t *pEntity)
 {
+	Bot_ForgetMoveMaxSpeed(pEntity);
 	BotManager::ClientDisconnect(pEntity);
 	RETURN_META(MRES_IGNORED);
 }
@@ -415,8 +536,12 @@ static void PM_Move(playermove_t *ppmove, qboolean server)
 
 static void PM_Move_Post(playermove_t *ppmove, qboolean server)
 {
-	if (ppmove && ppmove->PM_PlaySound == PM_PlaySoundHook)
-		ppmove->PM_PlaySound = g_pmPlaySound;
+	if (ppmove)
+	{
+		if (ppmove->PM_PlaySound == PM_PlaySoundHook)
+			ppmove->PM_PlaySound = g_pmPlaySound;
+		Bot_NoteMoveMaxSpeed(ppmove->player_index, ppmove->maxspeed);
+	}
 	g_pmPlayerEnt = 0;
 	RETURN_META(MRES_IGNORED);
 }

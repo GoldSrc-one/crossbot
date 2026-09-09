@@ -49,6 +49,8 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 		gc.drift = c.drift;
 		gc.costSeconds = c.costSeconds + c.runtimePenalty;
 		gc.exposure = c.vantageExposure;
+		gc.openDistAB = c.openDistAB;
+		gc.openDistBA = c.openDistBA;
 	}
 }
 
@@ -73,7 +75,7 @@ bool GateAllowsCrossing(const NavMesh &mesh, uint32_t connIdx, uint32_t fromId, 
 
 PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint, const NavPlan::PlanTraceContext *traces,
-	NavPlan::PlanStats *stats, float careful)
+	NavPlan::PlanStats *stats, float careful, const NavPlan::RangeBias &range)
 {
 	std::vector<std::vector<uint32_t>> areaConnIndices;
 	std::vector<NavAStar::Connection> graphConns;
@@ -84,7 +86,7 @@ PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 
 	PlannedPath path = NavPlan::PlanRoute(areaConnIndices, graphConns, mesh.planAreas, mesh.planConns,
 		startArea, goalArea, startPoint, goalPoint, traces, stats, careful, mesh.minConnExposure,
-		maxSpeed);
+		maxSpeed, range);
 
 	for (NavPlan::PlanWaypoint &wp : path.waypoints)
 	{
@@ -101,7 +103,7 @@ namespace
 constexpr float kGravityEpsilon = 0.01f;
 
 void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::vector<float> &out,
-	float gravityMultiplier, float careful, float maxSpeed)
+	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range)
 {
 	size_t n = mesh.areas.size();
 	out.assign(n, kUnreachableSeconds);
@@ -156,7 +158,9 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 			float base = c.travelSeconds + c.costSeconds + c.runtimePenalty + drift.seconds;
 			if (base < 0.f)
 				base = 0.f;
-			float step = currentDist + base * (1.f - careful + careful * c.vantageExposure);
+			float openDist = (c.areaA == from) ? c.openDistAB : c.openDistBA;
+			float step = currentDist + base * (1.f - careful + careful * c.vantageExposure) *
+				range.Scale(openDist);
 			if (step >= out[neighbor])
 				continue;
 
@@ -169,17 +173,17 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 }
 
 void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out,
-	float gravityMultiplier, float careful, float maxSpeed)
+	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range)
 {
 	AreaCostsImpl(mesh, startArea, false, out, gravityMultiplier, careful,
-		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed);
+		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed, range);
 }
 
 void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out,
-	float gravityMultiplier, float careful, float maxSpeed)
+	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range)
 {
 	AreaCostsImpl(mesh, goalArea, true, out, gravityMultiplier, careful,
-		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed);
+		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed, range);
 }
 
 }

@@ -17,7 +17,7 @@ namespace BotCamp
 
 // A camp spot that survived the route filter, flattened out of Nav::CampSpot so neither the trigger
 // nor the hold has to touch the mesh again. duck and zoom are decided here, at build time, from the
-// arc ratios -- they are properties of the spot, not of the moment.
+// spot's scores and spread -- they are properties of the spot, not of the moment.
 struct RouteSpot
 {
 	int campIndex = -1;
@@ -66,6 +66,10 @@ float Budget();
 float ScareRadius();
 
 float ReachRadius();
+
+float ZoomShare();
+
+float ZoomDist();
 
 // Called from BotGoal::Select once the cost-to-target field exists. One linear pass over
 // mesh.camps; no search of its own.

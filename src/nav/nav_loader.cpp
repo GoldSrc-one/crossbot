@@ -1,5 +1,6 @@
 #include "nav_loader.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -293,6 +294,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 			wd.pitch = rec.watch[k].pitch;
 			wd.spread = rec.watch[k].spread;
 			wd.amount = rec.watch[k].amount;
+			wd.dist = rec.watch[k].dist;
 		}
 	}
 	BuildVantageGrid(mesh->vantageField);
@@ -306,21 +308,26 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		spot.yaw = rec.yaw;
 		spot.pitch = rec.pitch;
 		spot.score = rec.score;
-		for (size_t k = 0; k < kNavCampArcs; ++k)
-		{
-			spot.stand[k] = rec.stand[k];
-			spot.crouch[k] = rec.crouch[k];
-		}
+		spot.standScore = rec.standScore;
+		spot.standSpread = rec.standSpread;
+		spot.standDist = rec.standDist;
+		spot.crouchScore = rec.crouchScore;
+		spot.crouchSpread = rec.crouchSpread;
+		spot.crouchDist = rec.crouchDist;
 		spot.areaId = static_cast<int>(rec.areaId);
 		spot.flags = rec.flags;
 	}
 
 	float exposureSum = 0.f;
 	size_t exposureKnown = 0;
+	float openSum = 0.f;
+	float openMax = 0.f;
 	for (size_t i = 0; i < mesh->conns.size(); ++i)
 	{
 		Connection &conn = mesh->conns[i];
 		conn.vantageExposure = 1.f;
+		conn.openDistAB = 0.f;
+		conn.openDistBA = 0.f;
 
 		if (i >= mesh->planConns.size() || mesh->vantageField.maxExposure <= 0.f)
 			continue;
@@ -347,15 +354,29 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		++exposureKnown;
 		if (exposure < mesh->minConnExposure)
 			mesh->minConnExposure = exposure;
+
+		// Same blend, evaluated along each direction of travel: how far a fight can
+		// reach for a bot crossing this way.
+		if (conn.areaA < mesh->areas.size() && conn.areaB < mesh->areas.size())
+		{
+			Vector travel = mesh->areas[conn.areaB].centroid - mesh->areas[conn.areaA].centroid;
+			travel.z = 0.f;
+			conn.openDistAB = VantageOpenDistance(blend, travel);
+			conn.openDistBA = VantageOpenDistance(blend, travel * -1.f);
+		}
+
+		openSum += 0.5f * (conn.openDistAB + conn.openDistBA);
+		openMax = std::max(openMax, std::max(conn.openDistAB, conn.openDistBA));
 	}
 
 	char msg[700];
 	snprintf(msg, sizeof(msg),
 		"CrossBot: loaded nav file %s (%zu areas, %zu connections, %zu vantages, %zu camps); "
-		"connection exposure known %zu, mean %.3f, min %.3f.\n",
+		"connection exposure known %zu, mean %.3f, min %.3f; open distance mean %.0f, max %.0f.\n",
 		navPath, mesh->areas.size(), mesh->conns.size(), mesh->vantageField.vantages.size(), mesh->camps.size(),
 		exposureKnown, exposureKnown > 0 ? exposureSum / static_cast<float>(exposureKnown) : 1.f,
-		mesh->minConnExposure);
+		mesh->minConnExposure,
+		exposureKnown > 0 ? openSum / static_cast<float>(exposureKnown) : 0.f, openMax);
 	SERVER_PRINT(msg);
 
 	return mesh;

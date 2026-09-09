@@ -6,6 +6,7 @@
 
 #include "bot_opportunist.h"
 #include "bot_log.h"
+#include "bot_difficulty.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "../nav/astar_graph.h"
@@ -22,7 +23,6 @@ namespace
 {
 	constexpr int kHullDuck = 3;
 
-	constexpr float kCheckInterval = 0.25f;
 	constexpr float kMinGainSeconds = 0.35f;
 	constexpr float kSpeedTriggerRatio = 1.25f;
 	constexpr float kMinLaunchSpeed = 60.f;
@@ -30,12 +30,18 @@ namespace
 	constexpr float kMaxLaunchYawRate = 30.f;
 	constexpr float kMaxLaunchPitch = 20.f;
 
+	constexpr float kBunnyInterval = 0.1f;
+	constexpr float kBunnySpeedRatio = 0.98f;
+	constexpr float kBunnyCorridor = 64.f;
+	constexpr float kBunnySimSeconds = 3.f;
+	constexpr size_t kBunnyLookahead = 6;
+
 	float Speed2D(const Vector &v)
 	{
 		return sqrtf(v.x * v.x + v.y * v.y);
 	}
 
-	bool RebuildCosts(CBot &bot, const Nav::NavMesh &mesh)
+	bool RebuildCostsImpl(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		const Nav::Area *goalArea = Nav::FindAreaNearest(mesh, bot.goalPoint);
 		if (!goalArea)
@@ -52,15 +58,79 @@ namespace
 	}
 }
 
+bool RebuildCosts(CBot &bot, const Nav::NavMesh &mesh)
+{
+	return RebuildCostsImpl(bot, mesh);
+}
+
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_oppo_jump");
-	return cvar && cvar->value != 0.f;
+	float pin = BotDiff::Pin("crossbot_oppo_jump");
+	return pin >= 0.f ? pin != 0.f : true;
 }
 
 void OnRepath(CBot &bot)
 {
 	bot.oppoCostsGoalArea = -1;
+}
+
+bool WantBunnyHop(CBot &bot, const Nav::NavMesh &mesh)
+{
+	edict_t *pEdict = bot.pEdict;
+
+	if (!BotDiff::BunnyHop())
+		return false;
+	if ((pEdict->v.flags & FL_ONGROUND) == 0)
+		return false;
+	if (bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive)
+		return false;
+	if (bot.waypointIndex >= bot.waypoints.size())
+		return false;
+	if (gpGlobals->time < bot.bunnyNextCheck)
+		return false;
+
+	bot.bunnyNextCheck = gpGlobals->time + kBunnyInterval;
+
+	for (size_t i = bot.waypointIndex; i < bot.waypoints.size() && i < bot.waypointIndex + kBunnyLookahead; ++i)
+	{
+		const Nav::Waypoint &wp = bot.waypoints[i];
+		if (wp.airmoveLaunch || wp.requiresLadder || wp.requiresCrouch ||
+			wp.requiresElevatorRide || wp.requiresButtonUse || wp.requiresTriggerTouch ||
+			wp.requiresTeleport || wp.requiresBreak || wp.requiresDoor)
+			return false;
+	}
+
+	PmSim::PmPhysics physics = Bot_Physics(pEdict);
+	const Vector &vel = pEdict->v.velocity;
+	float speed = Speed2D(vel);
+	if (speed < kBunnySpeedRatio * physics.maxSpeed)
+		return false;
+
+	float yaw = atan2f(vel.y, vel.x) * (180.f / NavMath::kPiF);
+
+	Bot_SimulateAirmoveArc(pEdict, pEdict->v.origin, nullptr, yaw, speed, false, kHullDuck, 0.f,
+		kBunnySimSeconds, bot.airmoveArc);
+
+	if (!bot.airmoveArc.landed)
+		return false;
+	if (PmSim::FallDamageFor(bot.airmoveArc.fallSpeed) > 0.f)
+		return false;
+
+	const Vector &landing = bot.airmoveArc.points.back();
+
+	bool onPath = false;
+	for (size_t i = bot.waypointIndex; i < bot.waypoints.size() && !onPath; ++i)
+	{
+		Vector to(bot.waypoints[i].point.x - landing.x, bot.waypoints[i].point.y - landing.y, 0.f);
+		if (to.Length() <= kBunnyCorridor)
+			onPath = true;
+	}
+
+	if (!onPath)
+		return false;
+
+	++bot.bunnyHops;
+	return true;
 }
 
 bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
@@ -80,7 +150,7 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 	if (bot.waypointIndex < bot.waypoints.size() && bot.waypoints[bot.waypointIndex].airmoveLaunch)
 		return false;
 
-	bot.oppoNextCheck = gpGlobals->time + kCheckInterval;
+	bot.oppoNextCheck = gpGlobals->time + BotDiff::OppoInterval();
 
 	const Vector &vel = pEdict->v.velocity;
 	float speed = Speed2D(vel);
@@ -95,7 +165,7 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 		fabsf(pEdict->v.v_angle.x) > kMaxLaunchPitch))
 		return false;
 
-	if (!RebuildCosts(bot, mesh))
+	if (!RebuildCostsImpl(bot, mesh))
 		return false;
 
 	uint32_t here = static_cast<uint32_t>(bot.currentAreaId);

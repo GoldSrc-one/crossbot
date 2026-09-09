@@ -14,7 +14,8 @@
 namespace navgen
 {
 
-constexpr size_t kCampArcs = crossbot_nav::kNavCampArcs;
+// Half-angle of the scoring cone: a 90 degree field of view.
+constexpr double kCampFovHalfDeg = 45.0;
 
 constexpr double kDefaultCampSpacing = 256.0;
 constexpr size_t kDefaultCampMinVisible = 32;
@@ -26,8 +27,12 @@ struct CampSpot
 	double yaw = 0.0;
 	double pitch = 0.0;
 	double score = 0.0;
-	double stand[kCampArcs] = {0.0, 0.0, 0.0, 0.0};
-	double crouch[kCampArcs] = {0.0, 0.0, 0.0, 0.0};
+	double standScore = 0.0;
+	double standSpread = 0.0;
+	double standDist = 0.0;
+	double crouchScore = 0.0;
+	double crouchSpread = 0.0;
+	double crouchDist = 0.0;
 	int areaId = -1;
 	uint32_t flags = 0;
 	size_t climbSteps = 0;

@@ -141,7 +141,7 @@ try {
     if (-not $SkipRoam) {
         Write-Host "`n===== ROAM: gather on, bots move ====="
         Write-Host "err may be large -- that is target acceleration. Watch queue and served instead."
-        Invoke-Rcon "crossbot_aim_delay 0.25" | Out-Null
+        Invoke-Rcon "crossbot_aim_delay -1" | Out-Null
         Invoke-Rcon "crossbot_aim_drift 1" | Out-Null
         Invoke-Rcon "crossbot_gather 1" | Out-Null
 

@@ -5,6 +5,7 @@
 #include "../bot/bot.h"
 #include "../bot/bot_aim.h"
 #include "../bot/bot_deploy.h"
+#include "../bot/bot_difficulty.h"
 #include "../bot/bot_fire.h"
 #include "../bot/bot_fun.h"
 #include "../bot/bot_items.h"
@@ -217,6 +218,11 @@ namespace
 		BotManager::PrintMonsters();
 	}
 
+	void Cmd_CrossBotDifficultyStatus()
+	{
+		BotDiff::PrintStatus();
+	}
+
 	void Cmd_CrossBotVantageStatus()
 	{
 		if (CMD_ARGC() < 4)
@@ -369,8 +375,9 @@ namespace
 	void PrintWeaponSpec(const WeaponSpec &spec)
 	{
 		char msg[192];
-		snprintf(msg, sizeof(msg), "CrossBot:  id %2d %-20s clip %d\n",
-			spec.id, spec.classname, spec.clipSize);
+		snprintf(msg, sizeof(msg), "CrossBot:  id %2d %-20s clip %d value %.2f range %-5s zoomfov %.0f\n",
+			spec.id, spec.classname, spec.clipSize, spec.value,
+			WeaponRangeName(spec.rangeClass), spec.zoomFov);
 		SERVER_PRINT(msg);
 
 		PrintWeaponMode("P", spec.primary);
@@ -917,6 +924,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_monsters", Cmd_CrossBotMonsters);
+	ADD_SERVER_COMMAND("crossbot_difficulty_status", Cmd_CrossBotDifficultyStatus);
 	ADD_SERVER_COMMAND("crossbot_vantage_status", Cmd_CrossBotVantageStatus);
 	ADD_SERVER_COMMAND("crossbot_camp_status", Cmd_CrossBotCampStatus);
 	ADD_SERVER_COMMAND("crossbot_teams_status", Cmd_CrossBotTeamsStatus);

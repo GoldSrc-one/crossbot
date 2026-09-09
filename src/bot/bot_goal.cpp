@@ -12,6 +12,7 @@
 #include "bot_camp.h"
 #include "bot_fun.h"
 #include "bot_goal.h"
+#include "bot_difficulty.h"
 #include "bot_items.h"
 #include "bot_log.h"
 #include "bot_move.h"
@@ -234,6 +235,8 @@ namespace
 
 		std::vector<BotGoal::Candidate> gather;
 		BotItems::Collect(bot, mesh, fromBot, gather);
+		if (BotDiff::PickupPriority())
+			BotItems::Prioritize(gather);
 
 		const BotGoal::Candidate *best = nullptr;
 		float bestFrom = 0.f;
@@ -319,7 +322,8 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
-		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
+		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
 
 	std::vector<Candidate> cands;
 	Tier tier = GOAL_NONE;
@@ -331,6 +335,8 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		PruneUnreachable(bot, mesh, costs, cands);
 		if (t == GOAL_FUN)
 			BotFun::Prioritize(cands);
+		if (t == GOAL_GATHER && BotDiff::PickupPriority())
+			BotItems::Prioritize(cands);
 		if (!cands.empty())
 		{
 			tier = static_cast<Tier>(t);
@@ -368,7 +374,8 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 	if (tier > GOAL_GATHER)
 	{
 		Nav::AreaCostsToGoal(mesh, static_cast<uint32_t>(st.target.areaId), st.toTargetCosts,
-			Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
+			Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
+			Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
 		st.toTargetArea = st.target.areaId;
 		BotCamp::BuildRoute(bot, mesh, costs);
 	}
@@ -425,12 +432,13 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 	st.skipped.clear();
 
 	Nav::AreaCostsToGoal(mesh, areaId, st.toTargetCosts, Bot_GravityMultiplier(bot.pEdict),
-		Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
+		Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
 	st.toTargetArea = st.target.areaId;
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
-		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
+		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
 
 	BotCamp::BuildRoute(bot, mesh, costs);
 
@@ -457,7 +465,8 @@ bool Advance(CBot &bot)
 
 	std::vector<float> costs;
 	Nav::AreaCosts(*mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
-		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict));
+		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
 
 	PickStop(bot, *mesh, costs);
 	Bot_ResetNavPath(bot);

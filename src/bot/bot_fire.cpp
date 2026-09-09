@@ -8,6 +8,7 @@
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_camp.h"
+#include "bot_difficulty.h"
 #include "bot_break.h"
 #include "bot_deploy.h"
 #include "bot_fun.h"
@@ -42,6 +43,10 @@ namespace
 	constexpr float kChargeSafety = 0.5f;
 
 	constexpr float kChargeBurn = 0.1f;
+
+	constexpr float kPolicyChargeShare = 0.5f;
+
+	constexpr float kPolicyChargeBonus = 1.f;
 
 	constexpr float kZoomIn = 500.f;
 
@@ -181,12 +186,29 @@ namespace
 		return PmSim::kGravity * m.gravity;
 	}
 
+	bool IsChargeWeapon(const WeaponSpec &spec)
+	{
+		return spec.secondary.fire == FIRE_CHARGE;
+	}
+
+	bool IsScopeWeapon(const WeaponSpec &spec)
+	{
+		return spec.primaryZoomed.fire != FIRE_NONE && spec.secondary.toggle == TOGGLE_ZOOM;
+	}
+
+	float ChargeTime(const WeaponMode &m)
+	{
+		if (m.chargeFull <= 0.f)
+			return 0.f;
+		return BotDiff::GaussPolicy() ? m.chargeFull * kPolicyChargeShare : m.chargeFull;
+	}
+
 	int ShotCost(const WeaponMode &m)
 	{
 		int per = (m.ammoPerShot > 0) ? m.ammoPerShot : 1;
 		if (m.fire != FIRE_CHARGE || m.chargeFull <= 0.f)
 			return per;
-		return per * (1 + static_cast<int>(m.chargeFull / kChargeBurn));
+		return per * (1 + static_cast<int>(ChargeTime(m) / kChargeBurn));
 	}
 
 	bool AmmoReady(const BotInventory &inv, const BotWeapon &w, const WeaponMode &m, bool strict)
@@ -741,7 +763,11 @@ namespace
 			return 0;
 
 		bool want = false;
-		if (fire.aimValid)
+		if (BotDiff::GaussPolicy() && IsScopeWeapon(spec))
+		{
+			want = fire.aimValid;
+		}
+		else if (fire.aimValid)
 		{
 			float dist = (fire.aimPoint - eye).Length();
 			want = fire.zoomed ? (dist >= kZoomOut) : (dist > kZoomIn);
@@ -792,20 +818,24 @@ namespace
 			return 0;
 		}
 
-		if (held < m.chargeFull)
+		if (held < ChargeTime(m))
 		{
 			fire.lastReason = "charging";
 			return button;
 		}
 
-		if (!onTarget)
+		if (!onTarget && !fire.releaseCharge)
 		{
 			fire.lastReason = "charged";
 			return button;
 		}
 
+		if (!onTarget)
+			++fire.gaussJumps;
+
 		fire.commit = BotFire::COMMIT_NONE;
-		fire.lastReason = "firing";
+		fire.releaseCharge = false;
+		fire.lastReason = onTarget ? "firing" : "gauss-jump";
 		return 0;
 	}
 
@@ -980,6 +1010,13 @@ bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict)
 	if ((m.quirks & WPN_Q_NO_UNDERWATER) != 0 && bot.pEdict->v.waterlevel == 3)
 		return false;
 
+	if (BotDiff::GaussPolicy() && g_pGameProfile)
+	{
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+		if (spec && IsChargeWeapon(*spec) && &m != &spec->secondary)
+			return false;
+	}
+
 	return AmmoReady(bot.inventory, w, m, strict);
 }
 
@@ -1102,8 +1139,13 @@ static void PinEquip(CBot &bot)
 static float WeaponScore(int weaponId)
 {
 	const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(weaponId) : nullptr;
+	if (!spec)
+		return 0.f;
 
-	return spec ? spec->value : 0.f;
+	if (BotDiff::GaussPolicy() && IsChargeWeapon(*spec))
+		return spec->value + kPolicyChargeBonus;
+
+	return spec->value;
 }
 
 static bool WeaponViable(CBot &bot, const BotWeapon &w)
@@ -1583,6 +1625,27 @@ static void IdleSelect(CBot &bot)
 		++fire.idleSwitches;
 }
 
+static bool IdleCharge(CBot &bot, const BotWeapon *active)
+{
+	if (!active || !g_pGameProfile)
+		return false;
+
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active->id);
+	if (!spec || !IsChargeWeapon(*spec))
+		return false;
+
+	if (!ModeViable(bot, *active, spec->secondary, true))
+		return false;
+
+	State &fire = bot.fire;
+	fire.mode = MODE_SECONDARY;
+	fire.weaponId = active->id;
+	fire.wantReload = false;
+	ClearAim(fire);
+	fire.lastReason = "idle-charge";
+	return true;
+}
+
 void Think(CBot &bot)
 {
 	State &fire = bot.fire;
@@ -1673,7 +1736,7 @@ void Think(CBot &bot)
 	Vector basePoint;
 	Vector baseVel(0.f, 0.f, 0.f);
 	bool haveTarget = fire.haveSize &&
-		BotAim::ReadDelayed(bot, BotAim::Delay(), basePoint, &baseVel);
+		BotAim::ReadPredicted(bot, BotAim::Delay(bot), basePoint, &baseVel);
 
 	if (!haveTarget)
 	{
@@ -1691,6 +1754,9 @@ void Think(CBot &bot)
 			fire.lastReason = "sticky";
 			return;
 		}
+
+		if (BotDiff::GaussPolicy() && IdleCharge(bot, active))
+			return;
 
 		ClearAim(fire);
 		Idle(fire, "no-target");
@@ -1890,6 +1956,12 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 			fire.lastReason = "zooming";
 			return toggle;
 		}
+	}
+
+	if (!charge && BotDiff::GaussPolicy() && IsScopeWeapon(*spec) && !fire.zoomed)
+	{
+		fire.lastReason = "unzoomed";
+		return 0;
 	}
 
 	bool onTarget = false;
