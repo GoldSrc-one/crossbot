@@ -88,7 +88,10 @@ Only `crossplay.cpp` includes `crossplay_api.h`. That header declares `maxGameDl
 - `GiveItem::Give` / `Spawn` — around `pfnCreateNamedEntity`, so CrossPlay stamps the owner as the
   entity's private data is allocated. `Give` takes the game from the receiving player.
 - Console commands that read private data — `ScopedGame` in `commands.cpp`, keyed by the bot's
-  `gameDll` or `XPlay::OwnerOf(player)`.
+  `gameDll` or `XPlay::OwnerOf(player)`. A dump with no bot or player to key on takes the map
+  owner instead — `PrintMonsters`, and `ListMesh` for the `crossbot_list_*` family. Missing that
+  context is not always a quiet misreport: `crossbot_list_items` took the server down, because
+  `ClassifyItem` is called on a null `g_pGameProfile`. See `doc/console.md`.
 
 `ServerActivate` and `ServerDeactivate` need no context; they call `XPlay::DetectProfiles()` and
 `XPlay::ForgetProfiles()`.

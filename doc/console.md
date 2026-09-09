@@ -173,6 +173,35 @@ overrides the difficulty for the rest of the session. See `doc/bot.md`, `bot_dif
 
 The ladder itself is one global setting, `crossbot_difficulty` 0-3 (easy/normal/hard/expert),
 modelled on the CS bot's `cv_bot_difficulty`. Normal is the behaviour that predates it.
+## Every dump needs a game context
+
+A console command runs at `gCaller == -1` with **no game entered**: `g_pGameProfile` is null and
+`CBotPrivateData` returns null for every entity (see `doc/crossplay.md`). Bot code never sees that
+state, because `BotManager::StartFrame` enters a game around each bot's think, so anything a dump
+reuses from the bot side meets both for the first time when the dump calls it.
+
+`crossbot_list_items` did exactly that and killed the server on every call, with or without bots
+connected: `BotItems::PrintCandidates` calls `g_pGameProfile->ClassifyItem` on the first entity it
+reaches, which is a call through a null vtable. The symptom hid the cause. HLDS printed nothing and
+reloaded the level instead of dying visibly, which reads like a bad console line or a stray
+`pfnTraceModel` rather than a missing context.
+
+The silent half was worse. `crossbot_list_fun` never crashed, because `ChainTerminal` null-checks the
+profile before asking it for a terminal — it simply returned false for every switch, and `BuildTable`
+dropped them all. That table is cached per map, so one `crossbot_list_fun` run before the first bot
+connected left the bots with no switch or trigger goal for the rest of the map: on `crossfire`, 2
+entries instead of 3, with the nuke missing. `crossbot_list_gates` degrades the same way, since
+`GateHasMine` returns false with no profile and `mined` can never appear.
+
+`ListMesh` in `commands.cpp` therefore resolves both halves of the precondition for every mesh-backed
+dump — the nav mesh, then a playable game, the map owner where it is playable and otherwise the first
+one that is — and each command enters it with `ScopedGame` before calling into bot code. That is the
+shape `PrintMonsters` already used. `crossbot_list_spawns` and `crossbot_list_targets` read only
+`pev` fields through the engine and need none of it.
+
+`BotItems::PrintCandidates` also refuses to run without a profile rather than faulting. The dump is
+the one place that code is reachable with no bot in the picture, and a printed line beats a level
+reload.
 
 ## No console line may reach 1024 characters
 

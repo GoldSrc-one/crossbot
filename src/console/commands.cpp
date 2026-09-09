@@ -715,51 +715,82 @@ namespace
 		}
 	}
 
-	void Cmd_CrossBotListItems()
+	int ListGame()
+	{
+		int owner = XPlay::MapOwner();
+		if (XPlay::Supported(owner))
+			return owner;
+
+		for (int i = 0; i < XPlay::NumGames(); ++i)
+		{
+			if (XPlay::Supported(i))
+				return i;
+		}
+
+		return -1;
+	}
+
+	const Nav::NavMesh *ListMesh(int &iGame)
 	{
 		const Nav::NavMesh *mesh = Nav::Get();
 		if (!mesh)
 		{
 			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
-			return;
+			return nullptr;
 		}
 
+		iGame = ListGame();
+		if (iGame < 0)
+		{
+			SERVER_PRINT("CrossBot: no playable game is loaded.\n");
+			PrintLoadedGames();
+			return nullptr;
+		}
+
+		return mesh;
+	}
+
+	void Cmd_CrossBotListItems()
+	{
+		int iGame = -1;
+		const Nav::NavMesh *mesh = ListMesh(iGame);
+		if (!mesh)
+			return;
+
+		ScopedGame ctx(iGame);
 		BotItems::PrintCandidates(*mesh);
 	}
 
 	void Cmd_CrossBotListFun()
 	{
-		const Nav::NavMesh *mesh = Nav::Get();
+		int iGame = -1;
+		const Nav::NavMesh *mesh = ListMesh(iGame);
 		if (!mesh)
-		{
-			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
 			return;
-		}
 
+		ScopedGame ctx(iGame);
 		BotFun::PrintCandidates(*mesh);
 	}
 
 	void Cmd_CrossBotListGoals()
 	{
-		const Nav::NavMesh *mesh = Nav::Get();
+		int iGame = -1;
+		const Nav::NavMesh *mesh = ListMesh(iGame);
 		if (!mesh)
-		{
-			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
 			return;
-		}
 
+		ScopedGame ctx(iGame);
 		BotStrategic::PrintCandidates(*mesh);
 	}
 
 	void Cmd_CrossBotListGates()
 	{
-		const Nav::NavMesh *mesh = Nav::Get();
+		int iGame = -1;
+		const Nav::NavMesh *mesh = ListMesh(iGame);
 		if (!mesh)
-		{
-			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
 			return;
-		}
 
+		ScopedGame ctx(iGame);
 		BotDeploy::PrintGates(*mesh);
 	}
 
