@@ -31,14 +31,40 @@ namespace
 	constexpr float kMaxLaunchPitch = 20.f;
 
 	constexpr float kBunnyInterval = 0.1f;
-	constexpr float kBunnySpeedRatio = 0.98f;
+	constexpr float kBunnySpeedRatio = 0.70f;
 	constexpr float kBunnyCorridor = 64.f;
+	constexpr float kBunnyMinProgress = 96.f;
 	constexpr float kBunnySimSeconds = 3.f;
-	constexpr size_t kBunnyLookahead = 6;
+	constexpr float kBunnyLookahead = 256.f;
 
 	float Speed2D(const Vector &v)
 	{
 		return sqrtf(v.x * v.x + v.y * v.y);
+	}
+
+	float SegmentDist2D(const Vector &p, const Vector &a, const Vector &b, float &alongOut)
+	{
+		Vector ab(b.x - a.x, b.y - a.y, 0.f);
+		Vector ap(p.x - a.x, p.y - a.y, 0.f);
+
+		float len2 = ab.x * ab.x + ab.y * ab.y;
+		float t = (len2 > 0.f) ? ((ap.x * ab.x + ap.y * ab.y) / len2) : 0.f;
+		if (t < 0.f)
+			t = 0.f;
+		else if (t > 1.f)
+			t = 1.f;
+
+		alongOut = sqrtf(len2) * t;
+
+		Vector off(ap.x - ab.x * t, ap.y - ab.y * t, 0.f);
+		return sqrtf(off.x * off.x + off.y * off.y);
+	}
+
+	bool Refuse(CBot &bot, int reason)
+	{
+		++bot.bunnyRefuse[reason];
+		bot.bunnyNextCheck = gpGlobals->time + kBunnyInterval;
+		return false;
 	}
 
 	bool RebuildCostsImpl(CBot &bot, const Nav::NavMesh &mesh)
@@ -87,49 +113,78 @@ bool WantBunnyHop(CBot &bot, const Nav::NavMesh &mesh)
 	if (bot.waypointIndex >= bot.waypoints.size())
 		return false;
 	if (gpGlobals->time < bot.bunnyNextCheck)
-		return false;
-
-	bot.bunnyNextCheck = gpGlobals->time + kBunnyInterval;
-
-	for (size_t i = bot.waypointIndex; i < bot.waypoints.size() && i < bot.waypointIndex + kBunnyLookahead; ++i)
 	{
-		const Nav::Waypoint &wp = bot.waypoints[i];
-		if (wp.airmoveLaunch || wp.requiresLadder || wp.requiresCrouch ||
-			wp.requiresElevatorRide || wp.requiresButtonUse || wp.requiresTriggerTouch ||
-			wp.requiresTeleport || wp.requiresBreak || wp.requiresDoor)
-			return false;
+		++bot.bunnyRefuse[0];
+		return false;
 	}
 
 	PmSim::PmPhysics physics = Bot_Physics(pEdict);
 	const Vector &vel = pEdict->v.velocity;
 	float speed = Speed2D(vel);
+
 	if (speed < kBunnySpeedRatio * physics.maxSpeed)
+	{
+		++bot.bunnyRefuse[1];
 		return false;
+	}
+
+	float ahead = 0.f;
+	Vector walk = pEdict->v.origin;
+	for (size_t i = bot.waypointIndex; i < bot.waypoints.size() && ahead < kBunnyLookahead; ++i)
+	{
+		const Nav::Waypoint &wp = bot.waypoints[i];
+		if (wp.airmoveLaunch || wp.requiresLadder || wp.requiresCrouch ||
+			wp.requiresElevatorRide || wp.requiresButtonUse || wp.requiresTriggerTouch ||
+			wp.requiresTeleport || wp.requiresBreak || wp.requiresDoor)
+			return Refuse(bot, 2);
+
+		Vector step(wp.point.x - walk.x, wp.point.y - walk.y, 0.f);
+		ahead += step.Length();
+		walk = wp.point;
+	}
 
 	float yaw = atan2f(vel.y, vel.x) * (180.f / NavMath::kPiF);
 
-	Bot_SimulateAirmoveArc(pEdict, pEdict->v.origin, nullptr, yaw, speed, false, kHullDuck, 0.f,
-		kBunnySimSeconds, bot.airmoveArc);
+	Bot_SimulateAirmoveArc(pEdict, pEdict->v.origin, nullptr, yaw, speed, true, kHullDuck, 0.f,
+		kBunnySimSeconds, bot.probeArc);
 
-	if (!bot.airmoveArc.landed)
-		return false;
-	if (PmSim::FallDamageFor(bot.airmoveArc.fallSpeed) > 0.f)
-		return false;
+	if (!bot.probeArc.landed)
+		return Refuse(bot, 3);
+	if (PmSim::FallDamageFor(bot.probeArc.fallSpeed) > 0.f)
+		return Refuse(bot, 3);
 
-	const Vector &landing = bot.airmoveArc.points.back();
+	const Vector &landing = bot.probeArc.points.back();
 
-	bool onPath = false;
-	for (size_t i = bot.waypointIndex; i < bot.waypoints.size() && !onPath; ++i)
+	float miss = kBunnyCorridor + 1.f;
+	float progress = 0.f;
+	float walked = 0.f;
+	Vector prev = pEdict->v.origin;
+	for (size_t i = bot.waypointIndex; i < bot.waypoints.size(); ++i)
 	{
-		Vector to(bot.waypoints[i].point.x - landing.x, bot.waypoints[i].point.y - landing.y, 0.f);
-		if (to.Length() <= kBunnyCorridor)
-			onPath = true;
+		float along = 0.f;
+		float d = SegmentDist2D(landing, prev, bot.waypoints[i].point, along);
+		if (d < miss)
+		{
+			miss = d;
+			progress = walked + along;
+		}
+
+		Vector leg(bot.waypoints[i].point.x - prev.x, bot.waypoints[i].point.y - prev.y, 0.f);
+		walked += leg.Length();
+		prev = bot.waypoints[i].point;
 	}
 
-	if (!onPath)
-		return false;
+	if (miss > kBunnyCorridor || progress < kBunnyMinProgress)
+		return Refuse(bot, 4);
 
 	++bot.bunnyHops;
+	bot.bunnyAirborne = true;
+
+	BOT_VLOG("CrossBot: %s bunnyhops at %.0f of %.0f from (%.1f,%.1f,%.1f), lands "
+		"(%.1f,%.1f,%.1f) %.1f off the path, %.0f along it, after %.2fs\n", bot.name, speed,
+		physics.maxSpeed, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
+		landing.x, landing.y, landing.z, miss, progress, bot.probeArc.flightTime);
+
 	return true;
 }
 

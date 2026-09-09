@@ -127,6 +127,8 @@ struct CBot
 	float airmovePeakError = 0.f;
 	int airmoveCorrectFrames = 0;
 
+	BotAirmoveArc probeArc;
+
 	std::vector<float> oppoCosts;
 	int oppoCostsGoalArea = -1;
 	float oppoNextCheck = 0.f;
@@ -136,9 +138,16 @@ struct CBot
 	float gaussPitch = 0.f;
 	float gaussNextCheck = 0.f;
 	float gaussWindowStart = 0.f;
+	bool gaussPredictPending = false;
+	Vector gaussPredicted;
+	float gaussPredictFlight = 0.f;
+	float gaussPredictTime = 0.f;
 
 	float bunnyNextCheck = 0.f;
 	unsigned int bunnyHops = 0;
+	unsigned int bunnyRefuse[5] = { 0, 0, 0, 0, 0 };
+	bool bunnyAirborne = false;
+	float bunnyStrafeSide = 1.f;
 
 	bool ladderActive = false;
 	bool ladderUp = false;

@@ -211,7 +211,7 @@ namespace
 	{
 		BotGoal::State &st = bot.goal;
 
-		if (st.target.tier <= BotGoal::GOAL_GATHER)
+		if (st.toTargetArea < 0)
 		{
 			CommitStop(bot, st.target, false);
 			return;
@@ -235,8 +235,6 @@ namespace
 
 		std::vector<BotGoal::Candidate> gather;
 		BotItems::Collect(bot, mesh, fromBot, gather);
-		if (BotDiff::PickupPriority())
-			BotItems::Prioritize(gather);
 
 		const BotGoal::Candidate *best = nullptr;
 		float bestFrom = 0.f;
@@ -325,6 +323,14 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
 		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
 
+	std::vector<Candidate> promoted;
+	if (BotDiff::PickupPriority())
+	{
+		CollectTier(bot, mesh, costs, GOAL_GATHER, promoted);
+		PruneUnreachable(bot, mesh, costs, promoted);
+		BotItems::KeepPreferred(promoted);
+	}
+
 	std::vector<Candidate> cands;
 	Tier tier = GOAL_NONE;
 
@@ -334,9 +340,10 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		CollectTier(bot, mesh, costs, static_cast<Tier>(t), cands);
 		PruneUnreachable(bot, mesh, costs, cands);
 		if (t == GOAL_FUN)
+		{
 			BotFun::Prioritize(cands);
-		if (t == GOAL_GATHER && BotDiff::PickupPriority())
-			BotItems::Prioritize(cands);
+			cands.insert(cands.end(), promoted.begin(), promoted.end());
+		}
 		if (!cands.empty())
 		{
 			tier = static_cast<Tier>(t);
@@ -367,8 +374,9 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 	st.skipped.clear();
 	st.active = true;
 
-	BOT_VLOG("CrossBot: %s wants %s %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
-		bot.name, TierName(tier), CBotClassOf(best->ent), best->point.x, best->point.y,
+	BOT_VLOG("CrossBot: %s wants %s%s %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
+		bot.name, TierName(best->tier), (best->tier != tier) ? " (promoted)" : "",
+		CBotClassOf(best->ent), best->point.x, best->point.y,
 		best->point.z, best->areaId, cost, cands.size());
 
 	if (tier > GOAL_GATHER)

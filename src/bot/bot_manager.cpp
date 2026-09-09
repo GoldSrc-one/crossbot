@@ -993,13 +993,15 @@ void PrintVantageStatus(const Vector *at)
 		++shown;
 		report(bot.name, bot.pEdict->v.origin + bot.pEdict->v.view_ofs, bot.pEdict->v.v_angle.y);
 
-		char drive[224];
+		char drive[288];
 		snprintf(drive, sizeof(drive),
-			"CrossBot:   view=(%.1f,%.1f) desired=(%.1f,%.1f) look=%s glances=%u bhops=%u wp=%zu/%zu\n",
+			"CrossBot:   view=(%.1f,%.1f) desired=(%.1f,%.1f) look=%s glances=%u bhops=%u "
+			"refuse=%u/%u/%u/%u/%u wp=%zu/%zu\n",
 			bot.pEdict->v.v_angle.x, bot.pEdict->v.v_angle.y, bot.desiredAngles.x,
 			bot.desiredAngles.y, BotSense::LookSourceName(bot.sense.lookSource),
 			bot.sense.backGlances, bot.bunnyHops,
-			bot.waypointIndex, bot.waypoints.size());
+			bot.bunnyRefuse[0], bot.bunnyRefuse[1], bot.bunnyRefuse[2], bot.bunnyRefuse[3],
+			bot.bunnyRefuse[4], bot.waypointIndex, bot.waypoints.size());
 		SERVER_PRINT(drive);
 	}
 

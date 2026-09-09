@@ -1037,7 +1037,7 @@ server, so it exists from the first commit rather than being added later.
 | `combatInterrupt` | the movement takeover in `BotCombat::Run` |
 | `camp` | `BotCamp::Enabled`, one choke point over `BuildRoute` / `Consider` / `Run` |
 | `ambushOverride` | `BotCombat::AmbushEnabled`, reaching the ambush branch of `BotFire::Think` |
-| `pickupPriority` | `BotItems::Prioritize`, called from *both* goal paths -- see below |
+| `pickupPriority` | `BotItems::KeepPreferred`, promoting those items into the fun round |
 | `gaussPolicy` | `ChargeTime`, `WeaponScore`, `ModeViable`, `ZoomButtons` and `BotGauss` |
 | `bunnyHop` | `BotOppo::WantBunnyHop` |
 
@@ -1143,24 +1143,42 @@ disable. The state still enters, so `crossbot_combat_status` reports a bot that 
 `ambushOverride` off means an expert that catches someone unaware skips the grenade-or-crowbar
 override and falls through to the ordinary value-ranked picker -- it opens with its best gun.
 
-### Pickup priority has two call sites, not one
+### Pickup priority is a promotion, not a filter
 
-`BotItems::Prioritize` is the same shape as `BotFun::Prioritize`: if any candidate is preferred, erase
-everything that is not; otherwise leave the list alone. That *is* "only if none of these are
-available, go for the less interesting ones", and it leaves `PickCheapest` untouched, so among
-preferred items the bot still takes the nearest.
+The tier loop walks STRATEGIC, FUN, GATHER and stops at the first non-empty tier, so GATHER only ever
+wins when nothing else is on offer; ordinary items reach the bot through `PickStop`'s detour scan.
+Expert priority uses that structure rather than fighting it: `BotItems::KeepPreferred` reduces a
+gather collect to the preferred items only, and `BotGoal::Select` appends that list to the *fun*
+round. Preferred items then compete with fun goals in the same `PickWeighted` lottery, and everything
+else stays exactly where it was -- available as a detour on the way.
+
+It was a hard filter first, erasing every non-preferred candidate at both call sites. That met the
+letter of "only if none of these are available, go for the less interesting ones" and read badly in
+play: an expert walked past a battery two steps off its route. The promotion keeps the priority and
+gives back the detours.
+
+**The promoted candidates keep `tier = GOAL_GATHER`.** That field is the dispatch key for
+`TargetValid`, `CommitStop`'s `Accept` and `OnArrived`; retagging them `GOAL_FUN` to move them
+between rounds would route an item through `BotFun::ValidFor` and `BotFun::Accept`. `Select` tracks
+the *round* tier separately and uses that for what it actually governs -- weighted versus cheapest,
+and whether to build `toTargetCosts`. `PickStop` keys its early return on `toTargetArea < 0` rather
+than on the tier label, which is what lets a promoted item accumulate detours the way a fun goal
+does. The goal log prints the candidate's own tier and marks a promotion, so the two cases stay
+distinguishable on a live server.
 
 The preferred set is game-specific and lives behind `IGameProfile::ItemPreferred`, beside
 `MeleeWeapon` and `AmbushWeapon`. HLDM answers yes for the gauss, crossbow and egon, their ammo
 entities (resolved through `AmmoEntity` rather than hardcoding the strings a second time),
-`item_healthkit`, `item_battery`, and every charger and heal volume.
+`item_healthkit`, `item_battery`, `item_longjump`, and every charger and heal volume. The longjump
+module is on that list because it feeds the movement code an expert leans on hardest.
 
 **The tier loop is not the only path to an item.** `BotGoal::PickStop` runs a *second*
-`BotItems::Collect` for detours whenever a fun or strategic goal is active, and filtering only the
-tier loop leaves that path wide open. This was not visible by reading -- an expert bot on crossfire
-still collected `weapon_rpg`, `weapon_9mmAR`, `weapon_357`, `weapon_satchel` and `weapon_snark` as
-goals until `Prioritize` was added to `PickStop` as well. After: gauss, crossbow, egon and their ammo
-only.
+`BotItems::Collect` for detours whenever a fun or strategic goal is active. Under the old hard
+filter that path had to be filtered too, and until it was, an expert on crossfire still collected
+`weapon_rpg`, `weapon_9mmAR`, `weapon_357`, `weapon_satchel` and `weapon_snark` as goals. Under the
+promotion the detour scan is deliberately left alone -- that scan *is* "still consider the other
+pickups". Measured over 105s with three experts: 20 promoted goals (gauss and crossbow ammo,
+chargers, batteries, the crossbow itself) alongside 75 detours to ordinary pickups.
 
 ### The gauss policy
 
@@ -1192,34 +1210,106 @@ the existing commit machinery keeps it. `ChargeButtons` gained a `releaseCharge`
 other than an on-target verdict can let go of the button.
 
 `BotGauss::Update` probes four random directions every 0.1s while a charge is held with no aim point,
-builds `launchVel = velocity - dir * 500`, simulates it with `Bot_SimulateAirmoveArc`, and requires a
+builds `launchVel = velocity - dir * push`, simulates it with `Bot_SimulateAirmoveArc`, and requires a
 landing with no fall damage whose `bot.oppoCosts` gain clears `kMinGainSeconds`. That reverse Dijkstra
-is `BotOppo`'s, unchanged -- and because pickup priority has already filtered the goal to a preferred
-item, "does this get me closer to something worth having" is a question the existing field answers
-with no second search. The chosen direction is published through `BotSense::ApplyLook` as `LOOK_GAUSS`
-rather than written directly, so it arrives through the normal aim ladder and the hand model still has
-to get there; the release waits until the view is actually within `kAimTolerance`, because otherwise
-the bot launches along a half-completed turn. If nothing pays within `kProbeWindow`, it blasts it
-anywhere.
+is `BotOppo`'s, unchanged -- and because the goal is already a preferred item, "does this get me
+closer to something worth having" is a question the existing field answers with no second search. The
+chosen direction is published through `BotSense::ApplyLook` as `LOOK_GAUSS` rather than written
+directly, so it arrives through the normal aim ladder and the hand model still has to get there. If
+nothing pays within `kProbeWindow`, it blasts it anywhere.
 
-Measured: two jumps in 45s on crossfire at pitch 46 and 51 degrees, both inside the safe band.
+#### The probe is a forecast; the shot is re-proved
+
+Committing to a direction and firing when the view arrives is not the same event. The bot keeps
+running while it slews, so the origin and velocity the probe simulated are stale by the time the
+charge is released -- and the charge itself has grown in the meantime. `Update` therefore re-runs
+`Evaluate` for the committed yaw and pitch at the moment the view is within `kAimTolerance`, from
+where the bot actually stands, and drops the commitment if it no longer pays. The arc that survives
+that second evaluation is stored as `gaussPredicted` and compared against where the bot really lands.
+
+That comparison is the only reason the next two defects were found, and both were invisible by
+reading. **The push was modelled at a flat 100 damage while the engine applied whatever charge the bot
+actually held.** `ChargeButtons` holds the button until something releases it, and the view slew
+outlasts the 0.75s policy charge, so the real shot was routinely a full 200-damage, 1000-unit push
+against a modelled 500. **And the arc used the duck hull while the bot flies standing**, so the
+simulation cleared gaps the real hull hits. First measured jump: predicted (-178, 537), landed
+(-769, 830) -- **660 units of flat miss and 174 of vertical**. Modelling the real charge through
+`ChargeDamage` and simulating with `kHullHuman` brings that to 14, 124, 141 and 262 units flat with
+0, 0, 1 and -33 vertical, and flight times inside 0.05s of prediction.
+
+**Known deviation: the shot lands at 200 damage, not the 100 the policy names.** Aiming now begins the
+moment the charge does rather than halfway through it, and the release still waits for
+`ChargeDamage >= kPolicyDamage`, but a slew of up to 180 degrees of yaw plus 40-65 of pitch still
+outruns the 1.5s to full charge. The prediction is correct either way because it models the charge
+actually held; what is *not* consistent is `ShotCost`, which still budgets the 0.75s charge, so an
+expert burns roughly twice the uranium per jump that it accounts for. Fixing that properly means
+aiming before charging rather than concurrently.
+
+Measured: jumps at pitch 41, 48, 52 and 62 degrees, all inside the 40-65 safe band, no self-damage.
 
 ### Bunnyhop
 
 Distinct from the opportunistic jump: that one picks a *different* landing area for a shortcut, this
-one jumps *along* the path to go faster, with no search. `BotOppo::WantBunnyHop` fires at maxspeed on
-the ground with a live path, simulates the jump along the current velocity yaw, and returns true only
-when the arc lands within `kBunnyCorridor` of a waypoint still ahead with no fall damage. It adds
-`IN_JUMP` to the ordinary walking frame rather than taking movement over, so the path follower keeps
-steering the whole time -- which is where the airstrafe comes from.
+one jumps *along* the path to go faster, with no search. `BotOppo::WantBunnyHop` fires on the ground
+at `kBunnySpeedRatio` of maxspeed with a live path, simulates the jump along the current velocity yaw,
+and accepts only an arc that lands with no fall damage, within `kBunnyCorridor` of the waypoint
+polyline ahead, and at least `kBunnyMinProgress` further *along* that polyline. It adds `IN_JUMP` to
+the ordinary walking frame rather than taking movement over, so the path follower keeps steering.
 
-The next six waypoints must be plain ground. A hop into a ladder, launch, elevator, button, trigger,
-teleport, break or crouch waypoint is refused outright.
+The clean-ground scan runs forward by *distance*, not by waypoint count. A hop covers about 200 units;
+counting six waypoints could demand 600 clear, so a door two rooms away refused hops it had no
+business refusing. A hop into a ladder, launch, elevator, button, trigger, teleport, break or crouch
+waypoint within `kBunnyLookahead` is still refused outright.
+
+**The airstrafe is explicit, not inherited from the path follower.** `AirmoveCorrection` is the only
+other in-air steering routine and it runs solely under `RunAirmoveFlight`, which needs
+`airmoveActive` -- a flag the hop deliberately does not set, because setting it would hand the bot to
+the airmove landing-verdict and connection-penalty machinery. Left to the ordinary path wishdir the
+hop bought nothing: air acceleration along the direction you are already moving is almost zero.
+`BunnyAirSteer` replaces the wishdir with the horizontal perpendicular to velocity at full drive,
+signed *toward* the path line, so the strafe accelerates and corrects at the same time -- which is
+also why the curve it introduces does not invalidate the straight-line arc the probe verified. It
+needs no view turning: `Bot_DecomposeMove` takes a world wishdir and the current yaw and emits
+fmove/smove, so the strafe is pure sidemove and the head stays free for `ApplyLook`.
+
+**Three things kept this near-inert, and only measurement found them.**
+
+The probe simulated `jump = false`. On flat ground the simulation never went airborne, so `landed` was
+never true and the hop was refused; the hops that did happen were the arc catching a *walk off a step*
+-- flight times of 0.08 to 0.21s and a landing always below the start. With `jump = true` the arc is a
+real 0.73s hop covering about 200 units.
+
+The retry throttle was set on every probe, pass or fail. A hop is 0.73s of flight, so the bot is
+grounded for one or two frames and a 0.1s window is usually still closed on exactly the frame that
+could chain. Only refusals throttle now, and the speed gate -- which runs no simulation -- does not
+throttle at all.
+
+The corridor was measured to the nearest *waypoint*. A landing halfway between two waypoints 128
+apart is 64 from either and was rejected while sitting dead on the path. It measures to the nearest
+*segment* now, and carries the arclength to that point so the hop must also make forward progress.
+Without the progress test the bot found pairs of hops that each landed near the path and bounced
+between two spots indefinitely -- 162 hops in 60s with an average speed of 0.21 maxspeed.
 
 `PmSim::PreventMegaBunnyJumping` clamps landing speed at 1.7x maxspeed. That is a faithful replication
 of the engine's own anti-bhop rule and must not be touched -- it bounds the gain, it does not block it.
 
-Measured on crossfire: 0 hops at normal; 20 and 15 over 80s at expert.
+**`kBunnySpeedRatio` is 0.70, not the 0.98 the ask implies, and the reason is worth keeping.** Hopping
+while slow is normally a trap: ground acceleration reaches maxspeed in about three frames, air
+acceleration gains roughly 1.4 units/s per frame, so a bot that locks itself into hopping below
+maxspeed is slower than one that runs. What changes it is that `BunnyAirSteer` drives at
+`Bot_MaxSpeed` rather than at the follower's `wishSpeed`, so a hop is the one way the bot escapes the
+path plan's conservative speed target. Observed speeds run to 349 against a maxspeed of 270.
+
+Measured on crossfire: 0 hops at normal. At expert, 39 and 71 over 90s, every one advancing 139 to 219
+units along the path, with visible chains of consecutive hops down a corridor. That is roughly a
+third of wall-clock spent airborne, not the "almost always" the ask asked for, and the reason is not
+in this function: `refuse=` in `crossbot_vantage_status` counts refusals by gate -- throttled, speed,
+waypoint kind, arc, corridor, in that order -- and the speed gate
+outnumbers every other gate combined by two orders of magnitude (4543 against 117). Instrumenting the
+distribution showed only 8-9% of walk frames sit at 0.9 maxspeed or above and 12-20% at 0.7 or above:
+the bot rarely runs flat out, because `SolveDrive` targets the plan profile's speed. Raising the hop
+rate further means raising the *path plan's* speed, which is a navigation change and would move every
+tier.
 
 ### cvars
 
@@ -1231,7 +1321,8 @@ Measured on crossfire: 0 hops at normal; 20 and 15 over 80s at expert.
 - `crossbot_predict_pct` — chance per loss of sight of tracking the enemy through cover.
   Default -1 (tier)
 - `crossbot_combat_interrupt` — may combat drop the goal and take movement over. Default -1 (tier)
-- `crossbot_pickup_priority` — restrict gathering to the profile's preferred items. Default -1 (tier)
+- `crossbot_pickup_priority` — promote the profile's preferred items to compete with fun goals.
+  Default -1 (tier)
 - `crossbot_gauss` — the charge-weapon policy and the opportunistic gauss jump. Default -1 (tier)
 - `crossbot_bunnyhop` — opportunistic bunnyhop. Default -1 (tier)
 - `crossbot_oppo_interval` — opportunistic-jump retry throttle in seconds. Default -1 (tier)

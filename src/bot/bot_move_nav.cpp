@@ -572,6 +572,9 @@ namespace
 		return true;
 	}
 
+	constexpr float kBunnySteerMinSpeed = 50.f;
+	constexpr float kBunnySteerDeadband = 8.f;
+
 	bool AirmoveCorrection(CBot &bot, float airTime, Vector &wishDir, float &drive)
 	{
 		Vector ref, refVel;
@@ -645,6 +648,32 @@ namespace
 
 		++bot.airmoveCorrectFrames;
 		return true;
+	}
+
+	void BunnyAirSteer(CBot &bot, Vector &wishDir, float &drive)
+	{
+		edict_t *pEdict = bot.pEdict;
+		const Vector &vel = pEdict->v.velocity;
+
+		float speed = sqrtf(vel.x * vel.x + vel.y * vel.y);
+		if (speed < kBunnySteerMinSpeed || bot.waypointIndex >= bot.waypoints.size())
+			return;
+
+		Vector vHat(vel.x / speed, vel.y / speed, 0.f);
+		Vector left(-vHat.y, vHat.x, 0.f);
+
+		size_t aimIndex = bot.waypointIndex + 1;
+		if (aimIndex >= bot.waypoints.size())
+			aimIndex = bot.waypoints.size() - 1;
+
+		const Vector &target = bot.waypoints[aimIndex].point;
+		Vector to(target.x - pEdict->v.origin.x, target.y - pEdict->v.origin.y, 0.f);
+		float off = to.x * left.x + to.y * left.y;
+		if (fabsf(off) > kBunnySteerDeadband)
+			bot.bunnyStrafeSide = (off > 0.f) ? 1.f : -1.f;
+
+		wishDir = Vector(left.x * bot.bunnyStrafeSide, left.y * bot.bunnyStrafeSide, 0.f);
+		drive = Bot_MaxSpeed(pEdict);
 	}
 
 	bool RunAirmoveFlight(CBot &bot, const Nav::NavMesh &mesh)
@@ -2735,6 +2764,7 @@ void Bot_MoveNav(CBot &bot)
 		if (onGroundNow)
 		{
 			bot.fallTelemetryLogged = false;
+			bot.bunnyAirborne = false;
 		}
 		else if (!bot.fallTelemetryLogged && pEdict->v.velocity.z < -120.f && !wp->requiresJump)
 		{
@@ -2827,6 +2857,9 @@ void Bot_MoveNav(CBot &bot)
 		drive = physics.maxSpeed;
 	if (avoid.slowApproach)
 		drive = std::min(drive, physics.maxSpeed * PmSim::kDuckingMultiplier);
+
+	if (bot.bunnyAirborne && (pEdict->v.flags & FL_ONGROUND) == 0)
+		BunnyAirSteer(bot, moveDir, drive);
 
 	float fmove = 0.f, smove = 0.f;
 	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);

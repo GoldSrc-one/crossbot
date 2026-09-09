@@ -254,7 +254,8 @@ bool CHLDMProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
 	if (!classname || !classname[0])
 		return false;
 
-	if (strcmp(classname, "item_healthkit") == 0 || strcmp(classname, "item_battery") == 0)
+	if (strcmp(classname, "item_healthkit") == 0 || strcmp(classname, "item_battery") == 0 ||
+		strcmp(classname, "item_longjump") == 0)
 		return true;
 
 	static const char *kPreferred[] = { "weapon_gauss", "weapon_crossbow", "weapon_egon" };

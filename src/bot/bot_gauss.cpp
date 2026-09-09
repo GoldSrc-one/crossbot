@@ -25,10 +25,12 @@ namespace BotGauss
 
 namespace
 {
-	constexpr int kHullDuck = 3;
+	constexpr int kHullHuman = 1;
 
 	constexpr float kPushPerDamage = 5.f;
 	constexpr float kPolicyDamage = 100.f;
+	constexpr float kMaxDamage = 200.f;
+	constexpr float kFullChargeSeconds = 1.5f;
 
 	constexpr float kPitchMin = 40.f;
 	constexpr float kPitchMax = 65.f;
@@ -41,9 +43,23 @@ namespace
 	constexpr float kMinGainSeconds = 0.35f;
 	constexpr float kMaxSimSeconds = 6.f;
 
+	constexpr float kPredictMinAir = 0.15f;
+	constexpr float kPredictTimeout = 8.f;
+
 	float RandomUnit(CBot &bot)
 	{
 		return BotAim::RandomRoll(bot);
+	}
+
+	float ChargeDamage(const CBot &bot)
+	{
+		float held = gpGlobals->time - bot.fire.commitStart;
+		float damage = kMaxDamage * (held / kFullChargeSeconds);
+		if (damage < 0.f)
+			damage = 0.f;
+		else if (damage > kMaxDamage)
+			damage = kMaxDamage;
+		return damage;
 	}
 
 	bool HoldingCharge(const CBot &bot)
@@ -60,11 +76,41 @@ namespace
 		if (!spec || spec->secondary.fire != FIRE_CHARGE)
 			return false;
 
-		return bot.fire.commit == BotFire::COMMIT_CHARGE &&
-			gpGlobals->time - bot.fire.commitStart >= spec->secondary.chargeFull * 0.5f;
+		return bot.fire.commit == BotFire::COMMIT_CHARGE;
 	}
 
-	bool Evaluate(CBot &bot, const Nav::NavMesh &mesh, float yaw, float pitch, float &gainOut)
+	void CheckLanding(CBot &bot)
+	{
+		if (!bot.gaussPredictPending)
+			return;
+
+		edict_t *pEdict = bot.pEdict;
+		float airTime = gpGlobals->time - bot.gaussPredictTime;
+
+		if ((pEdict->v.flags & FL_ONGROUND) == 0)
+		{
+			if (airTime > kPredictTimeout)
+				bot.gaussPredictPending = false;
+			return;
+		}
+
+		if (airTime < kPredictMinAir)
+			return;
+
+		const Vector &at = pEdict->v.origin;
+		Vector miss(at.x - bot.gaussPredicted.x, at.y - bot.gaussPredicted.y, 0.f);
+
+		BOT_VLOG("CrossBot: %s gauss jump landed at (%.1f,%.1f,%.1f) after %.2fs, predicted "
+			"(%.1f,%.1f,%.1f) after %.2fs, miss %.1f flat %.1f vertical\n", bot.name,
+			at.x, at.y, at.z, airTime, bot.gaussPredicted.x, bot.gaussPredicted.y,
+			bot.gaussPredicted.z, bot.gaussPredictFlight, miss.Length(),
+			at.z - bot.gaussPredicted.z);
+
+		bot.gaussPredictPending = false;
+	}
+
+	bool Evaluate(CBot &bot, const Nav::NavMesh &mesh, float yaw, float pitch, float damage,
+		float &gainOut, Vector &landingOut, float &flightOut)
 	{
 		edict_t *pEdict = bot.pEdict;
 
@@ -73,21 +119,21 @@ namespace
 
 		Vector aim(cosf(pitchRad) * cosf(yawRad), cosf(pitchRad) * sinf(yawRad), -sinf(pitchRad));
 
-		float push = kPolicyDamage * kPushPerDamage;
+		float push = damage * kPushPerDamage;
 		Vector launch = pEdict->v.velocity - aim * push;
 
 		float launchYaw = atan2f(launch.y, launch.x) * (180.f / NavMath::kPiF);
 		float launchSpeed = sqrtf(launch.x * launch.x + launch.y * launch.y);
 
 		Bot_SimulateAirmoveArc(pEdict, pEdict->v.origin, &launch, launchYaw, launchSpeed, true,
-			kHullDuck, 0.f, kMaxSimSeconds, bot.airmoveArc);
+			kHullHuman, 0.f, kMaxSimSeconds, bot.probeArc);
 
-		if (!bot.airmoveArc.landed)
+		if (!bot.probeArc.landed)
 			return false;
-		if (PmSim::FallDamageFor(bot.airmoveArc.fallSpeed) > 0.f)
+		if (PmSim::FallDamageFor(bot.probeArc.fallSpeed) > 0.f)
 			return false;
 
-		const Vector &landing = bot.airmoveArc.points.back();
+		const Vector &landing = bot.probeArc.points.back();
 		const Nav::Area *landedArea = Nav::FindAreaExact(mesh, landing);
 		if (!landedArea)
 			return false;
@@ -103,7 +149,10 @@ namespace
 			return false;
 
 		PmSim::PmPhysics physics = Bot_Physics(pEdict);
-		float flight = bot.airmoveArc.flightTime * (physics.maxSpeed / NavAStar::kNavRunSpeed);
+		float flight = bot.probeArc.flightTime * (physics.maxSpeed / NavAStar::kNavRunSpeed);
+
+		landingOut = landing;
+		flightOut = bot.probeArc.flightTime;
 
 		gainOut = bot.oppoCosts[here] - bot.oppoCosts[land] - flight;
 		return gainOut > kMinGainSeconds;
@@ -136,6 +185,8 @@ void Update(CBot &bot, const Nav::NavMesh &mesh)
 {
 	edict_t *pEdict = bot.pEdict;
 
+	CheckLanding(bot);
+
 	if (!Enabled() || !HoldingCharge(bot) || !bot.hasGoal || bot.currentAreaId < 0)
 	{
 		Reset(bot);
@@ -161,13 +212,36 @@ void Update(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		float dYaw = Bot_NormalizeAngle(bot.gaussYaw - pEdict->v.v_angle.y);
 		float dPitch = Bot_NormalizeAngle(bot.gaussPitch - pEdict->v.v_angle.x);
-		if (sqrtf(dYaw * dYaw + dPitch * dPitch) <= kAimTolerance)
+		if (sqrtf(dYaw * dYaw + dPitch * dPitch) > kAimTolerance)
+			return;
+
+		float gain = 0.f, flight = 0.f;
+		Vector landing;
+		float damage = ChargeDamage(bot);
+		if (damage < kPolicyDamage)
+			return;
+
+		if (!BotOppo::RebuildCosts(bot, mesh) ||
+			!Evaluate(bot, mesh, bot.gaussYaw, bot.gaussPitch, damage, gain, landing, flight))
 		{
-			bot.fire.releaseCharge = true;
-			BOT_VLOG("CrossBot: %s gauss jump yaw %.0f pitch %.0f\n", bot.name, bot.gaussYaw,
-				bot.gaussPitch);
-			Reset(bot);
+			bot.gaussAiming = false;
+			return;
 		}
+
+		bot.fire.releaseCharge = true;
+		bot.gaussPredicted = landing;
+		bot.gaussPredictFlight = flight;
+		bot.gaussPredictTime = gpGlobals->time;
+		bot.gaussPredictPending = true;
+
+		BOT_VLOG("CrossBot: %s gauss jump yaw %.0f pitch %.0f from (%.1f,%.1f,%.1f) at %.0f, "
+			"%.0f damage, %.1fs gain, lands (%.1f,%.1f,%.1f) after %.2fs\n", bot.name, bot.gaussYaw,
+			bot.gaussPitch, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
+			sqrtf(pEdict->v.velocity.x * pEdict->v.velocity.x +
+				pEdict->v.velocity.y * pEdict->v.velocity.y),
+			damage, gain, landing.x, landing.y, landing.z, flight);
+
+		Reset(bot);
 		return;
 	}
 
@@ -195,8 +269,9 @@ void Update(CBot &bot, const Nav::NavMesh &mesh)
 		float yaw = RandomUnit(bot) * 360.f - 180.f;
 		float pitch = kPitchMin + RandomUnit(bot) * (kPitchMax - kPitchMin);
 
-		float gain = 0.f;
-		if (!Evaluate(bot, mesh, yaw, pitch, gain))
+		float gain = 0.f, flight = 0.f;
+		Vector landing;
+		if (!Evaluate(bot, mesh, yaw, pitch, kPolicyDamage, gain, landing, flight))
 			continue;
 
 		if (!have || gain > bestGain)
