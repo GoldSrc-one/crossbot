@@ -711,6 +711,11 @@ penalises the connection it is on (see `doc/bot.md`), and with one connection th
 same ladder dearer. Parallel edges between one pair are fine for the planner, which walks connection lists
 and never looks a connection up by its endpoints.
 
+Of the twelve stock DM maps with ladders, only snark_pit changes: its `*9` and `*10` are one wide ladder
+built from two adjacent brushes, each now keeps its own `148 <-> 147`, and `PruneRedundantLadders` leaves
+2 of 5 where it left 1. That is the same physical climb twice, which costs nothing and lets a bot blocked on
+one half take the other.
+
 ### Reversibility, and why it decides the gates
 Gate A is the mount. Gate B is **where a descending bot gets onto the ladder** — not, in general, where an
 ascending one steps off. Those coincide for a dismount that barely left the column and diverge for one that

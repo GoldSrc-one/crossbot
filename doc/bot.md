@@ -4197,15 +4197,20 @@ The approach probe only runs inside `kLadderCommitRadius`, because the walker's 
 running during a ladder approach — a probe that fired at 200 units would penalize a can the bot could
 have stepped around, where one at 48 is saying the mount itself is occupied.
 
-Measured on a copy of test52_avoid with the can moved on top of the `y 0..32` ladder: `ladder path
-blocked by cycler ... for 0.40s`, `blocked on ... failed`, conn 16 penalized, 0.4 s after the grab.
-That copy has no second way up, so the next plan is the same ladder, the bot is still on it and
-re-commits on the spot, and the cycle repeats every 0.4 s while the penalty climbs by
-`kConnFailPenalty` each time. That is the penalty working as designed — a price, never a ban — on an
-edge with no alternative; with one, the repath takes it and the `ladderEject` rule jumps the bot off
-the dead ladder. Note that test52_avoid itself does not exercise any of this: navgen's dismount
-simulation off the `y 80..112` ladder loops back into the pit, so that ladder never becomes a
-connection at all and the can on top of it is never met.
+test52_avoid is the map for it. The target pocket is only reachable by climbing out of a pit, the pit
+has two ladders, and a `cycler` sits on top of the `y 80..112` one. The run reads: `ladder climb ... conn
+16`, `ladder path blocked by cycler at (640,96,0) for 0.41s`, `blocked on ... conn 16 failed`, a
+`Replan ... penalized=0` that now goes the other way, `ladder climb ... conn 17`, `dismounted off ...
+conn 17 ok`, `reached goal`. Until navgen stopped starting that ladder's dismount exactly on a clip plane
+and stopped merging two ladders into one edge (both in `doc/navgen.md`, "A sample that finds nothing is
+retried" and "Two ladders are two connections"), the blocked ladder was never a connection and the can
+was never met.
+
+With no second way up the penalty cannot help. On a copy of the map with the can moved onto the other
+ladder, the next plan is the same ladder, the bot is still on it and re-commits on the spot, and the
+cycle repeats every 0.4 s while the penalty climbs by `kConnFailPenalty` each time. That is the penalty
+working as designed — a price, never a ban — on an edge with no alternative, and nothing above the
+ladder gives up on the goal.
 
 **Being shot ends a climb, unless the fall would kill.** Combat enters on the damage frame but
 `BotCombat::Run` waits for `Bot_ManeuverActive`, and a bot that finishes a 144-unit climb while being
