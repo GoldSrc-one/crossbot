@@ -20,6 +20,8 @@ bool Bot_HasLongJumpModule(edict_t *pEdict);
 
 Vector Bot_YawDir(float yawDeg);
 
+bool Bot_TraceHitEntity(const TraceResult &tr);
+
 PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull);
 
 PmSim::PmPushFn Bot_PushFields(int hull);

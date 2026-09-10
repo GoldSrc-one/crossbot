@@ -15,6 +15,7 @@
 #include "bot_camp.h"
 #include "bot_combat.h"
 #include "bot_deploy.h"
+#include "bot_difficulty.h"
 #include "bot_fun.h"
 #include "bot_gauss.h"
 #include "bot_goal.h"
@@ -87,6 +88,8 @@ namespace
 	constexpr float kLadderStallDist = 8.f;
 	constexpr float kLadderStallTime = 0.5f;
 	constexpr int kLadderStallEscapes = 2;
+	constexpr float kLadderProbeAhead = 48.f;
+	constexpr float kLadderBlockDwell = 0.4f;
 
 	constexpr float kElevatorEngageRadius = 48.f;
 	constexpr float kElevatorBoardRadius = 12.f;
@@ -975,18 +978,75 @@ namespace
 		RunLadderDrive(bot, drive, yaw, pitch, crouch, false);
 	}
 
-	bool FinishLadder(CBot &bot, const Nav::NavMesh &mesh, const char *why, bool completed)
+	edict_t *LadderBlocker(CBot &bot, const Vector &target)
+	{
+		edict_t *pEdict = bot.pEdict;
+		const Vector &origin = pEdict->v.origin;
+
+		Vector delta = target - origin;
+		float len = delta.Length();
+		if (len < 1.f)
+			return nullptr;
+		if (len > kLadderProbeAhead)
+			delta = delta * (kLadderProbeAhead / len);
+
+		TraceResult tr;
+		g_engfuncs.pfnTraceHull(origin, origin + delta, dont_ignore_monsters,
+			(pEdict->v.flags & FL_DUCKING) != 0 ? kHullDuck : kHullHuman, pEdict, &tr);
+
+		if (tr.flFraction >= 1.f || !Bot_TraceHitEntity(tr) || CBotIsLivePlayer(tr.pHit))
+			return nullptr;
+		return tr.pHit;
+	}
+
+	bool LadderBlocked(CBot &bot, const Vector &target)
+	{
+		edict_t *hit = LadderBlocker(bot, target);
+		if (!hit)
+		{
+			bot.ladderBlockEnt = 0;
+			return false;
+		}
+
+		int index = g_engfuncs.pfnIndexOfEdict(hit);
+		if (index != bot.ladderBlockEnt)
+		{
+			bot.ladderBlockEnt = index;
+			bot.ladderBlockTime = gpGlobals->time;
+			return false;
+		}
+
+		if (gpGlobals->time - bot.ladderBlockTime < kLadderBlockDwell)
+			return false;
+
+		BOT_VLOG("CrossBot: %s ladder path blocked by %s at (%.1f,%.1f,%.1f) for %.2fs\n", bot.name,
+			CBotClassOf(hit), hit->v.origin.x, hit->v.origin.y, hit->v.origin.z,
+			gpGlobals->time - bot.ladderBlockTime);
+		return true;
+	}
+
+	enum LadderOutcome
+	{
+		kLadderOk,
+		kLadderFailed,
+		kLadderAbandoned
+	};
+
+	bool FinishLadder(CBot &bot, const Nav::NavMesh &mesh, const char *why, LadderOutcome outcome)
 	{
 		edict_t *pEdict = bot.pEdict;
 		bot.ladderActive = false;
+		bot.ladderBail = false;
+		bot.ladderBlockEnt = 0;
 
 		const Nav::Area *landedArea = Nav::FindAreaExact(mesh, pEdict->v.origin);
 		int landedId = landedArea ? static_cast<int>(landedArea->id) : -1;
-		bool failed = !completed ||
-			(landedId >= 0 && bot.ladderTargetArea >= 0 && landedId != bot.ladderTargetArea);
-		bool undecided = !failed && bot.ladderTargetArea >= 0 && landedId < 0;
+		bool abandoned = outcome == kLadderAbandoned;
+		bool failed = outcome == kLadderFailed || (outcome == kLadderOk && landedId >= 0 &&
+			bot.ladderTargetArea >= 0 && landedId != bot.ladderTargetArea);
+		bool undecided = outcome == kLadderOk && !failed && bot.ladderTargetArea >= 0 && landedId < 0;
 
-		if (!undecided && bot.ladderConnIndex >= 0)
+		if (!abandoned && !undecided && bot.ladderConnIndex >= 0)
 		{
 			uint32_t connIndex = static_cast<uint32_t>(bot.ladderConnIndex);
 			if (failed)
@@ -998,9 +1058,10 @@ namespace
 		BOT_VLOG("CrossBot: %s ladder %s %s after %.2fs at (%.1f,%.1f,%.1f) area %d (wanted %d) conn %d %s\n",
 			bot.name, bot.ladderUp ? "climb" : "descent", why, gpGlobals->time - bot.ladderStartTime,
 			pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, landedId, bot.ladderTargetArea,
-			bot.ladderConnIndex, undecided ? "undecided" : (failed ? "failed" : "ok"));
+			bot.ladderConnIndex,
+			abandoned ? "abandoned" : (undecided ? "undecided" : (failed ? "failed" : "ok")));
 
-		if (failed)
+		if (failed || abandoned)
 			bot.nextRepathTime = gpGlobals->time;
 
 		return false;
@@ -1035,7 +1096,20 @@ namespace
 		bot.lastProgressTime = gpGlobals->time;
 
 		if (elapsed >= kLadderMaxTime)
-			return FinishLadder(bot, mesh, "timed out on", false);
+			return FinishLadder(bot, mesh, "timed out on", kLadderFailed);
+
+		if (bot.ladderBail)
+		{
+			if (!onLadder)
+				return FinishLadder(bot, mesh, "bailed off", kLadderAbandoned);
+			if (gpGlobals->time - bot.ladderMoveTime >= kLadderStallTime)
+				return FinishLadder(bot, mesh, "could not bail off", kLadderAbandoned);
+
+			LadderAim bail = ResolveLadderAim(bot, ProbeLadderPlane(pEdict), kLadderPushOff,
+				bot.ladderDismountYaw);
+			RunLadderDrive(bot, 0.f, bail.yaw, bail.pitch, bot.ladderCrouch, bail.jump);
+			return true;
+		}
 
 		if (!bot.ladderGrabbed)
 		{
@@ -1064,7 +1138,7 @@ namespace
 				if (elapsed >= kLadderEntryTimeout ||
 					toMount.Length() > kLadderCommitRadius + kLadderEntryDrift ||
 					gpGlobals->time - bot.ladderMoveTime >= kLadderStallTime)
-					return FinishLadder(bot, mesh, "never caught", false);
+					return FinishLadder(bot, mesh, "never caught", kLadderFailed);
 
 				Vector aim = LadderMountAim(pEdict->v.origin, bot.ladderMountPoint, bot.ladderUp,
 					bot.ladderYaw, bot.ladderEntryYaw);
@@ -1084,9 +1158,9 @@ namespace
 		if (!bot.ladderUp)
 		{
 			if (navZ <= bot.ladderDismountZ + kLadderDismountSlack)
-				return FinishLadder(bot, mesh, "reached the bottom of", true);
+				return FinishLadder(bot, mesh, "reached the bottom of", kLadderOk);
 			if (!onLadder && onGround)
-				return FinishLadder(bot, mesh, "fell off", false);
+				return FinishLadder(bot, mesh, "fell off", kLadderFailed);
 		}
 		else if (!onLadder)
 		{
@@ -1094,7 +1168,7 @@ namespace
 				bot.ladderLeftTime = gpGlobals->time;
 
 			if (onGround && gpGlobals->time - bot.ladderLeftTime >= kLadderMinAirTime)
-				return FinishLadder(bot, mesh, "dismounted off", true);
+				return FinishLadder(bot, mesh, "dismounted off", kLadderOk);
 		}
 
 		if (!onLadder)
@@ -1136,6 +1210,17 @@ namespace
 			bot.ladderStalls, gpGlobals->time - bot.ladderMoveTime,
 			(pEdict->v.origin - bot.ladderStallOrigin).Length());
 
+		Vector probe = pEdict->v.origin;
+		if (bot.ladderAtTop)
+			probe = bot.ladderExitPoint;
+		else if (bot.ladderUp)
+			probe.z += std::max(0.f, std::min(kLadderProbeAhead, bot.ladderDismountZ - navZ));
+		else
+			probe.z -= std::max(0.f, std::min(kLadderProbeAhead, navZ - bot.ladderDismountZ));
+
+		if (LadderBlocked(bot, probe))
+			return FinishLadder(bot, mesh, "blocked on", kLadderFailed);
+
 		float fallbackYaw = (step == kLadderUp || step == kLadderDown)
 			? bot.ladderYaw : bot.ladderDismountYaw;
 		LadderAim aim = ResolveLadderAim(bot, plane, step, fallbackYaw);
@@ -1149,7 +1234,7 @@ namespace
 		else if (gpGlobals->time - bot.ladderMoveTime >= kLadderStallTime)
 		{
 			if (bot.ladderStalls >= kLadderStallEscapes)
-				return FinishLadder(bot, mesh, "stalled on", false);
+				return FinishLadder(bot, mesh, "stalled on", kLadderFailed);
 
 			++bot.ladderStalls;
 			bot.ladderMoveTime = gpGlobals->time;
@@ -1214,6 +1299,8 @@ namespace
 			bot.ladderStalls = 0;
 			bot.ladderTargetArea = wp.targetAreaId;
 			bot.ladderConnIndex = wp.connIndex;
+			bot.ladderBail = false;
+			bot.ladderBlockEnt = 0;
 			++bot.waypointIndex;
 
 			BOT_VLOG("CrossBot: %s ladder %s at (%.1f,%.1f,%.1f) entry yaw %.0f speed %.0f | climb yaw %.0f "
@@ -1225,6 +1312,24 @@ namespace
 
 			RunLadderMove(bot, *Nav::Get());
 			return true;
+		}
+
+		if (dist > kLadderCommitRadius)
+			bot.ladderBlockEnt = 0;
+		else if (LadderBlocked(bot, wp.point))
+		{
+			bot.ladderBlockEnt = 0;
+			if (wp.connIndex >= 0)
+				Nav::PenalizeConnection(static_cast<uint32_t>(wp.connIndex));
+			else
+				Bot_PenalizeCurrentConnection(bot);
+			bot.nextRepathTime = gpGlobals->time;
+
+			BOT_VLOG("CrossBot: %s ladder %s mount blocked at (%.1f,%.1f,%.1f) conn %d penalty %.1f\n",
+				bot.name, wp.ladderUp ? "climb" : "descent", wp.point.x, wp.point.y, wp.point.z,
+				wp.connIndex,
+				wp.connIndex >= 0 ? Nav::ConnectionPenalty(static_cast<uint32_t>(wp.connIndex)) : 0.f);
+			return false;
 		}
 
 		Vector aim = LadderMountAim(origin, wp.point, wp.ladderUp, wp.ladderYaw, wp.ladderEntryYaw);
@@ -1878,6 +1983,9 @@ namespace
 		bot.ladderActive = false;
 		bot.ladderTargetArea = -1;
 		bot.ladderConnIndex = -1;
+		bot.ladderBail = false;
+		bot.ladderBlockEnt = 0;
+		bot.ladderBlockTime = 0.f;
 		bot.rideActive = false;
 		bot.rideTargetArea = -1;
 		bot.rideConnIndex = -1;
@@ -2351,6 +2459,39 @@ bool Bot_ManeuverActive(const CBot &bot)
 		bot.fun.aboard || bot.fun.arrival;
 }
 
+void Bot_BailManeuver(CBot &bot, const char *why)
+{
+	edict_t *pEdict = bot.pEdict;
+
+	if (bot.ladderActive)
+	{
+		if (bot.ladderBail)
+			return;
+
+		float floorZ = bot.ladderUp
+			? bot.ladderMountPoint.z - (bot.ladderCrouch ? 0.f : NavPlan::kPlanStandHeight)
+			: bot.ladderDismountZ;
+		float drop = std::max(0.f, BotNavZ(pEdict) - floorZ);
+		float damage = PmSim::FallDamageFor(sqrtf(2.f * Bot_DrivePhysics(pEdict).gravity * drop));
+
+		if (damage >= pEdict->v.health)
+		{
+			BOT_VLOG("CrossBot: %s %s, but stays on the ladder: a %.0f drop costs %.0f of %.0f health\n",
+				bot.name, why, drop, damage, pEdict->v.health);
+			return;
+		}
+
+		BOT_VLOG("CrossBot: %s %s, bailing off the ladder over a %.0f drop for %.0f damage\n",
+			bot.name, why, drop, damage);
+		bot.ladderBail = true;
+		bot.ladderMoveTime = gpGlobals->time;
+		return;
+	}
+
+	if (bot.chargerActive && ItemKindIsCharger(bot.goalItemKind))
+		FinishCharger(bot, bot.goalItem.Get(), why);
+}
+
 void Bot_ResetNavPath(CBot &bot)
 {
 	ResetPath(bot);
@@ -2465,6 +2606,9 @@ void Bot_MoveNav(CBot &bot)
 		BOTPERF_SCOPE(ZONE_COMBAT);
 		BotCombat::Update(bot);
 	}
+
+	if (BotCombat::Active(bot) && BotDiff::CombatInterrupt() && BotCombat::DamageSource(pEdict))
+		Bot_BailManeuver(bot, "took fire");
 
 	// Runs unconditionally: the tracker is a running minimum, and a gap in its sampling would
 	// read back as "nothing has come closer" the moment combat hands control back.

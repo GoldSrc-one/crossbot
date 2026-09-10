@@ -66,8 +66,11 @@ namespace
 
 	struct ScopedGame
 	{
-		explicit ScopedGame(int iGame) { XPlay::EnterGame(iGame); }
-		~ScopedGame() { XPlay::LeaveGame(); }
+		explicit ScopedGame(int iGame) : prev(XPlay::Current()) { XPlay::EnterGame(iGame); }
+		~ScopedGame() { XPlay::EnterGame(prev); }
+		ScopedGame(const ScopedGame &) = delete;
+		ScopedGame &operator=(const ScopedGame &) = delete;
+		int prev;
 	};
 
 	bool TouchDebugEnabled()
@@ -351,7 +354,7 @@ void Touch(edict_t *pentTouched, edict_t *pentOther)
 	if (!bot)
 		return;
 
-	XPlay::EnterGame(bot->gameDll);
+	ScopedGame ctx(bot->gameDll);
 	if (!g_pGameProfile)
 		return;
 
@@ -1190,14 +1193,12 @@ void OnSound(edict_t *src, int channel, const char *sample, float volume, float 
 		if (!bot.inUse || bot.pEdict == src)
 			continue;
 
-		XPlay::EnterGame(bot.gameDll);
+		ScopedGame ctx(bot.gameDll);
 		if (!g_pGameProfile)
 			continue;
 
 		XPlay::InGame(bot.gameDll, [&] { BotSense::Hear(bot, src, pos, volume, attenuation); });
 	}
-
-	XPlay::LeaveGame();
 }
 
 void OnEvent(int flags, const edict_t *pInvoker)
@@ -1214,14 +1215,12 @@ void OnEvent(int flags, const edict_t *pInvoker)
 		if (!bot.inUse || bot.pEdict == pInvoker)
 			continue;
 
-		XPlay::EnterGame(bot.gameDll);
+		ScopedGame ctx(bot.gameDll);
 		if (!g_pGameProfile)
 			continue;
 
 		XPlay::InGame(bot.gameDll, [&] { BotSense::Notice(bot, pInvoker); });
 	}
-
-	XPlay::LeaveGame();
 }
 
 void PrintNavStatus()

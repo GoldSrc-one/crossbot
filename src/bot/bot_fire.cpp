@@ -52,6 +52,8 @@ namespace
 
 	constexpr float kZoomOut = 300.f;
 
+	constexpr float kZoomConeEnter = 0.5f;
+
 	constexpr float kArcStep = 0.1f;
 
 	constexpr int kArcMaxSteps = 24;
@@ -194,6 +196,34 @@ namespace
 	bool IsScopeWeapon(const WeaponSpec &spec)
 	{
 		return spec.primaryZoomed.fire != FIRE_NONE && spec.secondary.toggle == TOGGLE_ZOOM;
+	}
+
+	bool ScopeCommitted(const WeaponSpec &spec)
+	{
+		return BotDiff::GaussPolicy() && IsScopeWeapon(spec);
+	}
+
+	bool EffectiveZoom(const CBot &bot, const WeaponSpec &spec)
+	{
+		return bot.fire.zoomed || ScopeCommitted(spec);
+	}
+
+	bool AimWithinCone(const CBot &bot, const WeaponSpec &spec, const Vector &eye,
+		float fraction)
+	{
+		if (!bot.fire.aimValid || spec.zoomFov <= 0.f)
+			return false;
+
+		Vector to = bot.fire.aimPoint - eye;
+		float len = to.Length();
+		if (len < 0.0001f)
+			return true;
+
+		MAKE_VECTORS(bot.pEdict->v.v_angle);
+		float dot = (to.x * gpGlobals->v_forward.x + to.y * gpGlobals->v_forward.y +
+			to.z * gpGlobals->v_forward.z) / len;
+
+		return dot >= cosf(spec.zoomFov * 0.5f * fraction * kPiF / 180.f);
 	}
 
 	float ChargeTime(const WeaponMode &m)
@@ -763,9 +793,9 @@ namespace
 			return 0;
 
 		bool want = false;
-		if (BotDiff::GaussPolicy() && IsScopeWeapon(spec))
+		if (ScopeCommitted(spec))
 		{
-			want = fire.aimValid;
+			want = AimWithinCone(bot, spec, eye, fire.zoomed ? 1.f : kZoomConeEnter);
 		}
 		else if (fire.aimValid)
 		{
@@ -1428,7 +1458,7 @@ static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
 
 	for (int i = 0; i < tries; ++i)
 	{
-		const WeaponMode *m = ModeOf(*spec, order[i], fire.zoomed);
+		const WeaponMode *m = ModeOf(*spec, order[i], EffectiveZoom(bot, *spec));
 		if (!m)
 			continue;
 		if (!holding && !ModeUsable(bot, active, *m, dist, rise, strict))
@@ -1910,6 +1940,23 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	const BotWeapon &w = inv.weapons[inv.activeIndex];
 
+	fire.zoomed = bot.pEdict->v.fov != 0.f;
+
+	if (fire.zoomed)
+	{
+		const WeaponSpec *held = g_pGameProfile->GetWeaponSpec(w.id);
+		if (held)
+		{
+			unsigned short unzoom = ZoomButtons(bot, *held, w,
+				bot.pEdict->v.origin + bot.pEdict->v.view_ofs);
+			if (unzoom != 0)
+			{
+				fire.lastReason = "unzooming";
+				return unzoom;
+			}
+		}
+	}
+
 	if (fire.mode == MODE_NONE)
 		return IdleReloadButton(bot, w);
 
@@ -1929,7 +1976,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	if (!spec)
 		return 0;
 
-	const WeaponMode *m = ModeOf(*spec, fire.mode, fire.zoomed);
+	const WeaponMode *m = ModeOf(*spec, fire.mode, EffectiveZoom(bot, *spec));
 	if (!m)
 		return 0;
 

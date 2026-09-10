@@ -675,6 +675,42 @@ Selection per landing area: **one** winner, ranked by lowest fall damage, then b
 reversible (below), then by distance from the landing point to that area's centroid. A dismount landing back
 in the ladder's own bottom area is a **loopback** and produces nothing.
 
+### A sample that finds nothing is retried a sixteenth of a unit to either side
+Every sample sits on the face centroid's lateral line, and that line is synthesised from brush geometry, so
+it can land *exactly* on a hull-expanded clip plane. It does whenever a ladder brush is exactly hull-wide
+(32 units) and flush against a wall: the brush centre and the wall's hull-1/hull-3 face are then the same
+number. On-plane is the **front** side both here and in the engine (`ClassifyPoint` and `HullCheck` take
+`>= 0` to `children[0]`, exactly as `SV_HullPointContents` and `SV_RecursiveHullCheck` do), and which side
+is front depends only on which way the axial plane is stored, so the same geometry fails or works by
+orientation alone.
+
+test52_avoid has both. Ladder `*2` (y 0..32) sits flush against the south wall, and its centre `y = 16` is
+the wall's expanded face with the open side in front — it dismounts. Ladder `*1` (y 80..112) sits flush
+against the `y = 112` wall, its centre `y = 96` is that wall's expanded face with the *wall* in front, and
+the top sample also sits on the pocket slab's `x = 656` face, whose front is open. The point passes
+`InSolid` only because of the `x` plane; the forward dismount moves west, leaves it, is inside the wall on
+the first trace, and falls straight back down the shaft — `[loopback]`, `no connections emitted`.
+
+That is not a disagreement with the engine. `PM_FlyMove` would block a player at exactly `y = 96` too, but
+no player is ever there: every engine trace stops `DIST_EPSILON` short of the plane it hits, so a real
+climber on that ladder is at `y <= 95.96875`. So when a sample produces no dismount, the whole sample —
+forward, sides and jump-off — is rerun at `±kLadderLateralNudge` (1/16, twice `DIST_EPSILON`) along
+`perp`, first `+` then `-`, stopping at the first that produces one. The nudge is far below anything
+geometric, so it cannot invent a dismount; it only moves the start off a plane the real player cannot be
+on. `--dump-ladders` tags those lines `[nudged +perp]` / `[nudged -perp]`: on test52_avoid `*1` loops back
+centred and at `+perp`, and at `-perp` reaches area 6 at (641, 95.9, 18). A sample that already works is
+never nudged, which is why every other test map's `.nav` is byte-identical with and without this.
+
+### Two ladders are two connections
+`emitted` deduplicates by area pair **per ladder entity**, not across the map. Within one ladder it still
+collapses what its faces and pieces produce for the same pair to the lowest-fall-damage one. Across ladders
+it used to do the same, so two separate ladders joining the same pair of areas became one connection —
+and once `*1` dismounted on test52_avoid, it replaced `*2` outright, because it is processed first and
+ties on fall damage. A single edge cannot be routed around: the bot's runtime `LadderBlocked` probe
+penalises the connection it is on (see `doc/bot.md`), and with one connection that penalty only makes the
+same ladder dearer. Parallel edges between one pair are fine for the planner, which walks connection lists
+and never looks a connection up by its endpoints.
+
 ### Reversibility, and why it decides the gates
 Gate A is the mount. Gate B is **where a descending bot gets onto the ladder** — not, in general, where an
 ascending one steps off. Those coincide for a dismount that barely left the column and diverge for one that

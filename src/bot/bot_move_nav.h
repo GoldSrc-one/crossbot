@@ -19,6 +19,8 @@ PmSim::PmPhysics Bot_DrivePhysics(edict_t *pEdict);
 
 bool Bot_PenalizeCurrentConnection(CBot &bot);
 
+void Bot_BailManeuver(CBot &bot, const char *why);
+
 bool Bot_AirmoveCorrectEnabled();
 
 bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector *velocity, float yaw,

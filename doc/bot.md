@@ -1247,6 +1247,42 @@ aiming before charging rather than concurrently.
 
 Measured: jumps at pitch 41, 48, 52 and 62 degrees, all inside the 40-65 safe band, no self-damage.
 
+#### At expert the scope is the shot
+
+Under the policy a scope weapon only fires zoomed -- the `unzoomed` gate in `Buttons` -- so the shot
+the bot is lining up is always `primaryZoomed`, and for the crossbow that is hitscan `AIM_TARGET`,
+not the 2000 u/s `AIM_LEAD` bolt. The aim used to be resolved against `ModeOf(spec, mode,
+fire.zoomed)`, the *current* zoom, so for the whole slew before the zoom landed the bot led a
+projectile it was never going to fire, then zoomed in with the crosshair off to one side of the
+target. `EffectiveZoom` (`fire.zoomed || ScopeCommitted(spec)`) is what the aim ladder in `Select`
+and the on-target test in `Buttons` pass now: the mode the shot will use, not the one the weapon is
+in. The other `ModeOf` callers keep the live zoom -- the ammo, range and ambush checks read the same
+numbers from either crossbow mode.
+
+**The zoom follows the scope's own cone.** `ZoomButtons` zooms in once the aim point is within half
+the scope's half-angle of the view (`kZoomConeEnter`, 5 degrees for the crossbow's fov 20) and holds
+while it stays within the full half-angle (10 degrees) -- that is, while the target is still in the
+picture the scope shows. Anything else unzooms: target dead, lost, or swung out of view. That is
+"unzoom after the shot if nobody is in the scope" stated as state rather than as an event, so it
+also covers a target lost without a shot. Two thresholds for the same reason as `kZoomIn` /
+`kZoomOut`: a single cone flickers on its edge, and each toggle costs a frame and a second of
+`m_flNextSecondaryAttack`. Entering at the tighter cone also means the zoom lands with the hand
+already on the target, so the 4.5x `FovScale` turn penalty is paid on the fine correction rather
+than on the slew.
+
+**The zoom used to stick because nothing ran to take it off.** With no target, `Think` calls `Idle`,
+which sets `fire.mode = MODE_NONE`, and `Buttons` returned on that before reaching `ZoomButtons`. The
+bot stayed zoomed until its next target, turning at under a quarter of its normal rate in the
+meantime. `Buttons` now runs the zoom decision ahead of the `MODE_NONE` and weapon-mismatch returns
+whenever the weapon is zoomed. It can only unzoom there -- for a zoomed weapon a nonzero answer from
+`ZoomButtons` means "want out" -- so no path that used to return early gains a zoom-in. It also
+re-reads `pev->fov` itself, because `Think` has five early returns (off, breaking, deploying, on a
+tank, pressing) ahead of the line that refreshes `fire.zoomed`.
+
+Measured on crossfire with four experts and the crossbow pinned, over 80s: `leadshots=0` on all
+four, every sampled aim `target`, and the longest zoomed-with-no-target stretch 0.8s -- the cooldown
+before the unzoom press is allowed.
+
 ### Bunnyhop
 
 Distinct from the opportunistic jump: that one picks a *different* landing area for a shortcut, this
@@ -1293,7 +1329,7 @@ between two spots indefinitely -- 162 hops in 60s with an average speed of 0.21 
 `PmSim::PreventMegaBunnyJumping` clamps landing speed at 1.7x maxspeed. That is a faithful replication
 of the engine's own anti-bhop rule and must not be touched -- it bounds the gain, it does not block it.
 
-**`kBunnySpeedRatio` is 0.70, not the 0.98 the ask implies, and the reason is worth keeping.** Hopping
+**`kBunnySpeedRatio` is 0.75, not the 0.98 the ask implies, and the reason is worth keeping.** Hopping
 while slow is normally a trap: ground acceleration reaches maxspeed in about three frames, air
 acceleration gains roughly 1.4 units/s per frame, so a bot that locks itself into hopping below
 maxspeed is slower than one that runs. What changes it is that `BunnyAirSteer` drives at
@@ -1307,9 +1343,30 @@ in this function: `refuse=` in `crossbot_vantage_status` counts refusals by gate
 waypoint kind, arc, corridor, in that order -- and the speed gate
 outnumbers every other gate combined by two orders of magnitude (4543 against 117). Instrumenting the
 distribution showed only 8-9% of walk frames sit at 0.9 maxspeed or above and 12-20% at 0.7 or above:
-the bot rarely runs flat out, because `SolveDrive` targets the plan profile's speed. Raising the hop
-rate further means raising the *path plan's* speed, which is a navigation change and would move every
-tier.
+the bot rarely runs flat out, because `SolveDrive` targets the plan profile's speed.
+
+**Raising the path plan's speed was tried and rejected.** The obvious next move is to build the plan
+as though maxspeed were higher, so that `NavFollow::Track`'s `target = min(here.speed, worldCap)`
+saturates at the real maxspeed everywhere instead of tracking the profile's conservative per-segment
+speed. One line in `MakePlanTraces` does it -- scale `traces.physics.maxSpeed` before it reaches
+`BuildPathProfile` -- and at expert with a 1.5x factor it measurably worked as intended: over 120s
+with three bots on crossfire the average speed rose from 178 to 190 against a maxspeed of 270, and the
+share of samples at or above 0.7 maxspeed went from 54% to 60%.
+
+It bought no hops. 472 against 489 is inside the run-to-run spread, because the speed gate is not the
+only thing a faster bot changes: the corner slowdowns the profile exists to compute are exactly what
+the inflated maxspeed erases, so the bot carries speed into corners it then has to correct out of, and
+the corridor and waypoint-kind gates absorb what the speed gate stopped refusing. The cost was
+unambiguous. `traces.physics` is the same physics the airmove connection sims run under, so every
+stored arc was simulated at a launch speed the bot cannot reach: aborted airmoves went from 9 to 74 in
+the same window, and goals reached fell from 87 to 74. The plan profile's speed is load-bearing for
+cornering and for airmoves, and overdriving it trades navigation for nothing.
+
+What is left is the gate itself, and it is nearly flat there too: 0.70 and 0.75 measure 472 and 450
+hops over the same 120s window, which is noise, and 0.75 reached more goals (98 against 87). The gate
+sits at 0.75 because that is the cheaper end of a flat curve, not because the number was found to
+matter. Every accepted hop launches at 269 of 270 anyway -- the bot hops when it is already at
+maxspeed, and the ratio only decides how much of the ramp-up it is willing to hop through.
 
 ### cvars
 
@@ -2553,6 +2610,15 @@ which is 5s of shooting at a threat that is now someone else's problem.
 break, deploy. Those runners live below goal selection and steer along the waypoint list, so calling
 `ClearGoalItem` mid-flight would drop a bot into whatever is under it. The state is still entered on
 time, and `driving` records whether the movement half has actually started.
+
+Two of those maneuvers are cut short instead of waited out, and only when the bot is actually hit:
+a frame where combat is active, `BotDiff::CombatInterrupt()` holds and `DamageSource` names an
+attacker calls `Bot_BailManeuver` from `Bot_MoveNav`, right after `Update`. A ladder ejects unless the
+drop would be fatal (see `### Ladders`), and a charger is walked away from (see `### RunChargerUse`).
+Airmoves, rides and activations still wait — there is nowhere to eject to mid-flight, and a ride is
+the only way off its platform. Being *seen* is not enough: a climb that finishes in two seconds is
+still worth finishing when nobody is shooting yet. The call lives in `Bot_MoveNav` rather than in
+`Update` so combat never learns what a ladder is, and the frame order stays readable in one place.
 
 The first frame `Run` does drive, it calls `BotItems::ClearGoalItem` once. That is what "path
 following is terminated" means concretely: goal cleared, `hasGoal` false, waypoints gone. On exit,
@@ -3985,7 +4051,8 @@ of the list in `crossbot_nav_status` are the tell.
 `RunLadderApproach` walks the bot to the mount and latches `CBot::ladderActive`; `RunLadderMove` then
 owns every frame until it finishes, exactly as the air move does. Eight rules make the difference between
 a climb and the jump-on-jump-off loop test53_ladder4 used to run. A ninth is the descent aim, and a tenth
-is how the attempt is scored; both are below.
+is how the attempt is scored; both are below. The last two are about giving up on purpose: a shaft
+something is standing in, and a bot that gets shot on the way.
 
 **Drive from the plane the engine picked, not the face navgen planned.** `PM_LadderMove` chooses its
 plane with `PM_TraceModel(origin -> ladder centre)` in the *point* hull, so the face is decided by where
@@ -4083,13 +4150,15 @@ starts around y 280, and the answer came back as area 4, the ledge 62 units abov
 was charged `kConnFailPenalty` every single time, and the next `Replan` reported `penalized=1` because
 of it.
 
-So the verdict now takes two inputs. `FinishLadder`'s `completed` argument says whether the maneuver
-itself finished as designed — `reached the bottom of` and `dismounted off` pass true, `never caught`,
-`fell off`, `timed out on` and `stalled on` pass false — and a maneuver that did not complete is a
-failure whatever the geometry says. Only when it did complete does the area matter, and then it is read
-with the strict `Nav::FindAreaExact`: the target area rewards, a *different* area penalizes,
-and no area at all is `undecided` — neither rewarded nor penalized, because a bot still in the shaft is
-not evidence of anything. The log line carries that word, so a run tells you which of the three happened.
+So the verdict now takes two inputs. `FinishLadder`'s `LadderOutcome` says whether the maneuver itself
+finished as designed — `reached the bottom of` and `dismounted off` pass `kLadderOk`, `never caught`,
+`fell off`, `timed out on`, `stalled on` and `blocked on` pass `kLadderFailed` — and a maneuver that did
+not complete is a failure whatever the geometry says. Only when it did complete does the area matter,
+and then it is read with the strict `Nav::FindAreaExact`: the target area rewards, a *different* area
+penalizes, and no area at all is `undecided` — neither rewarded nor penalized, because a bot still in the
+shaft is not evidence of anything. The third outcome, `kLadderAbandoned`, is the bot choosing to leave
+(see the last rule) and is scored exactly like `undecided`. The log line carries one of `ok`, `failed`,
+`undecided` or `abandoned`, so a run tells you which happened.
 
 Deferring the undecided case instead — hold the verdict, settle it once the bot is back on the ground
 and strictly inside something — was tried and is worse. By the time the bot satisfies that test it has
@@ -4106,6 +4175,58 @@ and the timeout, which is decided in mid-air, is the same trap and so declines t
 `vel=(0,0,67)` forever while its origin does not move, so the detector compares against
 `ladderStallOrigin` and gives up after `kLadderStallDist`. Two escapes are allowed, each a push-off;
 the third gives up on the connection and repaths.
+
+**Look where the climb is going, and count only entities.** The stall detector finds a blocked shaft
+eventually, and badly: with a `cycler` sitting on top of the ladder, the climb's head meets its bottom,
+two push-offs drop the bot back down the shaft, and the second landing is scored `dismounted off` —
+a completed maneuver — so the penalty only arrives because `FindAreaExact` happens to name the pit.
+`LadderBlocked` instead casts one hull trace a frame, at most `kLadderProbeAhead` long, along where the
+current phase is heading: straight up to `ladderDismountZ` on a climb, straight down to it on a descent,
+at `ladderExitPoint` once `ladderAtTop` has latched, and at the mount itself on the approach. The same
+entity has to stay in the way for `kLadderBlockDwell`; then the climb ends `blocked on` with
+`kLadderFailed`, which penalizes `ladderConnIndex` and repaths. On the approach nothing is latched yet,
+so the mount's own `wp.connIndex` takes the penalty and the frame goes back to the walker.
+
+What counts is `Bot_TraceHitEntity` — the predicate `Bot_EngineTraceFn` already uses, which drops the
+world, world brushes and `IsBakedBlocker` classnames — minus live players. The world has to be out:
+a shaft is a hull-wide tube of world brush, and a vertical probe that counted walls would abort every
+good ladder on the first frame its hull grazed one. Geometry that genuinely blocks a ladder is navgen's
+mistake and is what `never caught` and `stalled on` already catch. Players have to be out too: a
+teammate standing at the top is gone a second later, and the penalty is mesh-global and long-lived.
+The approach probe only runs inside `kLadderCommitRadius`, because the walker's `BotAvoid` is not
+running during a ladder approach — a probe that fired at 200 units would penalize a can the bot could
+have stepped around, where one at 48 is saying the mount itself is occupied.
+
+Measured on a copy of test52_avoid with the can moved on top of the `y 0..32` ladder: `ladder path
+blocked by cycler ... for 0.40s`, `blocked on ... failed`, conn 16 penalized, 0.4 s after the grab.
+That copy has no second way up, so the next plan is the same ladder, the bot is still on it and
+re-commits on the spot, and the cycle repeats every 0.4 s while the penalty climbs by
+`kConnFailPenalty` each time. That is the penalty working as designed — a price, never a ban — on an
+edge with no alternative; with one, the repath takes it and the `ladderEject` rule jumps the bot off
+the dead ladder. Note that test52_avoid itself does not exercise any of this: navgen's dismount
+simulation off the `y 80..112` ladder loops back into the pit, so that ladder never becomes a
+connection at all and the can on top of it is never met.
+
+**Being shot ends a climb, unless the fall would kill.** Combat enters on the damage frame but
+`BotCombat::Run` waits for `Bot_ManeuverActive`, and a bot that finishes a 144-unit climb while being
+shot in the back is a free kill. So `Bot_MoveNav` calls `Bot_BailManeuver` right after
+`BotCombat::Update` whenever combat is active, `BotDiff::CombatInterrupt()` would let `Run` drive, and
+`BotCombat::DamageSource` names an attacker this frame — world damage, falls and the bot's own rockets
+resolve to nothing there, so they never cause a bail. The bail estimates the drop the eject implies —
+back down to the mount on a climb, down to `ladderDismountZ` on a descent — prices it with
+`PmSim::FallDamageFor`, and refuses only when that damage would be at least the bot's health. A fall
+that hurts is still cheaper than hanging on a ladder under fire.
+
+It does not clear `ladderActive`. It sets `ladderBail`, and `RunLadderMove` drives the existing
+`kLadderPushOff` aim until `OnLadder` goes false — one frame of `IN_JUMP` in practice, measured at
+`vel=(270,0,-8)` the frame after the button — and only then finishes `bailed off` with
+`kLadderAbandoned`. If the bot is still on the ladder `kLadderStallTime` later it finishes `could not
+bail off` anyway and lets combat drive from where it hangs. That is not hypothetical: a player whose
+hull overlaps a solid is frozen by `PM_CheckStuck` before `PM_LadderMove` ever reads the jump, and a
+bail without that bound held `IN_JUMP` into the wall until `kLadderMaxTime`. Clearing the state outright would hand the frame to
+combat with the bot still in `MOVETYPE_FLY`, and the `ladderEject` rule that would have kicked it off
+only lives on the walker path that combat bypasses. `kLadderAbandoned` neither rewards nor penalizes:
+the ladder was fine, and pricing it would feed combat noise into every bot's routing.
 
 ### Ladder debugging
 
@@ -4360,6 +4481,16 @@ It is dispatched from inside the `follow.done` branch rather than from the waypo
 charger is not a waypoint — the plan's goal is the use spot and the charger is off the mesh
 entirely. `lastProgressTime` is stamped every frame for the same reason `RunActivation` stamps it:
 no arclength accrues while standing still and the 2 s stall detector would otherwise repath.
+
+**A charger holds the bot's view hostage, so being shot at one ends the visit.** `RunChargerUse`
+writes `desiredAngles` at the fixture every frame, so a bot shot mid-charge cannot turn to answer.
+`Bot_BailManeuver` calls `FinishCharger` — which clears `chargerActive` and forgets the goal item —
+and the next frame `BotCombat::Run` drives. There is deliberately no `NoteIgnored`: nothing is wrong
+with the charger, and `BotCombat::Exit` zeroes `nextSelectTime`, so the bot can walk straight back once
+the fight is over. `RunHealVolume` is not bailed out of, even though it shares the `chargerActive`
+bookkeeping. It leaves the view to `BotSense::ApplyLook` and `BotFire::Think` runs before any movement,
+so a bot standing in a healing pool is already shooting back while it heals, and leaving would only
+stop the healing.
 
 ## bot_opportunist.cpp
 

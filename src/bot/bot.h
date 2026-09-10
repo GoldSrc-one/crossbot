@@ -171,6 +171,9 @@ struct CBot
 	int ladderStalls = 0;
 	int ladderTargetArea = -1;
 	int ladderConnIndex = -1;
+	bool ladderBail = false;
+	int ladderBlockEnt = 0;
+	float ladderBlockTime = 0.f;
 
 	bool rideActive = false;
 	bool rideCrouch = false;

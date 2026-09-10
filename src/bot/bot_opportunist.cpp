@@ -31,7 +31,7 @@ namespace
 	constexpr float kMaxLaunchPitch = 20.f;
 
 	constexpr float kBunnyInterval = 0.1f;
-	constexpr float kBunnySpeedRatio = 0.70f;
+	constexpr float kBunnySpeedRatio = 0.75f;
 	constexpr float kBunnyCorridor = 64.f;
 	constexpr float kBunnyMinProgress = 96.f;
 	constexpr float kBunnySimSeconds = 3.f;

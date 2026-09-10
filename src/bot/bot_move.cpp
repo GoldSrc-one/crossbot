@@ -191,7 +191,7 @@ Vector Bot_YawDir(float yawDeg)
 	return Vector(cosf(r), sinf(r), 0.f);
 }
 
-static bool TraceHitEntity(const TraceResult &tr)
+bool Bot_TraceHitEntity(const TraceResult &tr)
 {
 	edict_t *hit = tr.pHit;
 	if (!hit || g_engfuncs.pfnIndexOfEdict(hit) == 0)
@@ -215,7 +215,7 @@ PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
 		out.fraction = tr.flFraction;
 		out.allsolid = tr.fAllSolid != 0;
 		out.startsolid = tr.fStartSolid != 0;
-		out.hitEntity = TraceHitEntity(tr);
+		out.hitEntity = Bot_TraceHitEntity(tr);
 		return out;
 	};
 }

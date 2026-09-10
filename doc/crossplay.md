@@ -93,6 +93,18 @@ Only `crossplay.cpp` includes `crossplay_api.h`. That header declares `maxGameDl
   context is not always a quiet misreport: `crossbot_list_items` took the server down, because
   `ClassifyItem` is called on a null `g_pGameProfile`. See `doc/console.md`.
 
+**Hooks hand back the game they found.** `Touch`, `OnSound` and `OnEvent` are engine callbacks, and
+they fire *inside* a bot's think as readily as outside it: `GiveItem` spawning a weapon plays its
+pickup sound, `pfnRunPlayerMove` fires a gun. They used to end with `LeaveGame()`, which nulled
+`g_pGameProfile` for the rest of the enclosing think. With one game loaded that is a crash on the
+next profile call -- it took the server down in `IdleSelect` the moment `crossbot_fire_pin` handed a
+joining bot its crossbow. With two games it is quieter and worse: the rest of the think runs against
+the other game's profile and offsets. Both `ScopedGame` structs now save `XPlay::Current()` and give
+it back to `EnterGame` on the way out, and the three hooks use them. `EnterGame(-1)` falls through to
+`LeaveGame`, so a hook entered from no game still leaves none. The one bare `LeaveGame` left is the
+end of `StartFrame`, which is never nested. Copying a `ScopedGame` is deleted, since two destructors
+would restore twice.
+
 `ServerActivate` and `ServerDeactivate` need no context; they call `XPlay::DetectProfiles()` and
 `XPlay::ForgetProfiles()`.
 

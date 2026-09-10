@@ -36,9 +36,15 @@ namespace
 
 	struct ScopedGame
 	{
-		explicit ScopedGame(int iGame) { XPlay::EnterGame(iGame); }
-		explicit ScopedGame(const edict_t *ent) { XPlay::EnterGame(XPlay::OwnerOf(ent)); }
-		~ScopedGame() { XPlay::LeaveGame(); }
+		explicit ScopedGame(int iGame) : prev(XPlay::Current()) { XPlay::EnterGame(iGame); }
+		explicit ScopedGame(const edict_t *ent) : prev(XPlay::Current())
+		{
+			XPlay::EnterGame(XPlay::OwnerOf(ent));
+		}
+		~ScopedGame() { XPlay::EnterGame(prev); }
+		ScopedGame(const ScopedGame &) = delete;
+		ScopedGame &operator=(const ScopedGame &) = delete;
+		int prev;
 	};
 
 	bool IsLivePlayer(edict_t *ent) { return CBotIsLivePlayer(ent); }

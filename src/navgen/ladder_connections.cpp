@@ -27,6 +27,7 @@ constexpr double kLadderStandStep = 4.0;
 constexpr double kLadderStandReach = 48.0;
 constexpr double kLadderStandProbeStep = 2.0;
 constexpr double kMapRadius = 8192.0;
+constexpr double kLadderLateralNudge = 0.0625;
 
 struct ClimbFace
 {
@@ -343,12 +344,12 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 	double bottomReach = 2.0 * kStandProbeLift +
 		static_cast<double>(PmSim::PlainJumpHeight(physics.gravity));
 
-	std::map<long long, size_t> emitted;
-
 	for (const Entity &ent : entities)
 	{
 		if (ent.Get("classname") != "func_ladder")
 			continue;
+
+		std::map<long long, size_t> emitted;
 
 		++stats.entities;
 
@@ -485,11 +486,13 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 
 				std::map<int, Dismount> best;
 
+				const char *nudgeNote = "";
+
 				auto record = [&](const AirmoveTrajectory &traj, int area, double height,
 					const char *direction, bool jumpOff, const Vec3 &exitPos, float exitYaw, bool duckOnly)
 				{
 					if (area < 0)
-						return;
+						return false;
 
 					bool reversible = !jumpOff && CanRemountAt(traj.landingPos, volMins, volMaxs);
 					bool unreachable = duckOnly && (areas[static_cast<size_t>(area)].areaFlags &
@@ -497,15 +500,15 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 
 					if (dump)
 						std::printf("        %-9s at z %7.1f -> area %3d, fall %.1f, flight %.2fs, "
-							"landing (%.1f, %.1f, %.1f)%s%s%s\n",
+							"landing (%.1f, %.1f, %.1f)%s%s%s%s\n",
 							direction, height, area, traj.fallDamage, traj.flightTime,
 							traj.landingPos.x, traj.landingPos.y, traj.landingPos.z,
 							reversible ? "  [remountable]" : "",
 							(area == bottomArea) ? "  [loopback]" : "",
-							unreachable ? "  [standing hull does not fit]" : "");
+							unreachable ? "  [standing hull does not fit]" : "", nudgeNote);
 
 					if (area == bottomArea || unreachable)
-						return;
+						return false;
 
 					Dismount d;
 					d.area = area;
@@ -526,6 +529,7 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 					auto it = best.find(area);
 					if (it == best.end() || BetterDismount(d, it->second, areaCentroid))
 						best[area] = d;
+					return true;
 				};
 
 				std::vector<Vec3> samples;
@@ -546,18 +550,17 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 					samples.push_back(at);
 				}
 
-				for (size_t si = 0; si < samples.size(); ++si)
+				auto dismountFrom = [&](const Vec3 &at, bool atTop)
 				{
-					const Vec3 &at = samples[si];
-					bool atTop = (si == 0);
 					bool duckOnly = !StandFits(bsp, standHull, at);
+					bool found = false;
 					int area = -1;
 
 					if (atTop && ladderEnded)
 					{
 						AirmoveTrajectory traj = sim.SimulateAirborne(at,
 							Vec3(0.0, 0.0, climbSpeed), climbYaw, physics.maxSpeed, areas, -1, area);
-						record(traj, area, at.z, "forward", false, at, climbYaw, duckOnly);
+						found |= record(traj, area, at.z, "forward", false, at, climbYaw, duckOnly);
 					}
 
 					for (int side = 0; side < 2; ++side)
@@ -571,13 +574,32 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 
 						AirmoveTrajectory traj = sim.SimulateAirborne(from, dir * climbSpeed,
 							YawOf(dir), physics.maxSpeed, areas, -1, area);
-						record(traj, area, at.z, (side == 0) ? "side +" : "side -", false, from, YawOf(dir),
-							!StandFits(bsp, standHull, from));
+						found |= record(traj, area, at.z, (side == 0) ? "side +" : "side -", false, from,
+							YawOf(dir), !StandFits(bsp, standHull, from));
 					}
 
 					AirmoveTrajectory jumped = sim.SimulateAirborne(at,
 						climb.outward * kLadderJumpOffSpeed, YawOf(climb.outward), 0.0f, areas, -1, area);
-					record(jumped, area, at.z, "jump off", true, at, outYaw, duckOnly);
+					found |= record(jumped, area, at.z, "jump off", true, at, outYaw, duckOnly);
+					return found;
+				};
+
+				for (size_t si = 0; si < samples.size(); ++si)
+				{
+					nudgeNote = "";
+					if (dismountFrom(samples[si], si == 0))
+						continue;
+
+					for (double nudge : {kLadderLateralNudge, -kLadderLateralNudge})
+					{
+						Vec3 at = samples[si] + climb.perp * nudge;
+						if (InSolid(bsp, duckHull, at))
+							continue;
+
+						nudgeNote = (nudge > 0.0) ? "  [nudged +perp]" : "  [nudged -perp]";
+						if (dismountFrom(at, si == 0))
+							break;
+					}
 				}
 
 				for (auto &entry : best)
