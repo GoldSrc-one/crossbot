@@ -41,15 +41,18 @@ namespace
 		return nullptr;
 	}
 
+	void ComplainNoName(const char *kind, const char *name)
+	{
+		char msg[128];
+		snprintf(msg, sizeof(msg), "CrossBot: no %s named '%s'\n", kind, name);
+		SERVER_PRINT(msg);
+	}
+
 	edict_t *FindPlayerOrComplain(const char *name)
 	{
 		edict_t *ent = FindPlayerByName(name);
 		if (!ent)
-		{
-			char msg[128];
-			snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", name);
-			SERVER_PRINT(msg);
-		}
+			ComplainNoName("player", name);
 		return ent;
 	}
 
@@ -58,11 +61,7 @@ namespace
 		ent = FindPlayerByName(name);
 		CBot *bot = ent ? BotManager::FindBot(ent) : nullptr;
 		if (!bot)
-		{
-			char msg[128];
-			snprintf(msg, sizeof(msg), "CrossBot: no bot named '%s'\n", name);
-			SERVER_PRINT(msg);
-		}
+			ComplainNoName("bot", name);
 		return bot;
 	}
 
