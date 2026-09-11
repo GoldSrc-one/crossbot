@@ -1,5 +1,6 @@
 #include <extdll.h>
 #include <meta_api.h>
+#include <algorithm>
 #include <in_buttons.h>
 
 #include <cmath>
@@ -38,18 +39,12 @@ namespace
 	using NavMath::kPiF;
 	using NavMath::Norm2D;
 
-	float ClampF(float v, float lo, float hi)
-	{
-		if (v < lo) return lo;
-		if (v > hi) return hi;
-		return v;
-	}
 
 	Vector NearestPoint(const Vector &from, const Vector &mins, const Vector &maxs)
 	{
 		Vector center = (mins + maxs) * 0.5f;
-		Vector p(ClampF(from.x, mins.x, maxs.x), ClampF(from.y, mins.y, maxs.y),
-			ClampF(from.z, mins.z, maxs.z));
+		Vector p(std::clamp(from.x, mins.x, maxs.x), std::clamp(from.y, mins.y, maxs.y),
+			std::clamp(from.z, mins.z, maxs.z));
 
 		Vector inward = center - p;
 		float len = inward.Length();

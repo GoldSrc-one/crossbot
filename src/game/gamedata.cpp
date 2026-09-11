@@ -1,5 +1,6 @@
 #include <extdll.h>
 #include <meta_api.h>
+#include <commonmacros.h>
 
 #include <cstdarg>
 #include <cstddef>
@@ -81,7 +82,7 @@ const Request kRequests[] = {
 	{ "CMultiSource",      "m_iTotal",                CB_OFF(ms_iTotal) },
 };
 
-constexpr size_t kRequestCount = sizeof(kRequests) / sizeof(kRequests[0]);
+constexpr size_t kRequestCount = ARRAYSIZE(kRequests);
 
 GameOffsets g_gameOffsets[XPlay::kMaxGames];
 bool g_gameLoaded[XPlay::kMaxGames];

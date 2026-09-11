@@ -1,5 +1,7 @@
 ﻿#include <extdll.h>
 #include <meta_api.h>
+#include <algorithm>
+#include <commonmacros.h>
 #include <in_buttons.h>
 
 #include <stdio.h>
@@ -49,12 +51,6 @@ namespace
 		return (ent->v.spawnflags & kSfHurtNoClients) == 0;
 	}
 
-	float Saturate(float v)
-	{
-		if (v < 0.f)
-			return 0.f;
-		return (v > 1.f) ? 1.f : v;
-	}
 }
 
 const char *CBotClassOf(const edict_t *ent)
@@ -147,7 +143,7 @@ float CHLDMProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) con
 	float maxHealth = (pEdict->v.max_health > 0.f) ? pEdict->v.max_health : kHLDMMaxNormal;
 	float pool = maxHealth + kHLDMMaxNormal;
 	float survive = (pEdict->v.health + pEdict->v.armorvalue) / pool;
-	survive = Saturate(survive);
+	survive = std::clamp(survive, 0.f, 1.f);
 
 	float arms = 0.f;
 	for (int i = 0; i < inv.count; ++i)
@@ -160,7 +156,7 @@ float CHLDMProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) con
 			arms += spec->value;
 	}
 
-	return survive * Saturate(arms);
+	return survive * std::clamp(arms, 0.f, 1.f);
 }
 
 void CHLDMProfile::Respawn(edict_t *pEdict) const
@@ -254,7 +250,7 @@ bool CHLDMProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
 
 	static const char *kPreferred[] = { "weapon_gauss", "weapon_crossbow", "weapon_egon" };
 
-	for (size_t i = 0; i < sizeof(kPreferred) / sizeof(kPreferred[0]); ++i)
+	for (size_t i = 0; i < ARRAYSIZE(kPreferred); ++i)
 	{
 		if (strcmp(classname, kPreferred[i]) == 0)
 			return true;
@@ -339,7 +335,7 @@ const char *CHLDMProfile::AmmoEntity(int weaponId, WeaponAmmo pool) const
 		{ "weapon_satchel",     NULL,             "weapon_satchel",   "weapon_satchel" },
 	};
 
-	for (size_t i = 0; i < sizeof(kAmmo) / sizeof(kAmmo[0]); ++i)
+	for (size_t i = 0; i < ARRAYSIZE(kAmmo); ++i)
 	{
 		if (strcmp(kAmmo[i].weapon, spec->classname) != 0)
 			continue;

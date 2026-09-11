@@ -46,12 +46,6 @@ constexpr float kPlanAirmoveRangeEps = 1.f;
 constexpr float kPlanAirmoveFlightEps = 0.01f;
 constexpr float kPlanAirmoveRetractAlign = 0.5f;
 
-float HorizontalDistance(const Vector &a, const Vector &b)
-{
-	float dx = b.x - a.x, dy = b.y - a.y;
-	return std::sqrt(dx * dx + dy * dy);
-}
-
 float ClampTravelInsideArea(const PlanArea &area, const Vector &from, const Vector &dir, float want,
 	float inset)
 {
@@ -1371,7 +1365,7 @@ bool PlanWalker::Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t 
 				const Vector &toCentroid = (*m_areas)[toId].centroid;
 				float want = (toCentroid.x - exitPoint.x) * candDir.x +
 					(toCentroid.y - exitPoint.y) * candDir.y;
-				float got = HorizontalDistance(exitPoint, end);
+				float got = (exitPoint - end).Length2D();
 				float rescaled = 0.f;
 				if (want > kPlanAirmoveRangeEps)
 				{
@@ -1598,7 +1592,7 @@ void PlanWalker::Retract()
 		const Vector &launchPoint = m_result[prev.index].point;
 		const Vector &landPoint = m_result[prev.index + 1].point;
 
-		float got = HorizontalDistance(launchPoint, landPoint);
+		float got = (launchPoint - landPoint).Length2D();
 		if (got <= kPlanAirmoveRangeEps)
 		{
 			++m_stats.airmovesRetractKept;

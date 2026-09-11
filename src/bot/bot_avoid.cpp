@@ -72,23 +72,6 @@ namespace
 		return (s && s[0]) ? s : "?";
 	}
 
-	float Length2D(const Vector &v)
-	{
-		return sqrtf(v.x * v.x + v.y * v.y);
-	}
-
-	float Dist2D(const Vector &a, const Vector &b)
-	{
-		float dx = a.x - b.x;
-		float dy = a.y - b.y;
-		return sqrtf(dx * dx + dy * dy);
-	}
-
-	float Dot2D(const Vector &a, const Vector &b)
-	{
-		return a.x * b.x + a.y * b.y;
-	}
-
 	Vector MoverVelocityAt(edict_t *ent, const Vector &point)
 	{
 		const Vector &av = ent->v.avelocity;
@@ -96,7 +79,7 @@ namespace
 			return ent->v.velocity;
 
 		Vector r = point - ent->v.origin;
-		float len = Length2D(r);
+		float len = r.Length2D();
 		if (len < kAvoidSpinRadiusMin)
 			return ent->v.velocity;
 
@@ -341,7 +324,7 @@ namespace
 		ProbeResult probe = Probe(ctx, from, to, tr);
 		if (probe == PROBE_CLEAR)
 		{
-			length += Dist2D(from, to);
+			length += (from - to).Length2D();
 			return true;
 		}
 		if (probe == PROBE_WORLD)
@@ -376,11 +359,11 @@ namespace
 		float maxY = bmax.y + pad;
 
 		Vector fwd((minX + maxX) * 0.5f - from.x, (minY + maxY) * 0.5f - from.y, 0.f);
-		float fwdLen = Length2D(fwd);
+		float fwdLen = fwd.Length2D();
 		if (fwdLen < 0.0001f)
 		{
 			fwd = Vector(to.x - from.x, to.y - from.y, 0.f);
-			fwdLen = Length2D(fwd);
+			fwdLen = fwd.Length2D();
 			if (fwdLen < 0.0001f)
 				return false;
 		}
@@ -418,7 +401,7 @@ namespace
 
 		int order[2] = { 1, 0 };
 		bool exclusive = false;
-		float vlat = Dot2D(MoverVelocityAt(hit, contact), right);
+		float vlat = DotProduct2D(MoverVelocityAt(hit, contact), right);
 		if (fabsf(vlat) > kAvoidMoverSpeed)
 		{
 			order[0] = (vlat < 0.f) ? 1 : 0;
@@ -465,7 +448,7 @@ namespace
 				}
 				else
 				{
-					sideLength += Dist2D(cur, corner);
+					sideLength += (cur - corner).Length2D();
 					points.push_back(corner);
 					cur = corner;
 
@@ -548,7 +531,7 @@ namespace
 			Vector target(wp.point.x, wp.point.y,
 				wp.point.z + hullHalf - NavPlan::kPlanStandHeight);
 
-			float len = Dist2D(prev, target);
+			float len = (prev - target).Length2D();
 			int steps = std::max(1, static_cast<int>(len / kAvoidDestStep));
 			for (int s = 1; s <= steps; ++s)
 			{
@@ -619,7 +602,7 @@ namespace
 		{
 			Vector step = bot.waypoints[bot.waypointIndex].point - origin;
 			step.z = 0.f;
-			float stepLen = Length2D(step);
+			float stepLen = step.Length2D();
 			if (stepLen > 1.f)
 			{
 				travel.x = step.x / stepLen;
@@ -628,7 +611,7 @@ namespace
 			}
 		}
 
-		float closing = Dot2D(MoverVelocityAt(hit, contact), travel);
+		float closing = DotProduct2D(MoverVelocityAt(hit, contact), travel);
 		bool recedes = closing > kAvoidMoverSpeed;
 
 		SearchCtx ctx;
@@ -668,7 +651,7 @@ namespace
 		if (ok)
 			points.push_back(dest);
 
-		float direct = Dist2D(origin, dest);
+		float direct = (origin - dest).Length2D();
 		float budget = kAvoidDetourMaxLength;
 
 		if (ok && length <= budget)
@@ -749,7 +732,7 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 
 	const Vector &origin = pEdict->v.origin;
 	const Vector &vel = pEdict->v.velocity;
-	float speed = Length2D(vel);
+	float speed = vel.Length2D();
 
 	if (onGround && !state.jumpArmed && (pathDir.x != 0.f || pathDir.y != 0.f))
 	{
@@ -767,7 +750,7 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 		bool wantsBreak = false;
 		bool qualifies = tr.flFraction < 1.f && HitQualifies(bot, mesh, tr.pHit, &wantsBreak);
 
-		float solidDist = tr.flFraction < 1.f ? Length2D(tr.vecEndPos - origin) : lookahead;
+		float solidDist = tr.flFraction < 1.f ? (tr.vecEndPos - origin).Length2D() : lookahead;
 
 		float beamDist = 0.f, beamLo = 0.f, beamHi = 0.f;
 		const BotDeploy::Beam *beam = BeamAlong(origin, end, hull, beamDist, beamLo, beamHi);
@@ -802,7 +785,7 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 		if (qualifies || beam)
 		{
 			edict_t *hit = beam ? beam->ent : tr.pHit;
-			float dist = beam ? beamDist : Length2D(tr.vecEndPos - origin);
+			float dist = beam ? beamDist : (tr.vecEndPos - origin).Length2D();
 			float gap = beam ? (beamLo - kAvoidBeamPad - feetZ) : (hit->v.absmin.z - feetZ);
 			float top = beam ? (beamHi + kAvoidBeamPad - feetZ) : (hit->v.absmax.z - feetZ);
 			float depth = beam ? kAvoidBeamDepth

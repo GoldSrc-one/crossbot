@@ -69,13 +69,6 @@ namespace
 	using NavMath::kPiF;
 	using NavMath::Norm2D;
 
-	float Dist2D(const Vector &a, const Vector &b)
-	{
-		float dx = a.x - b.x;
-		float dy = a.y - b.y;
-		return sqrtf(dx * dx + dy * dy);
-	}
-
 	Vector AnglesTo(const Vector &dir)
 	{
 		float flat = sqrtf(dir.x * dir.x + dir.y * dir.y);
@@ -806,7 +799,7 @@ bool EvaluateGate(const Nav::NavMesh &mesh, uint32_t areaId, uint32_t connIndex,
 	}
 
 	Vector mid = NavPlan::GateMidpoint(*gate);
-	float span = Dist2D(gate->left, gate->right);
+	float span = (gate->left - gate->right).Length2D();
 	out.gateWidth = span + 4.f * NavPlan::kPlanClearance;
 
 	if (out.gateWidth > kDeployGateProbe)
