@@ -68,6 +68,7 @@ struct VantageParams
 	double pitchRangeDeg = 45.0;
 	bool verifyNeighbors = false;
 	size_t threadCount = 0;
+	bool groupCull = false;
 };
 
 struct VantageStats
@@ -90,6 +91,14 @@ struct VantageStats
 	size_t neighborMismatches = 0;
 	size_t worldTraces = 0;
 	size_t blockerTraces = 0;
+	size_t groupPairs = 0;
+	size_t groupOpen = 0;
+	size_t groupBlocked = 0;
+	size_t groupMixed = 0;
+	size_t cornerTraces = 0;
+	size_t verifyChecks = 0;
+	size_t verifyFalseVisible = 0;
+	size_t verifyFalseBlocked = 0;
 	double candidateSeconds = 0.0;
 	double leafSeconds = 0.0;
 	double pairSeconds = 0.0;

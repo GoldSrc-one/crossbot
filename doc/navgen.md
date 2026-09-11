@@ -34,6 +34,9 @@ Command-line tool with extensive debug flags:
   `--vantage-spacing`, `--vantage-cone` and `--vantage-neighbors`; see `vantage_sampler.cpp` below
 - `--vantage-verify-neighbors` - cross-check every nearest-neighbour query the reduction makes against a
   brute-force scan and report mismatches
+- `--vantage-group-cull` - resolve visibility per vis-leaf group pair from convex-hull corner traces and
+  exact-trace only mixed groups (experiment, single-threaded). Reports group open/blocked/mixed split,
+  corner traces spent, and false-visible/false-blocked rates over verification samples
 - `--no-vantage` - skip the visibility field. The `.nav` is still valid and still v21, it just carries no
   vantage section, and bots on it lose the idle look and the cone weighting. This is the fast-iteration
   switch: the field is the single most expensive thing navgen does (see `vantage_sampler.cpp`)

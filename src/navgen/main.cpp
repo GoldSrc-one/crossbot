@@ -182,6 +182,8 @@ void PrintUsage(const char *argv0)
 		"  --vantage-neighbors <n> vantages the reduction interpolates each candidate from (default %zu)\n"
 		"  --vantage-verify-neighbors cross-check every nearest-neighbour query against a brute-force\n"
 		"                    scan and report mismatches (debug: validates the reduction's grid index)\n"
+		"  --vantage-group-cull resolve visibility per vis-leaf group pair from convex-hull corner\n"
+		"                    traces, exact-tracing only mixed groups (experiment: single-threaded)\n"
 		"  --no-vantage      skip the visibility field entirely: the nav file gets no vantage section\n"
 		"                    and bots on it fall back to no idle look and uncone-weighted senses\n"
 		"  --dump-camp-svg <path> write camp spots as their own top-down SVG: one glyph per spot with\n"
@@ -1209,6 +1211,10 @@ int main(int argc, char **argv)
 		else if (arg == "--vantage-verify-neighbors")
 		{
 			vantageParams.verifyNeighbors = true;
+		}
+		else if (arg == "--vantage-group-cull")
+		{
+			vantageParams.groupCull = true;
 		}
 		else if (arg == "--camp-spacing")
 		{
@@ -2238,9 +2244,20 @@ int main(int argc, char **argv)
 					: 0.0,
 				vantageStats.deriveSeconds, vantageStats.reduceSeconds);
 
-			std::printf("%s: vantage pair loop on %zu threads: slowest bin %.1fs, fastest %.1fs\n",
-				bspPath.c_str(), vantageStats.threads, vantageStats.binWallMax,
-				vantageStats.binWallMin);
+		std::printf("%s: vantage pair loop on %zu threads: slowest bin %.1fs, fastest %.1fs\n",
+			bspPath.c_str(), vantageStats.threads, vantageStats.binWallMax,
+			vantageStats.binWallMin);
+
+		if (vantageParams.groupCull)
+		{
+			std::printf("%s: vantage group cull: %zu group pairs (%zu open, %zu blocked, "
+				"%zu mixed), %zu corner traces, %zu/%zu verify mismatches "
+				"(false-visible/false-blocked over %zu checks)\n",
+				bspPath.c_str(), vantageStats.groupPairs, vantageStats.groupOpen,
+				vantageStats.groupBlocked, vantageStats.groupMixed, vantageStats.cornerTraces,
+				vantageStats.verifyFalseVisible, vantageStats.verifyFalseBlocked,
+				vantageStats.verifyChecks);
+		}
 
 			if (!noCamp)
 			{

@@ -240,6 +240,46 @@ double InterpolationError(const std::vector<std::vector<double>> &shape,
 	return err;
 }
 
+std::vector<size_t> HullCornersXY(const std::vector<Vec3> &pts)
+{
+	size_t n = pts.size();
+	std::vector<size_t> idx(n);
+	for (size_t i = 0; i < n; ++i)
+		idx[i] = i;
+	std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b)
+	{
+		if (pts[a].x != pts[b].x)
+			return pts[a].x < pts[b].x;
+		return pts[a].y < pts[b].y;
+	});
+	std::vector<size_t> hull;
+	hull.reserve(n);
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		size_t base = hull.size();
+		for (size_t k = 0; k < n; ++k)
+		{
+			size_t i = (pass == 0) ? idx[k] : idx[n - 1 - k];
+			while (hull.size() >= base + 2)
+			{
+				size_t b = hull[hull.size() - 2];
+				size_t a = hull[hull.size() - 1];
+				double cross = (pts[a].x - pts[b].x) * (pts[i].y - pts[b].y) -
+					(pts[a].y - pts[b].y) * (pts[i].x - pts[b].x);
+				if (cross > 0.0)
+					break;
+				hull.pop_back();
+			}
+			hull.push_back(i);
+		}
+		if (!hull.empty())
+			hull.pop_back();
+	}
+	if (hull.empty() && n > 0)
+		hull.push_back(idx[0]);
+	return hull;
+}
+
 }
 
 std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
@@ -298,6 +338,20 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	for (std::atomic<uint32_t> &slot : distTally)
 		slot.store(0, std::memory_order_relaxed);
 
+	auto recordVisible = [&](size_t i, size_t j)
+	{
+		Vec3 d = vantages[j].pos - vantages[i].pos;
+		double yaw = 0.0, pitch = 0.0;
+		AnglesFromDir(d, yaw, pitch);
+		uint32_t len = static_cast<uint32_t>(d.Length());
+		size_t forward = i * binCount + bins.BinFor(yaw, pitch);
+		size_t backward = j * binCount + bins.BinFor(yaw + 180.0, -pitch);
+		tally[forward].fetch_add(1, std::memory_order_relaxed);
+		tally[backward].fetch_add(1, std::memory_order_relaxed);
+		distTally[forward].fetch_add(len, std::memory_order_relaxed);
+		distTally[backward].fetch_add(len, std::memory_order_relaxed);
+	};
+
 	std::vector<size_t> order(count);
 	for (size_t i = 0; i < count; ++i)
 		order[i] = i;
@@ -312,10 +366,10 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 
 	std::vector<size_t> slots(count);
 	std::vector<double> slotCost(count, 0.0);
+	std::vector<int> leafIds;
+	std::vector<size_t> leafBegin;
+	std::vector<size_t> leafEnd;
 	{
-		std::vector<int> leafIds;
-		std::vector<size_t> leafBegin;
-		std::vector<size_t> leafEnd;
 		for (size_t a = 0; a < count; ++a)
 		{
 			slots[a] = a;
@@ -358,10 +412,144 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	std::vector<std::vector<size_t>> workBins =
 		BuildWorkBins(slotCost, slots, kVantageTileSlots, threads);
 
+	std::chrono::steady_clock::time_point pairStart = std::chrono::steady_clock::now();
+
+	if (params.groupCull)
+	{
+	std::chrono::steady_clock::time_point groupStart = std::chrono::steady_clock::now();
+	stats.threads = 1;
+	VisRowReader groupReader(vis);
+	TraceCounters groupCounters;
+	HullOriginChain groupChain;
+	std::vector<Vec3> groupPts;
+	std::vector<size_t> hullL;
+	std::vector<size_t> hullM;
+	for (size_t l = 0; l < leafIds.size(); ++l)
+	{
+		size_t beginL = leafBegin[l];
+		size_t endL = leafEnd[l];
+		const uint8_t *rowL = groupReader.VisRow(leafIds[l]);
+		if (vis.RowVisible(rowL, leafIds[l]))
+		{
+			for (size_t a = beginL; a < endL; ++a)
+			{
+				size_t i = order[a];
+				for (size_t b = a + 1; b < endL; ++b)
+				{
+					size_t j = order[b];
+					++stats.pvsPairs;
+					if (Occluded(hull, worldHeadnode, blockers, vantages[i].pos,
+						vantages[j].pos, groupCounters, groupChain))
+						continue;
+					++stats.visiblePairs;
+					recordVisible(i, j);
+				}
+			}
+		}
+		for (size_t m = l + 1; m < leafIds.size(); ++m)
+		{
+			++stats.groupPairs;
+			if (rowL && !vis.RowVisible(rowL, leafIds[m]))
+				continue;
+			size_t beginM = leafBegin[m];
+			size_t endM = leafEnd[m];
+			size_t nL = endL - beginL;
+			size_t nM = endM - beginM;
+			size_t pairs = nL * nM;
+			stats.pvsPairs += pairs;
+			groupPts.clear();
+			for (size_t a = beginL; a < endL; ++a)
+				groupPts.push_back(vantages[order[a]].pos);
+			hullL = HullCornersXY(groupPts);
+			groupPts.clear();
+			for (size_t b = beginM; b < endM; ++b)
+				groupPts.push_back(vantages[order[b]].pos);
+			hullM = HullCornersXY(groupPts);
+			bool tiny = hullL.size() * hullM.size() * 2 >= pairs;
+			size_t openCorners = 0;
+			size_t cornerTests = 0;
+			if (!tiny)
+			{
+				for (size_t cl : hullL)
+				{
+					for (size_t cm : hullM)
+					{
+						size_t i = order[beginL + cl];
+						size_t j = order[beginM + cm];
+						++cornerTests;
+						if (!Occluded(hull, worldHeadnode, blockers, vantages[i].pos,
+							vantages[j].pos, groupCounters, groupChain))
+							++openCorners;
+					}
+				}
+				stats.cornerTraces += cornerTests;
+			}
+			bool expectOpen = false;
+			if (!tiny && openCorners == cornerTests)
+			{
+				++stats.groupOpen;
+				expectOpen = true;
+				for (size_t a = beginL; a < endL; ++a)
+				{
+					for (size_t b = beginM; b < endM; ++b)
+					{
+						++stats.visiblePairs;
+						recordVisible(order[a], order[b]);
+					}
+				}
+			}
+			else if (!tiny && openCorners == 0)
+			{
+				++stats.groupBlocked;
+			}
+			else
+			{
+				++stats.groupMixed;
+				for (size_t a = beginL; a < endL; ++a)
+				{
+					size_t i = order[a];
+					for (size_t b = beginM; b < endM; ++b)
+					{
+						size_t j = order[b];
+						if (Occluded(hull, worldHeadnode, blockers, vantages[i].pos,
+							vantages[j].pos, groupCounters, groupChain))
+							continue;
+						++stats.visiblePairs;
+						recordVisible(i, j);
+					}
+				}
+				continue;
+			}
+			uint32_t rng = static_cast<uint32_t>(l * 2654435761ull + m * 40503ull + 1ull);
+			size_t checks = std::min<size_t>(32, pairs);
+			for (size_t k = 0; k < checks; ++k)
+			{
+				rng = rng * 1664525u + 1013904223u;
+				size_t a = beginL + static_cast<size_t>(rng >> 8) % nL;
+				rng = rng * 1664525u + 1013904223u;
+				size_t b = beginM + static_cast<size_t>(rng >> 8) % nM;
+				++stats.verifyChecks;
+				bool blocked = Occluded(hull, worldHeadnode, blockers,
+					vantages[order[a]].pos, vantages[order[b]].pos, groupCounters, groupChain);
+				if (expectOpen && blocked)
+					++stats.verifyFalseVisible;
+				if (!expectOpen && !blocked)
+					++stats.verifyFalseBlocked;
+			}
+		}
+	}
+	stats.worldTraces = groupCounters.worldTraces;
+	stats.blockerTraces = groupCounters.blockerTraces;
+	double groupWall = std::chrono::duration<double>(
+		std::chrono::steady_clock::now() - groupStart).count();
+	stats.traceSeconds = groupWall;
+	stats.binWallMin = groupWall;
+	stats.binWallMax = groupWall;
+	}
+	else
+	{
 	std::vector<VantageStats> binStats(threads);
 	std::vector<double> binWall(threads, 0.0);
-
-	std::chrono::steady_clock::time_point pairStart = std::chrono::steady_clock::now();
 
 	RunBins(threads, [&](size_t binIndex)
 	{
@@ -394,17 +582,7 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 					continue;
 
 				++local.visiblePairs;
-
-				Vec3 d = vantages[j].pos - vantages[i].pos;
-				double yaw = 0.0, pitch = 0.0;
-				AnglesFromDir(d, yaw, pitch);
-				uint32_t len = static_cast<uint32_t>(d.Length());
-				size_t forward = i * binCount + bins.BinFor(yaw, pitch);
-				size_t backward = j * binCount + bins.BinFor(yaw + 180.0, -pitch);
-				tally[forward].fetch_add(1, std::memory_order_relaxed);
-				tally[backward].fetch_add(1, std::memory_order_relaxed);
-				distTally[forward].fetch_add(len, std::memory_order_relaxed);
-				distTally[backward].fetch_add(len, std::memory_order_relaxed);
+				recordVisible(i, j);
 			}
 		}
 
@@ -426,6 +604,7 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 
 	stats.binWallMin = binWall.empty() ? 0.0 : *std::min_element(binWall.begin(), binWall.end());
 	stats.binWallMax = binWall.empty() ? 0.0 : *std::max_element(binWall.begin(), binWall.end());
+	}
 
 	stats.pairSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now() - pairStart).count();
