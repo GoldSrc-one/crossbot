@@ -1,5 +1,6 @@
 #include <extdll.h>
 #include <meta_api.h>
+#include <commonmacros.h>
 
 #include "commands.h"
 #include "../bot/bot.h"
@@ -352,7 +353,7 @@ namespace
 		out[0] = '\0';
 		size_t used = 0;
 
-		for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i)
+		for (size_t i = 0; i < ARRAYSIZE(kNames); ++i)
 		{
 			if ((quirks & kNames[i].bit) == 0)
 				continue;

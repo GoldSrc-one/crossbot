@@ -80,3 +80,29 @@ function Invoke-CbPhase {
     if (-not (Test-Path $log)) { return @() }
     return Get-Content $log
 }
+
+function Get-CbSpawns {
+    param([string]$Log)
+    $spawns = @()
+    foreach ($m in [regex]::Matches($Log, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")) {
+        $spawns += [pscustomobject]@{
+            Classname = $m.Groups[1].Value
+            X = [double]$m.Groups[2].Value
+            Y = [double]$m.Groups[3].Value
+            Z = [double]$m.Groups[4].Value
+        }
+    }
+    return @($spawns | Sort-Object X,Y,Z -Unique)
+}
+
+function Get-CbFarthestPair {
+    param($Spawns)
+    $bestDist = -1; $bestA = $null; $bestB = $null
+    for ($i = 0; $i -lt $Spawns.Count; $i++) {
+        for ($j = $i + 1; $j -lt $Spawns.Count; $j++) {
+            $d = Get-CbDistance3D $Spawns[$i].X $Spawns[$i].Y $Spawns[$i].Z $Spawns[$j].X $Spawns[$j].Y $Spawns[$j].Z
+            if ($d -gt $bestDist) { $bestDist = $d; $bestA = $Spawns[$i]; $bestB = $Spawns[$j] }
+        }
+    }
+    return @{ A = $bestA; B = $bestB; Dist = $bestDist }
+}

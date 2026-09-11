@@ -148,39 +148,25 @@ function Update-FireState {
         # Every counter the plugin reports is per life -- respawn zeroes the
         # whole fire state -- so a drop is a death, and the running tally has to
         # be banked at that point rather than differenced across the gap.
-        if ($shots -lt $bot.Shots -or $switches -lt $bot.Switches -or $reloads -lt $bot.Reloads) {
-            $bot.Total += $bot.Shots - $bot.Base
-            $bot.TotalSwitches += $bot.Switches - $bot.BaseSwitches
-            $bot.TotalReloads += $bot.Reloads - $bot.BaseReloads
-            $bot.TotalLead += $bot.Lead - $bot.BaseLead
-            $bot.TotalCharge += $bot.Charge - $bot.BaseCharge
-            $bot.TotalArc += $bot.Arc - $bot.BaseArc
-            $bot.TotalThrow += $bot.Throw - $bot.BaseThrow
-            $bot.TotalSticky += $bot.Sticky - $bot.BaseSticky
-            $bot.TotalGuides += $bot.Guides - $bot.BaseGuides
-            $bot.TotalEmptySw += $bot.EmptySw - $bot.BaseEmptySw
-            $bot.TotalIdleSw += $bot.IdleSw - $bot.BaseIdleSw
-            $bot.TotalIdleRel += $bot.IdleRel - $bot.BaseIdleRel
-            $bot.Base = 0; $bot.BaseSwitches = 0; $bot.BaseReloads = 0; $bot.BaseLead = 0
-            $bot.BaseCharge = 0; $bot.BaseArc = 0; $bot.BaseThrow = 0; $bot.BaseGuides = 0
-            $bot.BaseSticky = 0
-            $bot.BaseEmptySw = 0; $bot.BaseIdleSw = 0; $bot.BaseIdleRel = 0
-            $bot.Deaths++
+        # Each row is total key, current key, base key, fresh reading: on death
+        # bank (current - base) and re-zero the base, else add (fresh - current).
+        $died = ($shots -lt $bot.Shots -or $switches -lt $bot.Switches -or $reloads -lt $bot.Reloads)
+        foreach ($t in @( @('Total', 'Shots', 'Base', $shots),
+                @('TotalSwitches', 'Switches', 'BaseSwitches', $switches),
+                @('TotalReloads', 'Reloads', 'BaseReloads', $reloads),
+                @('TotalLead', 'Lead', 'BaseLead', $leadShots),
+                @('TotalCharge', 'Charge', 'BaseCharge', $chargeShots),
+                @('TotalArc', 'Arc', 'BaseArc', $arcShots),
+                @('TotalThrow', 'Throw', 'BaseThrow', $throwShots),
+                @('TotalSticky', 'Sticky', 'BaseSticky', $stickyShots),
+                @('TotalGuides', 'Guides', 'BaseGuides', $guides),
+                @('TotalEmptySw', 'EmptySw', 'BaseEmptySw', $emptySwitches),
+                @('TotalIdleSw', 'IdleSw', 'BaseIdleSw', $idleSwitches),
+                @('TotalIdleRel', 'IdleRel', 'BaseIdleRel', $idleReloads) ) ) {
+            if ($died) { $bot[$t[0]] += $bot[$t[1]] - $bot[$t[2]]; $bot[$t[2]] = 0 }
+            else { $bot[$t[0]] += $t[3] - $bot[$t[1]] }
         }
-        else {
-            $bot.Total += $shots - $bot.Shots
-            $bot.TotalSwitches += $switches - $bot.Switches
-            $bot.TotalReloads += $reloads - $bot.Reloads
-            $bot.TotalLead += $leadShots - $bot.Lead
-            $bot.TotalCharge += $chargeShots - $bot.Charge
-            $bot.TotalArc += $arcShots - $bot.Arc
-            $bot.TotalThrow += $throwShots - $bot.Throw
-            $bot.TotalSticky += $stickyShots - $bot.Sticky
-            $bot.TotalGuides += $guides - $bot.Guides
-            $bot.TotalEmptySw += $emptySwitches - $bot.EmptySw
-            $bot.TotalIdleSw += $idleSwitches - $bot.IdleSw
-            $bot.TotalIdleRel += $idleReloads - $bot.IdleRel
-        }
+        if ($died) { $bot.Deaths++ }
         $bot.EmptySw = $emptySwitches
         $bot.IdleSw = $idleSwitches
         $bot.IdleRel = $idleReloads

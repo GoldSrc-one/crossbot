@@ -34,10 +34,10 @@ Start-Sleep -Seconds 10
 try {
     # --- 2. Parse the spawn point and the info_target out of qconsole.log. ---
     $log = Get-Content (Join-Path $hldsDir "qconsole.log") -Raw
-    $spawnMatches = [regex]::Matches($log, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
+    $spawns = Get-CbSpawns $log
     $targetMatches = [regex]::Matches($log, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
 
-    if ($spawnMatches.Count -lt 1) {
+    if ($spawns.Count -lt 1) {
         Write-Host "FAIL: found no spawn point in qconsole.log"
         exit 1
     }
@@ -46,10 +46,8 @@ try {
         exit 1
     }
 
-    $spawn = $spawnMatches[0]
-    $spawnX = [double]$spawn.Groups[2].Value
-    $spawnY = [double]$spawn.Groups[3].Value
-    $spawnZ = [double]$spawn.Groups[4].Value
+    $spawn = $spawns[0]
+    $spawnX, $spawnY, $spawnZ = $spawn.X, $spawn.Y, $spawn.Z
 
     $target = $targetMatches[0]
     $targetX = [double]$target.Groups[2].Value

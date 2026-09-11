@@ -45,19 +45,7 @@ Start-Sleep -Seconds 10
 try {
     # --- 2. Parse spawn points out of qconsole.log. ---
     $log = Get-Content (Join-Path $hldsDir "qconsole.log") -Raw
-    $spawnMatches = [regex]::Matches($log, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
-
-    $spawns = @()
-    foreach ($m in $spawnMatches) {
-        $spawns += [pscustomobject]@{
-            Classname = $m.Groups[1].Value
-            X = [double]$m.Groups[2].Value
-            Y = [double]$m.Groups[3].Value
-            Z = [double]$m.Groups[4].Value
-        }
-    }
-    # De-dupe (info_player_start and a deathmatch spawn can coincide).
-    $spawns = $spawns | Sort-Object X,Y,Z -Unique
+    $spawns = Get-CbSpawns $log
 
     if ($spawns.Count -lt 2) {
         Write-Host "FAIL: found only $($spawns.Count) spawn point(s) in qconsole.log -- can't pick a pair"
@@ -66,19 +54,8 @@ try {
     Write-Host "found $($spawns.Count) spawn points"
 
     # --- 3. Pick the two most (straight-line) distant spawns. ---
-    $bestDist = -1
-    $bestA = $null
-    $bestB = $null
-    for ($i = 0; $i -lt $spawns.Count; $i++) {
-        for ($j = $i + 1; $j -lt $spawns.Count; $j++) {
-            $d = Get-CbDistance3D $spawns[$i].X $spawns[$i].Y $spawns[$i].Z $spawns[$j].X $spawns[$j].Y $spawns[$j].Z
-            if ($d -gt $bestDist) {
-                $bestDist = $d
-                $bestA = $spawns[$i]
-                $bestB = $spawns[$j]
-            }
-        }
-    }
+    $pair = Get-CbFarthestPair $spawns
+    $bestA, $bestB, $bestDist = $pair.A, $pair.B, $pair.Dist
     Write-Host ("most distant pair: A=({0},{1},{2}) B=({3},{4},{5}) dist={6:F0}" -f `
         $bestA.X, $bestA.Y, $bestA.Z, $bestB.X, $bestB.Y, $bestB.Z, $bestDist)
 

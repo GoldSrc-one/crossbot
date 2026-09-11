@@ -59,7 +59,9 @@ Bots now belong to a game, so every scripted `crossbot_add` names one: `crossbot
 `-NoNewWindow` and its stdout/stderr redirected. The binary is console-subsystem, so it is created with
 no console at all rather than being shown and hidden after the fact: nothing flashes, nothing steals
 focus, and there is no window to click into and freeze the server in QuickEdit select mode. Readiness is
-the engine printing `player server started` into that log, not a window handle appearing.
+the server answering RCON (`echo crossbot_ready` via `rcon.ps1`), not the engine printing
+`player server started` into that log: redirected stdout is block-buffered, so that line can sit
+unflushed long after the map is live while RCON answers the moment it is.
 
 **The plugin's output is now per-instance.** Every `SERVER_PRINT` — `Repath`, `Replan`, the air-move
 launch and landing lines — goes to `<OutputDir>/logs/<map>_server.log` for that run alone. A run that
@@ -729,12 +731,10 @@ The flag rides the same run. What to check in the log:
 `weapon_snark` for the whole server, so bots almost never have one in hand at the moment they surprise
 someone, and `ambush=` in `crossbot_fire_status` stays 0 through a normal run. That is scarcity, not a
 failure. Force it instead:
-
 ```powershell
-.\scriptscon.ps1 -Port 29015 -Command "crossbot_equip weapon_handgrenade"
-.\scriptscon.ps1 -Port 29015 -Command "crossbot_equip weapon_snark"
+.\scripts\rcon.ps1 -Port 29015 -Command "crossbot_equip weapon_handgrenade"
+.\scripts\rcon.ps1 -Port 29015 -Command "crossbot_equip weapon_snark"
 ```
-
 Re-equip every few polls -- five grenades go quickly -- and watch `ambush=` climb. Unlike the weapon
 phases of `test_fire.ps1`, equipping *is* the right lever here and the pin would be wrong: the pin
 makes every other weapon unusable, which would destroy the very thing under test, namely that an
