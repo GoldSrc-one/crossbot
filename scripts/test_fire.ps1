@@ -80,12 +80,7 @@ if ($Port -eq 0) { $Port = 29115 + (Get-Random -Maximum 85) }
 
 $mapName = [System.IO.Path]::GetFileNameWithoutExtension($Map)
 
-function Invoke-Rcon {
-    param([string]$Cmd)
-    $out = try { & "$scriptDir\rcon.ps1" -Port $Port -Command $Cmd } catch { "" }
-    if ($null -eq $out) { return "" }
-    return ($out | Out-String)
-}
+. "$scriptDir\common.ps1"
 
 # One poll of crossbot_fire_status, folded into $state. Shots are cumulative per
 # life and reset to zero on respawn, so a drop is a death and the tally has to be
@@ -93,7 +88,7 @@ function Invoke-Rcon {
 function Update-FireState {
     param([hashtable]$state)
 
-    $text = Invoke-Rcon "crossbot_fire_status"
+    $text = Invoke-CbRcon $Port "crossbot_fire_status"
     foreach ($line in ($text -split "`r?`n")) {
         if ($line -notmatch 'held=') { continue }
         if ($line -notmatch '^CrossBot: (\S+) held=(\S+) zoom=(\d) mode=(\S+) why=(\S+)') { continue }
@@ -104,30 +99,16 @@ function Update-FireState {
 
         if ($Matches[3] -eq '1') { $state.Zoomed++ }
 
-        $shots = 0
-        if ($line -match ' shots=(\d+)') { $shots = [int]$Matches[1] }
-        $switches = 0
-        if ($line -match 'switches=(\d+)') { $switches = [int]$Matches[1] }
-        $reloads = 0
-        if ($line -match 'reloads=(\d+)') { $reloads = [int]$Matches[1] }
-        $emptySwitches = 0
-        if ($line -match 'emptyswitch=(\d+)') { $emptySwitches = [int]$Matches[1] }
-        $idleSwitches = 0
-        if ($line -match 'idleswitch=(\d+)') { $idleSwitches = [int]$Matches[1] }
-        $idleReloads = 0
-        if ($line -match 'idlereload=(\d+)') { $idleReloads = [int]$Matches[1] }
-        $leadShots = 0
-        if ($line -match 'leadshots=(\d+)') { $leadShots = [int]$Matches[1] }
-        $chargeShots = 0
-        if ($line -match 'chargeshots=(\d+)') { $chargeShots = [int]$Matches[1] }
-        $arcShots = 0
-        if ($line -match 'arcshots=(\d+)') { $arcShots = [int]$Matches[1] }
-        $throwShots = 0
-        if ($line -match 'throwshots=(\d+)') { $throwShots = [int]$Matches[1] }
-        $stickyShots = 0
-        if ($line -match 'stickyshots=(\d+)') { $stickyShots = [int]$Matches[1] }
-        $guides = 0
-        if ($line -match 'guides=(\d+)') { $guides = [int]$Matches[1] }
+        $n = @{}
+        foreach ($f in @('shots', 'switches', 'reloads', 'emptyswitch', 'idleswitch', 'idlereload',
+                'leadshots', 'chargeshots', 'arcshots', 'throwshots', 'stickyshots', 'guides')) {
+            $n[$f] = 0
+            if ($line -match " $f=(\d+)") { $n[$f] = [int]$Matches[1] }
+        }
+        $shots, $switches, $reloads, $emptySwitches, $idleSwitches, $idleReloads,
+            $leadShots, $chargeShots, $arcShots, $throwShots, $stickyShots, $guides =
+            $n['shots'], $n['switches'], $n['reloads'], $n['emptyswitch'], $n['idleswitch'], $n['idlereload'],
+            $n['leadshots'], $n['chargeshots'], $n['arcshots'], $n['throwshots'], $n['stickyshots'], $n['guides']
         if ($line -match 'capped=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.Capped++ } }
         if ($line -match 'uphill=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.Uphill++ } }
         if ($line -match 'selfveto=(\d+)') { if ([int]$Matches[1] -gt 0) { $state.SelfVeto++ } }
@@ -254,82 +235,24 @@ function New-FireState {
     }
 }
 
-function Get-TotalArc {
-    param([hashtable]$state)
+function Get-TotalField {
+    param([hashtable]$state, [string]$total, [string]$current, [string]$base)
     $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalArc + $bot.Arc - $bot.BaseArc }
+    foreach ($bot in $state.Bots.Values) { $sum += $bot[$total] + $bot[$current] - $bot[$base] }
     return $sum
 }
 
-function Get-TotalSticky {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalSticky + $bot.Sticky - $bot.BaseSticky }
-    return $sum
-}
-
-function Get-TotalThrow {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalThrow + $bot.Throw - $bot.BaseThrow }
-    return $sum
-}
-
-function Get-TotalGuides {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalGuides + $bot.Guides - $bot.BaseGuides }
-    return $sum
-}
-
-function Get-TotalLead {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalLead + $bot.Lead - $bot.BaseLead }
-    return $sum
-}
-
-function Get-TotalCharge {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalCharge + $bot.Charge - $bot.BaseCharge }
-    return $sum
-}
-
-function Get-TotalShots {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.Total + $bot.Shots - $bot.Base }
-    return $sum
-}
-
-function Get-TotalBurned {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.Burned }
-    return $sum
-}
-
-function Get-TotalEmptySwitch {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalEmptySw + $bot.EmptySw - $bot.BaseEmptySw }
-    return $sum
-}
-
-function Get-TotalIdleSwitch {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalIdleSw + $bot.IdleSw - $bot.BaseIdleSw }
-    return $sum
-}
-
-function Get-TotalIdleReload {
-    param([hashtable]$state)
-    $sum = 0
-    foreach ($bot in $state.Bots.Values) { $sum += $bot.TotalIdleRel + $bot.IdleRel - $bot.BaseIdleRel }
-    return $sum
-}
+function Get-TotalArc { param([hashtable]$state) Get-TotalField $state 'TotalArc' 'Arc' 'BaseArc' }
+function Get-TotalSticky { param([hashtable]$state) Get-TotalField $state 'TotalSticky' 'Sticky' 'BaseSticky' }
+function Get-TotalThrow { param([hashtable]$state) Get-TotalField $state 'TotalThrow' 'Throw' 'BaseThrow' }
+function Get-TotalGuides { param([hashtable]$state) Get-TotalField $state 'TotalGuides' 'Guides' 'BaseGuides' }
+function Get-TotalLead { param([hashtable]$state) Get-TotalField $state 'TotalLead' 'Lead' 'BaseLead' }
+function Get-TotalCharge { param([hashtable]$state) Get-TotalField $state 'TotalCharge' 'Charge' 'BaseCharge' }
+function Get-TotalShots { param([hashtable]$state) Get-TotalField $state 'Total' 'Shots' 'Base' }
+function Get-TotalBurned { param([hashtable]$state) Get-TotalField $state 'Burned' 'Burned' 'Burned' }
+function Get-TotalEmptySwitch { param([hashtable]$state) Get-TotalField $state 'TotalEmptySw' 'EmptySw' 'BaseEmptySw' }
+function Get-TotalIdleSwitch { param([hashtable]$state) Get-TotalField $state 'TotalIdleSw' 'IdleSw' 'BaseIdleSw' }
+function Get-TotalIdleReload { param([hashtable]$state) Get-TotalField $state 'TotalIdleRel' 'IdleRel' 'BaseIdleRel' }
 
 # The carry table is the one thing the plugin reports that does not reset on
 # respawn, so it needs no banking -- the widest spread any bot reaches is the
@@ -338,10 +261,14 @@ function Get-TotalIdleReload {
 # tally tracks acquisition rather than running as one uniform clock is that the
 # times differ from each other. Carry is printed at one decimal, so distinctness
 # is counted on that same resolution.
+function Get-CarryLines {
+    return ((Invoke-CbRcon $Port "crossbot_weapon_carry") -split "`r?`n")
+}
+
 function Get-CarrySpread {
     $best = 0
     $detail = @()
-    foreach ($line in ((Invoke-Rcon "crossbot_weapon_carry") -split "`r?`n")) {
+    foreach ($line in (Get-CarryLines)) {
         if ($line -notmatch '^CrossBot: (\S+) held=(\S+)') { continue }
         $name = $Matches[1]
         $seen = @{}
@@ -365,7 +292,7 @@ function Get-CarrySpread {
 # and least carried among the weapons sharing that score.
 function Get-CarryTable {
     $table = @{}
-    foreach ($line in ((Invoke-Rcon "crossbot_weapon_carry") -split "`r?`n")) {
+    foreach ($line in (Get-CarryLines)) {
         if ($line -notmatch '^CrossBot: (\S+) held=(\S+)') { continue }
         foreach ($m in ([regex]'(weapon_\S+?)=([\d.]+)/([\d.]+)').Matches($line)) {
             $table[$m.Groups[1].Value] = @{
@@ -422,7 +349,7 @@ function Wait-SelectionRule {
 
 function Get-HeldWeapons {
     $held = @()
-    foreach ($line in ((Invoke-Rcon "crossbot_fire_status") -split "`r?`n")) {
+    foreach ($line in ((Invoke-CbRcon $Port "crossbot_fire_status") -split "`r?`n")) {
         if ($line -match '^CrossBot: (\S+) held=(\S+)') { $held += $Matches[2] }
     }
     return $held
@@ -431,12 +358,8 @@ function Get-HeldWeapons {
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
-$navDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
-if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir | Out-Null }
-if (-not (Test-Path (Join-Path $navDir "$mapName.nav"))) {
-    & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $hldsMap -o (Join-Path $navDir "$mapName.nav") 2>&1 |
-        Select-Object -Last 3 | ForEach-Object { Write-Host "navgen: $_" }
-}
+Ensure-CbNav -HldsMap $hldsMap -NavPath (Join-Path $HLDSDir "crossplay\addons\crossbot\nav\$mapName.nav") `
+    -NavGenExe (Join-Path $repoRoot "build\tools\navgen\navgen.exe")
 
 $logFile = Join-Path $repoRoot "nav_debug\logs\${mapName}_fire.log"
 
@@ -444,25 +367,24 @@ Write-Host "Starting HLDS on port $Port (join with: connect 127.0.0.1:$Port)"
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands @() `
     -ConfigName "_crossbot_fire_$mapName.cfg" -HLDSDir $HLDSDir -LogFile $logFile
 
-if ($startResult -match "^EXITED") { Write-Host "FAIL: $startResult"; exit 1 }
-$serverPid = [int]($startResult -replace "PID=", "")
+$serverPid = Get-CbServerPid $startResult
 Write-Host "Server PID=$serverPid"
 
 $failures = @()
 
 try {
-    Invoke-Rcon "crossbot_gather 1" | Out-Null
-    Invoke-Rcon "crossbot_sense 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_gather 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_sense 1" | Out-Null
 
     # Before the bots exist, not after. Several of them spawn inside each
     # other's line of sight, and the handful of milliseconds an rcon round trip
     # takes is long enough for the default crossbot_fire 1 to produce a few
     # shots that the control phase would then have to explain.
-    Invoke-Rcon "crossbot_fire 0" | Out-Null
-    if ($Quantum -ge 0) { Invoke-Rcon "crossbot_aim_quantum $Quantum" | Out-Null }
-    if ($Impulse -ge 0) { Invoke-Rcon "crossbot_aim_impulse $Impulse" | Out-Null }
+    Invoke-CbRcon $Port "crossbot_fire 0" | Out-Null
+    if ($Quantum -ge 0) { Invoke-CbRcon $Port "crossbot_aim_quantum $Quantum" | Out-Null }
+    if ($Impulse -ge 0) { Invoke-CbRcon $Port "crossbot_aim_impulse $Impulse" | Out-Null }
 
-    Invoke-Rcon "crossbot_add valve Fire1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_add valve Fire1" | Out-Null
 
     # One bot, so there is never a target and every decision this phase sees is
     # the out-of-combat one. It runs before the others join because that is the
@@ -488,9 +410,9 @@ try {
     Write-Host "`n===== SELECT: one bot, no targets, ${SelectSeconds}s ====="
     Write-Host "Score picks the band; carry breaks the tie inside it."
 
-    Invoke-Rcon "crossbot_fire 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_fire 1" | Out-Null
     foreach ($give in @('weapon_shotgun', 'weapon_crossbow', 'weapon_9mmAR', 'weapon_hornetgun')) {
-        Invoke-Rcon "crossbot_equip $give Fire1" | Out-Null
+        Invoke-CbRcon $Port "crossbot_equip $give Fire1" | Out-Null
     }
 
     $select = New-FireState
@@ -504,7 +426,7 @@ try {
     $scoreHeld = @(Get-HeldWeapons)[0]
     $scoreWhy = Wait-SelectionRule
 
-    Invoke-Rcon "crossbot_equip weapon_gauss Fire1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_equip weapon_gauss Fire1" | Out-Null
 
     $deadline = (Get-Date).AddSeconds($SelectSeconds)
     while ((Get-Date) -lt $deadline) {
@@ -542,8 +464,8 @@ try {
     }
     if ($selectShots -ne 0) { $failures += "SELECT: $selectShots shot(s) fired with no target on the map" }
 
-    Invoke-Rcon "crossbot_fire 0" | Out-Null
-    for ($i = 2; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add valve Fire$i" | Out-Null }
+    Invoke-CbRcon $Port "crossbot_fire 0" | Out-Null
+    for ($i = 2; $i -le $Bots; $i++) { Invoke-CbRcon $Port "crossbot_add valve Fire$i" | Out-Null }
 
     Write-Host "`n===== CONTROL: crossbot_fire 0, ${ControlSeconds}s ====="
     Write-Host "Bots roam and pick up guns. Nothing may fire."
@@ -565,7 +487,7 @@ try {
     if ($control.Firing -ne 0) { $failures += "CONTROL: $($control.Firing) firing decision(s) with crossbot_fire 0" }
 
     Write-Host "`n===== DUEL: crossbot_fire 1, up to ${DuelSeconds}s ====="
-    Invoke-Rcon "crossbot_fire 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_fire 1" | Out-Null
 
     $duel = New-FireState
     Update-FireState $duel
@@ -579,7 +501,7 @@ try {
         # is overwritten by their own SIGHT entry inside the same BotSense::Update
         # and fresh= would essentially never report it. The pushed= counters are
         # cumulative, so a single poll cannot miss a source that fired between polls.
-        foreach ($line in ((Invoke-Rcon "crossbot_sense_status") -split "`r?`n")) {
+        foreach ($line in ((Invoke-CbRcon $Port "crossbot_sense_status") -split "`r?`n")) {
             if ($line -notmatch 'pushed=sgt:(\d+),snd:(\d+),evt:(\d+),dmg:(\d+)') { continue }
             foreach ($p in @(@('SIGHT', 1), @('SOUND', 2), @('EVENT', 3), @('DAMAGE', 4))) {
                 if ([int]$Matches[$p[1]] -gt 0) { $senseSeen[$p[0]] = $true }
@@ -680,14 +602,14 @@ try {
     # only shuffles inside the current area, so the range it costs is far
     # smaller, but it is still movement the phase did not ask for. DUEL keeps it
     # on, since that phase wants the bots to find each other.
-    Invoke-Rcon "crossbot_combat 0" | Out-Null
+    Invoke-CbRcon $Port "crossbot_combat 0" | Out-Null
 
     foreach ($entry in $pins) {
         $pin = $entry.Weapon
         $mode = $entry.Mode
         Write-Host "`n===== WEAPON: $pin $mode, ${seconds}s ====="
 
-        Invoke-Rcon ("crossbot_fire_pin $pin $mode").Trim() | Out-Null
+        Invoke-CbRcon $Port ("crossbot_fire_pin $pin $mode").Trim() | Out-Null
 
         # Respawn every bot before the phase is measured. The pin reaches weapon
         # selection, and selection alone is not enough to isolate a phase: a bot
@@ -695,7 +617,7 @@ try {
         # by design, so a charge started in the previous phase survives the pin
         # and discharges into this one's counters. Dying drops the inventory,
         # the charge and every per-life counter at once.
-        Invoke-Rcon "crossbot_kill" | Out-Null
+        Invoke-CbRcon $Port "crossbot_kill" | Out-Null
         Start-Sleep -Seconds $PollSeconds
 
         $proj = New-FireState
@@ -705,8 +627,8 @@ try {
             # Re-issued every poll rather than once. Respawning drops the whole
             # inventory, and a second pickup of a weapon already held is what
             # refills the five bolts a crossbow carries.
-            Invoke-Rcon "crossbot_equip $pin" | Out-Null
-            if ($entry.Ammo) { Invoke-Rcon "crossbot_equip $($entry.Ammo)" | Out-Null }
+            Invoke-CbRcon $Port "crossbot_equip $pin" | Out-Null
+            if ($entry.Ammo) { Invoke-CbRcon $Port "crossbot_equip $($entry.Ammo)" | Out-Null }
 
             Start-Sleep -Seconds $PollSeconds
             Update-FireState $proj
@@ -856,7 +778,7 @@ try {
         }
     }
 
-    Invoke-Rcon "crossbot_fire_pin off" | Out-Null
+    Invoke-CbRcon $Port "crossbot_fire_pin off" | Out-Null
     $failures += $projFailures
 }
 finally {

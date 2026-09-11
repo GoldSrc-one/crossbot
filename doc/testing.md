@@ -114,6 +114,22 @@ Killing a child does not run its cleanup, so the runner tracks the ports it owns
 surviving `hlds.exe` at the end, matching on `+port` in the command line. It never mass-kills
 `hlds.exe`: a server you started by hand on the default 27015 is outside its range and is left alone.
 
+## scripts/common.ps1
+
+Shared helpers, dot-sourced by every driver: `Invoke-CbRcon` / `Invoke-CbRconQuiet` (the one rcon
+call shape, returning text or discarding it), `Get-CbDistance3D`, `Copy-CbMap` + `Ensure-CbNav`
+(map copy and conditional `-Force` navgen), `Get-CbServerPid` (`EXITED` check plus pid parse),
+`Assert-Cb` / `Measure-CbCount` / `Invoke-CbPhase` (the deploy/monster phase shape, with `-LogPrefix`
+and `-ConfigPrefix` telling the two suites apart). `test_nav_goal_all.ps1` keeps its own
+`Stop-ServerOnPort`: that kills by port range after a child is shot, which is a different job from
+`test_server_stop.ps1`'s kill-by-pid, and `profile_hlds.ps1` keeps its own launch (32 slots,
+`-NoConDebug` / `-NullStdout`).
+
+Kept, not cut: `nav_spawn_test.ps1` / `nav_target_test.ps1` stay as the only drivers that assert on
+the `reached goal` log line (see `doc/bot.md`), and the single-use flags (`-GatherDebug`,
+`-FunDebug`, `-NoGather`, `-SkipRoam`, `-Full`) stay — each gates one rcon line, and deleting the
+flag just moves the same line into a chat message.
+
 ## scripts/test_items.ps1
 
 Drives the gather goals, which `test_nav_goal.ps1` cannot: that script commands a goal and waits for

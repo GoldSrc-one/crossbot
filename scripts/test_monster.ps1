@@ -52,45 +52,12 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Forc
 $failures = New-Object System.Collections.ArrayList
 $results = New-Object System.Collections.ArrayList
 
-function Assert-That([bool]$ok, [string]$what) {
-    $tag = if ($ok) { "PASS" } else { "FAIL" }
-    Write-Host "  [$tag] $what"
-    if (-not $ok) { [void]$failures.Add($what) }
-}
-
-function Count-Of($lines, [string]$pattern) {
-    return @($lines | Select-String -Pattern $pattern -SimpleMatch:$false).Count
-}
+. "$scriptDir\common.ps1"
 
 function Invoke-Phase([string]$name, [string]$map, [int]$port, [string[]]$boot,
         [scriptblock]$body) {
-    $log = Join-Path $logDir "monster_$name.log"
-    if (Test-Path $log) { Remove-Item $log }
-
-    Write-Host ""
-    Write-Host "=== $name ($map) ==="
-
-    $start = & "$scriptDir\test_server_start.ps1" -Map $map -Port $port -LogFile $log `
-        -WaitSeconds 90 -ConfigName "_monster_$name.cfg" -Commands $boot -HLDSDir $HLDSDir `
-        -RequireVerbose
-    if ($start -notmatch 'PID=(\d+)') {
-        Assert-That $false "$name server started ($start)"
-        return @()
-    }
-    $srv = [int]$Matches[1]
-
-    try {
-        & $body $port
-    } finally {
-        & "$scriptDir\test_server_stop.ps1" -Id $srv | Out-Null
-    }
-
-    if (-not (Test-Path $log)) { return @() }
-    return Get-Content $log
-}
-
-function Rcon([int]$port, [string]$cmd) {
-    & "$scriptDir\rcon.ps1" -Command $cmd -Port $port | Out-Null
+    Invoke-CbPhase $name $map $port $boot $body -LogDir $logDir -HLDSDir $HLDSDir `
+        -LogPrefix "monster" -ConfigPrefix "_monster" -Failures $failures
 }
 
 # Adds the bots, arms them, and keeps a snark in front of each one.
@@ -111,18 +78,18 @@ function Rcon([int]$port, [string]$cmd) {
 # win, and a bot that spawned with a crowbar would confound the two.
 function Start-SnarkFight([int]$port, [int]$seconds) {
     for ($i = 1; $i -le $Bots; $i++) {
-        Rcon $port "crossbot_add valve Snark$i"
+        Invoke-CbRconQuiet $port "crossbot_add valve Snark$i"
         Start-Sleep -Milliseconds 400
     }
     Start-Sleep -Seconds 3
-    Rcon $port "crossbot_equip weapon_9mmAR"
+    Invoke-CbRconQuiet $port "crossbot_equip weapon_9mmAR"
 
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
-        Rcon $port "crossbot_spawn monster_snark"
+        Invoke-CbRconQuiet $port "crossbot_spawn monster_snark"
         Start-Sleep -Seconds 2
-        Rcon $port "crossbot_monsters"
-        Rcon $port "crossbot_sense_status"
+        Invoke-CbRconQuiet $port "crossbot_monsters"
+        Invoke-CbRconQuiet $port "crossbot_sense_status"
         Start-Sleep -Seconds 2
     }
 }
@@ -147,11 +114,11 @@ function Test-Census([int]$port) {
         $badOffset = ([int]$Matches[1] -le 0)
     }
 
-    Assert-That ($snarks.Count -gt 0) "snarks reached the census ($($snarks.Count) lines)"
-    Assert-That (-not $badOffset) "mon_hEnemy resolved to a real offset"
-    Assert-That ($snarks.Count -gt 0 -and $flagged.Count -eq $snarks.Count) `
+    Assert-Cb ($snarks.Count -gt 0) "snarks reached the census ($($snarks.Count) lines)"
+    Assert-Cb (-not $badOffset) "mon_hEnemy resolved to a real offset"
+    Assert-Cb ($snarks.Count -gt 0 -and $flagged.Count -eq $snarks.Count) `
         "every snark line carried FL_MONSTER ($($flagged.Count)/$($snarks.Count))"
-    Assert-That ($withEnemy.Count -gt 0) `
+    Assert-Cb ($withEnemy.Count -gt 0) `
         "at least one snark named an enemy ($($withEnemy.Count)/$($snarks.Count))"
 
     [void]$results.Add("census snarks=$($snarks.Count) withEnemy=$($withEnemy.Count)")
@@ -165,8 +132,8 @@ function Test-Engage([int]$port) {
     $lines = Invoke-Phase "engage" "crossfire" $port @("crossbot_combat_debug 1") {
         param($p)
         Start-SnarkFight $p $Seconds
-        Rcon $p "crossbot_sense_status"
-        Rcon $p "crossbot_combat_status"
+        Invoke-CbRconQuiet $p "crossbot_sense_status"
+        Invoke-CbRconQuiet $p "crossbot_combat_status"
         Start-Sleep -Milliseconds 800
     }
 
@@ -181,18 +148,18 @@ function Test-Engage([int]$port) {
         }
     }
 
-    $entered = Count-Of $lines "entered combat with monster_snark"
-    $switched = Count-Of $lines "switches from .* to monster_snark"
-    $stopped = Count-Of $lines "left combat with monster_snark .*: the monster stopped hunting us"
-    $died = Count-Of $lines "left combat with monster_snark .*: the enemy died"
-    $targeted = Count-Of $lines "target=monster_snark"
+    $entered = Measure-CbCount $lines "entered combat with monster_snark"
+    $switched = Measure-CbCount $lines "switches from .* to monster_snark"
+    $stopped = Measure-CbCount $lines "left combat with monster_snark .*: the monster stopped hunting us"
+    $died = Measure-CbCount $lines "left combat with monster_snark .*: the enemy died"
+    $targeted = Measure-CbCount $lines "target=monster_snark"
 
-    Assert-That ($mine -gt 0) "a snark named a bot as its enemy and passed the gate ($mine)"
-    Assert-That ($traces -gt 0) "monster tracelines were spent ($traces)"
-    Assert-That ($hits -gt 0) "a monster trace reached its target ($hits of $traces)"
-    Assert-That ($targeted -gt 0) "a snark became a bot's sense target ($targeted)"
-    Assert-That ($entered -gt 0) "a bot entered combat with a snark ($entered)"
-    Assert-That ($died -gt 0) "a snark died in a fight a bot was having with it ($died)"
+    Assert-Cb ($mine -gt 0) "a snark named a bot as its enemy and passed the gate ($mine)"
+    Assert-Cb ($traces -gt 0) "monster tracelines were spent ($traces)"
+    Assert-Cb ($hits -gt 0) "a monster trace reached its target ($hits of $traces)"
+    Assert-Cb ($targeted -gt 0) "a snark became a bot's sense target ($targeted)"
+    Assert-Cb ($entered -gt 0) "a bot entered combat with a snark ($entered)"
+    Assert-Cb ($died -gt 0) "a snark died in a fight a bot was having with it ($died)"
 
     [void]$results.Add(
         "engage mine=$mine trc=$traces hit=$hits entered=$entered switched=$switched " +

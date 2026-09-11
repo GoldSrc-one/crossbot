@@ -27,9 +27,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
 $hldsDir = "D:\hlds"
 
-function Get-Distance3D($ax, $ay, $az, $bx, $by, $bz) {
-    return [math]::Sqrt(($ax-$bx)*($ax-$bx) + ($ay-$by)*($ay-$by) + ($az-$bz)*($az-$bz))
-}
+. "$scriptDir\common.ps1"
 
 Write-Host "=== crossbot spawn-pair test: $Map ==="
 
@@ -38,11 +36,7 @@ Write-Host "=== crossbot spawn-pair test: $Map ==="
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port `
     -Commands @("crossbot_add valve SpawnTestBot", "crossbot_list_spawns")
 
-if ($startResult -match "^EXITED") {
-    Write-Host "FAIL: server failed to start ($startResult)"
-    exit 1
-}
-$serverPid = [int]($startResult -replace "PID=", "")
+$serverPid = Get-CbServerPid $startResult
 Write-Host "server started, PID=$serverPid"
 
 # Give the boot cfg (40 waits + our commands) time to actually run.
@@ -77,7 +71,7 @@ try {
     $bestB = $null
     for ($i = 0; $i -lt $spawns.Count; $i++) {
         for ($j = $i + 1; $j -lt $spawns.Count; $j++) {
-            $d = Get-Distance3D $spawns[$i].X $spawns[$i].Y $spawns[$i].Z $spawns[$j].X $spawns[$j].Y $spawns[$j].Z
+            $d = Get-CbDistance3D $spawns[$i].X $spawns[$i].Y $spawns[$i].Z $spawns[$j].X $spawns[$j].Y $spawns[$j].Z
             if ($d -gt $bestDist) {
                 $bestDist = $d
                 $bestA = $spawns[$i]
@@ -89,9 +83,9 @@ try {
         $bestA.X, $bestA.Y, $bestA.Z, $bestB.X, $bestB.Y, $bestB.Z, $bestDist)
 
     # --- 4. Place the bot at A, send it to B. ---
-    & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_teleport $($bestA.X) $($bestA.Y) $($bestA.Z)" | Out-Null
+    Invoke-CbRconQuiet $Port "crossbot_teleport $($bestA.X) $($bestA.Y) $($bestA.Z)"
     Start-Sleep -Milliseconds 500
-    & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_goal $($bestB.X) $($bestB.Y) $($bestB.Z)" | Out-Null
+    Invoke-CbRconQuiet $Port "crossbot_nav_goal $($bestB.X) $($bestB.Y) $($bestB.Z)"
 
     # --- 5. Poll until arrival, timeout, or the bot abandons this goal. ---
     $expectedEta = $null
@@ -103,7 +97,7 @@ try {
         Start-Sleep -Seconds $PollIntervalSeconds
         $elapsed += $PollIntervalSeconds
 
-        $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
+        $status = Invoke-CbRcon $Port "crossbot_nav_status"
         $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
         if (-not $statusLine) { continue }
 
@@ -117,7 +111,7 @@ try {
         $oy = [double]$originMatch.Groups[2].Value
         $oz = [double]$originMatch.Groups[3].Value
 
-        $distToTarget = Get-Distance3D $ox $oy $oz $bestB.X $bestB.Y $bestB.Z
+        $distToTarget = Get-CbDistance3D $ox $oy $oz $bestB.X $bestB.Y $bestB.Z
 
         if ($etaMatch.Success -and -not $expectedEta) {
             $expectedEta = [double]$etaMatch.Groups[1].Value
@@ -141,7 +135,7 @@ try {
             $gx = [double]$goalMatch.Groups[1].Value
             $gy = [double]$goalMatch.Groups[2].Value
             $gz = [double]$goalMatch.Groups[3].Value
-            if ((Get-Distance3D $gx $gy $gz $bestB.X $bestB.Y $bestB.Z) -gt 1.0) {
+            if ((Get-CbDistance3D $gx $gy $gz $bestB.X $bestB.Y $bestB.Z) -gt 1.0) {
                 $reason = "goal was reassigned away from the target (pathfinding likely failed) before arriving"
                 break
             }

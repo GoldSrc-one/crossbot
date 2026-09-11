@@ -5565,7 +5565,7 @@ however cheap the line is, and an answer to an rcon command is not verbose howev
 ### The event lines the test suite parses
 
 An earlier revision kept `bot_avoid.cpp`, `bot_break.cpp`, `bot_deploy.cpp` and `WriteTraceLog`
-unconditional on the grounds that scripts assert on them: `nav_target_test.ps1:90` regexes
+unconditional on the grounds that scripts assert on them: `nav_target_test.ps1:84` regexes
 `CrossBot: <bot> reached goal (x, y, z)`, and `test_deploy.ps1` counts `placed a mine`, `detonated a
 satchel`, `avoid jump`, `is shooting`, `destroyed` and `blocked by`. That reasoning was sound about the
 scripts and wrong about the requirement: at 32 bots these are the bulk of what a `-DCROSSBOT_VERBOSE=OFF`

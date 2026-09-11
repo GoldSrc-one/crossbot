@@ -102,6 +102,7 @@ $scriptDir = $PSScriptRoot
 $repoRoot = Split-Path $scriptDir -Parent
 
 . "$scriptDir\nav_index.ps1"
+. "$scriptDir\common.ps1"
 
 # Native tools report warnings on stderr. Under $ErrorActionPreference = 'Stop'
 # a redirected stderr line becomes a terminating error, which failed maps for
@@ -111,13 +112,6 @@ function Invoke-Native {
     $ErrorActionPreference = 'Continue'
     $output = & $Exe @Arguments 2>&1 | Out-String
     return [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
-}
-
-function Invoke-Rcon {
-    param([string]$Cmd)
-    $out = try { & "$scriptDir\rcon.ps1" -Port $Port -Command $Cmd } catch { "" }
-    if ($null -eq $out) { return "" }
-    return ($out | Out-String)
 }
 
 # Resolve paths
@@ -226,8 +220,8 @@ $serverPid = [int]($startResult -replace "PID=", "")
 Write-Host "Server started, PID=$serverPid"
 
 function Parse-SpawnsAndTargetsFromRcon {
-    $spawnOut = Invoke-Rcon "crossbot_list_spawns"
-    $targetOut = Invoke-Rcon "crossbot_list_targets"
+    $spawnOut = Invoke-CbRcon $Port "crossbot_list_spawns"
+    $targetOut = Invoke-CbRcon $Port "crossbot_list_targets"
 
     $spawnMatches = [regex]::Matches([string]$spawnOut, "CrossBot: spawn (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
     $targetMatches = [regex]::Matches([string]$targetOut, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
@@ -275,7 +269,7 @@ try {
         $parsed = Parse-SpawnsAndTargetsFromRcon
         $spawns = $parsed.Spawns
         $targets = $parsed.Targets
-        $status = Invoke-Rcon "crossbot_nav_status"
+        $status = Invoke-CbRcon $Port "crossbot_nav_status"
         $botReady = ($status -match "origin=")
         $key = "$($spawns.Count)/$($targets.Count)"
         if ($spawns.Count -ge 1 -and $botReady -and $key -eq $prevKey) { break }
@@ -296,17 +290,12 @@ try {
         Write-Host ("Using info_target '{0}' as goal: ({1:F1},{2:F1},{3:F1})" -f $goal.Name, $goal.X, $goal.Y, $goal.Z)
     }
     elseif ($spawns.Count -ge 2) {
-        # Find farthest pair
-        function Get-Dist3D($a, $b) {
-            $dx = $a.X - $b.X; $dy = $a.Y - $b.Y; $dz = $a.Z - $b.Z
-            return [math]::Sqrt($dx*$dx + $dy*$dy + $dz*$dz)
-        }
         $bestDist = -1
         $bestA = $null
         $bestB = $null
         for ($i=0; $i -lt $spawns.Count; $i++) {
             for ($j=$i+1; $j -lt $spawns.Count; $j++) {
-                $d = Get-Dist3D $spawns[$i] $spawns[$j]
+                $d = Get-CbDistance3D $spawns[$i].X $spawns[$i].Y $spawns[$i].Z $spawns[$j].X $spawns[$j].Y $spawns[$j].Z
                 if ($d -gt $bestDist) { $bestDist = $d; $bestA = $spawns[$i]; $bestB = $spawns[$j] }
             }
         }
@@ -325,25 +314,25 @@ try {
     # --- 4. Teleport bot to start (use first spawn point) and set goal ---
     $startSpawn = $spawns[0]
     Write-Host "Teleporting bot to first spawn: ($($startSpawn.X), $($startSpawn.Y), $($startSpawn.Z))"
-    Invoke-Rcon "crossbot_teleport $($startSpawn.X) $($startSpawn.Y) $($startSpawn.Z)" | Out-Null
+    Invoke-CbRcon $Port "crossbot_teleport $($startSpawn.X) $($startSpawn.Y) $($startSpawn.Z)" | Out-Null
     Start-Sleep -Milliseconds 500
 
-    $status = Invoke-Rcon "crossbot_nav_status"
+    $status = Invoke-CbRcon $Port "crossbot_nav_status"
     Write-Host "After teleport status: $status"
 
     Write-Host ("Setting nav goal to ({0:F1},{1:F1},{2:F1})..." -f $goal.X, $goal.Y, $goal.Z)
-    Invoke-Rcon "crossbot_nav_goal $($goal.X) $($goal.Y) $($goal.Z)" | Out-Null
+    Invoke-CbRcon $Port "crossbot_nav_goal $($goal.X) $($goal.Y) $($goal.Z)" | Out-Null
 
     # Wait for Repath to run and waypoints to be generated
     Write-Host "Waiting for path planning..."
     $planSw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($planSw.Elapsed.TotalSeconds -lt 5) {
         Start-Sleep -Milliseconds 100
-        $status = Invoke-Rcon "crossbot_nav_status"
+        $status = Invoke-CbRcon $Port "crossbot_nav_status"
         if ($status -match "waypoint=\d+/(\d+)" -and [int]$matches[1] -gt 0) { break }
     }
 
-    $wpDump = Invoke-Rcon "crossbot_waypoints"
+    $wpDump = Invoke-CbRcon $Port "crossbot_waypoints"
     Write-Host "Waypoints dump:"
     Write-Host $wpDump
 
@@ -366,7 +355,7 @@ try {
         Start-Sleep -Seconds $pollInterval
         $elapsed = $sw.Elapsed.TotalSeconds
 
-        $status = Invoke-Rcon "crossbot_nav_status"
+        $status = Invoke-CbRcon $Port "crossbot_nav_status"
         $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
 
         if ($statusLine) {

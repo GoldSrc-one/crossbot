@@ -22,7 +22,8 @@ constexpr double kLethalStandLift = 36.0;
 bool IsSpawnClassname(const std::string &classname)
 {
 	return classname == "info_player_start" || classname == "info_player_deathmatch" ||
-		classname == "info_player_coop" || classname == "info_player_teamspawn";
+		classname == "info_player_coop" || classname == "info_player_teamspawn" ||
+		classname == "info_player_allies" || classname == "info_player_axis";
 }
 
 bool IsTargetClassname(const std::string &classname)

@@ -148,6 +148,24 @@ function Stop-ServerOnPort {
     return $killed
 }
 
+function Remove-AutotestCfg {
+    param([string]$Map)
+    $cfgPath = Join-Path $HLDSDir "_crossbot_autotest_$Map.cfg"
+    Remove-Item $cfgPath -ErrorAction SilentlyContinue
+}
+
+function Invoke-DeadlineSweep {
+    foreach ($t in $tracked) {
+        if (-not $t.Proc.HasExited -and (Get-Date) -gt $t.Deadline) {
+            Write-Host "  deadline exceeded for $($t.Map), killing"
+            Stop-Process -Id $t.Proc.Id -Force -ErrorAction SilentlyContinue
+            Stop-ServerOnPort -Ports @($t.Port) | Out-Null
+            Remove-AutotestCfg $t.Map
+            $t.Killed = $true
+        }
+    }
+}
+
 $tracked = [System.Collections.Generic.List[object]]::new()
 
 for ($i = 0; $i -lt $mapFiles.Count; $i++) {
@@ -203,17 +221,7 @@ for ($i = 0; $i -lt $mapFiles.Count; $i++) {
     Write-Host "Started $mapName on port $port (PID $($proc.Id))"
 
     while (@($tracked | Where-Object { -not $_.Proc.HasExited }).Count -ge $MaxParallel) {
-        foreach ($t in $tracked) {
-            if (-not $t.Proc.HasExited -and (Get-Date) -gt $t.Deadline) {
-                Write-Host "  deadline exceeded for $($t.Map), killing"
-                Stop-Process -Id $t.Proc.Id -Force -ErrorAction SilentlyContinue
-                Stop-ServerOnPort -Ports @($t.Port) | Out-Null
-                # Clean up config file in case the child didn't get to it
-                $cfgPath = Join-Path $HLDSDir "_crossbot_autotest_$($t.Map).cfg"
-                Remove-Item $cfgPath -ErrorAction SilentlyContinue
-                $t.Killed = $true
-            }
-        }
+        Invoke-DeadlineSweep
         Start-Sleep -Milliseconds 500
     }
 }
@@ -222,17 +230,7 @@ Write-Host ""
 Write-Host "=== Waiting for remaining runs to finish ==="
 
 while (@($tracked | Where-Object { -not $_.Proc.HasExited }).Count -gt 0) {
-    foreach ($t in $tracked) {
-        if (-not $t.Proc.HasExited -and (Get-Date) -gt $t.Deadline) {
-            Write-Host "  deadline exceeded for $($t.Map), killing"
-            Stop-Process -Id $t.Proc.Id -Force -ErrorAction SilentlyContinue
-            Stop-ServerOnPort -Ports @($t.Port) | Out-Null
-            # Clean up config file in case the child didn't get to it
-            $cfgPath = Join-Path $HLDSDir "_crossbot_autotest_$($t.Map).cfg"
-            Remove-Item $cfgPath -ErrorAction SilentlyContinue
-            $t.Killed = $true
-        }
-    }
+    Invoke-DeadlineSweep
     Start-Sleep -Milliseconds 500
 }
 
@@ -276,8 +274,7 @@ if ($orphans.Count -gt 0) {
 
 # Clean up any orphaned config files
 foreach ($mapFile in $mapFiles) {
-    $cfgPath = Join-Path $HLDSDir "_crossbot_autotest_$($mapFile.BaseName).cfg"
-    Remove-Item $cfgPath -ErrorAction SilentlyContinue
+    Remove-AutotestCfg $mapFile.BaseName
 }
 
 Write-Host ""

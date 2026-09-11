@@ -61,15 +61,10 @@ if ($Port -eq 0) { $Port = 29015 + (Get-Random -Maximum 85) }
 
 $mapName = [System.IO.Path]::GetFileNameWithoutExtension($Map)
 
-function Invoke-Rcon {
-    param([string]$Cmd)
-    $out = try { & "$scriptDir\rcon.ps1" -Port $Port -Command $Cmd } catch { "" }
-    if ($null -eq $out) { return "" }
-    return ($out | Out-String)
-}
+. "$scriptDir\common.ps1"
 
 function Show-AimStatus {
-    (Invoke-Rcon "crossbot_aim_status") -split "`r?`n" |
+    (Invoke-CbRcon $Port "crossbot_aim_status") -split "`r?`n" |
         Where-Object { $_ -match 'target=|bot\(s\)' } |
         ForEach-Object { Write-Host ("  " + ($_ -replace '^CrossBot: ', '')) }
 }
@@ -77,12 +72,8 @@ function Show-AimStatus {
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
-$navDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
-if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir | Out-Null }
-if (-not (Test-Path (Join-Path $navDir "$mapName.nav"))) {
-    & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $hldsMap -o (Join-Path $navDir "$mapName.nav") 2>&1 |
-        Select-Object -Last 3 | ForEach-Object { Write-Host "navgen: $_" }
-}
+Ensure-CbNav -HldsMap $hldsMap -NavPath (Join-Path $HLDSDir "crossplay\addons\crossbot\nav\$mapName.nav") `
+    -NavGenExe (Join-Path $repoRoot "build\tools\navgen\navgen.exe")
 
 $logFile = Join-Path $repoRoot "nav_debug\logs\${mapName}_sense.log"
 
@@ -90,17 +81,16 @@ Write-Host "Starting HLDS on port $Port (join with: connect 127.0.0.1:$Port)"
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands @() `
     -ConfigName "_crossbot_sense_$mapName.cfg" -HLDSDir $HLDSDir -LogFile $logFile
 
-if ($startResult -match "^EXITED") { Write-Host "FAIL: $startResult"; exit 1 }
-$serverPid = [int]($startResult -replace "PID=", "")
+$serverPid = Get-CbServerPid $startResult
 Write-Host "Server PID=$serverPid"
 
 try {
     $failed = $false
-    Invoke-Rcon "crossbot_gather 0" | Out-Null
-    for ($i = 1; $i -le $Bots; $i++) { Invoke-Rcon "crossbot_add valve Sense$i" | Out-Null }
-    Invoke-Rcon "crossbot_sense 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_gather 0" | Out-Null
+    for ($i = 1; $i -le $Bots; $i++) { Invoke-CbRcon $Port "crossbot_add valve Sense$i" | Out-Null }
+    Invoke-CbRcon $Port "crossbot_sense 1" | Out-Null
 
-    $spawnOut = Invoke-Rcon "crossbot_list_spawns"
+    $spawnOut = Invoke-CbRcon $Port "crossbot_list_spawns"
     $spawn = $null
     foreach ($line in ($spawnOut -split "`r?`n")) {
         if ($line -match 'spawn \S+ \((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\)') {
@@ -121,14 +111,14 @@ try {
     Write-Host "Idle micro-drift is switched off for this phase: it is a deliberate ~1 degree of error,"
     Write-Host "and leaving it on would mask exactly the small defects this phase exists to catch."
 
-    Invoke-Rcon "crossbot_aim_drift 0" | Out-Null
+    Invoke-CbRcon $Port "crossbot_aim_drift 0" | Out-Null
 
-    Invoke-Rcon "crossbot_nav_goal $($spawn.X) $($spawn.Y) $($spawn.Z)" | Out-Null
+    Invoke-CbRcon $Port "crossbot_nav_goal $($spawn.X) $($spawn.Y) $($spawn.Z)" | Out-Null
     Write-Host "Walking to the goal..."
     Start-Sleep -Seconds 20
 
     foreach ($delay in $Delays) {
-        Invoke-Rcon "crossbot_aim_delay $delay" | Out-Null
+        Invoke-CbRcon $Port "crossbot_aim_delay $delay" | Out-Null
         Write-Host "`n--- crossbot_aim_delay $delay ---"
 
         $deadline = (Get-Date).AddSeconds($SecondsPerDelay)
@@ -141,9 +131,9 @@ try {
     if (-not $SkipRoam) {
         Write-Host "`n===== ROAM: gather on, bots move ====="
         Write-Host "err may be large -- that is target acceleration. Watch queue and served instead."
-        Invoke-Rcon "crossbot_aim_delay -1" | Out-Null
-        Invoke-Rcon "crossbot_aim_drift 1" | Out-Null
-        Invoke-Rcon "crossbot_gather 1" | Out-Null
+        Invoke-CbRcon $Port "crossbot_aim_delay -1" | Out-Null
+        Invoke-CbRcon $Port "crossbot_aim_drift 1" | Out-Null
+        Invoke-CbRcon $Port "crossbot_gather 1" | Out-Null
 
         $deadline = (Get-Date).AddSeconds($RoamSeconds)
         while ((Get-Date) -lt $deadline) {
@@ -161,7 +151,7 @@ try {
     Write-Host "tier= must read PLAYER whenever kinds=p: is nonzero: the other bot outranks every door"
     Write-Host "and lift in the map, no matter how recently they made a noise."
 
-    Invoke-Rcon "crossbot_gather 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_gather 1" | Out-Null
     $lastPushed = @{}
     $tierViolations = 0
     $tierChecks = 0
@@ -172,7 +162,7 @@ try {
     $deadline = (Get-Date).AddSeconds($SuspicionSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 3
-        $out = Invoke-Rcon "crossbot_sense_status"
+        $out = Invoke-CbRcon $Port "crossbot_sense_status"
         foreach ($m in [regex]::Matches($out, 'pushed=sgt:(\d+),snd:(\d+),evt:(\d+),dmg:(\d+)')) {
             foreach ($p in @(@('SIGHT', 1), @('SOUND', 2), @('EVENT', 3), @('DAMAGE', 4))) {
                 $n = [int]$m.Groups[$p[1]].Value
@@ -241,14 +231,14 @@ try {
     Write-Host "The invariant: no live entry may ever be older than crossbot_sense_decay. Shrink the"
     Write-Host "window to 1s and check the age column."
 
-    Invoke-Rcon "crossbot_gather 1" | Out-Null
-    Invoke-Rcon "crossbot_sense_decay 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_gather 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_sense_decay 1" | Out-Null
     Start-Sleep -Seconds 5
 
     $worst = 0.0
     $sampled = 0
     for ($i = 0; $i -lt 5; $i++) {
-        $out = Invoke-Rcon "crossbot_sense_status"
+        $out = Invoke-CbRcon $Port "crossbot_sense_status"
         ($out -split "`r?`n") |
             Where-Object { $_ -match 'susp=|bot\(s\)' } |
             ForEach-Object { Write-Host ("  " + ($_ -replace '^CrossBot: ', '')) }
@@ -259,7 +249,7 @@ try {
         }
         Start-Sleep -Seconds 2
     }
-    Invoke-Rcon "crossbot_sense_decay 5" | Out-Null
+    Invoke-CbRcon $Port "crossbot_sense_decay 5" | Out-Null
 
     Write-Host ("oldest live entry seen at decay=1: {0:N2}s over {1} sample(s)" -f $worst, $sampled)
     if ($sampled -eq 0) {

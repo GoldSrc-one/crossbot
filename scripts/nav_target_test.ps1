@@ -15,9 +15,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
 $hldsDir = "D:\hlds"
 
-function Get-Distance3D($ax, $ay, $az, $bx, $by, $bz) {
-    return [math]::Sqrt(($ax-$bx)*($ax-$bx) + ($ay-$by)*($ay-$by) + ($az-$bz)*($az-$bz))
-}
+. "$scriptDir\common.ps1"
 
 Write-Host "=== crossbot single-target test: $Map ==="
 
@@ -27,11 +25,7 @@ Write-Host "=== crossbot single-target test: $Map ==="
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port -RequireVerbose `
     -Commands @("crossbot_add valve TargetTestBot", "crossbot_list_spawns", "crossbot_list_targets")
 
-if ($startResult -match "^EXITED") {
-    Write-Host "FAIL: server failed to start ($startResult)"
-    exit 1
-}
-$serverPid = [int]($startResult -replace "PID=", "")
+$serverPid = Get-CbServerPid $startResult
 Write-Host "server started, PID=$serverPid"
 
 # Give the boot cfg (40 waits + our commands) time to actually run.
@@ -69,9 +63,9 @@ try {
     #        already be there from natural spawn, but teleporting is cheap
     #        insurance against picking up leftover state from a prior run),
     #        then send it to the target. ---
-    & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_teleport $spawnX $spawnY $spawnZ" | Out-Null
+    Invoke-CbRconQuiet $Port "crossbot_teleport $spawnX $spawnY $spawnZ"
     Start-Sleep -Milliseconds 500
-    & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_goal $targetX $targetY $targetZ" | Out-Null
+    Invoke-CbRconQuiet $Port "crossbot_nav_goal $targetX $targetY $targetZ"
 
     # --- 4. Poll until arrival, timeout, or the bot abandons this goal.
     #        Primary signal is bot_move_nav.cpp's permanent "reached goal"
@@ -101,7 +95,7 @@ try {
             break
         }
 
-        $status = & "$scriptDir\rcon.ps1" -Port $Port -Command "crossbot_nav_status"
+        $status = Invoke-CbRcon $Port "crossbot_nav_status"
         $statusLine = ($status -split "`n") | Where-Object { $_ -match "CrossBot:.*origin=" } | Select-Object -First 1
         if (-not $statusLine) { continue }
 
@@ -114,7 +108,7 @@ try {
         $oy = [double]$originMatch.Groups[2].Value
         $oz = [double]$originMatch.Groups[3].Value
 
-        $distToTarget = Get-Distance3D $ox $oy $oz $targetX $targetY $targetZ
+        $distToTarget = Get-CbDistance3D $ox $oy $oz $targetX $targetY $targetZ
 
         if ($etaMatch.Success -and -not $expectedEta) {
             $expectedEta = [double]$etaMatch.Groups[1].Value

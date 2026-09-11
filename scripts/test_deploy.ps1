@@ -54,46 +54,12 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Forc
 $failures = New-Object System.Collections.ArrayList
 $results = New-Object System.Collections.ArrayList
 
-function Assert-That([bool]$ok, [string]$what) {
-    $tag = if ($ok) { "PASS" } else { "FAIL" }
-    Write-Host "  [$tag] $what"
-    if (-not $ok) { [void]$failures.Add($what) }
-}
+. "$scriptDir\common.ps1"
 
-function Count-Of($lines, [string]$pattern) {
-    return @($lines | Select-String -Pattern $pattern -SimpleMatch:$false).Count
-}
-
-# Boots a server, runs $Body against it, always stops it. Returns the log lines.
 function Invoke-Phase([string]$name, [string]$map, [int]$port, [string[]]$boot,
         [scriptblock]$body) {
-    $log = Join-Path $logDir "deploy_$name.log"
-    if (Test-Path $log) { Remove-Item $log }
-
-    Write-Host ""
-    Write-Host "=== $name ($map) ==="
-
-    $start = & "$scriptDir\test_server_start.ps1" -Map $map -Port $port -LogFile $log `
-        -WaitSeconds 90 -ConfigName "_deploy_$name.cfg" -Commands $boot -HLDSDir $HLDSDir `
-        -RequireVerbose
-    if ($start -notmatch 'PID=(\d+)') {
-        Assert-That $false "$name server started ($start)"
-        return @()
-    }
-    $srv = [int]$Matches[1]
-
-    try {
-        & $body $port
-    } finally {
-        & "$scriptDir\test_server_stop.ps1" -Id $srv | Out-Null
-    }
-
-    if (-not (Test-Path $log)) { return @() }
-    return Get-Content $log
-}
-
-function Rcon([int]$port, [string]$cmd) {
-    & "$scriptDir\rcon.ps1" -Command $cmd -Port $port | Out-Null
+    Invoke-CbPhase $name $map $port $boot $body -LogDir $logDir -HLDSDir $HLDSDir `
+        -LogPrefix "deploy" -ConfigPrefix "_deploy" -Failures $failures
 }
 
 # --- gates -------------------------------------------------------------------
@@ -104,18 +70,18 @@ function Test-Gates([int]$port) {
     foreach ($map in @("crossfire", "boot_camp", "stalkyard", "test2_doorway")) {
         $lines = Invoke-Phase "gates_$map" $map $port @() {
             param($p)
-            Rcon $p "crossbot_list_gates"
+            Invoke-CbRconQuiet $p "crossbot_list_gates"
             Start-Sleep -Milliseconds 1500
         }
         $port++
 
         $gates = @($lines | Select-String "CrossBot: gate " | Where-Object { $_.Line -match ' ok$' })
-        Assert-That ($gates.Count -gt 0) "$map finds at least one deployable gate ($($gates.Count))"
+        Assert-Cb ($gates.Count -gt 0) "$map finds at least one deployable gate ($($gates.Count))"
 
         $wide = @($gates | Where-Object {
             $_.Line -match 'open (\d+)' -and [int]$Matches[1] -gt 144
         })
-        Assert-That ($wide.Count -eq 0) "$map has no gate wider than the 144 opening bound"
+        Assert-Cb ($wide.Count -eq 0) "$map has no gate wider than the 144 opening bound"
 
         [void]$results.Add("$map gates=$($gates.Count)")
     }
@@ -129,38 +95,38 @@ function Test-Tripmine([int]$port) {
     $lines = Invoke-Phase "tripmine" "crossfire" $port @("crossbot_deploy_debug 1") {
         param($p)
         foreach ($n in @("Sap1", "Sap2", "Sap3")) {
-            Rcon $p "crossbot_add valve $n"
+            Invoke-CbRconQuiet $p "crossbot_add valve $n"
             Start-Sleep -Milliseconds 400
         }
         Start-Sleep -Seconds 3
         $deadline = (Get-Date).AddSeconds($Seconds)
         while ((Get-Date) -lt $deadline) {
-            Rcon $p "crossbot_equip weapon_tripmine"
+            Invoke-CbRconQuiet $p "crossbot_equip weapon_tripmine"
             Start-Sleep -Seconds 4
         }
-        Rcon $p "crossbot_deploy_status"
+        Invoke-CbRconQuiet $p "crossbot_deploy_status"
         Start-Sleep -Milliseconds 800
     }
 
-    $placed = Count-Of $lines "placed a mine"
-    $stand = Count-Of $lines ", standing\)"
-    $duck = Count-Of $lines ", ducked\)"
-    $jump = Count-Of $lines "avoid jump monster_tripmine"
-    $crawl = Count-Of $lines "avoid duck monster_tripmine"
-    $removed = Count-Of $lines "Tripmine at .* removed"
-    $goals = Count-Of $lines "reached goal"
-    $contact = Count-Of $lines "KILLED BY ITS OWN MINE.*onbeam 1"
-    $blast = Count-Of $lines "KILLED BY ITS OWN MINE.*onbeam 0"
-    $armedIn = Count-Of $lines "STILL IN BEAM AT ARMING"
+    $placed = Measure-CbCount $lines "placed a mine"
+    $stand = Measure-CbCount $lines ", standing\)"
+    $duck = Measure-CbCount $lines ", ducked\)"
+    $jump = Measure-CbCount $lines "avoid jump monster_tripmine"
+    $crawl = Measure-CbCount $lines "avoid duck monster_tripmine"
+    $removed = Measure-CbCount $lines "Tripmine at .* removed"
+    $goals = Measure-CbCount $lines "reached goal"
+    $contact = Measure-CbCount $lines "KILLED BY ITS OWN MINE.*onbeam 1"
+    $blast = Measure-CbCount $lines "KILLED BY ITS OWN MINE.*onbeam 0"
+    $armedIn = Measure-CbCount $lines "STILL IN BEAM AT ARMING"
 
-    Assert-That ($placed -gt 0) "tripmines placed ($placed)"
-    Assert-That ($stand -gt 0 -and $duck -gt 0) "both stances used (stand=$stand duck=$duck)"
-    Assert-That ($jump -eq 0) "no beam was jumped -- a beam cannot be jumped ($jump)"
-    Assert-That ($crawl -gt 0) "a beam was crawled under ($crawl)"
-    Assert-That ($removed -eq 0) "no mine failed to find a surface ($removed removed)"
-    Assert-That ($goals -gt 0) "bots still reach goals with beams up ($goals)"
-    Assert-That ($contact -eq 0) "no bot walked into its own beam ($contact contact deaths)"
-    Assert-That ($armedIn -eq 0) "no mine armed around its placer ($armedIn)"
+    Assert-Cb ($placed -gt 0) "tripmines placed ($placed)"
+    Assert-Cb ($stand -gt 0 -and $duck -gt 0) "both stances used (stand=$stand duck=$duck)"
+    Assert-Cb ($jump -eq 0) "no beam was jumped -- a beam cannot be jumped ($jump)"
+    Assert-Cb ($crawl -gt 0) "a beam was crawled under ($crawl)"
+    Assert-Cb ($removed -eq 0) "no mine failed to find a surface ($removed removed)"
+    Assert-Cb ($goals -gt 0) "bots still reach goals with beams up ($goals)"
+    Assert-Cb ($contact -eq 0) "no bot walked into its own beam ($contact contact deaths)"
+    Assert-Cb ($armedIn -eq 0) "no mine armed around its placer ($armedIn)"
 
     [void]$results.Add(
         "tripmine placed=$placed duck=$crawl goals=$goals contact=$contact blast=$blast")
@@ -175,33 +141,33 @@ function Test-Tripmine([int]$port) {
 function Test-Standoff([int]$port) {
     $lines = Invoke-Phase "standoff" "test2_doorway" $port @("crossbot_deploy_surface 3", "crossbot_deploy_debug 1") {
         param($p)
-        Rcon $p "crossbot_add valve Miner"
+        Invoke-CbRconQuiet $p "crossbot_add valve Miner"
         Start-Sleep -Seconds 2
-        Rcon $p "crossbot_equip weapon_9mmhandgun"
+        Invoke-CbRconQuiet $p "crossbot_equip weapon_9mmhandgun"
         $goals = @("400 384 32", "128 384 48")
         $i = 0
         $deadline = (Get-Date).AddSeconds($Seconds)
         while ((Get-Date) -lt $deadline) {
-            Rcon $p "crossbot_equip weapon_tripmine"
-            Rcon $p ("crossbot_nav_goal " + $goals[$i % 2])
+            Invoke-CbRconQuiet $p "crossbot_equip weapon_tripmine"
+            Invoke-CbRconQuiet $p ("crossbot_nav_goal " + $goals[$i % 2])
             $i++
             Start-Sleep -Seconds 7
         }
-        Rcon $p "crossbot_deploy_status"
+        Invoke-CbRconQuiet $p "crossbot_deploy_status"
         Start-Sleep -Milliseconds 800
     }
 
-    $placed = Count-Of $lines "placed a mine"
-    $shoot = Count-Of $lines "avoid shooting monster_tripmine"
-    $engaged = Count-Of $lines "is shooting monster_tripmine"
-    $killed = Count-Of $lines "destroyed monster_tripmine"
-    $stuck = Count-Of $lines "blocked by monster_tripmine"
+    $placed = Measure-CbCount $lines "placed a mine"
+    $shoot = Measure-CbCount $lines "avoid shooting monster_tripmine"
+    $engaged = Measure-CbCount $lines "is shooting monster_tripmine"
+    $killed = Measure-CbCount $lines "destroyed monster_tripmine"
+    $stuck = Measure-CbCount $lines "blocked by monster_tripmine"
 
-    Assert-That ($placed -gt 0) "ground mines placed under the pin ($placed)"
-    Assert-That ($shoot -gt 0) "side search gave up and chose to shoot ($shoot)"
-    Assert-That ($engaged -gt 0) "standoff engaged ($engaged)"
-    Assert-That ($killed -gt 0) "mine destroyed by gunfire ($killed)"
-    Assert-That ($stuck -eq 0) "bot never sat blocked by a beam ($stuck)"
+    Assert-Cb ($placed -gt 0) "ground mines placed under the pin ($placed)"
+    Assert-Cb ($shoot -gt 0) "side search gave up and chose to shoot ($shoot)"
+    Assert-Cb ($engaged -gt 0) "standoff engaged ($engaged)"
+    Assert-Cb ($killed -gt 0) "mine destroyed by gunfire ($killed)"
+    Assert-Cb ($stuck -eq 0) "bot never sat blocked by a beam ($stuck)"
 
     [void]$results.Add("standoff placed=$placed shoot=$shoot killed=$killed")
 }
@@ -214,33 +180,33 @@ function Test-Satchel([int]$port) {
     $lines = Invoke-Phase "satchel" "crossfire" $port @() {
         param($p)
         foreach ($n in @("Sap1", "Sap2", "Sap3", "Sap4")) {
-            Rcon $p "crossbot_add valve $n"
+            Invoke-CbRconQuiet $p "crossbot_add valve $n"
             Start-Sleep -Milliseconds 400
         }
         Start-Sleep -Seconds 3
         $deadline = (Get-Date).AddSeconds($Seconds)
         while ((Get-Date) -lt $deadline) {
-            Rcon $p "crossbot_equip weapon_satchel"
+            Invoke-CbRconQuiet $p "crossbot_equip weapon_satchel"
             Start-Sleep -Seconds 5
         }
-        Rcon $p "crossbot_deploy_status"
+        Invoke-CbRconQuiet $p "crossbot_deploy_status"
         Start-Sleep -Milliseconds 800
     }
 
-    $placed = Count-Of $lines "placed a mine"
-    $nothing = Count-Of $lines "placed nothing"
-    $dets = Count-Of $lines "detonated a satchel"
-    $tries = Count-Of $lines "is detonating a satchel"
+    $placed = Measure-CbCount $lines "placed a mine"
+    $nothing = Measure-CbCount $lines "placed nothing"
+    $dets = Measure-CbCount $lines "detonated a satchel"
+    $tries = Measure-CbCount $lines "is detonating a satchel"
 
     $near = @($lines | Select-String "is detonating a satchel" | Where-Object {
         $_.Line -match 'contact (\d+) away' -and [int]$Matches[1] -lt 16
     })
 
-    Assert-That ($placed -gt 0) "satchels thrown ($placed)"
-    Assert-That ($placed -gt $nothing) "more throws landed than failed ($placed vs $nothing)"
-    Assert-That ($dets -gt 0) "satchels detonated ($dets)"
-    Assert-That ($dets -le $tries) "no detonation counted twice ($dets of $tries)"
-    Assert-That ($near.Count -eq 0) "no self-triggered detonation ($($near.Count) contacts under 16u)"
+    Assert-Cb ($placed -gt 0) "satchels thrown ($placed)"
+    Assert-Cb ($placed -gt $nothing) "more throws landed than failed ($placed vs $nothing)"
+    Assert-Cb ($dets -gt 0) "satchels detonated ($dets)"
+    Assert-Cb ($dets -le $tries) "no detonation counted twice ($dets of $tries)"
+    Assert-Cb ($near.Count -eq 0) "no self-triggered detonation ($($near.Count) contacts under 16u)"
 
     [void]$results.Add("satchel placed=$placed dets=$dets tries=$tries")
 }

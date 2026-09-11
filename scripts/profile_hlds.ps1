@@ -19,6 +19,8 @@ $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
 $repoRoot = Split-Path $scriptDir -Parent
 
+. "$scriptDir\common.ps1"
+
 if (-not $OutDir) {
     $OutDir = Join-Path $repoRoot "nav_debug\perf"
 }
@@ -79,34 +81,26 @@ if (-not $ready -or -not $proc) {
 }
 Write-Host "profile_hlds: server up, pid $($proc.Id)"
 
-function Rcon([string]$cmd) {
-    try { & "$scriptDir\rcon.ps1" -Port $Port -Command $cmd | Out-Null } catch { }
-}
-
-function RconRead([string]$cmd) {
-    try { return (& "$scriptDir\rcon.ps1" -Port $Port -Command $cmd | Out-String) } catch { return "" }
-}
-
 # The zone profiler and its cvars are behind CROSSBOT_PERF, off by default. Against a stock build
 # this run would finish and simply print nothing, which reads as "no spikes" rather than "not
 # measured", so refuse to start instead.
-$probe = RconRead "crossbot_perf"
+$probe = Invoke-CbRcon $Port "crossbot_perf"
 if ($probe -notmatch 'crossbot_perf"?\s+is') {
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
     throw "crossbot_perf cvar not registered -- rebuild with: build.bat -DCROSSBOT_PERF=ON"
 }
 
-Rcon "crossbot_perf 0"
-foreach ($c in $ExtraCommands) { Rcon $c }
+Invoke-CbRconQuiet $Port "crossbot_perf 0"
+foreach ($c in $ExtraCommands) { Invoke-CbRconQuiet $Port $c }
 
 for ($i = 1; $i -le $Bots; $i++) {
-    Rcon "crossbot_add valve PerfBot$i"
+    Invoke-CbRconQuiet $Port "crossbot_add valve PerfBot$i"
 }
 Write-Host "profile_hlds: requested $Bots bots, warming up ${WarmupSeconds}s"
 Start-Sleep -Seconds $WarmupSeconds
 
-Rcon "crossbot_perf_spike $SpikeMs"
-Rcon "crossbot_perf $PerfInterval"
+Invoke-CbRconQuiet $Port "crossbot_perf_spike $SpikeMs"
+Invoke-CbRconQuiet $Port "crossbot_perf $PerfInterval"
 
 if (-not $NoProfiler) {
     Write-Host "profile_hlds: collecting ${ProfileSeconds}s with AMDuProf -> $sessionDir"
@@ -122,10 +116,10 @@ if (-not $NoProfiler) {
     Start-Sleep -Seconds $ProfileSeconds
 }
 
-Rcon "crossbot_perf 0"
+Invoke-CbRconQuiet $Port "crossbot_perf 0"
 Start-Sleep -Seconds 1
 
-$cacheStats = RconRead "crossbot_airmove_cache_stats"
+$cacheStats = Invoke-CbRcon $Port "crossbot_airmove_cache_stats"
 if ($cacheStats) { Write-Host $cacheStats.Trim() }
 
 Write-Host "profile_hlds: stopping server"

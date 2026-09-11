@@ -68,22 +68,13 @@ if ($Port -eq 0) { $Port = 29015 + (Get-Random -Maximum 85) }
 
 $mapName = [System.IO.Path]::GetFileNameWithoutExtension($Map)
 
-function Invoke-Rcon {
-    param([string]$Cmd)
-    $out = try { & "$scriptDir\rcon.ps1" -Port $Port -Command $Cmd } catch { "" }
-    if ($null -eq $out) { return "" }
-    return ($out | Out-String)
-}
+. "$scriptDir\common.ps1"
 
 $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
-$navDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
-if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir | Out-Null }
-if (-not (Test-Path (Join-Path $navDir "$mapName.nav"))) {
-    & (Join-Path $repoRoot "build\tools\navgen\navgen.exe") $hldsMap -o (Join-Path $navDir "$mapName.nav") 2>&1 |
-        Select-Object -Last 3 | ForEach-Object { Write-Host "navgen: $_" }
-}
+Ensure-CbNav -HldsMap $hldsMap -NavPath (Join-Path $HLDSDir "crossplay\addons\crossbot\nav\$mapName.nav") `
+    -NavGenExe (Join-Path $repoRoot "build\tools\navgen\navgen.exe")
 
 $logFile = Join-Path $repoRoot "nav_debug\logs\${mapName}_aimerror.log"
 
@@ -91,20 +82,19 @@ Write-Host "Starting HLDS on port $Port"
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands @() `
     -ConfigName "_crossbot_aimerror_$mapName.cfg" -HLDSDir $HLDSDir -LogFile $logFile
 
-if ($startResult -match "^EXITED") { Write-Host "FAIL: $startResult"; exit 1 }
-$serverPid = [int]($startResult -replace "PID=", "")
+$serverPid = Get-CbServerPid $startResult
 Write-Host "Server PID=$serverPid"
 
 try {
-    Invoke-Rcon "crossbot_gather 0" | Out-Null
-    Invoke-Rcon "crossbot_sense 0" | Out-Null
-    if ($Quantum -ge 0) { Invoke-Rcon "crossbot_aim_quantum $Quantum" | Out-Null }
-    if ($Impulse -ge 0) { Invoke-Rcon "crossbot_aim_impulse $Impulse" | Out-Null }
-    Invoke-Rcon "crossbot_add valve Flicker" | Out-Null
+    Invoke-CbRcon $Port "crossbot_gather 0" | Out-Null
+    Invoke-CbRcon $Port "crossbot_sense 0" | Out-Null
+    if ($Quantum -ge 0) { Invoke-CbRcon $Port "crossbot_aim_quantum $Quantum" | Out-Null }
+    if ($Impulse -ge 0) { Invoke-CbRcon $Port "crossbot_aim_impulse $Impulse" | Out-Null }
+    Invoke-CbRcon $Port "crossbot_add valve Flicker" | Out-Null
     Start-Sleep -Seconds 3
 
     foreach ($scale in $Scales) {
-        Invoke-Rcon "crossbot_aim_error $scale" | Out-Null
+        Invoke-CbRcon $Port "crossbot_aim_error $scale" | Out-Null
 
         foreach ($fov in $Fovs) {
             foreach ($shape in $Shapes) {
@@ -115,14 +105,14 @@ try {
                     $sign = if ($i % 2 -eq 0) { "" } else { "-" }
                     $cmd = "crossbot_aim_test Flicker $sign$delta $sign$pitch"
                     if ($fov -gt 0) { $cmd = "$cmd $fov" }
-                    Invoke-Rcon $cmd | Out-Null
+                    Invoke-CbRcon $Port $cmd | Out-Null
                     Start-Sleep -Milliseconds 2500
                 }
             }
         }
     }
 
-    Invoke-Rcon "crossbot_aim_error -1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_aim_error -1" | Out-Null
     Start-Sleep -Seconds 2
 }
 finally {
