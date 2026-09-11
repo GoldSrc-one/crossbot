@@ -3,10 +3,13 @@
 
 #include <math.h>
 
+#include "../game/game_profile.h"
 #include "../game/hldm_weapons.h"
+#include "../game/teams.h"
 #include "../nav/nav.h"
 #include "../nav/nav_camp.h"
 #include "../nav/nav_format.h"
+#include "../nav/nav_math.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_path.h"
 #include "bot.h"
@@ -38,6 +41,8 @@ namespace
 	constexpr float kDefaultZoomShare = 0.85f;
 	// Below this the targets are close enough to find without magnification.
 	constexpr float kDefaultZoomDist = 768.f;
+	constexpr float kFriendCheckInterval = 0.2f;
+	constexpr float kFriendFallbackCone = 90.f;
 
 	// Crouching is the default. A camper is a smaller and steadier target, so the tie and the near
 	// tie both go to crouch; only a spot that really needs the extra eye height stands up.
@@ -81,6 +86,59 @@ namespace
 		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer(name);
 		float v = cvar ? cvar->value : fallback;
 		return v < 0.f ? 0.f : v;
+	}
+
+	bool FriendInView(const CBot &bot, float range)
+	{
+		if (!Teams::Active(bot.pEdict))
+			return false;
+		if (!CBotIsLivePlayer(bot.pEdict))
+			return false;
+
+		edict_t *pEdict = bot.pEdict;
+		Vector eye = pEdict->v.origin + pEdict->v.view_ofs;
+
+		MAKE_VECTORS(pEdict->v.v_angle);
+		Vector forward = gpGlobals->v_forward;
+
+		float fov = pEdict->v.fov;
+		if (fov <= 0.f)
+			fov = kFriendFallbackCone;
+		float minDot = cosf(fov * 0.5f * NavMath::kPiF / 180.f);
+
+		edict_t *closest = nullptr;
+		float closestDist = range;
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!ent || ent == pEdict || !CBotIsLivePlayer(ent))
+				continue;
+			if (g_pGameProfile && g_pGameProfile->IsDead(ent))
+				continue;
+			if (Teams::Of(pEdict, ent) != Teams::REL_FRIEND)
+				continue;
+
+			Vector centre = ent->v.origin + ent->v.view_ofs;
+			Vector los = centre - eye;
+			float dist = los.Length();
+			if (dist > closestDist || dist < 0.001f)
+				continue;
+
+			Vector dir = los * (1.f / dist);
+			if (DotProduct(forward, dir) < minDot)
+				continue;
+
+			closest = ent;
+			closestDist = dist;
+		}
+
+		if (!closest)
+			return false;
+
+		TraceResult tr;
+		Vector centre = closest->v.origin + closest->v.view_ofs;
+		TRACE_LINE(eye, centre, dont_ignore_monsters, pEdict, &tr);
+		return tr.flFraction >= 1.f || tr.pHit == closest;
 	}
 }
 
@@ -203,14 +261,27 @@ void Track(CBot &bot)
 	if (!Enabled() || !BotSense::Enabled() || !bot.pEdict)
 	{
 		st.scared = false;
+		st.friendInView = false;
 		return;
 	}
 
 	bool was = st.scared;
 
+	float radius = ScareRadius();
 	float dist = 0.f;
 	const BotSense::Suspicion *contact = BotSense::NearestLive(bot, bot.pEdict->v.origin,
-		ScareRadius(), true, &dist);
+		radius, true, &dist);
+
+	if (contact || st.scared || st.holding)
+	{
+		if (gpGlobals->time >= st.nextFriendCheck)
+		{
+			st.friendInView = FriendInView(bot, radius);
+			st.nextFriendCheck = gpGlobals->time + kFriendCheckInterval;
+		}
+	}
+	else
+		st.friendInView = false;
 
 	// NearestLive has already applied the sense decay, so anything it returns is a contact the bot
 	// still believes in. Nothing further gates this on the slot's own age: footsteps arrive in
@@ -218,7 +289,9 @@ void Track(CBot &bot)
 	// between them. Distance is measured from the bot, so walking toward a remembered position also
 	// reads as closing in -- which is the right answer for somewhere the bot heard something a
 	// moment ago, and the decay is what stops it being the answer forever.
-	if (contact)
+	if (st.friendInView)
+		st.scared = false;
+	else if (contact)
 	{
 		if (!st.scared || dist < st.scareDist - kCampScareEpsilon)
 		{
@@ -235,7 +308,9 @@ void Track(CBot &bot)
 
 	if (DebugEnabled() && st.scared != was)
 		BOT_VLOG("CrossBot: %s %s\n", bot.name, st.scared
-			? "picks up something closing in" : "stops hearing anything come closer");
+			? "picks up something closing in" : (st.friendInView
+				? "calms down, a friend is in view"
+				: "stops hearing anything come closer"));
 }
 
 bool Consider(CBot &bot)
@@ -351,6 +426,13 @@ bool Run(CBot &bot)
 	if (!Enabled() || !bot.goal.stop.camp)
 	{
 		Leave(bot, "camping is off");
+		BotGoal::Advance(bot);
+		return false;
+	}
+
+	if (st.friendInView)
+	{
+		Leave(bot, "a friend is in view");
 		BotGoal::Advance(bot);
 		return false;
 	}
@@ -475,6 +557,8 @@ void OnRespawn(CBot &bot)
 	st.scared = false;
 	st.scareDist = 0.f;
 	st.scareTime = 0.f;
+	st.friendInView = false;
+	st.nextFriendCheck = 0.f;
 	st.unzoom = false;
 	st.nextCampTime = 0.f;
 }

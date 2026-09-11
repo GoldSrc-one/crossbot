@@ -46,6 +46,8 @@ struct State
 	bool scared = false;
 	float scareDist = 0.f;
 	float scareTime = 0.f;
+	bool friendInView = false;
+	float nextFriendCheck = 0.f;
 
 	// Set while we owe the weapon a zoom-out for a camp we have left.
 	bool unzoom = false;

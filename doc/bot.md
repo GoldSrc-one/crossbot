@@ -247,6 +247,21 @@ Because the minimum resets with the scare, a contact that approaches, stops, and
 frightens the bot twice. Because it is a minimum and not a last-known distance, an enemy that closes
 and then retreats keeps the bot camped for exactly one second past its closest approach.
 
+A visible teammate overrides the scare entirely:
+
+```
+friend = FriendInView(scare radius, live view cone)   // refreshed at most every 0.2s
+if (friend)   scared = false                          // no commit, and a holder leaves
+```
+
+This is a hard override, not a distance tweak: backup in sight means the bot plays on. The check
+runs only while a contact, a scare or a hold makes the answer matter; a quiet bot spends nothing.
+It is gated on `Teams::Active`, so it is a no-op on deathmatch maps. It takes the closest live
+teammate inside the scare radius and the bot's live view cone (90° when `v.fov` reads empty) and
+spends a single traceline on that one friend, so an occluded closest friend masks a visible one
+further out -- one trace was judged worth more than the corner case. A scoped holder keeps its
+narrowed cone and so rarely calms down. The approach walk is not abandoned by this either; see below.
+
 `Track` is called unconditionally, straight after `BotCombat::Update` and above every early return in
 `Bot_MoveNav`. A gap in its sampling would read back as "nothing has come closer" the moment combat
 handed control back.
@@ -2085,7 +2100,8 @@ handled one level up, by `Teams::Active` falling back to today's behaviour for t
 **The suspicion table is deliberately left unfiltered.** `Hear`, `Notice` and `Push` still record
 teammates, so a bot still turns its head toward a friend's footsteps -- that is the gaze, and it looks
 right. The table drives an attack in exactly one place, the satchel, which is gated separately in
-`NearestLive`.
+`NearestLive`. Camping reads teams a second time for the friend-in-view calm, but that read never
+aims or shoots, so the one-attack-gate claim still holds.
 
 ### Monsters are candidates only while they are hunting us
 

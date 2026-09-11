@@ -903,6 +903,8 @@ void PrintCampStatus(const Vector *at)
 			snprintf(line, sizeof(line),
 				"CrossBot:     scared: nearest contact %.0f out, closed in %.1fs ago\n",
 				camp.scareDist, gpGlobals->time - camp.scareTime);
+		else if (camp.friendInView)
+			snprintf(line, sizeof(line), "CrossBot:     calm: a friend is in view\n");
 		else
 			snprintf(line, sizeof(line), "CrossBot:     nothing has come closer\n");
 		SERVER_PRINT(line);
