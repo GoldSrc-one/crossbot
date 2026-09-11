@@ -36,7 +36,6 @@ public:
 
 	size_t ThreadCount() const { return m_workers.size() + 1; }
 
-	double IdleSeconds() const { return m_idleSeconds; }
 
 	void Run(size_t count, const std::function<void(size_t, size_t)> &body);
 
@@ -55,7 +54,6 @@ private:
 	size_t m_count = 0;
 	size_t m_active = 0;
 	uint64_t m_generation = 0;
-	double m_idleSeconds = 0.0;
 	bool m_stop = false;
 };
 

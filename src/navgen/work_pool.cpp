@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <chrono>
 #include <exception>
 #include <thread>
 
@@ -272,7 +271,6 @@ void ThreadPool::Run(size_t count, const std::function<void(size_t, size_t)> &bo
 
 	Drain(0);
 
-	std::chrono::steady_clock::time_point drained = std::chrono::steady_clock::now();
 
 	{
 		std::unique_lock<std::mutex> lock(m_mutex);
@@ -280,8 +278,6 @@ void ThreadPool::Run(size_t count, const std::function<void(size_t, size_t)> &bo
 		m_body = nullptr;
 	}
 
-	m_idleSeconds += std::chrono::duration<double>(
-		std::chrono::steady_clock::now() - drained).count();
 
 	for (const std::exception_ptr &error : m_errors)
 	{

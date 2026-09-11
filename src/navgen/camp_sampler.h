@@ -70,7 +70,6 @@ struct CampStats
 	size_t worldTraces = 0;
 	size_t blockerTraces = 0;
 	double buildSeconds = 0.0;
-	double idleSeconds = 0.0;
 	size_t batches = 0;
 	size_t batchItems = 0;
 	size_t threads = 0;

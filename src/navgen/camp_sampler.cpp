@@ -614,7 +614,6 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	}
 
 	stats.kept = kept.size();
-	stats.idleSeconds = pool.IdleSeconds();
 	stats.buildSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now() - buildStart).count();
 
