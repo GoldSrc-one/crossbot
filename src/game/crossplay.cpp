@@ -10,12 +10,6 @@
 #include "gamedata.h"
 #include "game_profile.h"
 
-#if defined(_WIN32)
-#define CB_STRICMP _stricmp
-#else
-#define CB_STRICMP strcasecmp
-#endif
-
 namespace
 {
 

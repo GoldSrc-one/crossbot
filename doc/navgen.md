@@ -14,6 +14,9 @@ Command-line tool with extensive debug flags:
 - `--dump-steps` - every walk connection the step filter trimmed or dropped: area pair, shallowest
   crossing, both floor heights, surviving walkable runs, each floor face's normal z and 2D offset
 - `--dump-support` - every leaf fragment dropped as unsupported: floor centroid, floor normal, volume
+- `--dump-footprints` - re-measure every finished area with `WalkableFootprintGapArea` and warn
+  (`ill-formed walkable footprint`) past 1 unit². Off by default: the gap subtraction multiplies its
+  remainder per floor face and exhausts a 32-bit address space on holed footprints (dod_kalt)
 - `--dump-sky` - classify every merged area's floor by the BSP leaf contents just below it, list the
   lethal `trigger_hurt` volumes, and report how much walkable footprint stands on sky, how much stands
   inside a kill volume, and the fifteen largest areas with their bounds. This is the flag that found
@@ -202,9 +205,9 @@ that path accepts without ever reaching the cap.
 Raising the cap from `1` upwards is also the cheapest way to bisect a merge bug: it bounds *how much*
 merging it takes to reproduce, which is usually faster than reading the growth loop.
 
-**The same tolerance validates the result.** `ValidateAreaFootprints` re-measures the finished areas with
-`WalkableFootprintGapArea` and warns (`ill-formed walkable footprint`) past the same 1 unit². Keep the two
-numbers equal. When the merge test was the looser of the two, the validator could never fire on anything
+**The same tolerance validates the result.** `ValidateAreaFootprints` (opt-in via `--dump-footprints`)
+re-measures the finished areas with `WalkableFootprintGapArea` and warns (`ill-formed walkable footprint`)
+past the same 1 unit². Keep the two numbers equal. When the merge test was the looser of the two, the validator could never fire on anything
 the merger had just accepted, which is how the test49_pyrascew overclaim went unreported.
 
 ### Area geometry vs exported region

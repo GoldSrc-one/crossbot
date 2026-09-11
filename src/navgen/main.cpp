@@ -162,6 +162,9 @@ void PrintUsage(const char *argv0)
 		"                    floor face's normal z plus its 2D offset from the query point\n"
 		"  --dump-support    print every leaf fragment dropped as unsupported: floor centroid, floor\n"
 		"                    normal, fragment volume\n"
+		"  --dump-footprints re-measure every finished area with WalkableFootprintGapArea and warn\n"
+		"                    past 1 sq unit (debug: the gap subtraction multiplies its remainder per\n"
+		"                    floor face, so this stays off by default)\n"
 		"  --dump-path       print the waypoint plan for the debug route: per-waypoint clearance and\n"
 		"                    per-segment arc/line/gap rows, plus the profile summary line\n"
 		"  --dump-airmove    print air-move launch derivation: why no funnel launch was found, and every\n"
@@ -860,6 +863,7 @@ int main(int argc, char **argv)
 	bool dumpConns = false;
 	bool dumpSteps = false;
 	bool dumpSupport = false;
+	bool dumpFootprints = false;
 	bool dumpPath = false;
 	bool dumpAirmove = false;
 	bool dumpCarve = false;
@@ -929,6 +933,10 @@ int main(int argc, char **argv)
 		else if (arg == "--dump-support")
 		{
 			dumpSupport = true;
+		}
+		else if (arg == "--dump-footprints")
+		{
+			dumpFootprints = true;
 		}
 		else if (arg == "--dump-path")
 		{
@@ -1835,10 +1843,13 @@ int main(int argc, char **argv)
 
 		navgen::TagElevatorAreas(elevators, merged.areas);
 
-		size_t illFormedAreas = navgen::ValidateAreaFootprints(merged.areas);
-		if (illFormedAreas > 0)
-			std::printf("%s: %zu areas have an ill-formed walkable footprint\n",
-				bspPath.c_str(), illFormedAreas);
+		if (dumpFootprints)
+		{
+			size_t illFormedAreas = navgen::ValidateAreaFootprints(merged.areas);
+			if (illFormedAreas > 0)
+				std::printf("%s: %zu areas have an ill-formed walkable footprint\n",
+					bspPath.c_str(), illFormedAreas);
+		}
 
 		size_t walkConnsBuilt = navgen::BuildWalkConnections(merged.areas, merged.conns);
 		std::printf("%s: %zu candidate walk connections across shared floor seams\n",

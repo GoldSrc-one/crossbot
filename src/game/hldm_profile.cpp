@@ -16,12 +16,6 @@
 #include "hldm_weapons.h"
 #include "player_models.h"
 
-#if defined(_WIN32)
-#define CB_STRICMP _stricmp
-#else
-#define CB_STRICMP strcasecmp
-#endif
-
 namespace
 {
 	constexpr int kEnvExplosionNoDamage = 1;

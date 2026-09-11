@@ -4,6 +4,12 @@
 
 #include <type_traits>
 
+#if defined(_WIN32)
+#define CB_STRICMP _stricmp
+#else
+#define CB_STRICMP strcasecmp
+#endif
+
 class IGameProfile;
 
 namespace XPlay
@@ -26,6 +32,16 @@ bool FindMapBsp(const char *mapName, char *out, unsigned int size);
 int Current();
 void EnterGame(int iGame);
 void LeaveGame();
+
+struct ScopedGame
+{
+	explicit ScopedGame(int iGame) : prev(Current()) { EnterGame(iGame); }
+	explicit ScopedGame(const edict_t *ent) : prev(Current()) { EnterGame(OwnerOf(ent)); }
+	~ScopedGame() { EnterGame(prev); }
+	ScopedGame(const ScopedGame &) = delete;
+	ScopedGame &operator=(const ScopedGame &) = delete;
+	int prev;
+};
 
 bool Supported(int iGame);
 int PickRandomSupported();

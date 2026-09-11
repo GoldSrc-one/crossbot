@@ -22,51 +22,73 @@
 #include "../nav/nav.h"
 #include "../nav/nav_water.h"
 
-#if defined(_WIN32)
-#define CB_STRICMP _stricmp
-#else
-#define CB_STRICMP strcasecmp
-#endif
-
 namespace
 {
 	constexpr unsigned int kSuitBit = 1u << 31;
 
-	const char *PlayerNameOf(edict_t *ent) { return CBotPlayerNameOf(ent); }
-
-	struct ScopedGame
-	{
-		explicit ScopedGame(int iGame) : prev(XPlay::Current()) { XPlay::EnterGame(iGame); }
-		explicit ScopedGame(const edict_t *ent) : prev(XPlay::Current())
-		{
-			XPlay::EnterGame(XPlay::OwnerOf(ent));
-		}
-		~ScopedGame() { XPlay::EnterGame(prev); }
-		ScopedGame(const ScopedGame &) = delete;
-		ScopedGame &operator=(const ScopedGame &) = delete;
-		int prev;
-	};
-
-	bool IsLivePlayer(edict_t *ent) { return CBotIsLivePlayer(ent); }
+	using XPlay::ScopedGame;
 
 	edict_t *FindPlayerByName(const char *name)
 	{
 		for (int i = 1; i <= gpGlobals->maxClients; ++i)
 		{
 			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-			if (!IsLivePlayer(ent))
+			if (!CBotIsLivePlayer(ent))
 				continue;
-			if (CB_STRICMP(PlayerNameOf(ent), name) == 0)
+			if (CB_STRICMP(CBotPlayerNameOf(ent), name) == 0)
 				return ent;
 		}
 		return nullptr;
+	}
+
+	edict_t *FindPlayerOrComplain(const char *name)
+	{
+		edict_t *ent = FindPlayerByName(name);
+		if (!ent)
+		{
+			char msg[128];
+			snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", name);
+			SERVER_PRINT(msg);
+		}
+		return ent;
+	}
+
+	CBot *FindBotOrComplain(const char *name, edict_t *&ent)
+	{
+		ent = FindPlayerByName(name);
+		CBot *bot = ent ? BotManager::FindBot(ent) : nullptr;
+		if (!bot)
+		{
+			char msg[128];
+			snprintf(msg, sizeof(msg), "CrossBot: no bot named '%s'\n", name);
+			SERVER_PRINT(msg);
+		}
+		return bot;
+	}
+
+	template <typename ActFn>
+	void ForEachBot(ActFn act)
+	{
+		int bots = 0;
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!CBotIsLivePlayer(ent) || !BotManager::FindBot(ent))
+				continue;
+			++bots;
+			if (!act(ent))
+				return;
+		}
+
+		if (bots == 0)
+			SERVER_PRINT("CrossBot: no bots connected.\n");
 	}
 
 	void PrintInventory(edict_t *player, const BotInventory &inv)
 	{
 		char msg[320];
 		snprintf(msg, sizeof(msg), "CrossBot: %s carries %d weapon(s), nextAttack %.2f\n",
-			PlayerNameOf(player), inv.count, inv.nextAttack);
+			CBotPlayerNameOf(player), inv.count, inv.nextAttack);
 		SERVER_PRINT(msg);
 
 		unsigned int walked = 0;
@@ -116,14 +138,9 @@ namespace
 	{
 		if (CMD_ARGC() > 1)
 		{
-			edict_t *ent = FindPlayerByName(CMD_ARGV(1));
+			edict_t *ent = FindPlayerOrComplain(CMD_ARGV(1));
 			if (!ent)
-			{
-				char msg[128];
-				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(1));
-				SERVER_PRINT(msg);
 				return;
-			}
 
 			ScopedGame ctx(ent);
 			if (CBot *bot = BotManager::FindBot(ent))
@@ -143,7 +160,7 @@ namespace
 		for (int i = 1; i <= gpGlobals->maxClients; ++i)
 		{
 			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-			if (!IsLivePlayer(ent))
+			if (!CBotIsLivePlayer(ent))
 				continue;
 
 			CBot *bot = BotManager::FindBot(ent);
@@ -170,7 +187,7 @@ namespace
 			return false;
 		}
 
-		snprintf(msg, sizeof(msg), "CrossBot: gave %s to %s\n", classname, PlayerNameOf(player));
+		snprintf(msg, sizeof(msg), "CrossBot: gave %s to %s\n", classname, CBotPlayerNameOf(player));
 		SERVER_PRINT(msg);
 		return true;
 	}
@@ -183,15 +200,10 @@ namespace
 			return;
 		}
 
-		edict_t *ent = FindPlayerByName(CMD_ARGV(1));
-		CBot *bot = ent ? BotManager::FindBot(ent) : nullptr;
+		edict_t *ent = nullptr;
+		CBot *bot = FindBotOrComplain(CMD_ARGV(1), ent);
 		if (!bot)
-		{
-			char msg[128];
-			snprintf(msg, sizeof(msg), "CrossBot: no bot named '%s'\n", CMD_ARGV(1));
-			SERVER_PRINT(msg);
 			return;
-		}
 
 		float yawDelta = static_cast<float>(atof(CMD_ARGV(2)));
 		float pitchDelta = (CMD_ARGC() > 3) ? static_cast<float>(atof(CMD_ARGV(3))) : 0.f;
@@ -229,30 +241,26 @@ namespace
 		BotDiff::PrintStatus();
 	}
 
-	void Cmd_CrossBotVantageStatus()
+	const Vector *ParsePointOrNull(Vector &storage)
 	{
 		if (CMD_ARGC() < 4)
-		{
-			BotManager::PrintVantageStatus(nullptr);
-			return;
-		}
+			return nullptr;
 
-		Vector at(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
+		storage = Vector(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
 			static_cast<float>(atof(CMD_ARGV(3))));
-		BotManager::PrintVantageStatus(&at);
+		return &storage;
+	}
+
+	void Cmd_CrossBotVantageStatus()
+	{
+		Vector at;
+		BotManager::PrintVantageStatus(ParsePointOrNull(at));
 	}
 
 	void Cmd_CrossBotCampStatus()
 	{
-		if (CMD_ARGC() < 4)
-		{
-			BotManager::PrintCampStatus(nullptr);
-			return;
-		}
-
-		Vector at(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
-			static_cast<float>(atof(CMD_ARGV(3))));
-		BotManager::PrintCampStatus(&at);
+		Vector at;
+		BotManager::PrintCampStatus(ParsePointOrNull(at));
 	}
 
 	void Cmd_CrossBotTeamsStatus()
@@ -395,14 +403,9 @@ namespace
 	{
 		if (CMD_ARGC() > 1)
 		{
-			edict_t *ent = FindPlayerByName(CMD_ARGV(1));
+			edict_t *ent = FindPlayerOrComplain(CMD_ARGV(1));
 			if (!ent)
-			{
-				char msg[128];
-				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(1));
-				SERVER_PRINT(msg);
 				return;
-			}
 
 			ScopedGame ctx(ent);
 			if (!g_pGameProfile)
@@ -422,7 +425,7 @@ namespace
 
 			char msg[192];
 			snprintf(msg, sizeof(msg), "CrossBot: %s carries %d weapon(s), fov %.0f\n",
-				PlayerNameOf(ent), inv.count, ent->v.fov);
+				CBotPlayerNameOf(ent), inv.count, ent->v.fov);
 			SERVER_PRINT(msg);
 
 			for (int i = 0; i < inv.count; ++i)
@@ -492,31 +495,14 @@ namespace
 
 		if (CMD_ARGC() > 2)
 		{
-			edict_t *ent = FindPlayerByName(CMD_ARGV(2));
+			edict_t *ent = FindPlayerOrComplain(CMD_ARGV(2));
 			if (!ent)
-			{
-				char msg[128];
-				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(2));
-				SERVER_PRINT(msg);
 				return;
-			}
 			EquipPlayer(ent, classname);
 			return;
 		}
 
-		int bots = 0;
-		for (int i = 1; i <= gpGlobals->maxClients; ++i)
-		{
-			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-			if (!IsLivePlayer(ent) || !BotManager::FindBot(ent))
-				continue;
-			++bots;
-			if (!EquipPlayer(ent, classname))
-				return;
-		}
-
-		if (bots == 0)
-			SERVER_PRINT("CrossBot: no bots connected.\n");
+		ForEachBot([classname](edict_t *ent) { return EquipPlayer(ent, classname); });
 	}
 
 	bool SpawnNear(edict_t *player, const char *classname, float ahead)
@@ -537,14 +523,14 @@ namespace
 		if (!ent)
 		{
 			snprintf(msg, sizeof(msg), "CrossBot: could not spawn %s near %s\n", classname,
-				PlayerNameOf(player));
+				CBotPlayerNameOf(player));
 			SERVER_PRINT(msg);
 			return false;
 		}
 
 		snprintf(msg, sizeof(msg), "CrossBot: spawned %s #%d at (%.0f,%.0f,%.0f) near %s\n",
 			classname, g_engfuncs.pfnIndexOfEdict(ent), tr.vecEndPos.x, tr.vecEndPos.y,
-			tr.vecEndPos.z, PlayerNameOf(player));
+			tr.vecEndPos.z, CBotPlayerNameOf(player));
 		SERVER_PRINT(msg);
 		return true;
 	}
@@ -562,30 +548,14 @@ namespace
 
 		if (CMD_ARGC() > 2)
 		{
-			edict_t *ent = FindPlayerByName(CMD_ARGV(2));
+			edict_t *ent = FindPlayerOrComplain(CMD_ARGV(2));
 			if (!ent)
-			{
-				char msg[128];
-				snprintf(msg, sizeof(msg), "CrossBot: no player named '%s'\n", CMD_ARGV(2));
-				SERVER_PRINT(msg);
 				return;
-			}
 			SpawnNear(ent, classname, ahead);
 			return;
 		}
 
-		int bots = 0;
-		for (int i = 1; i <= gpGlobals->maxClients; ++i)
-		{
-			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-			if (!IsLivePlayer(ent) || !BotManager::FindBot(ent))
-				continue;
-			++bots;
-			SpawnNear(ent, classname, ahead);
-		}
-
-		if (bots == 0)
-			SERVER_PRINT("CrossBot: no bots connected.\n");
+		ForEachBot([classname, ahead](edict_t *ent) { return SpawnNear(ent, classname, ahead); });
 	}
 
 	void PrintLoadedGames()
@@ -756,7 +726,8 @@ namespace
 		return mesh;
 	}
 
-	void Cmd_CrossBotListItems()
+	template <typename PrintFn>
+	void ListCandidates(PrintFn print)
 	{
 		int iGame = -1;
 		const Nav::NavMesh *mesh = ListMesh(iGame);
@@ -764,40 +735,27 @@ namespace
 			return;
 
 		ScopedGame ctx(iGame);
-		BotItems::PrintCandidates(*mesh);
+		print(*mesh);
+	}
+
+	void Cmd_CrossBotListItems()
+	{
+		ListCandidates(BotItems::PrintCandidates);
 	}
 
 	void Cmd_CrossBotListFun()
 	{
-		int iGame = -1;
-		const Nav::NavMesh *mesh = ListMesh(iGame);
-		if (!mesh)
-			return;
-
-		ScopedGame ctx(iGame);
-		BotFun::PrintCandidates(*mesh);
+		ListCandidates(BotFun::PrintCandidates);
 	}
 
 	void Cmd_CrossBotListGoals()
 	{
-		int iGame = -1;
-		const Nav::NavMesh *mesh = ListMesh(iGame);
-		if (!mesh)
-			return;
-
-		ScopedGame ctx(iGame);
-		BotStrategic::PrintCandidates(*mesh);
+		ListCandidates(BotStrategic::PrintCandidates);
 	}
 
 	void Cmd_CrossBotListGates()
 	{
-		int iGame = -1;
-		const Nav::NavMesh *mesh = ListMesh(iGame);
-		if (!mesh)
-			return;
-
-		ScopedGame ctx(iGame);
-		BotDeploy::PrintGates(*mesh);
+		ListCandidates(BotDeploy::PrintGates);
 	}
 
 #ifdef CROSSBOT_BSPTRACE

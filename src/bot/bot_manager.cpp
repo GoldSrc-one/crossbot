@@ -64,14 +64,7 @@ namespace
 
 	constexpr float kGravityEpsilon = 0.01f;
 
-	struct ScopedGame
-	{
-		explicit ScopedGame(int iGame) : prev(XPlay::Current()) { XPlay::EnterGame(iGame); }
-		~ScopedGame() { XPlay::EnterGame(prev); }
-		ScopedGame(const ScopedGame &) = delete;
-		ScopedGame &operator=(const ScopedGame &) = delete;
-		int prev;
-	};
+	using XPlay::ScopedGame;
 
 	bool TouchDebugEnabled()
 	{
