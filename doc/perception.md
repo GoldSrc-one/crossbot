@@ -1045,7 +1045,7 @@ The sweep exists now, at hard and expert only. `BotDiff::BackCheck` gives `Apply
 weighted-random pick over `watch[0..3]` by `amount` turns the head to one of them for 0.4s before the
 ordinary logic takes it back. A pick within 60 degrees of where the bot already means to look is
 rejected and the period spent, so the glance is always at something the bot was *not* watching. At
-normal and easy the head still goes to `watch[0]` and stays there. See `bot_difficulty.cpp` in `doc/bot.md` for
+normal and easy the head still goes to `watch[0]` and stays there. See `bot_difficulty.cpp` in `doc/difficulty.md` for
 why it sits above the suspicion blend rather than inside this function, and for the measured rates.
 
 Footsteps narrow the remaining gap. A running enemy is heard at ~625 units regardless of facing, so a bot

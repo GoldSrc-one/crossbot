@@ -168,7 +168,7 @@ Prints the resolved tier and every row of the difficulty ladder with its effecti
 whether it came from the tier or from a pinned cvar. This is the only way to audit the ladder from
 a live server: every difficulty-derived cvar defaults to -1 and reads as "tier", so a stale
 `crossbot_aim_delay 0.25` left behind by a test script is otherwise invisible and silently
-overrides the difficulty for the rest of the session. See `doc/bot.md`, `bot_difficulty.cpp`.
+overrides the difficulty for the rest of the session. See `doc/difficulty.md`, `bot_difficulty.cpp`.
 
 The ladder itself is one global setting, `crossbot_difficulty` 0-3 (easy/normal/hard/expert),
 modelled on the CS bot's `cv_bot_difficulty`. Normal is the behaviour that predates it.
