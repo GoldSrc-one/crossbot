@@ -690,7 +690,7 @@ tripmine's orientation. Copying that flip here would make every bot prefer targe
 
 ### Teammates never reach the trace budget
 
-`Candidate` rejects anything `Teams::Attackable` says this bot may not shoot -- see `doc/game.md`,
+`Candidate` rejects anything `Teams::Attackable` says this bot may not shoot -- see `doc/games.md`,
 `teams.cpp`, for what that means and why it is a no-op on a deathmatch map. The gate goes here rather
 than downstream because "do the POV checks only for enemies" is both the behaviour and the cheaper
 arrangement: a rejected player never enters the weighted reservoir, never costs one of the two

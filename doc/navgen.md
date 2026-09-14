@@ -403,7 +403,7 @@ answer. `--no-drift` disables the whole feature.
 `BotManager::CheckDriftSpeeds` prints the warning when the two disagree, and it compares against the bot's
 own cap from `Bot_MaxSpeed`, never `sv_maxspeed` — under CrossPlay there is no server-wide ground speed
 to compare against, and the cvar read the engine default 320 on a server whose bots ran at 270, which is
-exactly the case the warning exists to catch (`doc/bot.md`). One line per distinct speed, capped at
+exactly the case the warning exists to catch (`doc/manager.md`). One line per distinct speed, capped at
 `kMaxDriftSpeeds`, because two bots in different hosted games legitimately differ. The check re-arms every
 frame instead of firing once: a bot's cap is only known after its first `PM_Move`, so a one-shot check on
 the first frame a bot exists would read the cold fallback. It costs a bounded scan of live bots against a

@@ -6,16 +6,16 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_add [gamedir|*] [name] [model|team]` — add a bot to a loaded game. The first argument is
   always the game directory; `*` or nothing picks a random playable one, and an unknown name lists
   what is loaded. A game is playable only with both gamedata and a game profile — see
-  `doc/crossplay.md`. The third argument belongs to that game's profile rather than to this command:
+  `doc/games.md`. The third argument belongs to that game's profile rather than to this command:
   in deathmatch it is a player model, and in a team mod it will be a team. `*` or nothing means the
   profile chooses — a random installed model in deathmatch. A model the scan did not find is a
   warning rather than a refusal: it prints the installed list and uses the name anyway, because
-  models living inside a `.pak` are invisible to the scan. See `doc/game.md`, `player_models.cpp`,
+  models living inside a `.pak` are invisible to the scan. See `doc/games.md`, `player_models.cpp`,
   for where the list comes from and why CrossPlay may clamp the result.
 - `crossbot_nav_goal <x> <y> <z>` — send all bots to a point
 - `crossbot_teleport <x> <y> <z>` — teleport all bots
 - `crossbot_kill` — suicide every bot; the only way to exercise the respawn path from the console
-- `crossbot_nav_status` — the runtime planner's own answer; see `doc/movement.md`, `PrintNavStatus`
+- `crossbot_nav_status` — the runtime planner's own answer; see `doc/manager.md`, `PrintNavStatus`
 - `crossbot_waypoints` — full waypoint list per bot
 - `crossbot_nav_penalties` — connections with a nonzero `runtimePenalty`, and the total
 - `crossbot_list_spawns` / `crossbot_list_targets` — entity positions, for picking a goal by hand
@@ -53,7 +53,7 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   range class is what bends routing toward ground the gun can use (`doc/goals.md`, "Range bias") and the
   scope FOV is what decides whether a camp spot is worth zooming into. With a player name, joins that
   player's carried weapons against their specs and flags any classname that disagrees, which is the
-  one way the id-keyed table can be wrong; see `doc/game.md`, `weapon_spec.h`
+  one way the id-keyed table can be wrong; see `doc/games.md`, `weapon_spec.h`
 - `crossbot_equip <classname> [name]` — spawn an item at the target's feet and touch them with it,
   which is what the game's own `give` does. Default target is every bot
 - `crossbot_spawn <classname> [name] [distance]` — spawn a loose entity in front of the target instead of
@@ -158,7 +158,7 @@ it appears from both sides of the aim-queue boundary and means the same thing on
 
   **The pin also equips.** While one is set, a bot that does not carry the pinned weapon is given it,
   and one that carries it with the pinned mode out of ammo is given ammo for that mode
-  (`IGameProfile::AmmoEntity`, see `doc/game.md`). It gives only when the mode is *unusable*, never on
+  (`IGameProfile::AmmoEntity`, see `doc/games.md`). It gives only when the mode is *unusable*, never on
   a timer, so reloading and clip depletion stay real and only permanent starvation is removed. Before
   this, an RPG run reached one rocket per bot per life.
 
@@ -175,7 +175,7 @@ modelled on the CS bot's `cv_bot_difficulty`. Normal is the behaviour that preda
 ## Every dump needs a game context
 
 A console command runs at `gCaller == -1` with **no game entered**: `g_pGameProfile` is null and
-`CBotPrivateData` returns null for every entity (see `doc/crossplay.md`). Bot code never sees that
+`CBotPrivateData` returns null for every entity (see `doc/games.md`). Bot code never sees that
 state, because `BotManager::StartFrame` enters a game around each bot's think, so anything a dump
 reuses from the bot side meets both for the first time when the dump calls it.
 
@@ -291,7 +291,7 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   `tfc` or `dod`. With it on a bot never sights, chases, retaliates against or detonates a satchel on
   anything that is not a confirmed enemy; with it off every gate returns "attackable" and the bot
   behaves as it always has. It is the A/B switch for the whole feature — on a `valve` map the two
-  settings must be indistinguishable. See `doc/game.md`, `teams.cpp`
+  settings must be indistinguishable. See `doc/games.md`, `teams.cpp`
 - `crossbot_combat` — the combat state. Default 1. With it on, a bot that sees an enemy (or is shot
   by one) drops whatever it was walking to and repositions locally instead, until the enemy dies,
   vanishes, stops being sensed, or goes 5s unseen. With it off the bot never enters the state and

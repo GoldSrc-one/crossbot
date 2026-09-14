@@ -90,7 +90,7 @@ default) leaves it off. The `Repath` line reports `careful=`, `route=` (true sec
 ### Range bias
 
 Carefulness has a mirror. Every weapon is annotated `RANGE_CLOSE` or `RANGE_LONG` in `WeaponSpec`
-(`doc/game.md`), and `Bot_RangeBias` turns the held weapon's class into a `NavPlan::RangeBias` whose
+(`doc/games.md`), and `Bot_RangeBias` turns the held weapon's class into a `NavPlan::RangeBias` whose
 weight is `readiness` scaled by `crossbot_range_pref` -- the complement of carefulness, which scales
 by `(1 - readiness)`. The two multiply, so neither is lost: a hurt, badly armed bot ignores weapon
 range and just avoids exposed ground, while a healthy, well armed one shapes its route to suit what it
@@ -553,7 +553,7 @@ and not part of a profile.
 
 `bot_goal` is not a registered entity class anywhere. It is a bare `info_target` whose
 `pev->classname` the plugin rewrites at runtime, so **only `entvars_t` fields carry meaning, and no
-game context is needed to read one** — `doc/crossplay.md` rule 3 does not apply, nothing here
+game context is needed to read one** — `doc/games.md` rule 3 does not apply, nothing here
 touches private data.
 
 | field | meaning |
@@ -616,7 +616,7 @@ gather-only behaviour.
 
 **This is entirely a runtime feature. No nav format change, no `kNavVersion` bump, no navgen work.**
 Everything a fun goal needs is either a plain `entvars_t` field or an offset already present in
-`gamedata/valve-win.json` (`doc/game.md`, gamedata.cpp).
+`gamedata/valve-win.json` (`doc/games.md`, gamedata.cpp).
 
 ### Switches outrank everything else in the tier
 

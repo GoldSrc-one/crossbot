@@ -244,7 +244,7 @@ The numbers come from `external/hlsdk-full/dlls/gauss.cpp`:
 Nothing in the policy names the gauss or the crossbow. A charge weapon is one whose
 `secondary.fire == FIRE_CHARGE` and a scope weapon is one with a `primaryZoomed` and a `TOGGLE_ZOOM`
 secondary, both read straight off the spec table. In HLDM those resolve to exactly the gauss and the
-crossbow, and any other game gets sensible behaviour for free. This also keeps `doc/game.md`'s
+crossbow, and any other game gets sensible behaviour for free. This also keeps `doc/games.md`'s
 rejection of a `selfPush` weapon quirk intact: the push is modelled in `bot_gauss.cpp`, in the bot,
 not in the spec.
 

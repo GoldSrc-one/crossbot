@@ -552,7 +552,7 @@ than it would buy. It is the honest cost of throwing immediately instead of cook
 
 A bot that releases the trigger the instant `RayOnTarget` fails stutters in a way no human does. A
 player holding an MP5 does not blip the trigger every time the crosshair crosses the edge of a hitbox,
-and does not stop the moment someone steps behind a doorframe. `WPN_Q_STICKY` (see `doc/game.md` for
+and does not stop the moment someone steps behind a doorframe. `WPN_Q_STICKY` (see `doc/games.md` for
 which seven modes carry it and why it is not a `cycleTime` field) says the trigger may stay down.
 
 The condition is `gpGlobals->time - bot.sense.targetTime <= kStickyWindow`, half a second.
@@ -691,7 +691,7 @@ one weapon exercises both paths, which is exactly what makes the pinned hornetgu
 A `WPN_Q_THROW_ARC` mode does not have a launch direction and a launch speed. It has **one**
 parameter, and `IGameProfile::ThrowLaunch` is the map from it: the pitch the bot is holding goes in,
 the elevation and speed the grenade leaves at come out. The five coefficients behind that live in
-`CHLDMProfile` (see `doc/game.md`), so nothing here knows a number that belongs to a weapon.
+`CHLDMProfile` (see `doc/games.md`), so nothing here knows a number that belongs to a weapon.
 
 Which means `SolveArc`'s closed form does not apply — it assumes a fixed `v` and solves for the angle,
 and here `v` is a function of the angle. What replaces it is a scan, and the scan is cheap because
@@ -862,7 +862,7 @@ pins the mode order to one entry so selection cannot switch modes underneath it.
 Zoomed crossbow primary in multiplayer is `FireSniperBolt()` — a hitscan trace for a flat 120 — so
 zooming does not sharpen the same shot, it swaps `AIM_LEAD` for `AIM_TARGET`. `ModeOf` gains a
 `zoomed` argument and the `(zoomed && spec->primaryZoomed.fire) ? ... : spec->primary` one-liner from
-`doc/game.md` is finally reachable instead of aspirational.
+`doc/games.md` is finally reachable instead of aspirational.
 
 **Zooming costs turn rate and buys precision, and `FovScale` prices both.** It divides hand speed by
 `fov / 90`, so at the crossbow's fov 20 the bot's peak turn rate falls from roughly 450°/s to 100°/s —
@@ -897,7 +897,7 @@ returns early whenever the held weapon still works.
 
 Two numbers rank a weapon, applied in that order.
 
-**Score** is `WeaponSpec::value`, the static ladder already in the weapon table (`doc/game.md`,
+**Score** is `WeaponSpec::value`, the static ladder already in the weapon table (`doc/games.md`,
 "`value` is the one field that fails the criterion on purpose"): 0.5 for gauss, egon and crossbow, 0.3
 for RPG and mp5, 0.2 for shotgun, hornetgun and python, 0.1 for everything else. Selection keeps only
 the candidates at the single highest score present and discards the rest outright. There is no
@@ -1164,5 +1164,5 @@ the mask agree, the offsets are good. Bit 31 is excluded because `WEAPON_SUIT` s
 not an inventory entity, so it can never appear in the walk.
 
 Which of a weapon's two modes those numbers belong to, and what the bot is supposed to do with the
-button, is not here — that is `weapon_spec.h` in `doc/game.md`. This file answers "what am I holding",
+button, is not here — that is `weapon_spec.h` in `doc/games.md`. This file answers "what am I holding",
 that one answers "how is it operated".

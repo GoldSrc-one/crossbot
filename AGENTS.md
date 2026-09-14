@@ -4,7 +4,7 @@ CrossBot is a Metamod plugin for GoldSrc (Half-Life 1) that adds navigation-mesh
 
 It runs inside **CrossPlay**, a hyper-game that loads several real game DLLs into one HLDS at once, so
 every bot belongs to a game and the plugin talks to game state through `crossplay_api.h` — see
-`doc/crossplay.md` before touching anything that reads private data or calls into a game DLL.
+`doc/games.md` before touching anything that reads private data or calls into a game DLL.
 
 How the systems actually work lives in `doc/`. This file is build, commands and house rules only. If you find yourself explaining behaviour here, it belongs in `doc/`.
 
@@ -35,7 +35,7 @@ How the systems actually work lives in `doc/`. This file is build, commands and 
   game (**CrossPlay's, not ours**), plus `nav/<map>.nav` and `trace/` under
   `crossplay/addons/crossbot/`, which `build.bat` creates. A game with missing or wrong gamedata is
   disabled for bots with a printed reason; a bad offset **read** still kills the server on purpose —
-  see `doc/game.md`, `gamedata.cpp`.
+  see `doc/games.md`, `gamedata.cpp`.
 
 - **Coordinates (GoldSrc / Hammer):** X = East, Y = North, Z = Up (right-handed). The SVG debug view
   flips Y (screen Y down), so world Y+ = North = SVG Y-.

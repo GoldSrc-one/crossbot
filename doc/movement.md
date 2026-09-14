@@ -215,7 +215,7 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
 - `Bot_Physics` reads sv_airaccelerate, sv_accelerate, sv_friction, sv_stopspeed, sv_edgefriction and
   sv_maxvelocity, so plan-time physics match a non-default server. Only the first three were read
   before, which silently diverged the profile from the engine. It does *not* read `sv_gravity` — the
-  800 is `PmSim::kGravity` (see `doc/game.md`) — but it does multiply by `pev->gravity`, which is what
+  800 is `PmSim::kGravity` (see `doc/games.md`) — but it does multiply by `pev->gravity`, which is what
   `trigger_gravity` writes onto the player.
 - `Bot_PushFields` snapshots the live `trigger_push` entities into a `PmSim::PmPushFn` once per plan,
   so `JumpLandsIn` simulates a launch through a push field the same way navgen sampled it. A field

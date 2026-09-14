@@ -52,7 +52,7 @@ once at the end — concurrent read-modify-write on it loses results.
 tests share the install with any real server you run there. What they write is deliberately narrow:
 maps into `valve\maps\`, nav and traces under `crossplay\addons\crossbot\`, and a uniquely-named
 `-ConfigName` cfg into `crossplay\`. They never touch `server.cfg`, `mapcycle.txt`, `liblist.gam` or
-`plugins.ini` — see `doc/crossplay.md`.
+`plugins.ini` — see `doc/games.md`.
 
 Two preflight warnings come out of the same script: the plugin is not listed in
 `crossplay\addons\metamod\plugins.ini` (so it will not load at all), or the deployed
@@ -144,7 +144,7 @@ and `-ConfigPrefix` telling the two suites apart). `test_nav_goal_all.ps1` keeps
 gallery `index.html`.
 
 Kept, not cut: `nav_spawn_test.ps1` / `nav_target_test.ps1` stay as the only drivers that assert on
-the `reached goal` log line (see `doc/bot.md`), and the single-use flags (`-GatherDebug`,
+the `reached goal` log line (see `doc/diagnostics.md`), and the single-use flags (`-GatherDebug`,
 `-FunDebug`, `-NoGather`, `-SkipRoam`, `-Full`) stay — each gates one rcon line, and deleting the
 flag just moves the same line into a chat message.
 
@@ -1032,7 +1032,7 @@ whichever zone was running when it started.
 ### Profile with `-DCROSSBOT_VERBOSE=OFF` unless you are measuring the logging
 
 A `SERVER_PRINT` costs ~700us on the redirected pipe, so a chatty path measures its own logging. The
-`rp_log` zone was the worst offender until it was compiled out (`doc/bot.md`, `bot_log.cpp`). A
+`rp_log` zone was the worst offender until it was compiled out (`doc/diagnostics.md`, `bot_log.cpp`). A
 profiling build wants both flags:
 
 ```
@@ -1060,7 +1060,7 @@ uProf 5.3:
   find out.
 - **The translated database does carry time buckets, and that is the way in.** See below.
 
-uProf still cannot see a frame boundary, and per `doc/bot.md` its call graph dead-ends in unsymbolised
+uProf still cannot see a frame boundary, and per `doc/diagnostics.md` its call graph dead-ends in unsymbolised
 `swds.dll`, so engine time never attributes back to the plugin call that asked for it.
 `crossbot_perf_spike` remains the tool for attributing a frame. What uProf adds is the one thing the
 zone profiler structurally cannot see: time the game thread spent **not running at all**.
