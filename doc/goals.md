@@ -376,7 +376,7 @@ that on a small map with several bots, fun goals get re-selected often. Fighting
 A bot walking to a goal that senses something **closing in on it** breaks off to a camp spot that is
 still on the way, holds there facing the direction the spot was measured at, and resumes as soon as
 nothing is getting closer any more. `NavMesh::camps` had been carried by the `.nav` since v21 with no
-consumer (*nav_camp.h* below); this is the consumer.
+consumer (`doc/navgen.md`, `nav_camp.h`); this is the consumer.
 
 Two constraints shaped it, and everything else follows from them:
 
@@ -517,28 +517,6 @@ fill), `crossbot_camp_zoom_dist` (768, the range below which a scope buys nothin
 `crossbot_camp_debug` (0, gates the per-retarget route line and the scare transitions; the commit,
 arrival and leave lines are plain `BOT_VLOG`).
 
-## nav_camp.h
-
-### Camp spots are carried, not consumed
-navgen picks a reduced list of camp spots -- position, one facing, and four arc ratios per stance --
-and the loader lands them on `NavMesh::camps` as a flat vector. The runtime consumer is
-*bot_camp.cpp* above; `crossbot_camp_status` and `--dump-camp-svg` on the
-navgen side are still how you look at the data itself.
-
-There is deliberately no spatial index, and the consumer that arrived did not need one. `FindAreaExact`
-is still a linear scan and camp spots are a hundred-odd records, so the one pass over `mesh.camps` runs
-once per retarget rather than per frame; the vantage field got a CSR grid only because it is blended
-per bot at 10 Hz. Measured on crossfire: 114 camps, and the pass keeps between 4 and 79 of them
-depending on where the bot is and how far off its target is.
-
-### Why this is not part of the vantage field
-The vantage field is a *continuous* signature: `exposure` and the watch cones are properties of a
-neighbourhood, so IDW between the four nearest samples gives a meaningful answer anywhere. Camping is
-discrete. The midpoint between two camping spots is usually not a camping spot, and the old `focus[4]`
-was measured around each probe's own `watch[0]`, so blending two probes with different main directions
-blended two numbers that were never about the same facing. `focus[]` is gone from the format.
-
-## bot_strategic.cpp
 
 The top tier's only producer, and a deliberate stepping stone. CrossBot plays `valve` rules on maps
 that belong to `cstrike`, `tfc` and `dod`, where it knows nothing about what the map is *for*. That
@@ -973,3 +951,4 @@ pipeline, and a nudge back toward the deck centre when drift exceeds `kTrainCent
 bots slide off on the curves). Boredom is the tank's rule unchanged. Dismount looks each frame for a
 nav area within `kTrainHopRange` of either side and no more than `kTrainSafeDrop` below, then jumps
 onto it; `kTrainRideMax` forces a bail if nothing qualifies for a full minute.
+

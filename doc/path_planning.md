@@ -1026,27 +1026,6 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
   brush until it dies. The plan's `openSeconds` (`health * 0.1`) is only the ETA estimate; the runtime
   decides for itself whether the entity is breakable at all, from `takedamage` and `health`. See `doc/movement.md`
 
-### Activation at runtime
-`src/bot/bot_move_nav.cpp` services activation waypoints; see `doc/navgen.md` for how the detour is built.
-
-- **Barrier.** `NavFollow::Config` carries `sLimit` and `sFloor`, both arc lengths from
-  `NavPlan::ProfileWaypointS`. They exist because a detour doubles back on itself: the outbound and return
-  legs are collinear in XY, so `ProjectOntoProfile` cannot tell them apart by distance and resolves the tie
-  in favour of the lower `s`. Without `sLimit` the bot's `s` jumps to the return leg and it never stands on
-  the activator (worse on first acquisition, which searches the whole profile); without `sFloor` it can never
-  leave the outbound leg afterwards and stalls in place. `sLimit` is the next unserviced activation *or
-  pending elevator ride*, `sFloor` the last serviced one, both computed in one pass over the waypoints each
-  frame. A ride is the same tie in its extreme form — its two waypoints share an XY exactly, so the
-  segment between them has zero length and does not exist in the profile at all; see `doc/movement.md`
-- **Press.** `RunActivation` takes over the frame inside `kActivationEngageRadius`, aims at `activatorCenter`
-  in pitch and yaw, and emits a single `IN_USE` rising edge once the aim converges and the bot is within
-  `kActivationUseRange` of the centre in 3D. One edge, not a held button — repeated presses would toggle a
-  toggle-style button back off. It then holds for the door's `buttonWaitTime` before releasing the barrier
-- **Triggers** need no press, only arrival, so they are serviced by proximity before `Track` runs
-- **Memo.** Serviced activators are remembered by centre for `kActivationMemory` seconds. This is what stops a
-  mid-detour repath from pressing twice (waypoint indices change, world state does not), and what makes a
-  failed press retry on its own once the memo lapses
-
 ### Constants
 - `kPlanClearance = 16` - player hull radius; gates inset by this at ends and pushed this far off connection plane
 - `kPlanClampedClearance = 6.63` - corner-cut budget at a clamped gate, `16*(sqrt(2)-1)`: the diagonal
@@ -1530,3 +1509,4 @@ PM_AirAccelerate, wish speed capped at 30, so it can only ever nudge a trajector
 During planning, `gravityMultiplier` filters air moves the same way `PlanWalker::Cross` does, so goal selection and route search agree about which jumps exist. The filter is applied at the Dijkstra stage when selecting goals.
 
 When the bot is at a different gravity than an air move was sampled for, that air move simply does not exist in the planner's view of the graph. Only the air moves matching the bot's current gravity are available for planning.
+

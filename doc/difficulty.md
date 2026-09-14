@@ -149,8 +149,7 @@ predicted reads at expert, 0 at normal.
 ### The back-check
 
 A periodic weighted-random glance at a watch direction the bot would not otherwise look at, weighted
-by `watch[i].amount`, re-rolled every period and held for `kBackCheckHold = 0.4s`. This closes the
-sweep gap named below.
+by `watch[i].amount`, re-rolled every period and held for `kBackCheckHold = 0.4s`. This closes the sweep gap described in `doc/perception.md`, "Two gaps worth knowing about".
 
 **It sits above the suspicion blend, not inside `ApplyVantageLook`.** The first attempt put it in the
 vantage branch, which is only reached when there is no live suspicion at all -- and in a busy

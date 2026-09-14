@@ -107,7 +107,7 @@ scales them the same way it scales `kMaxAccelYaw`:
 | 20 (crossbow) | 0.0995 deg | 576u | +/- 7u |
 
 **This is the reason zoom is worth anything to a bot.** Before it existed, `FovScale` priced zoom as pure
-cost -- see "Zoom is a range decision" below -- and a bot that zoomed simply turned 4.5x slower for a mode
+cost -- see "Zoom is a range decision" in `doc/combat.md` -- and a bot that zoomed simply turned 4.5x slower for a mode
 swap. Now the same 4.5x buys 4.5x finer placement. Measured on a 40 degree flick, ten samples each: mean
 resting error 0.299 degrees at fov 90 against 0.052 at fov 20, for settle times of 0.180s and 0.393s. Peak
 hand speed came out 414 and 891 deg/s -- the fov 20 figure matching the 890 of a 180 at fov 90, because a 40

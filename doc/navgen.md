@@ -1289,6 +1289,30 @@ the stage is 8-59 s and the complexity is not yet worth it.
 Determinism has two other requirements: the priority queue breaks score ties on candidate index, and the
 climb breaks neighbour ties on candidate index.
 
+
+## nav_camp.h
+
+### Camp spots are carried, not consumed
+navgen picks a reduced list of camp spots -- position, one facing, and four arc ratios per stance --
+and the loader lands them on `NavMesh::camps` as a flat vector. The runtime consumer is
+*bot_camp.cpp* above; `crossbot_camp_status` and `--dump-camp-svg` on the
+navgen side are still how you look at the data itself.
+
+There is deliberately no spatial index, and the consumer that arrived did not need one. `FindAreaExact`
+is still a linear scan and camp spots are a hundred-odd records, so the one pass over `mesh.camps` runs
+once per retarget rather than per frame; the vantage field got a CSR grid only because it is blended
+per bot at 10 Hz. Measured on crossfire: 114 camps, and the pass keeps between 4 and 79 of them
+depending on where the bot is and how far off its target is.
+
+### Why this is not part of the vantage field
+The vantage field is a *continuous* signature: `exposure` and the watch cones are properties of a
+neighbourhood, so IDW between the four nearest samples gives a meaningful answer anywhere. Camping is
+discrete. The midpoint between two camping spots is usually not a camping spot, and the old `focus[4]`
+was measured around each probe's own `watch[0]`, so blending two probes with different main directions
+blended two numbers that were never about the same facing. `focus[]` is gone from the format.
+
+## bot_strategic.cpp
+
 ## work_pool.cpp
 
 Shared static work-binning used by both threaded stages. Three pieces:
@@ -1558,7 +1582,7 @@ with six `func_breakable` and no blockers at all, spent 22 of its 30 passable sp
 are geometrically identical to their parent, so keeping the parent is exact and strictly coarser.
 
 **This is the carve that made the four 25th-anniversary maps unbuildable.** Unlike the ladder carve it uses
-the clipnode tree, so it hit the escape-to-map-radius bug described under "func_ladder" above: a piece whose
+the clipnode tree, so it hit the escape-to-map-radius bug described under "The volumes are carved out of the walkable leaves" above: a piece whose
 faces degenerate below three vertices loses the plane that bounded it, and the next clip rebuilds its cut
 face from `BaseWindingForPlane(plane, mapRadius)`. On `disposal` 439 of 727 carves came back with **more**
 volume than they were given, the worst by 7.3e10x — one 8-face 3,090,431 cu.unit leaf carved into a

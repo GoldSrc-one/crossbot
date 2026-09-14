@@ -116,6 +116,39 @@ would restore twice.
 `ServerActivate` and `ServerDeactivate` need no context; they call `XPlay::DetectProfiles()` and
 `XPlay::ForgetProfiles()`.
 
+
+## Every dump needs a game context
+
+A console command runs at `gCaller == -1` with **no game entered**: `g_pGameProfile` is null and
+`CBotPrivateData` returns null for every entity (see `doc/games.md`). Bot code never sees that
+state, because `BotManager::StartFrame` enters a game around each bot's think, so anything a dump
+reuses from the bot side meets both for the first time when the dump calls it.
+
+`crossbot_list_items` did exactly that and killed the server on every call, with or without bots
+connected: `BotItems::PrintCandidates` calls `g_pGameProfile->ClassifyItem` on the first entity it
+reaches, which is a call through a null vtable. The symptom hid the cause. HLDS printed nothing and
+reloaded the level instead of dying visibly, which reads like a bad console line or a stray
+`pfnTraceModel` rather than a missing context.
+
+The silent half was worse. `crossbot_list_fun` never crashed, because `ChainTerminal` null-checks the
+profile before asking it for a terminal — it simply returned false for every switch, and `BuildTable`
+dropped them all. That table is cached per map, so one `crossbot_list_fun` run before the first bot
+connected left the bots with no switch or trigger goal for the rest of the map: on `crossfire`, 2
+entries instead of 3, with the nuke missing. `crossbot_list_gates` degrades the same way, since
+`GateHasMine` returns false with no profile and `mined` can never appear.
+
+`ListMesh` in `commands.cpp` therefore resolves both halves of the precondition for every mesh-backed
+dump — the nav mesh, then a playable game, the map owner where it is playable and otherwise the first
+one that is — and each command enters it with `ScopedGame` before calling into bot code. That is the
+shape `PrintMonsters` already used. `crossbot_list_spawns` and `crossbot_list_targets` read only
+`pev` fields through the engine and need none of it.
+
+`BotItems::PrintCandidates` also refuses to run without a profile rather than faulting. The dump is
+the one place that code is reachable with no bot in the picture, and a printed line beats a level
+reload.
+
+## No console line may reach 1024 characters
+
 ## Rules
 
 1. **Never write `gEntityOwners`.** CrossPlay owns it; it stamps ownership from `gCaller` in
@@ -223,8 +256,7 @@ takes `ammo_ARgrenades` while its clip takes `ammo_9mmAR`; the gauss and the ego
 two different classnames; and the handgrenade, snark, tripmine and satchel are their own ammo, so the
 mapping returns the weapon classname back.
 `EvaluateCombat(pEdict, inv)` scores how ready a bot is to fight, in `[0,1]`, and is the only input
-that decides whether an enemy or an item wins a goal selection — see `doc/goals.md`, "Readiness is what
-makes the comparison mean anything". It is mod policy rather than geometry for the obvious reason: what
+that decides whether an enemy or an item wins a goal selection — see `doc/goals.md`, "Carefulness". It is mod policy rather than geometry for the obvious reason: what
 counts as well-armed is entirely a property of the game's weapon set.
 
 It is the one profile method that takes a `BotInventory`. `game_profile.h` forward-declares the struct
@@ -707,8 +739,7 @@ It is here anyway because it answers a question no runtime observation can. It h
 they want the same number for different reasons:
 
 - `EvaluateCombat` asks how dangerous the bot is *in total*, to decide whether to go looking for a
-  fight — see above and `doc/goals.md`, "Readiness is what makes the comparison mean
-  anything". That is a property of the whole inventory.
+  fight — see above and `doc/goals.md`, "Carefulness". That is a property of the whole inventory.
 - `BotFire`'s weapon selection asks which of the guns in the bag is worth holding. That is ranking guns
   you are *not* holding, which is precisely what the rejected list said this table would not do.
 
@@ -1096,3 +1127,4 @@ merely survived.
 The other half of that check is `crossbot_weaponspec <name>`, which compares each spec's `classname`
 against `CBotClassOf` on the live weapon entity. Getting an id wrong is the one mistake this file can
 make, and a live join is the only thing that catches it.
+

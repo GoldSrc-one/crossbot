@@ -864,6 +864,28 @@ Driven by the barrier index rather than bot.waypointIndex, because a ride waypoi
 profile segment: on test18_elevator the funnel corner before the board point shares its XY, so the
 segment that reaches the shaft carries the corner's index and the ride's index never appears at all.
 
+
+### Activation at runtime
+`src/bot/bot_move_nav.cpp` services activation waypoints; see `doc/navgen.md` for how the detour is built.
+
+- **Barrier.** `NavFollow::Config` carries `sLimit` and `sFloor`, both arc lengths from
+  `NavPlan::ProfileWaypointS`. They exist because a detour doubles back on itself: the outbound and return
+  legs are collinear in XY, so `ProjectOntoProfile` cannot tell them apart by distance and resolves the tie
+  in favour of the lower `s`. Without `sLimit` the bot's `s` jumps to the return leg and it never stands on
+  the activator (worse on first acquisition, which searches the whole profile); without `sFloor` it can never
+  leave the outbound leg afterwards and stalls in place. `sLimit` is the next unserviced activation *or
+  pending elevator ride*, `sFloor` the last serviced one, both computed in one pass over the waypoints each
+  frame. A ride is the same tie in its extreme form — its two waypoints share an XY exactly, so the
+  segment between them has zero length and does not exist in the profile at all; see `doc/movement.md`
+- **Press.** `RunActivation` takes over the frame inside `kActivationEngageRadius`, aims at `activatorCenter`
+  in pitch and yaw, and emits a single `IN_USE` rising edge once the aim converges and the bot is within
+  `kActivationUseRange` of the centre in 3D. One edge, not a held button — repeated presses would toggle a
+  toggle-style button back off. It then holds for the door's `buttonWaitTime` before releasing the barrier
+- **Triggers** need no press, only arrival, so they are serviced by proximity before `Track` runs
+- **Memo.** Serviced activators are remembered by centre for `kActivationMemory` seconds. This is what stops a
+  mid-detour repath from pressing twice (waypoint indices change, world state does not), and what makes a
+  failed press retry on its own once the memo lapses
+
 ### RunActivation ordering
 Ahead of RunActivation, since a board point can sit inside the engage radius of a later button.
 
@@ -1941,3 +1963,4 @@ Push-field seeds have to launch at the boundary: backing up first only spends th
 ### Preview path at lowest gravity
 
 A bot only ever holds one gravity multiplier. The lowest one the map hands out is the one that unlocks the most air moves. During offline path preview (`--dump-path`), navgen samples at the lowest gravity multiplier found, so a map whose route exists only under a trigger_gravity does not read as unroutable offline.
+
