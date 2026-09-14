@@ -713,7 +713,7 @@ collapses what its faces and pieces produce for the same pair to the lowest-fall
 it used to do the same, so two separate ladders joining the same pair of areas became one connection —
 and once `*1` dismounted on test52_avoid, it replaced `*2` outright, because it is processed first and
 ties on fall damage. A single edge cannot be routed around: the bot's runtime `LadderBlocked` probe
-penalises the connection it is on (see `doc/bot.md`), and with one connection that penalty only makes the
+penalises the connection it is on (see `doc/path_planning.md`), and with one connection that penalty only makes the
 same ladder dearer. Parallel edges between one pair are fine for the planner, which walks connection lists
 and never looks a connection up by its endpoints.
 
@@ -937,7 +937,7 @@ skipped; negative `dmg` (healing) never qualifies.
 
 Healing volumes stay entirely out of navgen. They are not solid in any hull, so they carve nothing
 and split nothing, and the runtime finds them by edict scan with no baked data at all — see
-`ITEM_HEALVOLUME` in `doc/bot.md`. `pool_party` is the map to check this on: its `dmg 200` volume is
+`ITEM_HEALVOLUME` in `doc/goals.md`. `pool_party` is the map to check this on: its `dmg 200` volume is
 the one lethal trigger navgen reports, and its `dmg -40` pool never appears.
 
 **Why the leaf stage and not reachability.** The obvious place for this is a connection cut plus the
@@ -998,7 +998,7 @@ allows standing costs nothing, while standing in a spot that does not wedges the
 ### What a vantage is
 A sampled eye position carrying a visibility signature: where a bot standing there should watch, how exposed the spot is, and how much of that exposure a single facing covers. `BuildVantages` runs after `PruneUnreachableAreas` (which renumbers areas), and since the field became a `.nav` section it runs on **every** navgen invocation unless `--no-vantage` is passed.
 
-**That is not free, and it is now the dominant cost of a run.** On crossfire the whole invocation went from 8.8s to 47.8s at `--threads 13`; 38.7s of that is the vantage field, and 36.4s of *that* is the pair loop. The full 50-map test sweep in `generate_all_svgs.ps1` runs in 164s. `--no-vantage` exists for iterating on unrelated navgen stages, and the `.nav` it writes is valid — bots simply fall back to no idle look and unweighted senses (`doc/bot.md`, *Where the bot looks when it has no target*).
+**That is not free, and it is now the dominant cost of a run.** On crossfire the whole invocation went from 8.8s to 47.8s at `--threads 13`; 38.7s of that is the vantage field, and 36.4s of *that* is the pair loop. The full 50-map test sweep in `generate_all_svgs.ps1` runs in 164s. `--no-vantage` exists for iterating on unrelated navgen stages, and the `.nav` it writes is valid — bots simply fall back to no idle look and unweighted senses (`doc/perception.md`, *Where the bot looks when it has no target*).
 
 | Field | Meaning |
 | --- | --- |
@@ -1136,7 +1136,7 @@ camper there has to sweep. `dist` is their mean range. Both replace what used to
 ratios per stance (FOVs 90 / 45 / 22.5 / 11.25): the nesting was only ever a crude way of asking "how
 concentrated is this", which one spread answers directly, and no arc ever carried a distance at all.
 `BotCamp` reads all three -- spread and dist decide the scope, the scores decide the stance
-(`doc/bot.md`).
+(`doc/goals.md`).
 
 The nav floor plane is the hull-3 centre, so it *is* a ducking origin: crouch eye = floor + 12 (the duck
 `view_ofs`), standing origin = floor + 18 and standing eye = floor + 18 + 28 = floor + 46. Both lifts
@@ -1495,7 +1495,7 @@ Two classes of brush entity, handled oppositely:
   inherited that lie. `ResolveChargerArea` clamped the charger centre into that area and produced a service
   point at x=464, where a bot's hull would be 8 units inside the brush, so the bot could never arrive; and
   any route hugging that wall planned straight through the charger. Carving moves the area edge to x=472 and
-  both problems go away at the source. See `doc/bot.md` for the runtime half of that story.
+  both problems go away at the source. See `doc/goals.md` for the runtime half of that story.
 - **`func_door`, `func_door_rotating`, `func_breakable`** are not, so `ExtractPassableVolumes` returns them and
   they **split** the leaf they sit in. The interior piece survives as its own area tagged `NAV_AREA_DOOR` or
   `NAV_AREA_BREAKABLE`, carrying activation, activator position and opening time.
@@ -1916,8 +1916,7 @@ Serializes MergeResult to crossbot_nav format (v22):
   different answer on a map where the reduction spent its budget unevenly
 - `designMaxSpeed` is the `--maxspeed` the run was built with. Nothing navgen does reads it back; it is
   recorded because the runtime has no other way to know what speed the mesh assumes, and a bot faster
-  than that has movement options no connection on this mesh describes (`doc/bot.md`,
-  `bot_opportunist.cpp`)
+  than that has movement options no connection on this mesh describes (`doc/movement.md`, `bot_opportunist.cpp`)
 - Area records: id, mins/maxs/centroid[3], areaFlags, connOffset/Count, planeOffset/Count, `activation`,
   `openSeconds`, and `detourOffset`/`detourCount`
 - Activation detour records: fromAreaId, pointOffset/Count, actIndex, waitSeconds, detourSeconds,

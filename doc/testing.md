@@ -116,7 +116,7 @@ bot arrive at the right place late; a low ticrate changes the *shape* of a frame
 logic that only works because a 10 ms command is too short for the engine to do anything surprising
 inside it. `pfnRunPlayerMove` is where that bites — the engine halves any command over 50 ms and
 re-simulates it, which is how a held `IN_JUMP` came to eject the bot off a ladder it had just touched
-(see `Bot_RunPlayerMove` in `doc/bot.md`). At 100 Hz that bug was invisible; at 10 Hz it failed 5 runs
+(see `Bot_RunPlayerMove` in `doc/movement.md`). At 100 Hz that bug was invisible; at 10 Hz it failed 5 runs
 out of 5. Verify the rate actually took with `rcon stats`, whose FPS column should read ~10.9.
 
 **Plugin cvars must go through `-BootCommands`, not `-ServerArgs`.** `-BootCommands "crossbot_sense 0"`
@@ -245,7 +245,7 @@ Three failure signatures are worth naming, because each looks like something els
   with `-Bots 1`, where combat cannot be the explanation, and the `wants`/`detour` alternation is
   unambiguous.
 - **`could not aim at` or `got nothing out of` at a tank, with every gamedata read correct** is the
-  `UTIL_ClampVectorToBox` trap (`doc/bot.md`, `bot_fun.cpp`). Small brushes hide it entirely, so
+  `UTIL_ClampVectorToBox` trap (`doc/goals.md`, `bot_fun.cpp`). Small brushes hide it entirely, so
   undertow passing proves nothing about stalkyard.
 
 ### subtransit, the tram
@@ -342,7 +342,7 @@ could not route to it at all (`no route from area 1 to area 18`) — that was th
 routes on the window ledge: once the sweep moved onto the CrossPlay server (`D:\hlds\crossplay`, which
 sets no `sv_maxspeed`) the planner designed launches at the engine default 320 while the valve DLL held
 the bot at 270, so every launch was refused for being 90% of design. `Bot_MaxSpeed` now reads the cap
-the engine settled on, in `PM_Move_Post` — see `doc/bot.md`. A map that plans a route but will not
+the engine settled on, in `PM_Move_Post` — see `doc/movement.md`. A map that plans a route but will not
 follow it is the failure mode this sweep exists to catch; navgen alone called it healthy both times. `test19_water` also used to abandon, and `test39_skybox` and `test41_skydrop`
 used to hit the deadline; the skybox pair was the sky prune (see `DropSkyFloorLeaves` in
 `doc/navgen.md`), not the follower.
@@ -423,7 +423,7 @@ tally means the status regex stopped matching (e.g. a new field moved `tier=`), 
 Sound there now comes mostly from **footsteps**, plus item pickups, doors and chargers. Footsteps dominate
 by a wide margin: two roaming bots on `crossfire` produce around 85 step sounds in 25 seconds, against 64
 sounds of every other kind over a comparable run. They do not arrive through `pfnEmitSound` -- pmove emits
-them through `pmove->PM_PlaySound`, which is hooked separately via `pfnPM_Move` (see `doc/bot.md`). If they
+them through `pmove->PM_PlaySound`, which is hooked separately via `pfnPM_Move` (see `doc/perception.md`). If they
 ever seem to stop, check `sv_footsteps` before suspecting the hook, and remember that a player moving at or
 below 220 units/s emits none at all, by engine design.
 

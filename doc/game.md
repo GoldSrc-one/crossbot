@@ -57,7 +57,7 @@ same outcome as carrying none.
 
 `AmmoEntity(weaponId, pool)` is the mapping from a weapon and one of its ammo pools to the entity
 classname that refills it, and it is here for the same reason `ThrowLaunch` is: `src/bot/` must not
-name `ammo_ARgrenades`. It exists because the pin now equips (see `bot_fire.cpp` in `doc/bot.md`), and
+name `ammo_ARgrenades`. It exists because the pin now equips (see `bot_fire.cpp` in `doc/combat.md`), and
 "give this bot ammo for the mode it is pinned to" cannot be answered from `WeaponSpec` — the table
 records which *pool* a mode spends, not which pickup fills it, and the two are not one-to-one. It
 returns null where no entity fills that pool, which is the crowbar and the hornetgun's self-regenerating
@@ -68,7 +68,7 @@ takes `ammo_ARgrenades` while its clip takes `ammo_9mmAR`; the gauss and the ego
 two different classnames; and the handgrenade, snark, tripmine and satchel are their own ammo, so the
 mapping returns the weapon classname back.
 `EvaluateCombat(pEdict, inv)` scores how ready a bot is to fight, in `[0,1]`, and is the only input
-that decides whether an enemy or an item wins a goal selection — see `doc/bot.md`, "Readiness is what
+that decides whether an enemy or an item wins a goal selection — see `doc/goals.md`, "Readiness is what
 makes the comparison mean anything". It is mod policy rather than geometry for the obvious reason: what
 counts as well-armed is entirely a property of the game's weapon set.
 
@@ -168,7 +168,7 @@ the old free-for-all on a team map.
 
 ### Where the gates are
 
-Five, and they are all `src/bot/` — see `doc/bot.md` for each. `Candidate` and `MonsterCandidate` in
+Five, and they are all `src/bot/` — see `doc/perception.md` and `doc/combat.md` for each. `Candidate` and `MonsterCandidate` in
 `bot_sense.cpp`, `DamageSource` and the enemy-still-valid exit in `bot_combat.cpp`, and `NearestLive`'s
 `livingOnly` filter, which is what stops a satchel going off under a teammate. Everything else that
 shoots — `bot_fire.cpp`, the ambush, the duel, the func_tank in `bot_fun.cpp` — reads `sense.target` or
@@ -202,7 +202,7 @@ at scan time — and not a fixed property of the entity.
 `WEAPON_RESPAWN_TIME`, `AMMO_RESPAWN_TIME`, `ITEM_RESPAWN_TIME` and the deathmatch branches of
 `FlHEVChargerRechargeTime` / `FlHealthChargerRechargeTime`. They are a *prediction*, not a
 measurement — nothing tells the plugin when an item actually rematerialised, so a bot that guesses
-short simply walks up to an empty spot and learns from it (see `doc/bot.md`, case B).
+short simply walks up to an empty spot and learns from it (see `doc/goals.md`, case B).
 
 ### ChargerValue / ChargerFullValue
 The charger runner needs one number to watch and one ceiling to stop at, and which `pev` field that
@@ -211,8 +211,7 @@ is depends on the charger. HEV chargers read `v.armorvalue`, health chargers and
 having to know which is which. 100 happens to be the right ceiling for a pool for a different
 reason: `CBaseEntity::TakeHealth` refuses to heal past `pev->max_health`, which HLDM leaves at 100.
 
-These two are also now asked *before* travelling and not only on arrival — see `BotItems::Sated` in
-`doc/bot.md`.
+These two are also now asked *before* travelling and not only on arrival — see `BotItems::Sated` in `doc/goals.md`.
 
 ## gamedata.cpp
 
@@ -259,7 +258,7 @@ Both exist for the same reason: the thing they describe is invisible to every ot
 `CGauss::StartFire` moves no attack timer at all. `CHandGrenade::PrimaryAttack` moves no attack timer
 either — it only pulls the pin, and the grenade leaves half a second later from `WeaponIdle`, so
 `m_flStartThrow` falling back to zero is the only observation of the throw there is (see
-`doc/bot.md`, `bot_fire.cpp`).
+`doc/combat.md`, `bot_fire.cpp`).
 
 `rpg_cActiveRockets` genuinely breaks the rule. `CRpg::m_cActiveRockets` is at 196 and
 `CBasePlayerWeapon` ends at 188, so reading it off a crowbar is a heap over-read past the end of a
@@ -282,7 +281,7 @@ below for why nothing wants it.
 
 `CBaseMonster::m_hEnemy` (offset 244) is who a monster is currently hunting, and it is the whole gate on
 monster engagement: a bot traces and fights a monster if and only if this field names that bot (see
-`doc/bot.md`, `bot_sense.cpp`). It is an `EHANDLE`, which is 8 bytes of `{ edict_t *m_pent; int
+`doc/perception.md`, `bot_sense.cpp`). It is an `EHANDLE`, which is 8 bytes of `{ edict_t *m_pent; int
 m_serialnumber; }` — so the read is two peeks, and the serial has to match `m_pent->serialnumber` or the
 handle is stale. That is the same rule `CBotEntHandle::Get` applies, and skipping it means resolving a
 recycled edict slot to whatever now lives in it.
@@ -299,7 +298,7 @@ mod with a different monster base class answers differently and nothing in `bot_
 
 ### The fun-goal offsets, and why entvars_t is not enough
 
-The fun goal tier (`doc/bot.md`, `bot_fun.cpp`) added a block of offsets that have nothing to do with
+The fun goal tier (`doc/goals.md`, `bot_fun.cpp`) added a block of offsets that have nothing to do with
 weapons. They are all on brush entities, not the player, and every one of them exists because the
 question it answers is *not* visible in `entvars_t`:
 
@@ -340,7 +339,7 @@ pointer.
 
 ### The tram needs no offsets at all
 
-`FUN_TRAIN` (`doc/bot.md`, bot_fun.cpp) drives subtransit's `func_tracktrain` and adds **nothing** to
+`FUN_TRAIN` (`doc/goals.md`, bot_fun.cpp) drives subtransit's `func_tracktrain` and adds **nothing** to
 `GameOffsets` or `kRequests`. Worth stating explicitly, because the natural assumption from
 `FUN_TANK` — which needed nine — is that a second vehicle needs its own set, and adding fatal request
 entries for fields that turn out to be reachable through `entvars_t` is a self-inflicted crash on any
@@ -553,13 +552,13 @@ It is here anyway because it answers a question no runtime observation can. It h
 they want the same number for different reasons:
 
 - `EvaluateCombat` asks how dangerous the bot is *in total*, to decide whether to go looking for a
-  fight — see `doc/game.md` above and `doc/bot.md`, "Readiness is what makes the comparison mean
+  fight — see `doc/game.md` above and `doc/goals.md`, "Readiness is what makes the comparison mean
   anything". That is a property of the whole inventory.
 - `BotFire`'s weapon selection asks which of the guns in the bag is worth holding. That is ranking guns
   you are *not* holding, which is precisely what the rejected list said this table would not do.
 
 The second reader is a deliberate reversal, made when selection moved to score-then-rarity (see
-`doc/bot.md`, "Selection takes the best gun it has, and the rarest of those"). The earlier position was
+`doc/combat.md`, "Selection takes the best gun it has, and the rarest of those"). The earlier position was
 that the live inventory could answer selection on its own. It cannot: everything observable at runtime
 — clip, reserve, cycle time, range — says whether a weapon *works*, and nothing says whether it is
 worth holding. A bot with a full glock and a full gauss sees two working weapons and no reason to
@@ -574,7 +573,7 @@ sync.
 means "no opinion"). It says nothing about operating the gun; it says what ground the gun wants, which
 is a judgement about the mod that no runtime observation supplies. `Bot_RangeBias` turns it into a
 routing weight, so a bot holding a shotgun accepts a longer route through tighter ground and a bot
-holding a crossbow does the reverse (`doc/bot.md`, "Range bias"). Its two thresholds are cvars, not
+holding a crossbow does the reverse (`doc/goals.md`, "Range bias"). Its two thresholds are cvars, not
 table fields, because the distance that counts as "long" is a property of the map, not of the gun.
 
 `zoomFov` is the scope's field of view in degrees -- 40 on the python, 20 on the crossbow, 0 for
@@ -766,7 +765,7 @@ SDK ladder has an obvious cliff in it:
 | MP5 secondary, RPG, shotgun secondary | 1.0s+ | not |
 
 `WPN_Q_STICKY` marks the seven at or under 0.30s. It tells `bot_fire.cpp` that the trigger may stay
-down through a frame the crosshair is not on the target — see `doc/bot.md` — and it is the only
+down through a frame the crosshair is not on the target — see `doc/combat.md` — and it is the only
 consumer.
 
 **It is a quirk and not a `cycleTime` field, deliberately.** `cycleTime` is in the rejected-fields

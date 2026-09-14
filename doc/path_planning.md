@@ -3,7 +3,7 @@
 The mesh the bots run on — areas, connections, queries, the loader, the vantage field —
 and how routes over it come to exist: the A\* search, its cost model, the funnel, the speed
 profile, the air-move simulator and cache, and the gravity rules. How the bot follows the
-result is `doc/path_execution.md`.
+result is `doc/movement.md`.
 
 ## nav_mesh.h
 
@@ -25,7 +25,7 @@ Two lookups that answer different questions, and the names say which. `FindAreaE
 contains this point* and is allowed to answer none. `FindAreaNearest` asks *which area is nearest* and is
 a total function that essentially never fails. Picking the wrong one is a recurring bug — a strict lookup
 where a forgiving one belongs makes a bot on a lip forget where it is, and a forgiving one where a strict
-one belongs scores a maneuver against an area the bot never reached (`doc/bot.md`, `FinishLadder` and
+one belongs scores a maneuver against an area the bot never reached (`doc/movement.md`, `FinishLadder` and
 `FinishElevatorRide`).
 
 ### AreaContainsPoint
@@ -34,7 +34,7 @@ The shared predicate both lookups are built from: AABB test with 4-unit epsilon,
 directly is not the same question as sweeping the mesh. Areas abut on shared planes, so a point on a
 seam is inside both within the plane epsilon and `FindAreaExact` returns whichever comes first in id
 order — arbitrary. `FinishElevatorRide` tests its ride target with this first for exactly that reason
-(`doc/bot.md`, "The target area wins a boundary tie"); the stop slab and the shaft below it share a
+(`doc/movement.md`, "The target area wins a boundary tie"); the stop slab and the shaft below it share a
 plane, and the sweep would always answer "shaft".
 
 ### FindAreaExact
@@ -145,7 +145,7 @@ edge score = time * (1 - careful) + time * exposure * careful
 factor collapses to 1 and the score is the time. `careful = 1` drops the time term entirely and
 minimizes exposure alone. It is **deliberately uncapped**: a bot with nothing to fight with should
 take the covered way however long it is. `Repath` feeds it `Bot_Carefulness`, which is
-`(1 - combat readiness)` scaled by `crossbot_careful` (`doc/bot.md`, "Carefulness").
+`(1 - combat readiness)` scaled by `crossbot_careful` (`doc/goals.md`, "Carefulness").
 
 **The exposure is cached on the connection, not blended during the search.** `nav_loader.cpp` resolves
 `Connection::vantageExposure` once per map: `ConnectionCrossing` for the point, lifted to eye height
@@ -163,7 +163,7 @@ therefore plans identically at every `careful`. The normalized exposure is `blen
 **`g` stays true seconds.** `SearchNode` carries `score` *beside* `g`, and only `score` drives the
 ordering, the dominance test and the open-list key. Nothing touches `PlanWalker`'s lengths or
 `m_extraTime`, which is why the ETA needs no separate accounting at all: it is built by
-`BuildPathProfile` from waypoint geometry (`doc/bot.md`), never from the search cost, so a careful
+`BuildPathProfile` from waypoint geometry (`doc/movement.md`), never from the search cost, so a careful
 route reports the longer time it will actually take to walk.
 
 **The heuristic has to shrink with it.** The factor can go below 1, so the straight-line estimate is
@@ -192,7 +192,7 @@ a route that fights on the right ground may take twice as long in seconds and st
 `weight = 0` reproduces the planner exactly as it was, which is what every caller that does not opt in
 gets from the default-constructed `RangeBias`. `Repath` feeds it `Bot_RangeBias`, which is the mirror
 of carefulness: `combat readiness` scaled by `crossbot_range_pref`, zero for a weapon with no opinion
-(`doc/bot.md`, "Range bias"). An unready bot avoids exposure; a ready one picks its terrain.
+(`doc/goals.md`, "Range bias"). An unready bot avoids exposure; a ready one picks its terrain.
 
 **Open distance is cached on the connection, per direction.** The same load pass that resolves
 `vantageExposure` reuses its `VantageBlend` to fill `Connection::openDistAB` and `openDistBA` —
@@ -391,7 +391,7 @@ matters: `navgen` already records `detour area 21 <- 23 : BLOCKED (no route to a
 `trigger_multiple` that opens `secret_door` sits *inside* the room, and the 12 items behind it read `11.8s
 away` to the gather scan while every `Repath` to them failed. What stays outside this test is everything
 funnel-dependent — an air move that needs a run-up this approach cannot give — because answering that needs
-the walker, which is the whole reason phase 1 is a plain Dijkstra (`doc/bot.md`, "Selection is two searches").
+the walker, which is the whole reason phase 1 is a plain Dijkstra (`doc/goals.md`, "Selection is two searches").
 
 Being seconds is also what lets `runtimePenalty` be added straight on top in `BuildGraph` (see
 `nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
@@ -403,7 +403,7 @@ range term is `from -> to`, so the reverse sweep picks the other stored open dis
 values stop being seconds and become scores**, which splits the two callers. `BotItems::SelectGoal`
 passes the bot's carefulness and range bias and is fine with it — it only ever ranks candidates against
 each other. `BotOppo::RebuildCosts` must leave both at their zero defaults, because `TryJump` subtracts
-two of these values and compares the difference against a real simulated flight time (`doc/bot.md`);
+two of these values and compares the difference against a real simulated flight time (`doc/movement.md`);
 scaled costs there would silently deflate every gain.
 Reachability is unaffected either way: the factor is strictly positive, so nothing that was reachable
 becomes unreachable.
@@ -423,7 +423,7 @@ search does not reverse the door.
 
 It exists because a caller that has to price *many candidate positions against one fixed goal* would
 otherwise run one search per candidate. One reverse pass turns every such question into an array index,
-which is what makes a 4 Hz check affordable (`doc/bot.md`, `bot_opportunist.cpp`). Its values inherit
+which is what makes a 4 Hz check affordable (`doc/movement.md`, `bot_opportunist.cpp`). Its values inherit
 everything `travelSeconds` inherits: centroid-anchored, and priced at `kNavRunSpeed` rather than the
 bot's real speed. They are plan-seconds, not real seconds, and mixing them with a real duration without
 converting is the trap the opportunist section describes.
@@ -884,7 +884,7 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
   `requiresElevatorRide` / `elevatorTravelTime` / `elevatorWaitTime`, then a free arrival waypoint so the
   shaft's height never enters the funnel. Anchor moves to the arrival point. The wait is copied onto the
   waypoint as well as charged to the search, because the runner's ride deadline has to allow for a
-  platform that does not set off until its dwell elapses — see `doc/bot.md`.
+  platform that does not set off until its dwell elapses — see `doc/movement.md`.
 - Walking *onto* a gated stop takes the ordinary door path instead: `needsStop` includes a gated elevator area,
   so the same detour runs and `doorWaitTime` (= the summon time) is charged.
 
@@ -1024,7 +1024,7 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
   so the runtime cannot press without knowing where the brush is
 - `requiresBreak` is serviced at runtime by `BotBreak` — the bot stops, draws its melee weapon and hits the
   brush until it dies. The plan's `openSeconds` (`health * 0.1`) is only the ETA estimate; the runtime
-  decides for itself whether the entity is breakable at all, from `takedamage` and `health`. See `doc/bot.md`
+  decides for itself whether the entity is breakable at all, from `takedamage` and `health`. See `doc/movement.md`
 
 ### Activation at runtime
 `src/bot/bot_move_nav.cpp` services activation waypoints; see `doc/navgen.md` for how the detour is built.
@@ -1037,7 +1037,7 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
   leave the outbound leg afterwards and stalls in place. `sLimit` is the next unserviced activation *or
   pending elevator ride*, `sFloor` the last serviced one, both computed in one pass over the waypoints each
   frame. A ride is the same tie in its extreme form — its two waypoints share an XY exactly, so the
-  segment between them has zero length and does not exist in the profile at all; see `doc/bot.md`
+  segment between them has zero length and does not exist in the profile at all; see `doc/movement.md`
 - **Press.** `RunActivation` takes over the frame inside `kActivationEngageRadius`, aims at `activatorCenter`
   in pitch and yaw, and emits a single `IN_USE` rising edge once the aim converges and the bot is within
   `kActivationUseRange` of the centre in 3D. One edge, not a held button — repeated presses would toggle a
@@ -1201,7 +1201,7 @@ carries the launch's index. The bot then walks straight through the launch point
 `maxSpeed` — 320 by default. The bot flying it need not agree, and the number to compare against is
 not a cvar but whatever `PM_CheckParamters` left in `pmove->maxspeed` — 270 for a valve player, whether
 or not `sv_maxspeed` says so (the test server, `D:\hlds\crossplay`, never sets it). `Bot_Physics` reads that
-live value into `PlanTraceContext::physics` — see `Bot_MaxSpeed` in `doc/bot.md`. `Cross` therefore clamps
+live value into `PlanTraceContext::physics` — see `Bot_MaxSpeed` in `doc/movement.md`. `Cross` therefore clamps
 `candSpeed` to `physics.maxSpeed` before handing it to `JumpLandsIn`.
 
 This is what keeps a nav file server-independent. Sampling stores the fastest jump the geometry allows;

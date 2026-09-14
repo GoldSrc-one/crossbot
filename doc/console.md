@@ -15,43 +15,42 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_nav_goal <x> <y> <z>` — send all bots to a point
 - `crossbot_teleport <x> <y> <z>` — teleport all bots
 - `crossbot_kill` — suicide every bot; the only way to exercise the respawn path from the console
-- `crossbot_nav_status` — the runtime planner's own answer; see `doc/bot.md`, `PrintNavStatus`
+- `crossbot_nav_status` — the runtime planner's own answer; see `doc/movement.md`, `PrintNavStatus`
 - `crossbot_waypoints` — full waypoint list per bot
 - `crossbot_nav_penalties` — connections with a nonzero `runtimePenalty`, and the total
 - `crossbot_list_spawns` / `crossbot_list_targets` — entity positions, for picking a goal by hand
 - `crossbot_list_items` — every pickup and charger with its kind, resolved nav area, `frame`, `solid`
-  and state; see `doc/bot.md`, `bot_items.cpp`
+  and state; see `doc/goals.md`, `bot_items.cpp`
 - `crossbot_list_fun` — the fun goal tier's whole inventory for this map: kind
   (`switch`/`tank`/`tram`), action (`use`/`touch`/`shoot`), brush centre, every resolved nav area, the
   chain terminal it fires, and why it was skipped (`no nav area`, `taken or locked`, `not ready`) or
   `ready`. Ends with a count. A `tram` row also prints the tram's current `speed` and its computed
   `deck` point, and with `crossbot_fun_debug 1` follows it with one `tram board area` line per board
   point giving the stand position, the deck position as the tram passes that node, and its arc length
-  along the track; see `doc/bot.md`, `bot_fun.cpp`. `crossbot_fun_debug 1` also logs every bot death
+  along the track; see `doc/goals.md`, `bot_fun.cpp`. `crossbot_fun_debug 1` also logs every bot death
   with its distance to the tram and its tram phase, which is the only way to separate bots crushed
   attempting a catch from bots run over while walking
 - `crossbot_list_goals` — every `bot_goal` entity in the world with its resolved nav area, the
   player it belongs to (or `everyone` for a map-placed one), its `aiment` and the buttons it asks
   for. Ends with a count. Zero on a `valve` map is correct: the entity only exists where the
   `bot_goal.sma` plugin is running, which is on `cstrike`, `tfc` and `dod` maps; see
-  `doc/bot.md`, `bot_strategic.cpp`
+  `doc/goals.md`, `bot_strategic.cpp`
 - `crossbot_list_gates` — every walk gate that could hold a mine: the mesh width, the *measured*
   opening, the chosen surface, the mount point and the rejection reason. A gate that failed only at
   the surface or coverage stage is printed too, so the near misses are visible; ones filtered earlier
   are not. Read the openings before the count — they should be doorway widths (96, 128), and a map
   reporting hundreds of gates across open floor means the opening measurement is not running; see
-  `doc/bot.md`, `bot_deploy.cpp`
+  `doc/movement.md`, `bot_deploy.cpp`
 - `crossbot_deploy_status` — per bot: phase, target connection, measured opening, surface, stance,
   `placed`, `dets`, `aborts`, memo size and `why`. Unlike the `crossbot_fire_status` counters these
   are **not** per life — respawn clears the memo and any placement in flight but leaves the tallies
-  alone, so a drop in them is a bug rather than a death; see `doc/bot.md`, `bot_deploy.cpp`
+  alone, so a drop in them is a bug rather than a death; see `doc/movement.md`, `bot_deploy.cpp`
 - `crossbot_weapons [name]` — the inventory snapshot: every weapon with its `m_iId`, clip, ammo indices
-  and carried counts, both attack timers, and a `*` on the active one; see `doc/bot.md`,
-  `bot_weapons.cpp`
+  and carried counts, both attack timers, and a `*` on the active one; see `doc/combat.md`, `bot_weapons.cpp`
 - `crossbot_weaponspec [name]` — how each gun is operated. With no argument, dumps the whole
   weapon table: per weapon id, the classname, clip size, `value`, range class and scope FOV, then one
   line per firing mode with its button pattern, aim requirement, toggle, ammo pool and ballistics. The
-  range class is what bends routing toward ground the gun can use (`doc/bot.md`, "Range bias") and the
+  range class is what bends routing toward ground the gun can use (`doc/goals.md`, "Range bias") and the
   scope FOV is what decides whether a camp spot is worth zooming into. With a player name, joins that
   player's carried weapons against their specs and flags any classname that disagrees, which is the
   one way the id-keyed table can be wrong; see `doc/game.md`, `weapon_spec.h`
@@ -67,12 +66,12 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   navigation aim for 3 seconds. Two seconds in it also prints a **rest error**: the miss still standing once
   the view has stopped, which is the number the hand quantum sets and the one that should shrink with zoom.
   The optional 4th argument writes `pev->fov` before the flick (0 meaning the engine default) so a script
-  can sweep that; see `doc/bot.md`, `bot_aim.cpp`
+  can sweep that; see `doc/perception.md`, `bot_aim.cpp`
 - `crossbot_aim_status` — per bot: sense target, bone sampled, ring occupancy, delay served, hand speed,
   and `err`, the angle between the real view and the true present-time angles to the target. `err` is the
   one number that separates "correctly delayed" from "delayed and also wrong", but it no longer bottoms out
   at zero: it is measured against the target eye while the bot aims at a random hitbox bone, so a couple of
-  degrees is the floor. Read its trend across delays, not its value; see `doc/bot.md`, `bot_aim.cpp`
+  degrees is the floor. Read its trend across delays, not its value; see `doc/perception.md`, `bot_aim.cpp`
 - `crossbot_teams_status` — the map's game (`gEntityOwners[0]`), whether that makes it a team game,
   the `crossbot_teams` value and the verdict; then one line per live player with its `pev->team` and,
   per bot, how that bot reads it (`friend` / `enemy` / `unknown`) and whether it may shoot it
@@ -94,7 +93,7 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   vision path in five numbers: `list` is the shared per-frame monster list, `seen` how many of those this
   bot considered, `mine` how many named it as their enemy, `trc` tracelines spent on monsters and `hit`
   how many landed. `mine:0` with `list` nonzero means nothing is hunting this bot; `mine` nonzero with
-  `hit:0` means it is hunted but never has line of sight; see `doc/bot.md`, `bot_sense.cpp`
+  `hit:0` means it is hunted but never has line of sight; see `doc/perception.md`, `bot_sense.cpp`
 - `crossbot_monsters` — one line per `FL_MONSTER` edict on the map with its classname, flags, health,
   `takedamage`, solid type, box centre and the enemy its `m_hEnemy` names, then one indented line per bot
   giving distance, whether the monster is in that bot's view cone, and whether a live traceline to the box
@@ -132,7 +131,7 @@ it appears from both sides of the aim-queue boundary and means the same thing on
   subset of `shots` that only happened because the trigger stayed down off-target; it never counts a
   gauss primary shot, because that weapon moves no attack timer for the counter to see. `uphill` and `selfveto` count rejections rather than
   situations — both predicates run per weapon per mode per frame — so read them as a yes/no; see
-  `doc/bot.md`, `bot_fire.cpp`
+  `doc/combat.md`, `bot_fire.cpp`
 - `crossbot_weapon_carry [name]` — per bot: the weapon held, then `classname=carry/score` for every
   weapon the bot has ever held, and `carried` — how many that is. Carry is seconds the weapon has spent
   in the inventory while the bot was alive; score is the weapon's `WeaponSpec::value`. Together they
@@ -141,7 +140,7 @@ it appears from both sides of the aim-queue boundary and means the same thing on
   *spread*. All-equal times mean the walk is charging every slot rather than the carried ones, and a
   bot whose held weapon is neither the top score nor the least carried of that score means the ranking
   is not being applied. Unlike the other counters it survives respawn, and unlike `crossbot_weapons`
-  it can only report bots; see `doc/bot.md`, `bot_fire.cpp`
+  it can only report bots; see `doc/combat.md`, `bot_fire.cpp`
 - `crossbot_fire_pin <classname|off> [primary|secondary] [zoom|nozoom]` — restrict weapon selection to
   one classname, and optionally one mode, making everything else unusable. Only useful for testing, and
   necessary there because in a fight a bot only re-selects when the weapon it holds stops working — it
@@ -250,7 +249,7 @@ is the signature of a walkway the bot cannot actually get down from.
 
 `crossbot_weapons` ends with a line comparing the walked weapon mask against `pev->weapons`. That is
 the only self-check the offsets have, so read it before believing any other number on the dump — see
-`doc/bot.md`, `bot_weapons.cpp`. `crossbot_equip` exists to reach a weapon state that gathering would
+`doc/combat.md`, `bot_weapons.cpp`. `crossbot_equip` exists to reach a weapon state that gathering would
 take a whole match to produce, and it takes any entity classname, ammo boxes included.
 
 Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
@@ -287,7 +286,7 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   one; large values collapse to nearest-first. Does not affect gather, which is always cheapest-first
 - `crossbot_detour_budget` — seconds of extra travel a bot will accept to pick something up on the way
   to a distant goal. Default 6. 0 disables detours entirely without disabling the tier, so a bot walks
-  straight at its target; see `doc/bot.md`, `bot_goal.cpp`
+  straight at its target; see `doc/goals.md`, `bot_goal.cpp`
 - `crossbot_teams` — friend/foe gating. Default 1, and inert unless the map belongs to `cstrike`,
   `tfc` or `dod`. With it on a bot never sights, chases, retaliates against or detonates a satchel on
   anything that is not a confirmed enemy; with it off every gate returns "attackable" and the bot
@@ -317,7 +316,7 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   the *point* here rather than a bug: the charge is what closes the gap
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
-  Default 0, and verbose enough to be worth turning back off; see `doc/bot.md`
+  Default 0, and verbose enough to be worth turning back off; see `doc/goals.md`
 - `crossbot_oppo_jump` — opportunistic jumping. Default -1, following `crossbot_difficulty`,
   which enables it at every tier; 0 forces it off and 1 forces it on. The retry throttle is
   `crossbot_oppo_interval`, which easy halves to 0.5s
@@ -327,14 +326,14 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   only visible as `PlayerPostThink` not firing), the resulting drift between bot time and real time, and
   a `chain` line showing the whole bot loop in order with the msec each one saw and issued. A bot
   getting less sim time per second than the wall clock is the "honey mode" symptom -- slow running and
-  slow gravity together; see `doc/bot.md`, *Bot_BeginFrame and Bot_FrameTime*
+  slow gravity together; see `doc/movement.md`, *Bot_BeginFrame and Bot_FrameTime*
 - `crossbot_aim_delay` — reaction delay in seconds, clamped [0, 0.5]. Default -1, meaning the
   delay comes from `crossbot_difficulty` as a per-engagement roll inside that tier's band. Any value
   `>= 0` pins it to a fixed point value instead. Inert unless `crossbot_sense` is on, since vision is
   what feeds the queue
 - `crossbot_sense` — the whole sense system: vision, heard sounds and events, damage, and the suspicion
   list that drives where the bot looks when it has no target. Default 1, held there by a 45/45 nav sweep
-  at both settings; see `doc/bot.md`, `bot_sense.cpp`
+  at both settings; see `doc/perception.md`, `bot_sense.cpp`
 - `crossbot_sense_decay` — suspicion weight and decay window in seconds, clamped [0.1, 60]. Default 5.
   Doubles as the blend authority: a suspicion this old has zero pull on the view
 - `crossbot_aim_error` — scale on the intentional over/undershoot, clamped [0, 4]. Default -1,
@@ -345,7 +344,7 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   needs a target and an aim queue; and inert in the nav sweep either way, because a lone bot never
   acquires one. Turning it off also stops weapon *switching* and the out-of-combat reload, which are
   the same decision made without a target; see
-  `doc/bot.md`, `bot_fire.cpp`
+  `doc/combat.md`, `bot_fire.cpp`
 - `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
   `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean
   the test never settles at all
@@ -362,14 +361,14 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   blocks, and the sweep's per-map waypoint diffs depend on the route being repeatable. With it off the
   beam registry stays empty and every branch this feature added to `bot_avoid.cpp` early-outs, so a
   sweep clears a deployable change for movement regressions and says nothing about deployment itself;
-  see `doc/bot.md`, `bot_deploy.cpp`
+  see `doc/movement.md`, `bot_deploy.cpp`
 - `crossbot_deploy_debug` — per-placement and per-death tripmine forensics. Default 0. Prints an
   audit line for every mine actually spawned (real beam length against the measured opening, both
   jambs, and whether the placer is standing in its own beam), a residency line saying how long the
   bot took to clear that beam against the 2.5 s arming clock, and an attribution line on every death.
   `KILLED BY ITS OWN MINE` carries `onbeam`, which is the number that matters: `1` means the bot
   walked into its own laser and is a bug, `0` means it was inside the blast when something else
-  tripped the mine and is the game working; see `doc/bot.md`, `bot_deploy.cpp`
+  tripped the mine and is the game working; see `doc/movement.md`, `bot_deploy.cpp`
 - `crossbot_deploy_surface` — pin the mount surface: 0 off, 1 wall, 2 ceiling, 3 ground. Default 0.
   A pin also bypasses the opening bound that normally keeps ceiling and ground mounts to gaps under 48
   units. It exists for the reason `crossbot_fire_pin` does: a vertical beam is what reaches the side
