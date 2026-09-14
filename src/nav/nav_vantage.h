@@ -64,8 +64,6 @@ void BuildVantageGrid(VantageField &field);
 
 bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &out);
 
-// Amount-weighted mean open distance looking along dir. Returns 0 when nothing is
-// visible that way, which is correctly the shortest possible engagement range.
 float VantageOpenDistance(const VantageBlend &blend, const Vector &dir);
 
 }

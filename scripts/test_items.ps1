@@ -1,8 +1,3 @@
-<#
-.SYNOPSIS
-    Manual driver for the item gathering goals: boots HLDS on a map, adds a bot,
-    and polls crossbot_list_items / crossbot_nav_status while the bot gathers.
-#>
 param(
     [string]$Map = "maps\test56_recharger.bsp",
     [int]$Port = 0,

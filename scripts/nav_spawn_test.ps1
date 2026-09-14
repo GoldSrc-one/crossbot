@@ -2,24 +2,9 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$Map,
     [int]$Port = 29015,
-    # Fail the test once elapsed time exceeds this multiple of the bot's
-    # own reported ETA (crossbot_nav_status's "eta=" field, itself already
-    # a straight-line-distance/speed estimate with a 1.6x safety margin --
-    # see kEtaSafetyMargin in bot_move_nav.cpp). 2x on top of that margin is
-    # a generous allowance for detours/repaths/jump run-ups, not a tight
-    # bound -- the point is catching "never arrives" bots, not shaving
-    # seconds off a working route.
     [double]$TimeoutMultiplier = 2.0,
-    # Absolute safety cap regardless of ETA, in case the ETA field itself
-    # never populates (e.g. pathfinding fails immediately) -- without this
-    # a bad run could hang the test indefinitely.
     [int]$MaxWaitSeconds = 240,
     [int]$PollIntervalSeconds = 3,
-    # How close the bot's origin must get to the target spawn to count as
-    # arrived. Generous relative to the 32-unit waypoint-reached distance
-    # used internally -- the target is a raw spawn coordinate, not
-    # necessarily a point the nav mesh's own waypoint chain lands exactly
-    # on (e.g. it can sit a few units inside a wall/prop clearance zone).
     [double]$ArrivalDistance = 150.0
 )
 
@@ -31,19 +16,15 @@ $hldsDir = "D:\hlds"
 
 Write-Host "=== crossbot spawn-pair test: $Map ==="
 
-# --- 1. Start the server, listing spawns as part of the boot cfg so we
-#        don't need a separate rcon round-trip before the bot exists. ---
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port `
     -Commands @("crossbot_add valve SpawnTestBot", "crossbot_list_spawns")
 
 $serverPid = Get-CbServerPid $startResult
 Write-Host "server started, PID=$serverPid"
 
-# Give the boot cfg (40 waits + our commands) time to actually run.
 Start-Sleep -Seconds 10
 
 try {
-    # --- 2. Parse spawn points out of qconsole.log. ---
     $log = Get-Content (Join-Path $hldsDir "qconsole.log") -Raw
     $spawns = Get-CbSpawns $log
 
@@ -53,18 +34,15 @@ try {
     }
     Write-Host "found $($spawns.Count) spawn points"
 
-    # --- 3. Pick the two most (straight-line) distant spawns. ---
     $pair = Get-CbFarthestPair $spawns
     $bestA, $bestB, $bestDist = $pair.A, $pair.B, $pair.Dist
     Write-Host ("most distant pair: A=({0},{1},{2}) B=({3},{4},{5}) dist={6:F0}" -f `
         $bestA.X, $bestA.Y, $bestA.Z, $bestB.X, $bestB.Y, $bestB.Z, $bestDist)
 
-    # --- 4. Place the bot at A, send it to B. ---
     Invoke-CbRconQuiet $Port "crossbot_teleport $($bestA.X) $($bestA.Y) $($bestA.Z)"
     Start-Sleep -Milliseconds 500
     Invoke-CbRconQuiet $Port "crossbot_nav_goal $($bestB.X) $($bestB.Y) $($bestB.Z)"
 
-    # --- 5. Poll until arrival, timeout, or the bot abandons this goal. ---
     $expectedEta = $null
     $elapsed = 0
     $result = "FAIL"
@@ -104,10 +82,6 @@ try {
             break
         }
 
-        # Goal reassigned away from B (either PickRandomGoal kicked in after
-        # a repath failure, or -- less likely, since we'd have caught the
-        # arrival above first -- some other reset) -- this attempt is over,
-        # one way or the other.
         if ($goalMatch.Success) {
             $gx = [double]$goalMatch.Groups[1].Value
             $gy = [double]$goalMatch.Groups[2].Value

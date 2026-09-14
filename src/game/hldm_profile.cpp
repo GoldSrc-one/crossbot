@@ -31,7 +31,6 @@ namespace
 	constexpr float kHLDMUnreachableTimeout = 30.f;
 	constexpr float kHLDMMaxNormal = 100.f;
 
-	// SF_TRIGGER_HURT_NO_CLIENTS, hlsdk dlls/triggers.cpp
 	constexpr int kSfHurtNoClients = 8;
 
 	constexpr float kHLDMThrowTilt = 10.f;

@@ -98,7 +98,8 @@ trusting the defaults.
 **Unlike carefulness, this one can invalidate a route in flight.** A route planned for a shotgun is
 the wrong route once the crossbow comes out, so the nav update forces a repath when the live weapon's
 class differs from `bot.plannedRangeClass`. Comparing the class rather than the weapon id means
-swapping between two close-range guns costs nothing.
+swapping between two close-range guns costs nothing. The stamp happens only once the plan stands,
+so a failed search does not consume the retry trigger.
 
 `crossbot_range_pin` (-1) forces the weight the way `crossbot_careful_pin` does, and
 `crossbot_range_force` (-1, else 1 = close / 2 = long) forces the class without holding the weapon.
@@ -939,6 +940,10 @@ the bot has never been inside, while `kHealTimeout` (30 s) is the hard stop, bec
 Because the view is not hijacked, the runner calls `BotSense::ApplyLook` before `Bot_UpdateFacing`
 exactly as the idle branch does. A bot topping up in a pool keeps scanning the room and can track an
 enemy while it heals, which a charger user cannot.
+
+Drifting back out is not a useless pool: losing footing ends the goal with the short unreachable
+timeout, not the 120 s classname ban. The runner drives at the resolved spot inside the volume,
+not its centre, since a large pool's middle can sit inside geometry.
 
 ### Sated: asking before travelling, not on arrival
 
@@ -2075,6 +2080,11 @@ persistence is what carries the enemy across the gap, not vision.
 in turn reads this frame's `sense.target`. The one-frame lag is deliberate and stable, but a reader who
 assumes same-frame coherence will misread the loop; the `sense.target` fallback is what covers the frame
 before combat has entered.
+
+`visionCands` is how many players passed range and cone — how many tracelines the old
+every-candidate scan would have spent — and `visionKeep` says which of the at most two traces won.
+`visionKeep` alone is one frame, so the cumulative `keeps[]` tally carries the same claim across polls:
+during a duel it should read incumbent nearly every frame, and a run of fresh picks means the lock is broken.
 
 **Use `pfnAngleVectors` for the target's facing, never `MAKE_VECTORS`.** The latter writes
 `gpGlobals->v_forward`, which the function is still holding as *this* bot's forward. Clobbering it mid-loop
@@ -3614,7 +3624,9 @@ invisible to any poll. `selfVetoes` counts refusals to fire into a blast nearer 
 enemy, and like `uphillVetoes` it is a per-frame predicate, so read it as a yes/no. It is the only
 refusal witness that survives a two-second poll — the `why=` string samples one frame and misses
 almost everything it describes — which is why the arc phases assert on the counter and treat the
-reason strings as a bonus.
+reason strings as a bonus. `aimVetoes` is the same shape for the aim gate, and `targetAims` counts
+frames that published an `AIM_TARGET` aim, which is how a pinned crossbow proves `primaryZoomed`
+was selected when the sampled `aim=` field can only witness it by luck.
 
 Every counter is per life. `BotFire::Reset` runs on respawn from `BotManager::StartFrame`, so a drop
 in any of them is a death, which is how `test_fire.ps1` counts deaths without reading the scoreboard.

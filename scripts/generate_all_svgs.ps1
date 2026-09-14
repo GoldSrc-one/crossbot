@@ -1,11 +1,3 @@
-<#
-.SYNOPSIS
-    Generate SVG navigation meshes for all maps in the maps/ directory.
-.DESCRIPTION
-    Runs navgen.exe on every .bsp file in maps/ and outputs a corresponding .svg file.
-    Also generates .nav files alongside (required for the runtime plugin).
-    Writes directly to nav_debug/ and regenerates index.html for the debug gallery.
-#>
 
 $ErrorActionPreference = "Stop"
 

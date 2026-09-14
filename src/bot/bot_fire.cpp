@@ -802,8 +802,6 @@ namespace
 			float dist = (fire.aimPoint - eye).Length();
 			want = fire.zoomed ? (dist >= kZoomOut) : (dist > kZoomIn);
 		}
-		// With no aim there is normally nothing to decide. A camper is the exception: it zooms
-		// into the corridor its spot watches, and owes the weapon a zoom-out when it leaves.
 		else if (!BotCamp::WantZoom(bot, want))
 			return 0;
 
@@ -1251,9 +1249,6 @@ static bool IsAmbushWeapon(int id)
 	return false;
 }
 
-// Which slice of the inventory a pick is allowed to draw from. The two ambush passes exist so that
-// PickBest's ranking -- best value, then least carry time, ties by reservoir -- can be reused
-// verbatim on a restricted set instead of growing a second scoring rule.
 enum Pass
 {
 	PASS_NO_MELEE = 0,
@@ -1262,7 +1257,6 @@ enum Pass
 	PASS_THROWN,
 };
 
-// dist is consulted by PASS_THROWN only.
 static bool ChoiceEligible(const CBot &bot, const Choice &choice, Pass pass, float dist)
 {
 	int id = bot.inventory.weapons[choice.index].id;
@@ -1283,10 +1277,6 @@ static bool ChoiceEligible(const CBot &bot, const Choice &choice, Pass pass, flo
 	if (!IsAmbushWeapon(id))
 		return false;
 
-	// ModeUsable gates the maximum range, and there is no minimum-range field anywhere in
-	// WeaponMode -- self-blast is caught much later, at press time, by SplashSafe. Without this
-	// the bot would draw a grenade at knife range and then never throw it, standing there holding
-	// it while the ambush it was drawn for expires.
 	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(id);
 	const WeaponMode *m = spec ? ModeOf(*spec, choice.mode, bot.fire.zoomed) : nullptr;
 	if (!m)
@@ -1389,10 +1379,6 @@ static int PickChoice(CBot &bot, const Choice *choices, int count, float dist)
 	return pick;
 }
 
-// Melee first: BuildChoices only offers it when dist is inside the weapon's own range (32 units for
-// the crowbar), so "in melee range" is already computed and needs no constant of its own. Otherwise
-// a throwable, chosen by the same value-then-rarity rule as any other weapon -- the hand grenade and
-// the snark are both worth 0.1, so they tie on value and the least-carried one wins.
 static int PickAmbush(CBot &bot, const Choice *choices, int count, float dist)
 {
 	if (count <= 0)
@@ -1809,23 +1795,12 @@ void Think(CBot &bot)
 	bool throttled = gpGlobals->time < fire.nextSelectTime;
 	Choice choices[kMaxChoices];
 
-	// The opening shot against someone who has not noticed us yet, and it has to be attempted
-	// before TryKeep rather than inside PickChoice: TryKeep returns as soon as the held weapon
-	// still works, so a bot holding a loaded MP5 next to an oblivious enemy would never reach the
-	// picker at all.
-	//
-	// Three guards. Not while holding, because a commit in flight may be a primed grenade and
-	// switching away would leave it cooking. Not when an ambush weapon is already drawn, or this
-	// re-selects it every frame and TryKeep never gets to aim and throw it. And not once the
-	// enemy knows, which is what hands the frame back to ordinary selection.
 	if (!throttled && !holding && BotCombat::Ambushing(bot) &&
 		(!active || !IsAmbushWeapon(active->id)))
 	{
 		int count = BuildChoices(bot, true, true, dist, rise, 0, choices, kMaxChoices);
 		int pick = PickAmbush(bot, choices, count, dist);
 
-		// Nothing suitable, or nothing usable at this range, just falls through to the ordinary
-		// path below and the bot fights with whatever it has.
 		if (pick >= 0 && SelectWeapon(bot, choices[pick], "ambush"))
 		{
 			++fire.ambushes;
@@ -1833,14 +1808,6 @@ void Think(CBot &bot)
 		}
 	}
 
-	// The duel: they drew melee, so we draw melee. Same three guards as the ambush above and for
-	// the same reasons, and it sits after it because an unaware enemy is the better opportunity --
-	// PickAmbush tries melee first anyway, so at contact range the two agree.
-	//
-	// geometry=false, unlike the ambush. That routes BuildChoices through ModeViable instead of
-	// ModeUsable, dropping the range gate but keeping the pin and ammo checks. The ambush wants a
-	// weapon usable now; the duel wants one usable after walking, and gating on range here would
-	// refuse the crowbar at every distance the bot still has to close.
 	int meleeId = g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
 	if (!throttled && !holding && meleeId != 0 && BotCombat::Dueling(bot) &&
 		(!active || active->id != meleeId))

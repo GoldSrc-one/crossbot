@@ -16,8 +16,6 @@ function Update-IndexHtml {
     $borderColor = if ($Result -eq "PASS") { "#2e8b2e" } else { "#8b2e2e" }
     $label = if ($Result -eq "PASS") { "✓ PASS" } else { "✗ FAIL" }
 
-    # Match either a virgin card from generate_all_svgs.ps1 or one this function
-    # already rewrote, so repeat runs replace the mark instead of stacking cards.
     $esc = [regex]::Escape($MapName)
     $pattern = '<div class="card"[^>]*><h2><a href="' + $esc + '\.svg" target="_blank">' + $esc
 

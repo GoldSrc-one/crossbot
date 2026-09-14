@@ -490,13 +490,11 @@ void CommitCampStop(CBot &bot, const Vector &point, int areaId, int campIndex)
 	stop.camp = true;
 	stop.campIndex = campIndex;
 
-	// A detour, so the target survives it and OnRepathFailed/OnBlocked keep going straight on.
 	CommitStop(bot, stop, true);
 }
 
 bool OnArrived(CBot &bot)
 {
-	// A camp stop is not a leg to advance past: the bot arrived in order to stand still.
 	if (bot.goal.stop.camp)
 		return BotCamp::OnArrived(bot);
 

@@ -355,8 +355,6 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		if (exposure < mesh->minConnExposure)
 			mesh->minConnExposure = exposure;
 
-		// Same blend, evaluated along each direction of travel: how far a fight can
-		// reach for a bot crossing this way.
 		if (conn.areaA < mesh->areas.size() && conn.areaB < mesh->areas.size())
 		{
 			Vector travel = mesh->areas[conn.areaB].centroid - mesh->areas[conn.areaA].centroid;

@@ -1,46 +1,3 @@
-<#
-.SYNOPSIS
-    Manual driver for the sense system and the aim delay queue: boots HLDS, adds
-    bots that can see each other, and polls crossbot_aim_status and
-    crossbot_sense_status while stepping crossbot_aim_delay.
-
-.DESCRIPTION
-    The nav sweep cannot exercise any of this -- it spawns one bot, and with
-    LOS-gated vision a lone bot never has a target and hears almost nothing.
-    This script is the only automated way to see the queue and the suspicion
-    list run.
-
-    Two bots left to roam a real map is not enough either: they chase items
-    independently and are almost never in each other's line of sight, so the
-    queue sits empty. So the run has three phases.
-
-    STATIC: gather off, no goals, all bots sent to one spawn by nav goal. They stand
-    together, hold line of sight continuously, and the target is stationary --
-    which is the case the design says must be exact at *any* delay, because
-    extrapolating a still target forward and reading it back cancels perfectly.
-    err should be small and flat across delays. It no longer goes to zero: the
-    aim point is a randomly chosen hitbox bone each frame while err is measured
-    against the target's eye, so the bone spread is a standing floor of a couple
-    of degrees. A *trend* across delays is still a real defect.
-
-    ROAM: gather back on, bots move. err is now allowed to be nonzero -- that is
-    target acceleration, which is the whole point -- but the queue should be full
-    and served should equal the requested delay whenever a target is held.
-
-    SUSPICION: which senses actually fire, which tier wins the vote, and whether
-    heard entries age out. Only SIGHT and SOUND are reachable here. SOUND is
-    dominated by footsteps, which pmove emits through pmove->PM_PlaySound rather
-    than pfnEmitSound and which the plugin picks up by hooking pfnPM_Move; item
-    pickups, doors and chargers make up the rest. EVENT and DAMAGE both need
-    weapon fire, which no bot does yet.
-
-    Sources are read from the pushed= counters, not by sampling fresh=. The list
-    holds one entry per entity, so a player's SIGHT entry overwrites their own
-    SOUND entry within the same frame and fresh= would miss most of what fired.
-
-.PARAMETER Delays
-    crossbot_aim_delay values to walk through in the static phase (default: 0, 0.25, 0.5).
-#>
 param(
     [string]$Map = "crossfire",
     [int]$Port = 0,
@@ -155,9 +112,6 @@ try {
     $lastPushed = @{}
     $tierViolations = 0
     $tierChecks = 0
-    # Cumulative high-water marks from keeps=, never the sampled keep= field. A bot holds a target on
-    # well under half of frames, so a poll every few seconds reads keep=none almost always and would
-    # fail an honest build -- which is exactly what it did the first time this was written.
     $keepCounts = @{ 'inc' = 0; 'new' = 0 }
     $deadline = (Get-Date).AddSeconds($SuspicionSeconds)
     while ((Get-Date) -lt $deadline) {
@@ -191,10 +145,6 @@ try {
         Write-Host "FAIL: a live player entry lost the vote to a lower tier -- check LookDirection's tier pass"
         $failed = $true
     }
-    # Zero checks is not a pass. Two bots roaming crossfire always produce some poll with a live
-    # player entry, so an empty tally means the regex stopped matching the status line rather than
-    # that the tier rule held -- which is exactly what happened when kinds= gained hunt= and mon=
-    # fields between it and tier=.
     if ($tierChecks -eq 0) {
         Write-Host "FAIL: no poll had a live player entry -- the tier assertion never ran, check the kinds=/tier= regex against crossbot_sense_status"
         $failed = $true
@@ -204,11 +154,6 @@ try {
         $failed = $true
     }
 
-    # Vision spends at most two traces: the incumbent enemy, then a weighted-random pick. If
-    # Incumbent() ever returns null unconditionally, everything still works -- the bot just re-rolls
-    # its enemy every frame -- and nothing else in this suite would notice. keep=inc is the witness
-    # that the lock is reachable at all. Guard the empty case: an all-none run says the bots never
-    # saw each other, which is a broken phase, not a passing one.
     Write-Host ("keeps= inc:{0} new:{1} (cumulative frames, not samples)" -f $keepCounts['inc'], $keepCounts['new'])
     if (($keepCounts['inc'] + $keepCounts['new']) -eq 0) {
         Write-Host "FAIL: vision never saw anyone across the whole phase -- both bots blind, not a pass"

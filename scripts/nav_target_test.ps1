@@ -2,9 +2,6 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$Map,
     [int]$Port = 29015,
-    # Same reasoning as nav_spawn_test.ps1's identical parameter: 2x on top
-    # of Bot_MoveNav's own kEtaSafetyMargin is a generous allowance for
-    # detours/repaths/jump run-ups, not a tight bound.
     [double]$TimeoutMultiplier = 2.0,
     [int]$MaxWaitSeconds = 240,
     [int]$PollIntervalSeconds = 3,
@@ -19,20 +16,15 @@ $hldsDir = "D:\hlds"
 
 Write-Host "=== crossbot single-target test: $Map ==="
 
-# --- 1. Start the server, listing the spawn and target as part of the boot
-#        cfg so we don't need a separate rcon round-trip before the bot
-#        exists (same reasoning as nav_spawn_test.ps1). ---
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port -RequireVerbose `
     -Commands @("crossbot_add valve TargetTestBot", "crossbot_list_spawns", "crossbot_list_targets")
 
 $serverPid = Get-CbServerPid $startResult
 Write-Host "server started, PID=$serverPid"
 
-# Give the boot cfg (40 waits + our commands) time to actually run.
 Start-Sleep -Seconds 10
 
 try {
-    # --- 2. Parse the spawn point and the info_target out of qconsole.log. ---
     $log = Get-Content (Join-Path $hldsDir "qconsole.log") -Raw
     $spawns = Get-CbSpawns $log
     $targetMatches = [regex]::Matches($log, "CrossBot: target (\S+) \(([-\d.]+),([-\d.]+),([-\d.]+)\)")
@@ -57,24 +49,10 @@ try {
     Write-Host ("spawn=({0},{1},{2}) target=({3},{4},{5})" -f `
         $spawnX, $spawnY, $spawnZ, $targetX, $targetY, $targetZ)
 
-    # --- 3. Make sure the bot starts from the actual spawn point (it should
-    #        already be there from natural spawn, but teleporting is cheap
-    #        insurance against picking up leftover state from a prior run),
-    #        then send it to the target. ---
     Invoke-CbRconQuiet $Port "crossbot_teleport $spawnX $spawnY $spawnZ"
     Start-Sleep -Milliseconds 500
     Invoke-CbRconQuiet $Port "crossbot_nav_goal $targetX $targetY $targetZ"
 
-    # --- 4. Poll until arrival, timeout, or the bot abandons this goal.
-    #        Primary signal is bot_move_nav.cpp's permanent "reached goal"
-    #        log line, matched against the target's exact coordinates --
-    #        NOT the live "goal=" field from crossbot_nav_status, which is
-    #        racy: on a short path the bot can arrive and auto-pick a brand
-    #        new wander goal well within one poll interval, so by the time
-    #        we poll, "goal=" may already show the *next* destination and
-    #        never the target we actually asked for. The live status poll
-    #        is still useful for progress visibility and timeout/stuck
-    #        detection, just not as the pass/fail source of truth. ---
     $expectedEta = $null
     $elapsed = 0
     $result = "FAIL"
@@ -116,9 +94,6 @@ try {
         Write-Host ("t={0,4}s origin=({1:F0},{2:F0},{3:F0}) distToTarget={4:F0} hasGoal={5}" -f `
             $elapsed, $ox, $oy, $oz, $distToTarget, $hasGoalMatch.Groups[1].Value)
 
-        # Fallback in case the log-line match above has a formatting mismatch
-        # (e.g. an unexpected float rounding) -- still catch a genuine
-        # close-enough arrival via live distance, same as nav_spawn_test.ps1.
         if ($distToTarget -le $ArrivalDistance) {
             $result = "PASS"
             $reason = ("arrived, distToTarget={0:N0} at t={1}s" -f $distToTarget, $elapsed)

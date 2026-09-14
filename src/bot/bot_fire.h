@@ -75,9 +75,6 @@ struct State
 	int lastTimerId = 0;
 	int lastChargeState = 0;
 	float lastThrowStart = 0.f;
-	// When a shot was last corroborated by the weapon timer moving. pressed is a one-frame flag
-	// that CountShots consumes on the following frame, so it cannot answer "did we just swing?"
-	// from outside this file; this can.
 	float lastShotTime = 0.f;
 	bool pressed = false;
 	bool pressedLead = false;
@@ -94,12 +91,7 @@ struct State
 	int commitCaps = 0;
 	int uphillVetoes = 0;
 	int selfVetoes = 0;
-	// Shots withheld because the ray missed the target box. Cumulative, because the reason string
-	// is a single frame sampled every two seconds and misses most of what it describes -- the same
-	// reason selfVetoes exists alongside the "splash-self" reason.
 	int aimVetoes = 0;
-	// Frames that published an AIM_TARGET aim. For a pinned crossbow that is exactly "primaryZoomed
-	// was selected", which the aim= field in the status line can only witness by luck.
 	int targetAims = 0;
 	int switches = 0;
 	int reloads = 0;

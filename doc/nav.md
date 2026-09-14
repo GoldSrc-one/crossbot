@@ -120,7 +120,8 @@ edge score = time * (1 - careful + careful * exposure)
 ```
 
 `RangeBias` (`plan_search.h`) holds a weight, the two distance thresholds, and one bit saying whether
-the weapon wants long range. `Mismatch` is a single lerp: `t` ramps 0 to 1 as the edge's open distance
+the weapon wants long range. `Weight()` clamps to `[0, 1]` at the struct rather than at the call sites:
+above 1 the multiplier goes negative, which is a negative edge cost in both searches. `Mismatch` is a single lerp: `t` ramps 0 to 1 as the edge's open distance
 goes from `shortDist` to `longDist`, and a close-range weapon takes `t` while a long-range one takes
 `1 - t`. Zero is ideal ground, one is the worst. At `weight = 0.5` the multiplier spans `[0.5, 1]`, so
 a route that fights on the right ground may take twice as long in seconds and still win.
@@ -145,7 +146,8 @@ argument as the exposure bound, and the same cost: a high weight weakens the heu
 
 **A weapon swap invalidates the route.** `bot.plannedRangeClass` records what the current route was
 planned for, and the nav update forces a repath when the live weapon's class differs. It compares the
-*class*, not the weapon id, so swapping between two close-range guns costs nothing.
+*class*, not the weapon id, so swapping between two close-range guns costs nothing. It is stamped only
+once the plan stands: a failed search must not mark the route as planned, or the retry loses its trigger.
 
 ## plan_search.cpp
 
@@ -1077,6 +1079,10 @@ flag that arrived exactly at the boundary plane would be too late. The late one 
 **Walk (including doors):**
 - Door: adds button/trigger waypoint if needed, then door waypoint (requiresDoor, doorWaitTime)
 - Non-door: pushes both gates to funnel, continues
+
+**Swim pricing is deliberately coarse.** Either endpoint under water prices the whole leg as a swim,
+which over-charges the seam legs entering or leaving a pool. That is the direction to be wrong in:
+a land route that loses to water should lose by a margin.
 
 **Goal:**
 - Flushes funnel to goal point

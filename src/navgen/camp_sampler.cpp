@@ -65,8 +65,6 @@ struct SlotState
 	size_t visiblePairs = 0;
 };
 
-// Targets inside the cone against targets outside it, plus how wide an arc those
-// inside actually span and how far away they sit.
 FovStats EvaluateFov(const std::vector<CampTarget> &targets, const Vec3 &axis, double cosHalf)
 {
 	FovStats out;

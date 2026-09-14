@@ -14,7 +14,6 @@
 namespace navgen
 {
 
-// Half-angle of the scoring cone: a 90 degree field of view.
 constexpr double kCampFovHalfDeg = 45.0;
 
 constexpr double kDefaultCampSpacing = 256.0;

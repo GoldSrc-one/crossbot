@@ -1,8 +1,3 @@
-<#
-.SYNOPSIS
-    Manual driver for the fun goal tier: boots HLDS on a map, prints the fun
-    inventory, adds bots, and polls crossbot_nav_status while they play with it.
-#>
 param(
     [string]$Map = "maps\crossfire.bsp",
     [int]$Port = 0,

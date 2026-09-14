@@ -28,24 +28,16 @@ namespace
 	constexpr float kDefaultScareRadius = 1024.f;
 	constexpr float kDefaultReachRadius = 512.f;
 
-	// Slack so a contact jittering in place does not read as closing in.
 	constexpr float kCampScareEpsilon = 16.f;
-	// Nothing has come closer for this long -- the scare is over.
 	constexpr float kCampStale = 1.f;
-	// A committed camp whose route is longer than this was never a sidestep.
 	constexpr float kCampMaxTravel = 3.f;
 	constexpr float kCampCooldown = 5.f;
-	// Duck unless standing sees more than 5% more.
 	constexpr float kCampDuckSlack = 0.95f;
-	// How much of the zoomed field of view the sweep may fill and still be worth zooming into.
 	constexpr float kDefaultZoomShare = 0.85f;
-	// Below this the targets are close enough to find without magnification.
 	constexpr float kDefaultZoomDist = 768.f;
 	constexpr float kFriendCheckInterval = 0.2f;
 	constexpr float kFriendFallbackCone = 90.f;
 
-	// Crouching is the default. A camper is a smaller and steadier target, so the tie and the near
-	// tie both go to crouch; only a spot that really needs the extra eye height stands up.
 	bool ChooseDuck(const Nav::CampSpot &camp)
 	{
 		if ((camp.flags & crossbot_nav::CAMP_NO_STAND) != 0)
@@ -54,9 +46,6 @@ namespace
 		return camp.crouchScore >= kCampDuckSlack * camp.standScore;
 	}
 
-	// The spot's spread is the RMS angle its visible targets sit off the measured facing, so twice
-	// it is the arc the camper actually has to sweep. Zoom when that sweep fits inside the scope
-	// and the targets are far enough away for the magnification to buy anything.
 	bool ChooseZoom(const Nav::CampSpot &camp, bool duck, float zoomFov)
 	{
 		if (zoomFov <= 0.f)
@@ -70,7 +59,6 @@ namespace
 		return spread * 2.f <= zoomFov * BotCamp::ZoomShare();
 	}
 
-	// The scope of whatever the bot is holding when the route is built, 0 when it has none.
 	float HeldZoomFov(const CBot &bot)
 	{
 		const BotInventory &inv = bot.inventory;
@@ -223,7 +211,6 @@ void BuildRoute(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &f
 		float out = fromBot[area];
 		if (in >= Nav::kUnreachableSeconds || out >= Nav::kUnreachableSeconds)
 			continue;
-		// The gather-detour rule verbatim: a camp may never cost the bot ground on its target.
 		if (in >= here)
 			continue;
 		if (out + in - here > budget)
@@ -242,8 +229,6 @@ void BuildRoute(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &f
 		st.route.push_back(spot);
 	}
 
-	// Retargeting is frequent -- a moving strategic goal rebuilds this four times a second -- so
-	// this one line is the reason crossbot_camp_debug exists.
 	if (DebugEnabled())
 		BOT_VLOG("CrossBot: %s prepares %zu camp spots along the way of %zu, %.1fs from the target\n",
 			bot.name, st.route.size(), mesh.camps.size(), here);
@@ -253,8 +238,6 @@ void Track(CBot &bot)
 {
 	State &st = bot.camp;
 
-	// The zoom we owe the weapon outlives the camp that asked for it, so settle it first and
-	// independently of whether camping is still switched on.
 	if (st.unzoom && !bot.fire.zoomed)
 		st.unzoom = false;
 
@@ -283,12 +266,6 @@ void Track(CBot &bot)
 	else
 		st.friendInView = false;
 
-	// NearestLive has already applied the sense decay, so anything it returns is a contact the bot
-	// still believes in. Nothing further gates this on the slot's own age: footsteps arrive in
-	// bursts, and an age test tight enough to mean anything flickers the whole tracker on and off
-	// between them. Distance is measured from the bot, so walking toward a remembered position also
-	// reads as closing in -- which is the right answer for somewhere the bot heard something a
-	// moment ago, and the decay is what stops it being the answer forever.
 	if (st.friendInView)
 		st.scared = false;
 	else if (contact)
@@ -301,8 +278,6 @@ void Track(CBot &bot)
 		}
 	}
 
-	// Nothing has come closer for a while. The running minimum resets with the scare, so the same
-	// contact can frighten the bot again if it starts closing a second time.
 	if (st.scared && gpGlobals->time - st.scareTime > kCampStale)
 		st.scared = false;
 
@@ -319,11 +294,6 @@ bool Consider(CBot &bot)
 
 	if (bot.goal.stop.camp)
 	{
-		// Already on a camp leg. A stale scare deliberately does NOT abandon the approach: the
-		// stale rule is about how long to *stay*, and applying it to the walk as well meant the
-		// bot gave up on every camp it ever picked -- a spot 350 units out is a second away, which
-		// is the whole window. Arriving somewhere it was going anyway costs nothing, because the
-		// camp was only eligible if it was already on the way to the target.
 		if (!st.holding && !Enabled())
 		{
 			Abandon(bot, "camping is off");
@@ -356,8 +326,6 @@ bool Consider(CBot &bot)
 
 	for (const RouteSpot &spot : st.route)
 	{
-		// The live half of the detour rule. toGoal is a fixed field cached on the bot, so re-testing
-		// it as the bot advances is free -- that is the whole reason the route set is prepared.
 		if (spot.toGoal >= here)
 			continue;
 
@@ -399,10 +367,6 @@ bool OnArrived(CBot &bot)
 	if (st.spot.zoom)
 		st.unzoom = true;
 
-	// Re-seed the tracker from the camp itself. "Stale for more than a second" is a rule about
-	// camping and the bot has only just started, and the running minimum it carried here was
-	// measured from wherever it heard the noise rather than from where it is now. With nothing in
-	// radius the scare flag is left alone, so a bot that arrives to silence leaves again at once.
 	float dist = 0.f;
 	if (BotSense::NearestLive(bot, bot.pEdict->v.origin, ScareRadius(), true, &dist))
 	{
@@ -444,13 +408,8 @@ bool Run(CBot &bot)
 		return false;
 	}
 
-	// Nothing below plans a route, so keep the stall detector from reading a bot holding a corner
-	// as a bot stuck against geometry.
 	bot.lastProgressTime = gpGlobals->time;
 
-	// Default the head to the facing the spot was measured at, then let ApplyLook blend away from
-	// it toward whatever the bot can hear. The camp direction is the base, not an override -- a
-	// camper that ignored the noise it is camping against would be worse than one that never camped.
 	float yaw = 0.f, pitch = 0.f;
 	if (Facing(bot, yaw, pitch))
 		bot.desiredAngles = Vector(pitch, yaw, 0.f);
@@ -478,8 +437,6 @@ bool CheckTravel(CBot &bot, float seconds)
 	if (seconds <= kCampMaxTravel)
 		return false;
 
-	// The reach radius is euclidean, so it cannot tell a camp across the room from a camp across a
-	// chasm. The planned route can, and it has already been built by the time we get here.
 	Abandon(bot, "the route to it was longer than it looked");
 	return true;
 }
@@ -540,7 +497,6 @@ bool WantZoom(const CBot &bot, bool &want)
 		return true;
 	}
 
-	// The camp is over but the scope is still up. One opinion, held until the weapon agrees.
 	if (st.unzoom)
 	{
 		want = false;

@@ -1,42 +1,3 @@
-<#
-.SYNOPSIS
-    Deployable test: bots place tripmines and satchels, avoid the beams, and
-    detonate satchels on contact.
-
-.DESCRIPTION
-    Four phases, each on its own server:
-
-      gates    -- crossbot_list_gates on several stock maps. Asserts every map
-                  finds chokepoints and that the openings look like doorways
-                  rather than open floor. This is the only phase that needs no
-                  bots and the only one that fails on a bad gate scan alone.
-      tripmine -- bots equipped with tripmines on crossfire. Asserts placements,
-                  both stances, and that beams are met with duck AND jump.
-      standoff -- surface pinned to ground on test2_doorway, which has one route,
-                  so a vertical beam blocks it outright. Asserts the shoot path:
-                  side search fails, the bot backs off and destroys the mine.
-      satchel  -- bots equipped with satchels on crossfire. Asserts placements and
-                  detonations, and that detonations are NOT self-triggered.
-
-    The nav sweep cannot see any of this: it runs one bot with crossbot_deploy 0,
-    because mines placed mid-sweep change every route on the map.
-
-.PARAMETER Phase
-    Run one phase only. Default: all four.
-
-.PARAMETER Seconds
-    Seconds per bot phase (default 150). The floor is about 60 -- below that a
-    phase measures nothing, because a bot has to wander into a gate first.
-
-.PARAMETER Port
-    Base port (default 29200). Each phase takes the next one.
-
-.EXAMPLE
-    .\scripts\test_deploy.ps1
-
-.EXAMPLE
-    .\scripts\test_deploy.ps1 -Phase standoff -Seconds 240
-#>
 param(
     [ValidateSet("all", "gates", "tripmine", "standoff", "satchel")]
     [string]$Phase = "all",
@@ -62,10 +23,6 @@ function Invoke-Phase([string]$name, [string]$map, [int]$port, [string[]]$boot,
         -LogPrefix "deploy" -ConfigPrefix "_deploy" -Failures $failures
 }
 
-# --- gates -------------------------------------------------------------------
-# A stock map with no chokepoints means the gate scan is broken, not that the map
-# is unusual. The opening bound is the real assertion: anything over
-# kDeployOpeningMax would mean the physical measurement is not being applied.
 function Test-Gates([int]$port) {
     foreach ($map in @("crossfire", "boot_camp", "stalkyard", "test2_doorway")) {
         $lines = Invoke-Phase "gates_$map" $map $port @() {
@@ -87,10 +44,6 @@ function Test-Gates([int]$port) {
     }
 }
 
-# --- tripmine ----------------------------------------------------------------
-# Both stances must appear, and both maneuvers must follow from them: a standing
-# placement puts the beam at ~64 and is crawled under, a ducked one at ~30 and is
-# jumped. Seeing only one of the two means the stance roll is dead.
 function Test-Tripmine([int]$port) {
     $lines = Invoke-Phase "tripmine" "crossfire" $port @("crossbot_deploy_debug 1") {
         param($p)
@@ -132,12 +85,6 @@ function Test-Tripmine([int]$port) {
         "tripmine placed=$placed duck=$crawl goals=$goals contact=$contact blast=$blast")
 }
 
-# --- standoff ----------------------------------------------------------------
-# test2_doorway has one route per gate, so a vertical beam cannot be walked
-# around. The map is also smaller than kMineSafeRadius end to end, so the retreat
-# always ends on kBreakRetreatTime -- that is the graceful path, not a failure.
-# The bot is driven between the spawn and the info_target because it has no items
-# to fetch here and would otherwise never leave its spawn area.
 function Test-Standoff([int]$port) {
     $lines = Invoke-Phase "standoff" "test2_doorway" $port @("crossbot_deploy_surface 3", "crossbot_deploy_debug 1") {
         param($p)
@@ -172,10 +119,6 @@ function Test-Standoff([int]$port) {
     [void]$results.Add("standoff placed=$placed shoot=$shoot killed=$killed")
 }
 
-# --- satchel -----------------------------------------------------------------
-# The contact distance is the assertion that matters. A satchel plays a bounce
-# sound on landing and BotSense pushes a suspicion for the emitter, so a bot that
-# counts its own charge as a contact detonates instantly and reports ~2 units.
 function Test-Satchel([int]$port) {
     $lines = Invoke-Phase "satchel" "crossfire" $port @() {
         param($p)
@@ -211,7 +154,6 @@ function Test-Satchel([int]$port) {
     [void]$results.Add("satchel placed=$placed dets=$dets tries=$tries")
 }
 
-# --- run ---------------------------------------------------------------------
 Write-Host "=== crossbot deployable test ==="
 Write-Host "Phase: $Phase, $Seconds s per bot phase"
 

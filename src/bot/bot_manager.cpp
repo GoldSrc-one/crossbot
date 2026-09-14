@@ -396,11 +396,6 @@ bool AddBot(int iGame, const char *name, const char *arg)
 		return false;
 	}
 
-	// Whatever the third crossbot_add argument meant to this game -- a player model here, a team
-	// in a mod that has them. Deliberately outside the InGame scope: this is a plain engine call
-	// on an edict, and only CREATE_FAKE_CLIENT needs CrossPlay's context (doc/crossplay.md). It
-	// runs before ClientConnect so the game DLL reads a finished userinfo buffer, the order a
-	// real client arrives in. Supported(iGame) above already guarantees the profile is there.
 	char chose[32] = {};
 	XPlay::ProfileFor(iGame)->ApplyAddArg(iGame, pEdict, arg, chose, sizeof(chose));
 
@@ -962,7 +957,6 @@ void PrintVantageStatus(const Vector *at)
 			SERVER_PRINT(line);
 		}
 
-		// The number routing actually reads: how far a fight reaches looking each way.
 		char open[224];
 		snprintf(open, sizeof(open),
 			"CrossBot:   open dist: facing(%.0f) %.0f | +x %.0f +y %.0f -x %.0f -y %.0f\n", yaw,

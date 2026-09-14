@@ -58,9 +58,6 @@ struct Suspicion
 	bool hunting = false;
 };
 
-// Which trace won this frame. KEEP_INCUMBENT is the enemy the bot was already fighting; KEEP_NEW
-// is a fresh weighted-random pick. During a duel this should read KEEP_INCUMBENT nearly every
-// frame -- a run of KEEP_NEW means the lock is broken and the bot is re-rolling its enemy.
 enum VisionKeep : unsigned char
 {
 	KEEP_NONE = 0,
@@ -81,14 +78,8 @@ struct State
 	int targetBone = -1;
 	int leadVetoes = 0;
 
-	// Diagnostics for the two-trace vision rule. visionCands is how many players passed range
-	// and viewcone -- i.e. how many tracelines the old every-candidate scan would have spent --
-	// and visionKeep says which of the (at most two) traces produced the target.
 	int visionCands = 0;
 	VisionKeep visionKeep = KEEP_NONE;
-	// Cumulative per-outcome tally. visionKeep alone is one frame, and a test that samples it every
-	// few seconds reads none almost always -- a bot holds a target on well under half of frames, so
-	// sampling proves nothing about whether the incumbent lock works. These cannot miss.
 	unsigned int keeps[3] = {};
 
 	unsigned int monSeen = 0;

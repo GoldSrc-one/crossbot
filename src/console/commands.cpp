@@ -123,9 +123,6 @@ namespace
 			walked, pevBits, walked == (pevBits & ~kSuitBit) ? "match" : "MISMATCH");
 		SERVER_PRINT(msg);
 
-		// Same spirit as the mask check above. ActiveWeaponId is the two-deref shortcut the duel
-		// rule reads other players with, and nothing else corroborates it; the full walk's own
-		// activeIndex is the oracle.
 		int walkedActive = (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
 			? inv.weapons[inv.activeIndex].id : 0;
 		int peeked = BotWeapons::ActiveWeaponId(player);
@@ -575,8 +572,6 @@ namespace
 		const char *name = CMD_ARGC() > 2 ? CMD_ARGV(2) : nullptr;
 		const char *arg = CMD_ARGC() > 3 ? CMD_ARGV(3) : nullptr;
 
-		// What the third argument means is the game profile's business, not this command's. '*'
-		// spells "the profile's choice" here exactly as it does for the gamedir.
 		if (arg && (!arg[0] || strcmp(arg, "*") == 0))
 			arg = nullptr;
 

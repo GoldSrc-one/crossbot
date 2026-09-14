@@ -31,7 +31,6 @@ enum WeaponAmmo
 	AMMO_SECONDARY,
 };
 
-// The distance band a weapon fights best at. Routing prefers ground that matches.
 enum WeaponRangeClass
 {
 	RANGE_NONE = 0,

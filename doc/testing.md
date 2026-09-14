@@ -36,6 +36,12 @@ model ladders.** Ladder maps take 2.6-3.1× their reported ETA running completel
 parallel load. The multiplier is a fail-fast heuristic; `-Timeout` is the real bound. A genuinely stuck
 bot never arrives at all, so tightening the multiplier buys nothing and costs false failures.
 
+Arrival is `hasGoal=0` near the goal (96 units; legitimate arrivals land 24-50 out since the goal is
+clamped into its area). `hasGoal=0` alone is not arrival — a failed repath also drops the goal —
+so the distance check is what makes it a pass. Spawn and target counts are required twice in a row
+before trusting them, since a split UDP reply reads as a map with fewer spawns. Native stderr is
+kept out of the verdict: under `Stop` a warning line would otherwise fail the run.
+
 **Parallel-safe.** Every instance takes a unique port (29015-29100) and map-specific trace file, config,
 server log and outputs; `crossbot_trace_path` isolates the trace log per instance. The one thing that is
 *not* isolated is `nav_debug/index.html`, so parallel callers must pass `-NoIndexUpdate` and rebuild it
@@ -62,6 +68,15 @@ focus, and there is no window to click into and freeze the server in QuickEdit s
 the server answering RCON (`echo crossbot_ready` via `rcon.ps1`), not the engine printing
 `player server started` into that log: redirected stdout is block-buffered, so that line can sit
 unflushed long after the map is live while RCON answers the moment it is.
+
+`rcon.ps1` speaks the GoldSrc out-of-band protocol (challenge, then command with challenge +
+password) so a live server can be driven mid-run and wall-clock time stays observable. It waits 3 s
+for the first packet and 1 s per further packet — a short drain silently truncates the reply, which
+reads downstream as a map with no `info_target`. A missing server is a normal poll outcome, so it
+returns empty rather than throwing under `Stop`, and it always returns a string since callers regex
+the result. The `0xFF*4 + 'l'` prefix heads every packet, not just the first, and is stripped from
+all of them. The server's stdin is a real pipe held open by a per-port `waitfor`, and
+`test_server_stop.ps1` kills only its own pid plus that waiter — never a blanket kill.
 
 **The plugin's output is now per-instance.** Every `SERVER_PRINT` — `Repath`, `Replan`, the air-move
 launch and landing lines — goes to `<OutputDir>/logs/<map>_server.log` for that run alone. A run that
@@ -125,7 +140,8 @@ call shape, returning text or discarding it), `Get-CbDistance3D`, `Copy-CbMap` +
 and `-ConfigPrefix` telling the two suites apart). `test_nav_goal_all.ps1` keeps its own
 `Stop-ServerOnPort`: that kills by port range after a child is shot, which is a different job from
 `test_server_stop.ps1`'s kill-by-pid, and `profile_hlds.ps1` keeps its own launch (32 slots,
-`-NoConDebug` / `-NullStdout`).
+`-NoConDebug` / `-NullStdout`). `generate_all_svgs.ps1` rebuilds every map SVG plus the debug
+gallery `index.html`.
 
 Kept, not cut: `nav_spawn_test.ps1` / `nav_target_test.ps1` stay as the only drivers that assert on
 the `reached goal` log line (see `doc/bot.md`), and the single-use flags (`-GatherDebug`,
@@ -401,6 +417,9 @@ Sources are read from the `pushed=` counters, never by sampling `fresh=`. Since 
 per entity, a player's `SIGHT` entry overwrites their own `SOUND` and `DAMAGE` entries within a single
 `BotSense::Update`, so `fresh=` is a poor witness for anything but `SIGHT`.
 
+Zero tier checks is not a pass: two roaming bots always produce a live player entry, so an empty
+tally means the status regex stopped matching (e.g. a new field moved `tier=`), not that the rule held.
+
 Sound there now comes mostly from **footsteps**, plus item pickups, doors and chargers. Footsteps dominate
 by a wide margin: two roaming bots on `crossfire` produce around 85 step sounds in 25 seconds, against 64
 sounds of every other kind over a comparable run. They do not arrive through `pfnEmitSound` -- pmove emits
@@ -482,6 +501,8 @@ are both available with nobody else on the map, which is what turned it into a p
 What still needs the duel and `-Full` is `idlereload` (a magazine topped up between fights) and the
 carry *spread*: at least two weapons whose carry times differ, which is what shows the tally tracks
 acquisition rather than running as one uniform clock. `crossbot_weapon_carry` is what that reads.
+A bot met mid-phase enters the tally at its current counters, not zero — entering at zero would
+import everything it did before the phase started.
 
 **The control phase is the load-bearing half.** With `crossbot_fire 0` nothing may fire, and it is
 checked two independent ways: the plugin's own shot counter, and ammo the bots actually spent, read
@@ -804,10 +825,12 @@ something that is not a player. `-Phase` runs one; `-Seconds` sets each phase's 
 .\scripts\test_monster.ps1 -Phase engage -Seconds 300
 ```
 
-Live monsters come from the bots themselves. `weapon_snark` is the profile's `AMBUSH_SNARK`, so an
-equipped bot throws snarks at the first opponent it surprises -- the same machinery `test_fire.ps1`'s
-WEAPON phase already exercises, which is why this needs no entity-spawning command. Snarks are consumed
-per throw and the give is five, so the phase body re-equips every few seconds or the map runs dry.
+Live monsters come from `crossbot_spawn`, refreshed in front of each bot every few seconds.
+Letting the bots throw them does not work: the snark is only reachable through the ambush path
+against an unaware opponent, and the uphill veto refuses the throw almost everywhere on crossfire
+(measured: `uphill=510`, `throwshots=0` over a minute with the pin on). The phase equips `weapon_9mmAR`
+because a snark has 2 health and dies to one bullet — what is measured is whether the bot engages
+at all, not whether it can win.
 
 | Phase | Asserts |
 | --- | --- |

@@ -747,9 +747,6 @@ void PlanWalker::PushWaypoint(const PlanWaypoint &wp, bool countLength)
 		float len = (wp.point - m_result.back().point).Length();
 		m_committedLength += len;
 
-		// Either end under water prices the whole leg as a swim. That over-charges the seam legs
-		// that enter or leave a pool, which is the direction to be wrong in: a land route that
-		// loses to water should lose by a margin.
 		if (AreaUnderWater(m_result.back().targetAreaId) || AreaUnderWater(wp.targetAreaId))
 			m_committedSwimLength += len;
 	}

@@ -38,7 +38,6 @@ struct Stop
 	Vector point;
 	int payload = 0;
 
-	// A camp stop is a detour with no entity behind it: BotCamp picks it, BotGoal only carries it.
 	bool camp = false;
 	int campIndex = -1;
 };

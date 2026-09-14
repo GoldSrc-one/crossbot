@@ -1,60 +1,4 @@
-﻿<#
-.SYNOPSIS
-    Driver for the hitscan firing loop: boots HLDS, lets a handful of bots roam
-    a real deathmatch map, and checks that they actually shoot each other.
-
-.DESCRIPTION
-    Nothing else in the suite can exercise this. The nav sweep spawns one bot per
-    server, so it never acquires a target and the firing code exits on its first
-    branch every frame. test_sense.ps1 converges its bots onto a single spawn,
-    which is exactly the arrangement firing cannot be measured in: converged bots
-    end up on the same origin, the eye-to-eye vector degenerates and vision drops
-    them.
-
-    So this script does the opposite of test_sense.ps1 and leaves gathering on.
-    Roaming bots collect weapons, cross each other's line of sight at real ranges
-    and fight, which is the only cheap way to get the whole chain -- sense, aim
-    queue, weapon choice, the fire ray and the button -- under load at once.
-    Encounters are stochastic, so the duel phase is generous with time and the
-    pass condition is "shots were fired at real targets", not a fixed count.
-
-    SELECT: one bot, alone on the map, and the only phase that can take the two
-    stages of selection apart. With no target the sole weapon decision left is
-    the out-of-combat one, and nothing gates the candidate list, so the ranking
-    is visible on its own. Four weapons spanning three score bands must leave
-    the bot on a top-scoring one; a fifth that ties that score but arrives with
-    a cold carry clock must then win on rarity. Both checks are against the live
-    carry table rather than a named weapon, because the bot keeps picking things
-    up off the floor and a found egon ties the crossbow fairly. It runs before
-    the other bots join because once four of them roam crossfire, a three-second
-    gap without a sighting is the exception rather than the rule.
-
-    CONTROL: crossbot_fire 0. Bots roam and must fire nothing at all. This is
-    what separates "firing works" from "the shot counter is broken" -- the
-    counter watches the game DLL's own attack timers, not the plugin's buttons,
-    so a stuck counter would otherwise read as success.
-
-    DUEL: crossbot_fire 1. Poll until shots land on real targets. Deaths, weapon
-    variety, weapon switches and reloads are reported rather than asserted:
-    every one of them depends on which guns happen to spawn near which bot.
-
-    WEAPON: one pass per weapon that needs its own aim or trigger, each pinned
-    with crossbot_fire_pin. Equipping alone is not enough and no amount of
-    patience fixes it -- in a fight a bot only re-selects when the weapon in its
-    hands stops working, and out of combat it settles on its best-scoring gun,
-    which is not the one a phase wants and which it then refuses to leave. The
-    pin makes every other weapon unusable, which is the only lever that names
-    one, and it is now needed harder than before: score is stable where usage
-    drifted, so a bot that finds a crossbow will hold it all phase. Separate passes
-    are what make aim=lead,
-    aim=homing, the zoom decision and the charge each attributable to the
-    weapon that produced them.
-
-.PARAMETER Bots
-    More bots means more encounters per second of wall clock. Four is enough to
-    make crossfire produce a fight inside a minute; two can take several.
-#>
-param(
+﻿param(
     [string]$Map = "crossfire",
     [int]$Port = 0,
     [int]$Bots = 4,
@@ -65,9 +9,6 @@ param(
     [int]$PollSeconds = 2,
     [float]$Quantum = -1,
     [float]$Impulse = -1,
-    # Run the whole duel window instead of stopping at the first confirmed
-    # engagement. Deaths, reloads and the rarer suspicion sources need several
-    # fights before they show up, and the pass condition needs only one.
     [switch]$Full,
     [string]$HLDSDir = "D:\hlds"
 )
@@ -82,9 +23,6 @@ $mapName = [System.IO.Path]::GetFileNameWithoutExtension($Map)
 
 . "$scriptDir\common.ps1"
 
-# One poll of crossbot_fire_status, folded into $state. Shots are cumulative per
-# life and reset to zero on respawn, so a drop is a death and the tally has to be
-# banked before it is lost rather than differenced blindly.
 function Update-FireState {
     param([hashtable]$state)
 
@@ -122,10 +60,6 @@ function Update-FireState {
         $prim = -1
         if ($line -match 'prim=(-?\d+)') { $prim = [int]$Matches[1] }
 
-        # A bot met for the first time is entered at whatever it already reads,
-        # not at zero. Every counter is per life and each phase starts a fresh
-        # tally, so entering at zero would make the first poll of a phase import
-        # everything the bot did in the phase before it.
         if (-not $state.Bots.ContainsKey($name)) {
             $state.Bots[$name] = @{
                 Shots = $shots; Switches = $switches; Reloads = $reloads; Lead = $leadShots
@@ -145,11 +79,6 @@ function Update-FireState {
         }
         $bot = $state.Bots[$name]
 
-        # Every counter the plugin reports is per life -- respawn zeroes the
-        # whole fire state -- so a drop is a death, and the running tally has to
-        # be banked at that point rather than differenced across the gap.
-        # Each row is total key, current key, base key, fresh reading: on death
-        # bank (current - base) and re-zero the base, else add (fresh - current).
         $died = ($shots -lt $bot.Shots -or $switches -lt $bot.Switches -or $reloads -lt $bot.Reloads)
         foreach ($t in @( @('Total', 'Shots', 'Base', $shots),
                 @('TotalSwitches', 'Switches', 'BaseSwitches', $switches),
@@ -180,10 +109,6 @@ function Update-FireState {
         $bot.Sticky = $stickyShots
         $bot.Guides = $guides
 
-        # Ammo actually consumed, read independently of anything the plugin
-        # reports about itself. A clip only ever falls by firing -- reloading
-        # raises it -- and a clipless weapon spends its reserve directly, so
-        # one of the two is a true shot witness for every weapon in the game.
         if ($held -eq $bot.Held -and $held -ne '-') {
             if ($clip -ge 0 -and $bot.Clip -ge 0 -and $clip -lt $bot.Clip) {
                 $bot.Burned += $bot.Clip - $clip
@@ -240,13 +165,6 @@ function Get-TotalEmptySwitch { param([hashtable]$state) Get-TotalField $state '
 function Get-TotalIdleSwitch { param([hashtable]$state) Get-TotalField $state 'TotalIdleSw' 'IdleSw' 'BaseIdleSw' }
 function Get-TotalIdleReload { param([hashtable]$state) Get-TotalField $state 'TotalIdleRel' 'IdleRel' 'BaseIdleRel' }
 
-# The carry table is the one thing the plugin reports that does not reset on
-# respawn, so it needs no banking -- the widest spread any bot reaches is the
-# whole measurement. Every carried weapon has a non-zero carry time by
-# construction, so the count of carried weapons proves nothing; what proves the
-# tally tracks acquisition rather than running as one uniform clock is that the
-# times differ from each other. Carry is printed at one decimal, so distinctness
-# is counted on that same resolution.
 function Get-CarryLines {
     return ((Invoke-CbRcon $Port "crossbot_weapon_carry") -split "`r?`n")
 }
@@ -268,14 +186,6 @@ function Get-CarrySpread {
     return @{ Distinct = $best; Detail = ($detail -join ' ') }
 }
 
-# SELECT reads the settled weapon straight off the status line rather than the
-# HeldSeen set, because what it asserts is where the bot ended up, not every
-# weapon it passed through on the way.
-# The bot roams and picks weapons up while the phase runs, so naming the weapon
-# it ought to hold is wrong -- an egon found on the floor ties the crossbow at
-# 0.5 and legitimately beats it on carry. What is stable is the *rule*, so these
-# read the live table and check the held weapon against it: top score present,
-# and least carried among the weapons sharing that score.
 function Get-CarryTable {
     $table = @{}
     foreach ($line in (Get-CarryLines)) {
@@ -317,10 +227,6 @@ function Test-SelectionRule {
     return $null
 }
 
-# Sampled rather than settled: a weapon picked up with a partial clip sends the
-# bot off to reload it, which outranks the score filter by design and parks it on
-# the wrong gun for a second or two. Retrying past that is cheaper than trying to
-# exclude it.
 function Wait-SelectionRule {
     param([switch]$RequireRarest, [int]$Tries = 5)
 
@@ -362,37 +268,12 @@ try {
     Invoke-CbRcon $Port "crossbot_gather 1" | Out-Null
     Invoke-CbRcon $Port "crossbot_sense 1" | Out-Null
 
-    # Before the bots exist, not after. Several of them spawn inside each
-    # other's line of sight, and the handful of milliseconds an rcon round trip
-    # takes is long enough for the default crossbot_fire 1 to produce a few
-    # shots that the control phase would then have to explain.
     Invoke-CbRcon $Port "crossbot_fire 0" | Out-Null
     if ($Quantum -ge 0) { Invoke-CbRcon $Port "crossbot_aim_quantum $Quantum" | Out-Null }
     if ($Impulse -ge 0) { Invoke-CbRcon $Port "crossbot_aim_impulse $Impulse" | Out-Null }
 
     Invoke-CbRcon $Port "crossbot_add valve Fire1" | Out-Null
 
-    # One bot, so there is never a target and every decision this phase sees is
-    # the out-of-combat one. It runs before the others join because that is the
-    # only cheap way to guarantee an empty combat memory for twenty seconds --
-    # once four bots are roaming crossfire, three-second gaps in sight are the
-    # exception rather than the rule.
-    #
-    # Selection is a two-stage filter and this phase takes the stages one at a
-    # time, which is the only place either can be seen in isolation -- in a duel
-    # the candidate list is churned by ammo and geometry long before ranking
-    # sees it.
-    #
-    # Part A is stage 1. The four weapons handed over span three score bands
-    # (crossbow 0.5, 9mmAR 0.3, shotgun and hornetgun 0.2), so the score filter
-    # has exactly one survivor and the answer is not a matter of chance: the bot
-    # must settle on the crossbow and stay there.
-    #
-    # Part B is stage 2. The gauss also scores 0.5, so it ties the crossbow on
-    # score and the filter cannot separate them -- but it arrives with its carry
-    # clock at zero while the crossbow has been in the bag for the whole of part
-    # A, so rarity must break the tie towards the gauss. This is the one
-    # assertion in the suite that fails if carry time is not being accrued.
     Write-Host "`n===== SELECT: one bot, no targets, ${SelectSeconds}s ====="
     Write-Host "Score picks the band; carry breaks the tie inside it."
 
@@ -432,10 +313,6 @@ try {
     $selectShots = Get-TotalShots $select
     $selectCarry = Get-CarrySpread
 
-    # Two settles are expected, plus one per top-scoring weapon the bot finds on
-    # the floor, plus one per weapon that arrives with a partial clip and has to
-    # be carried while it reloads. A score filter that was not applied would
-    # instead churn on every 3s tick and show up here as a dozen.
     $churnBudget = 4 + [int]($SelectSeconds / 5)
 
     Write-Host ("  idleswitch={0} idlereload={1} shots={2} scoreheld={3} carryheld={4}" -f `
@@ -483,10 +360,6 @@ try {
         Start-Sleep -Seconds $PollSeconds
         Update-FireState $duel
 
-        # The suspicion list holds one entry per entity, so an enemy's DAMAGE entry
-        # is overwritten by their own SIGHT entry inside the same BotSense::Update
-        # and fresh= would essentially never report it. The pushed= counters are
-        # cumulative, so a single poll cannot miss a source that fired between polls.
         foreach ($line in ((Invoke-CbRcon $Port "crossbot_sense_status") -split "`r?`n")) {
             if ($line -notmatch 'pushed=sgt:(\d+),snd:(\d+),evt:(\d+),dmg:(\d+)') { continue }
             foreach ($p in @(@('SIGHT', 1), @('SOUND', 2), @('EVENT', 3), @('DAMAGE', 4))) {
@@ -533,18 +406,10 @@ try {
     if ($duel.Firing -eq 0) { $failures += "DUEL: no bot ever decided to fire" }
     if ($duelShots -eq 0) { $failures += "DUEL: no shot was observed leaving a weapon" }
     if ($duelBurned -eq 0) { $failures += "DUEL: no ammo was spent" }
-    # Every bot spawns with a glock and both its modes are sticky, so the duel is
-    # the cheapest witness there is -- a pinned phase would cost another minute of
-    # runtime to prove the same thing. Counted off the press flag like leadshots,
-    # never off a why= string.
     if ($duelSticky -eq 0) {
         $failures += "DUEL: no shot was ever held through an off-target frame, so the sticky trigger is not running"
     }
 
-    # Only under -Full. Each of these needs a bot to run a clip dry with a loaded
-    # spare in the bag, or to survive three seconds unseen with a part-empty
-    # magazine, and which guns spawn near which bot decides whether that happens
-    # at all inside the short window.
     if ($Full) {
         if ($duelCarry.Distinct -lt 2) {
             $failures += "DUEL: no bot reported two carry times that differ, so the tally is running as one uniform clock rather than tracking pickups"
@@ -555,23 +420,12 @@ try {
 
     $projFailures = @()
 
-    # The pin is per weapon and, for the gauss, per mode. Ranking names a weapon
-    # and then draws one of its usable modes at random, and pendingMode carries
-    # that draw through the switch -- but the draw is not repeated while the
-    # keep-loop is happy with what it already has. So a pinned gauss gets one
-    # coin flip at FIRE_CHARGE, at the select that opens the phase, and none
-    # after it. The mode argument is what makes the phase deterministic.
     $pins = @(
         @{ Weapon = 'weapon_crossbow';  Mode = '' }
         @{ Weapon = 'weapon_hornetgun'; Mode = '' }
         @{ Weapon = 'weapon_snark';     Mode = '' }
         @{ Weapon = 'weapon_gauss';     Mode = 'secondary' }
-        # The MP5's own give is clip ammo only, so the contact grenade needs its
-        # ammo entity equipped alongside the weapon or the mode is never usable.
         @{ Weapon = 'weapon_9mmAR';     Mode = 'secondary'; Ammo = 'ammo_ARgrenades' }
-        # The grenade's own give is five, and re-equipping every poll refills them.
-        # Its reach is about 550 units, so this phase is the one that most depends
-        # on the bots wandering close enough to each other.
         @{ Weapon = 'weapon_handgrenade'; Mode = '' }
         @{ Weapon = 'weapon_rpg';       Mode = ''; Ammo = 'ammo_rpgclip' }
     )
@@ -579,15 +433,6 @@ try {
     $seconds = [int]($ProjectileSeconds / $pins.Count)
     if ($seconds -lt 15) { $seconds = 15 }
 
-    # Combat off for the pinned phases, for the same reason test_nav_goal.ps1
-    # turns gathering off: a second movement source changes what is being
-    # measured. This used to be crossbot_chase, where a bot walked all the way to
-    # where it last saw someone and closed the range -- the crossbow only picks
-    # primaryZoomed at long range, so "aim=target never appeared" fired on a bot
-    # that was working correctly and simply never took a long shot. BotCombat
-    # only shuffles inside the current area, so the range it costs is far
-    # smaller, but it is still movement the phase did not ask for. DUEL keeps it
-    # on, since that phase wants the bots to find each other.
     Invoke-CbRcon $Port "crossbot_combat 0" | Out-Null
 
     foreach ($entry in $pins) {
@@ -597,12 +442,6 @@ try {
 
         Invoke-CbRcon $Port ("crossbot_fire_pin $pin $mode").Trim() | Out-Null
 
-        # Respawn every bot before the phase is measured. The pin reaches weapon
-        # selection, and selection alone is not enough to isolate a phase: a bot
-        # carrying a gauss charge keeps its mode without consulting ModeUsable,
-        # by design, so a charge started in the previous phase survives the pin
-        # and discharges into this one's counters. Dying drops the inventory,
-        # the charge and every per-life counter at once.
         Invoke-CbRcon $Port "crossbot_kill" | Out-Null
         Start-Sleep -Seconds $PollSeconds
 
@@ -610,9 +449,6 @@ try {
         Update-FireState $proj
         $deadline = (Get-Date).AddSeconds($seconds)
         while ((Get-Date) -lt $deadline) {
-            # Re-issued every poll rather than once. Respawning drops the whole
-            # inventory, and a second pickup of a weapon already held is what
-            # refills the five bolts a crossbow carries.
             Invoke-CbRcon $Port "crossbot_equip $pin" | Out-Null
             if ($entry.Ammo) { Invoke-CbRcon $Port "crossbot_equip $($entry.Ammo)" | Out-Null }
 
@@ -640,44 +476,21 @@ try {
 
         switch ($pin) {
             'weapon_crossbow' {
-                # Zoomed primary is FireSniperBolt, a hitscan trace, so a pinned
-                # crossbow has to show both aims: lead below 300 units, target
-                # once the range decision has zoomed it.
                 if ($proj.Zoomed -eq 0) { $projFailures += "WEAPON ${pin}: the bot never zoomed" }
-                # targetaims is cumulative and cannot miss; aim= in the status line is one frame
-                # sampled every two seconds and routinely does. Carried on aim= alone this failed on
-                # a bot that had selected primaryZoomed all phase -- the sample simply never landed
-                # on a frame that was both zoomed and holding a target.
                 if ($proj.TargetAims -eq 0 -and -not $proj.Aims.ContainsKey('target')) {
                     $projFailures += "WEAPON ${pin}: aim=target never appeared, so primaryZoomed was never selected"
                 }
-                # aimveto is the cumulative counter, so a single refusal anywhere in the phase
-                # reaches the poll; the reason string is one frame sampled every two seconds and
-                # misses most of what it describes, so it widens this test rather than carrying it.
-                # This is the same shape as the handgrenade refusal check below, and for the same
-                # reason -- carried on the reason string alone it failed on a bot that had withheld
-                # shots all phase and simply never been sampled mid-refusal.
                 if ($proj.AimVeto -eq 0 -and -not $proj.Reasons.ContainsKey('off-target')) {
                     $projFailures += "WEAPON ${pin}: no shot was ever withheld"
                 }
             }
             'weapon_hornetgun' {
-                # Primary is the homing cone, secondary's dart is genuinely led.
-                # leadshots is the cumulative witness; aim=homing is one frame
-                # sampled every two seconds and cannot carry an assertion.
                 if ($shots -eq 0) { $projFailures += "WEAPON ${pin}: nothing was fired" }
                 if ($lead -ge $shots) {
                     $projFailures += "WEAPON ${pin}: every shot was a solved lead, so the cone never replaced the solve"
                 }
             }
             'weapon_snark' {
-                # The snark's whole claim is "homing, so never solved", and the
-                # cumulative form of that is shots>0 with leadshots==0: a press
-                # carrying a solved lead would have moved leadshots. Without the
-                # shots>0 half, leadshots==0 passes on a phase that fired nothing.
-                # aim=homing used to carry this and cannot -- the snark is usable
-                # inside 300 units, so most two-second polls catch it with no
-                # target at all and the aim= field never appears.
                 if ($shots -eq 0) { $projFailures += "WEAPON ${pin}: nothing was thrown" }
                 if ($lead -ne 0) { $projFailures += "WEAPON ${pin}: $lead shot(s) were led, and a thrown snark is never led" }
                 if ($proj.TargetAims -ne 0) {
@@ -688,9 +501,6 @@ try {
                 }
             }
             'weapon_gauss' {
-                # charged means a bot reached full charge and waited for the
-                # shot instead of releasing on a timer, which is the whole
-                # difference between a charge and a slow trigger.
                 if ($charged -eq 0) { $projFailures += "WEAPON ${pin}: no charged shot was ever observed" }
                 if (-not $proj.Reasons.ContainsKey('charged')) {
                     $projFailures += "WEAPON ${pin}: no bot ever carried a full charge"
@@ -700,20 +510,7 @@ try {
                 }
             }
             'weapon_handgrenade' {
-                # The pin pull and the throw are half a second apart, and the bot
-                # never sees its own grenade leave -- m_flStartThrow going back to
-                # zero is what closes the commit, so a throw count that moves is
-                # the proof the field is being read rather than assumed.
-                # throwshots carries all of it. A throw can only be reached through
-                # ArcOnTarget, so it proves the arc path; and it counts the falling
-                # edge of m_flStartThrow, so it proves the pin field is read rather
-                # than assumed. aim=arc and why=primed said the same two things off a
-                # two-second sample, and a sampled string cannot carry an assertion.
                 if ($thrown -eq 0) { $projFailures += "WEAPON ${pin}: no grenade was ever thrown" }
-                # selfveto is the cumulative counter, so a single refusal anywhere in
-                # the phase reaches the poll. The reason strings are a two-second
-                # sample of one frame and miss most of what they describe, so they
-                # widen this test rather than carrying it.
                 $refused = $proj.SelfVeto -gt 0 -or $proj.Reasons.ContainsKey('arc-self') -or
                     $proj.Reasons.ContainsKey('arc-blocked') -or $proj.Reasons.ContainsKey('arc-wide')
                 if (-not $refused) {
@@ -724,37 +521,19 @@ try {
                 }
             }
             'weapon_rpg' {
-                # The rocket is tracked, never led: the laser spot sits under the
-                # crosshair, so leading it would steer the rocket off the target.
-                # guides counts the commit opening and capped proves it closed on the
-                # rocket rather than the valve; between them KEEP_AIMING is shown to
-                # run. why=guiding was a sampled restatement of the same fact.
                 if ($guided -eq 0) { $projFailures += "WEAPON ${pin}: no launch ever opened a guide window" }
                 if ($proj.Aims.ContainsKey('arc') -or $proj.Aims.ContainsKey('lead')) {
                     $projFailures += "WEAPON ${pin}: aim was $(($proj.Aims.Keys | Sort-Object) -join ','), and a guided rocket is aimed at the target"
                 }
-                # Every window has to close on the rocket rather than on the six
-                # second valve. Reaching the valve means m_cActiveRockets never came
-                # back to zero, which the SDK does leak on the self-detonation path,
-                # and it would pin the bot to a launcher it can neither fire nor
-                # reload. Same standing as charge-timeout on the gauss.
                 if ($proj.Capped -gt 0) {
                     $projFailures += "WEAPON ${pin}: a guide window ran to the safety cap"
                 }
             }
             'weapon_9mmAR' {
-                # The contact grenade is the only plain parabola in the game, so
-                # it is the only witness the elevation solve and the traced
-                # flight sim have.
-                # arcshots == shots is the cumulative form, but it passes on a phase
-                # that fired nothing, so it needs the shots>0 half beside it.
                 if ($shots -eq 0) { $projFailures += "WEAPON ${pin}: nothing was fired" }
                 if ($arced -ne $shots) {
                     $projFailures += "WEAPON ${pin}: $arced of $shots shot(s) went through the arc path"
                 }
-                # A gate that never refuses is a gate that is not running, and
-                # selfveto is the only witness that survives a two-second poll:
-                # the reason strings sample one frame and usually miss.
                 $refused = $proj.SelfVeto -gt 0 -or $proj.Reasons.ContainsKey('arc-self') -or
                     $proj.Reasons.ContainsKey('arc-blocked') -or $proj.Reasons.ContainsKey('arc-wide')
                 if (-not $refused) {

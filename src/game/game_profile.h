@@ -52,9 +52,6 @@ enum DeployKind
 	DEPLOY_COUNT,
 };
 
-// Weapons worth opening with against someone who has not noticed the bot yet. A role rather than a
-// type: nothing in WeaponSpec distinguishes a snark from a hornet gun (both are WPN_Q_HOMING), so
-// the profile has to name them the way it already names the melee and deploy weapons.
 enum AmbushKind
 {
 	AMBUSH_GRENADE = 0,
@@ -116,11 +113,6 @@ public:
 	virtual void CollectStrategicGoals(const CBot &bot, const Nav::NavMesh &mesh,
 		std::vector<BotGoal::Candidate> &out) const = 0;
 
-	// The optional third crossbot_add argument, whatever this game makes of it: a player model in
-	// deathmatch, a team in a mod that has them. Called once on a fresh fake client, before
-	// MDLL_ClientConnect, so the game DLL reads a finished userinfo buffer at connect. arg is null
-	// when the operator gave none -- the profile picks its own default then, at random where that
-	// makes sense -- and out receives what it settled on, for the console line.
 	virtual void ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
 		unsigned int size) const = 0;
 };

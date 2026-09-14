@@ -204,7 +204,7 @@ void EndBot(CBot &bot)
 	if (slot.hasLastOrigin)
 	{
 		float step = (org - slot.lastOrigin).Length();
-		if (step < 512.f)			// ignore respawns and teleports
+		if (step < 512.f)
 			slot.distance += step;
 	}
 	slot.lastOrigin = org;

@@ -1,55 +1,3 @@
-<#
-.SYNOPSIS
-    Runs test_nav_goal.ps1 for all .bsp maps in the maps/ directory in parallel.
-
-.DESCRIPTION
-    Finds all .bsp files in maps/ and runs each one as its own PowerShell child
-    process on a unique port, at most -MaxParallel at a time. Each child's full
-    transcript is captured to nav_debug/logs/<map>.log and its verdict is taken
-    from its real process exit code. Reports a PASS/FAIL summary and rebuilds
-    nav_debug/index.html once, serially, at the end.
-
-.PARAMETER MaxParallel
-    Maximum number of concurrent HLDS instances (default: 6, hard-limited by the
-    86 ports 29015-29100). Higher is faster but not free: at 12 the box is loaded
-    enough that bots themselves behave differently -- maps that pass alone and at
-    6 have been seen to fall off geometry and fail -- so the verdict gets less
-    trustworthy, which is the opposite of what this suite is for.
-
-.PARAMETER Timeout
-    Absolute safety timeout per test in seconds (default: 60). This is the real bound.
-
-.PARAMETER TimeoutMultiplier
-    Multiplier on bot's reported ETA (default: 6.0)
-
-.PARAMETER Overhead
-    Seconds the child is allowed on top of -Timeout before it is killed as wedged (default:
-    120). This covers everything outside the goal poll: the navgen run that builds the .nav,
-    HLDS boot, and the second navgen that draws the SVG. The big open maps spend over a
-    minute in navgen's vantage pass alone, so a budget that fits the small maps kills them
-    mid-SVG and reports a failure the navigation never had.
-
-.PARAMETER NavGenPath
-    Path to navgen.exe (default: build\tools\navgen\navgen.exe)
-
-.PARAMETER HLDSDir
-    HLDS installation directory (default: D:\hlds)
-
-.PARAMETER OutputDir
-    Directory for SVG/NAV output (default: nav_debug)
-
-.PARAMETER MapsDir
-    Directory containing .bsp test maps (default: maps\)
-
-.PARAMETER Filter
-    Only run maps whose filename matches this wildcard (default: *)
-
-.EXAMPLE
-    .\scripts\test_nav_goal_all.ps1 -MaxParallel 4
-
-.EXAMPLE
-    .\scripts\test_nav_goal_all.ps1 -MaxParallel 2 -Timeout 120 -TimeoutMultiplier 3.0
-#>
 
 param(
     [int]$MaxParallel = 6,
@@ -61,13 +9,7 @@ param(
     [string]$OutputDir = "nav_debug",
     [string]$MapsDir = "maps",
     [string]$Filter = "*",
-    # Forwarded to each child's -ServerArgs. -ServerArgs "+sys_ticrate","10" runs the whole
-    # suite at a 10 Hz server framerate, which catches follower logic that only works because
-    # a 100 Hz frame is too short for the engine to re-simulate anything mid-command.
     [string[]]$ServerArgs = @(),
-    # Forwarded to each child's -BootCommands, run once the level is active. This is the only
-    # way to set a plugin cvar for a sweep: -ServerArgs "+crossbot_sense","0" is parsed before
-    # GameDLLInit registers the cvar, so the default overwrites it and the run silently uses 1.
     [string[]]$BootCommands = @()
 )
 
@@ -86,7 +28,7 @@ if ($mapFiles.Count -eq 0) {
 }
 
 $portBase = 29015
-$maxPorts = 86  # 29015-29100
+$maxPorts = 86
 if ($mapFiles.Count -gt $maxPorts) {
     Write-Error "$($mapFiles.Count) maps exceeds the $maxPorts unique ports available from $portBase"
     exit 1
@@ -107,15 +49,8 @@ if (-not (Test-Path $outputDirFull)) { New-Item -ItemType Directory -Path $outpu
 $logDir = Join-Path $outputDirFull "logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-# Run each map in its own PowerShell process rather than a background job. A real
-# child process means the verdict is its exit code, its Write-Host transcript is
-# capturable, and native stderr goes to a file instead of becoming an ErrorRecord
-# that $ErrorActionPreference = 'Stop' would turn into a spurious failure.
 $psExe = [System.Diagnostics.Process]::GetCurrentProcess().Path
 
-# Killing a child does not run its cleanup, so remember which ports we own and
-# sweep for survivors at the end. Never a blanket kill: the user may be running
-# their own server, and the default 27015 is outside this range.
 $ourPorts = [System.Collections.Generic.List[int]]::new()
 
 function Stop-ServerOnPort {
@@ -133,8 +68,6 @@ function Stop-ServerOnPort {
         }
     }
 
-    # Each server's stdin pipe is held open by a `waitfor` tagged with its port -- see
-    # the launch note in test_server_start.ps1. Killing the server leaves it waiting.
     $writers = @(Get-CimInstance Win32_Process -Filter "Name='waitfor.exe'" -ErrorAction SilentlyContinue)
     foreach ($w in $writers) {
         foreach ($port in $Ports) {
@@ -272,7 +205,6 @@ if ($orphans.Count -gt 0) {
     Write-Host "Cleaned up $($orphans.Count) orphaned server(s): $($orphans -join ', ')"
 }
 
-# Clean up any orphaned config files
 foreach ($mapFile in $mapFiles) {
     Remove-AutotestCfg $mapFile.BaseName
 }

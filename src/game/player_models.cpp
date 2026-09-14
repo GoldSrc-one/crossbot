@@ -19,7 +19,6 @@ namespace
 constexpr int kMaxModels = 64;
 constexpr unsigned int kMaxNameLen = 32;
 
-// The game every game borrows from when it has no player models of its own.
 const char *const kFallbackDir = "valve";
 
 struct ModelList
@@ -31,9 +30,6 @@ struct ModelList
 
 ModelList g_lists[XPlay::kMaxGames];
 
-// models/player/<name>/<name>.mdl, probed the way FindMapBsp probes for a bsp. This doubles as the
-// is-it-a-directory test -- readdir's d_type is DT_UNKNOWN on plenty of filesystems, and a plain
-// file named "gordon" simply fails to open as "gordon/gordon.mdl".
 bool HasModelFile(const char *root, const char *name)
 {
 	char path[512];
@@ -116,8 +112,6 @@ const ModelList &ListFor(int iGame)
 	if (dir && dir[0])
 		ScanDir(list, dir);
 
-	// dmc and anything else Quake-shaped lands here: no models/player of its own, so it wears
-	// Half-Life's. CrossPlay expects exactly that -- its dmc model whitelist names valve models.
 	if (list.count == 0 && (!dir || CB_STRICMP(dir, kFallbackDir) != 0))
 		ScanDir(list, kFallbackDir);
 

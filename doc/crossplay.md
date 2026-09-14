@@ -84,6 +84,9 @@ Only `crossplay.cpp` includes `crossplay_api.h`. That header declares `maxGameDl
 - `BotManager::AddBot` — around `CREATE_FAKE_CLIENT`. Mandatory: CrossPlay's `CreateFakeClient`
   ReHLDS hook `DebugError`s on `gCaller == -1`, and it is what stamps the new client's owner.
   `MDLL_ClientConnect` / `MDLL_ClientPutInServer` stay outside; CrossPlay enters its own.
+  The third `crossbot_add` argument (`ApplyAddArg`) also stays outside: it is a plain engine call
+  on an edict, and it runs before `ClientConnect` so the game DLL reads a finished userinfo buffer,
+  the order a real client arrives in.
 - `BotManager::Touch`, `OnSound`, `OnEvent`, `KillAllBots` — per resolved bot.
 - `GiveItem::Give` / `Spawn` — around `pfnCreateNamedEntity`, so CrossPlay stamps the owner as the
   entity's private data is allocated. `Give` takes the game from the receiving player.
@@ -110,13 +113,12 @@ would restore twice.
 
 ## Rules
 
-1. **Never nest `InGame`.** One context at a time, entered from `gCaller == -1`.
-2. **Never write `gEntityOwners`.** CrossPlay owns it; it stamps ownership from `gCaller` in
+1. **Never write `gEntityOwners`.** CrossPlay owns it; it stamps ownership from `gCaller` in
    `PvAllocEntPrivateData` and in the `CreateFakeClient` hook. Reading it is fine.
-3. **Never read `edict->pvPrivateData` directly.** Outside a context it is garbage (`0xFFFFFFFF` in
+2. **Never read `edict->pvPrivateData` directly.** Outside a context it is garbage (`0xFFFFFFFF` in
    CrossPlay debug builds). Use `CBotPrivateData(ent)`, or `XPlay::PrivateData(ent, game)` when the
    entity's own game is the right lens — that is what `CBotIsLivePlayer` does.
-4. **Never edit anything under `D:\hlds\crossplay\` except `addons\crossbot\`.**
+3. **Never edit anything under `D:\hlds\crossplay\` except `addons\crossbot\`.**
 
 ## Reading CrossPlay's complaints
 

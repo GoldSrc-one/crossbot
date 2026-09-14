@@ -1,39 +1,3 @@
-<#
-.SYNOPSIS
-    Monster engagement: snarks hunt the bots, and the bots they hunt shoot back.
-
-.DESCRIPTION
-    Two phases, each on its own server.
-
-      census  -- crossbot_monsters with live snarks on the map. This is the
-                 assumption check, and it runs first because everything else is
-                 built on it: monster_snark must carry FL_MONSTER, and
-                 CBaseMonster::m_hEnemy must read back an edict the plugin can
-                 resolve. If the offset is wrong the census fails and the engage
-                 phase's failure would be unreadable.
-      engage  -- the behaviour. A snark that names a bot as its enemy must be
-                 traced, must enter that bot's combat state, and must die.
-
-    Snarks come from crossbot_spawn, in front of each bot, refreshed every few
-    seconds. See Start-SnarkFight for why they are not thrown by the bots.
-
-    The census phase is what distinguishes "the bot ignores snarks" from "there
-    were no snarks". Both look identical in the engage counters alone.
-
-.PARAMETER Seconds
-    Seconds per phase (default 150). The floor is about 40: a snark lives ~25s
-    on its own detonate timer, so a shorter window can end mid-life and see no
-    exit at all.
-
-.PARAMETER Port
-    Base port (default 29300). Each phase takes the next one.
-
-.EXAMPLE
-    .\scripts\test_monster.ps1
-
-.EXAMPLE
-    .\scripts\test_monster.ps1 -Phase engage -Seconds 300
-#>
 param(
     [ValidateSet("all", "census", "engage")]
     [string]$Phase = "all",
@@ -60,22 +24,6 @@ function Invoke-Phase([string]$name, [string]$map, [int]$port, [string[]]$boot,
         -LogPrefix "monster" -ConfigPrefix "_monster" -Failures $failures
 }
 
-# Adds the bots, arms them, and keeps a snark in front of each one.
-#
-# Snarks are spawned with crossbot_spawn rather than thrown by the bots, and
-# that is not a shortcut -- letting the bots produce them does not work. The
-# snark is reachable only through the ambush path, which needs an opponent who
-# has not noticed the bot; crossbot_fire_pin gets a bot to hold one, and then
-# the uphill veto refuses the throw, because it refuses any throwable at a
-# target more than 16 units above the eye and crossfire is vertical almost
-# everywhere. Measured over a minute with the pin on, two bots reached
-# uphill=510 and throwshots=0. A phase built on that would be measuring the
-# ambush picker, not monster engagement, and would fail for reasons that have
-# nothing to do with either.
-#
-# The 9mmAR is equipped because a snark has 2 health and dies to one bullet:
-# what is being measured is whether the bot engages at all, not whether it can
-# win, and a bot that spawned with a crowbar would confound the two.
 function Start-SnarkFight([int]$port, [int]$seconds) {
     for ($i = 1; $i -le $Bots; $i++) {
         Invoke-CbRconQuiet $port "crossbot_add valve Snark$i"
@@ -94,10 +42,6 @@ function Start-SnarkFight([int]$port, [int]$seconds) {
     }
 }
 
-# --- census ------------------------------------------------------------------
-# Reads only the entity facts the engage phase depends on. A snark line with
-# enemy=-1 for its whole life means m_hEnemy is being read from the wrong place,
-# which is a different failure from a bot that sees the snark and ignores it.
 function Test-Census([int]$port) {
     $lines = Invoke-Phase "census" "crossfire" $port @() {
         param($p)
@@ -124,10 +68,6 @@ function Test-Census([int]$port) {
     [void]$results.Add("census snarks=$($snarks.Count) withEnemy=$($withEnemy.Count)")
 }
 
-# --- engage ------------------------------------------------------------------
-# The whole chain: the gate lets a hunting snark through, a trace lands on it,
-# combat enters naming it, and it dies. mine>0 with hit==0 would mean the gate
-# works but every trace is blocked -- a different bug from mine==0.
 function Test-Engage([int]$port) {
     $lines = Invoke-Phase "engage" "crossfire" $port @("crossbot_combat_debug 1") {
         param($p)
@@ -166,7 +106,6 @@ function Test-Engage([int]$port) {
         "stopped=$stopped died=$died")
 }
 
-# --- run ---------------------------------------------------------------------
 $p = $Port
 if ($Phase -eq "all" -or $Phase -eq "census") { Test-Census $p; $p++ }
 if ($Phase -eq "all" -or $Phase -eq "engage") { Test-Engage $p; $p++ }

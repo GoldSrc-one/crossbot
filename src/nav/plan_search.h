@@ -10,9 +10,6 @@
 namespace NavPlan
 {
 
-// How much the equipped weapon's preferred engagement range should bend a route.
-// weight 0 leaves the search exactly as it was; at 0.5 a route that fights on the
-// right ground may take twice as long in seconds and still win.
 struct RangeBias
 {
 	float weight = 0.f;
@@ -20,7 +17,6 @@ struct RangeBias
 	float longDist = 1024.f;
 	bool preferLong = false;
 
-	// 0 = ideal ground for this weapon, 1 = worst.
 	float Mismatch(float openDist) const
 	{
 		float span = std::max(1.f, longDist - shortDist);
@@ -28,8 +24,6 @@ struct RangeBias
 		return preferLong ? (1.f - t) : t;
 	}
 
-	// Clamped here rather than at the call sites: a weight above 1 would make the
-	// multiplier negative, which is a negative edge cost in both searches.
 	float Weight() const { return std::max(0.f, std::min(1.f, weight)); }
 
 	float Scale(float openDist) const
@@ -38,7 +32,6 @@ struct RangeBias
 		return 1.f - w + w * Mismatch(openDist);
 	}
 
-	// Cheapest multiplier any edge can earn; keeps the A* heuristic admissible.
 	float BestScale() const { return 1.f - Weight(); }
 };
 

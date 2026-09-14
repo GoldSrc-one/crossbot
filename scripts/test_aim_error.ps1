@@ -1,53 +1,3 @@
-<#
-.SYNOPSIS
-    Measures the intentional aim error: fires repeated flicks with crossbot_aim_test
-    and reports the spread of settle times at each crossbot_aim_error scale.
-
-.DESCRIPTION
-    The brake multiplier is sampled once per flick, so a single flick proves
-    nothing -- the number you get is one draw from a distribution. This script
-    fires the same flick many times and reports the spread.
-
-    At crossbot_aim_error 0 the spread must collapse to the phase-1 numbers: the
-    brake is forced to exactly 1 and the controller is the time-optimal one again.
-    That is the regression check. At scale 1 the settle times must spread out,
-    and the slow tail is the overshoot-plus-correction case.
-
-    Settle is reported on the first frame within kTestSettleTolerance *and* under
-    kTestSettleSpeed, so a view flying through the target on its way to an
-    overshoot does not report a false early settle. A small enough overshoot can
-    still slip under that speed gate, so read the spread, not any single row.
-
-    crossbot_aim_drift is left at its default: micro-drift is suppressed while a
-    test is active, and this run is what proves it.
-
-    Each flick also reports a rest error: the angular miss still standing two seconds
-    after the flick began, once everything has stopped moving. That is the number the
-    hand quantum sets, and it is the one that should scale with FOV -- a zoomed bot
-    turns 4.5x slower but places the crosshair 4.5x finer. Sweep -Fovs to see it.
-
-.PARAMETER Scales
-    crossbot_aim_error values to test (default: 0, 1).
-
-.PARAMETER Fovs
-    pev->fov values to force for each flick. 0 leaves the bot's fov alone (default).
-    Use -Fovs 90,20 with a small -Shapes to measure what zoom buys.
-
-.PARAMETER Shapes
-    "<yaw> <pitch>" flick deltas (default: "180 0", "0 90"). At fov 20 a 40 degree yaw
-    flick is the same 180 degrees of hand travel as a 180 at fov 90, so use "40 0"
-    there rather than letting a 180 run past the two second rest sample.
-
-.PARAMETER Flicks
-    Flicks fired per scale per fov per shape (default: 8).
-
-.PARAMETER Quantum
-.PARAMETER Impulse
-    Override crossbot_aim_quantum / crossbot_aim_impulse. Negative leaves the shipped
-    default alone. Pass -Quantum 0 -Impulse 0 for the phase-4 regression check: with the
-    hand resolution off the settle distribution must collapse back onto 0.349s / 895 deg/s
-    for a 180 and 0.266s / 563 for 90 of pitch.
-#>
 param(
     [string]$Map = "crossfire",
     [int]$Port = 0,
@@ -122,8 +72,6 @@ finally {
 Write-Host "`n===== settle and rest error from $logFile ====="
 if (-not (Test-Path $logFile)) { Write-Host "FAIL: no server log"; exit 1 }
 
-# Group by the announce line rather than by slicing the settle lines: a flick that never
-# settles prints no settle line, and slicing would then silently shift every later group.
 $flicksSeen = @()
 $cur = $null
 foreach ($line in Get-Content $logFile) {

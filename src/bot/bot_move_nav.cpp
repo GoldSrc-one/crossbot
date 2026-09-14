@@ -1849,9 +1849,6 @@ namespace
 		return true;
 	}
 
-	// A healing trigger_hurt has no fixture to face and no button to press: the bot just has to
-	// be standing in the brush. It reuses the charger bookkeeping, where chargerPressed means
-	// "was inside" rather than "held +use".
 	bool RunHealVolume(CBot &bot)
 	{
 		edict_t *pEdict = bot.pEdict;
@@ -1880,14 +1877,12 @@ namespace
 			bot.chargerLastGainTime = gpGlobals->time;
 		bot.chargerLastValue = value;
 
-		// Exactly the test SV_TouchLinks runs before it calls HurtTouch.
 		bool ducking = (pEdict->v.flags & FL_DUCKING) != 0;
 		bool inside = BotItems::OriginInsideVolume(ent, pEdict->v.origin,
 			ducking ? kHullDuck : kHullHuman);
 		if (inside)
 			bot.chargerPressed = true;
 
-		// Nothing to aim at, so leave the view to the sense system and keep watching the room.
 		BotSense::ApplyLook(bot);
 		Vector angles = Bot_UpdateFacing(bot);
 
@@ -1897,8 +1892,6 @@ namespace
 				FinishCharger(bot, ent, "saw the pool switch off");
 			else if (!inside)
 			{
-				// Drifted back out rather than discovering the pool is useless; a short
-				// blacklist, not the 120s one that says "this classname gives me nothing".
 				BotItems::NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
 				FinishCharger(bot, ent, "could not stay in the pool");
 			}
@@ -1929,8 +1922,6 @@ namespace
 		Vector origin = pEdict->v.origin;
 		float drive = 0.f;
 		Vector moveDir(0.f, 0.f, 0.f);
-		// Head for the resolved spot inside the volume, not its centre: a large pool can have
-		// its middle sitting inside geometry the bot cannot walk through.
 		Vector to(bot.goalPoint.x - origin.x, bot.goalPoint.y - origin.y, 0.f);
 		float dist = sqrtf(to.x * to.x + to.y * to.y);
 		if (!inside && dist > 1.f)
@@ -2151,8 +2142,6 @@ namespace
 			return false;
 		}
 
-		// Only once the plan stands: a failed search must not mark the route as
-		// already planned for this weapon class, or the retry loses its trigger.
 		bot.plannedRangeClass = Bot_RangeClass(bot);
 
 		bot.waypoints = std::move(path.waypoints);
@@ -2610,8 +2599,6 @@ void Bot_MoveNav(CBot &bot)
 	if (BotCombat::Active(bot) && BotDiff::CombatInterrupt() && BotCombat::DamageSource(pEdict))
 		Bot_BailManeuver(bot, "took fire");
 
-	// Runs unconditionally: the tracker is a running minimum, and a gap in its sampling would
-	// read back as "nothing has come closer" the moment combat hands control back.
 	BotCamp::Track(bot);
 
 	{
@@ -2689,8 +2676,6 @@ void Bot_MoveNav(CBot &bot)
 	bool swimming = pEdict->v.waterlevel >= kWaterlevelSwimming &&
 		bot.waypointIndex < bot.waypoints.size();
 
-	// A route planned for a shotgun is the wrong route once the crossbow comes out.
-	// Compared on the class, so swapping between two close-range guns costs nothing.
 	if (!bot.waypoints.empty() && bot.nextRepathTime <= 0.f &&
 		Bot_RangeClass(bot) != bot.plannedRangeClass)
 		bot.nextRepathTime = gpGlobals->time;

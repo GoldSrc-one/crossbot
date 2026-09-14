@@ -1985,11 +1985,25 @@ Air moves sampled under a trigger_gravity only exist for a bot at that gravity. 
 A second, separate SVG (`--dump-vantage-svg`), not another overlay on the area graph: the vantage glyphs need the whole canvas to be readable. Areas are drawn flat grey at 0.35 opacity purely as a map backdrop, in the same lowest-floor-first painter's order.
 
 Per vantage, inside one `<g>` so the whole glyph shares a hover tooltip:
-- **Watch wedges** — an arc sector per watch direction, radius proportional to `amount`, angular half-width equal to `spread` (clamped to 4..80 degrees), one colour per rank, painted lowest rank first so the main direction lands on top.
+- **Watch wedges** — an arc sector per watch direction, radius proportional to `dist` (how far a fight
+  carries that way), angular half-width equal to `spread` (clamped to 4..80 degrees), one colour per
+  rank, painted lowest rank first so the main direction lands on top.
 - **The dot** — filled from a blue/yellow/red heatmap over `exposure / maxExposure`, so the most-seen floor in the map is red regardless of the map's absolute scale.
 - **The tooltip** — id, position, raw and normalized exposure, all four focus values, and every watch direction's yaw/pitch/spread/amount.
 
 World Y is flipped (`x, -y`) like the main SVG, so wedge endpoints are computed in world space and flipped rather than reasoning about screen angles. The arc always uses `sweep-flag=1` because the flip turns world-counterclockwise into screen-clockwise.
+
+`--dump-camp-svg` draws one glyph per camp spot: the wedge angle is the spot's `spread` (what the
+camper sweeps) and its radius is the spot's `dist` (how far it actually sees).
+
+## swim_connections.cpp
+
+Swim links join water volumes. A swimmer hangs a hull under the ceiling the way a walker stands one
+on the floor, with 2 units of slack so a crossing on a seam plane does not also touch the solid the
+seam runs along. Across a shared wall the link is a window both areas must fit through, hung under
+the lower of the two ceilings (the mirror of a walk gate on the shared floor); stacked areas get no
+common height since the link exists to change depth. Reachability is checked through that window,
+not point to point, except for stacked seams whose endpoints already sit in their own areas.
 
 ## Trigger Forces in Sampling
 

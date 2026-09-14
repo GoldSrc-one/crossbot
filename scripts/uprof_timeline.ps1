@@ -1,36 +1,3 @@
-<#
-.SYNOPSIS
-    Reads an AMD uProf session as a 1ms timeline and reports stalls.
-
-.DESCRIPTION
-    AMDuProfCLI's own `report` has no time dimension, so it cannot answer "which frame was slow".
-    The translated database can: `UnifiedSampleSeries.windowId` is a 1ms bucket index, and the
-    dedicated server's game loop is one thread, so one row per windowId is a per-millisecond trace
-    of what that thread was doing.
-
-    Two different stalls fall out of that, and they need opposite fixes:
-
-      RUNS  - consecutive milliseconds inside one module. The thread was on-CPU and busy. A long
-              run is compute; the module and RVA say where.
-      GAPS  - milliseconds with no sample at all. The thread was off-CPU: blocked on I/O, a lock,
-              a page fault. No amount of optimising the surrounding code helps.
-
-    See doc/testing.md for what uProf can and cannot do here, and why crossbot_perf_spike is still
-    the tool for attributing a frame.
-
-.PARAMETER Session
-    uProf session directory (the -o argument of `AMDuProfCLI collect`, which profile_hlds.ps1
-    writes to nav_debug/perf/uprof_<map>_<stamp>). Defaults to the newest one under nav_debug/perf.
-
-.PARAMETER MinRunMs
-    Report on-CPU runs at least this long. Default 20.
-
-.PARAMETER MinGapMs
-    Report off-CPU gaps at least this long. Default 4.
-
-.PARAMETER Top
-    Rows per table. Default 15.
-#>
 param(
     [string]$Session = "",
     [int]$MinRunMs = 20,
@@ -49,9 +16,6 @@ if (-not (Test-Path $DuckDB)) {
 
 if (-not $Session) {
     $perfDir = Join-Path $repoRoot "nav_debug\perf"
-    # Sort by CreationTime, not Name and not LastWriteTime. Names are uprof_<map>_<stamp>, so the
-    # map name dominates an alphabetical sort and xen_dm always wins; and `translate` rewrites the
-    # directory, so LastWriteTime marks the last time a session was READ, not when it was collected.
     $newest = Get-ChildItem -Path $perfDir -Directory -Filter "uprof_*" -ErrorAction SilentlyContinue |
         Sort-Object CreationTime | Select-Object -Last 1
     if (-not $newest) { throw "no uprof_* session under $perfDir; run profile_hlds.ps1 without -NoProfiler first" }
@@ -66,7 +30,6 @@ if (-not (Test-Path $db)) {
     if (-not (Test-Path $db)) { throw "translate produced no cpu.db in $Session" }
 }
 
-# A collect that caught nothing looks identical to a quiet server. Say which it was.
 $prd = Get-ChildItem -Path (Join-Path $Session "cpu") -Filter "*.prd" -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if ($prd -and $prd.Length -lt 100KB) {

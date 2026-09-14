@@ -637,8 +637,6 @@ namespace
 
 	bool ApplyVantageLook(CBot &bot)
 	{
-		// A camper looks where its spot was measured from. This sits ahead of the vantage blend
-		// because the blend is about the neighbourhood; the camp facing is about this exact spot.
 		float campYaw = 0.f, campPitch = 0.f;
 		if (BotCamp::Facing(bot, campYaw, campPitch))
 		{

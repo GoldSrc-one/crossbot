@@ -6,10 +6,8 @@ endif()
 
 project(crossbot CXX)
 
-# GoldSrc dedicated servers don't ship VC++ redistributable -- link CRT statically.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# GoldSrc is 32-bit-only (Windows and Linux). On MSVC, enforce with Win32 generator (cmake -B build -A Win32); on GCC/Clang, force via compile/link flags.
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR
         "crossbot must be built 32-bit (GoldSrc requirement). "
@@ -37,8 +35,6 @@ file(GLOB CROSSBOT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/meta/*.cpp
 )
 
-# The plugin verifies a .nav file against the live BSP with the same checksum navgen baked into
-# it, so it needs this one navgen translation unit -- and only this one.
 add_library(crossbot_mm SHARED ${CROSSBOT_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/navgen/crc32.cpp
 )
@@ -68,7 +64,6 @@ if(MSVC)
     target_compile_options(crossbot_mm PRIVATE /W3 /GR-)
     target_compile_definitions(crossbot_mm PRIVATE _CRT_SECURE_NO_WARNINGS)
 
-    # GiveFnptrsToDll is __stdcall (WINAPI); without .def file MSVC would export decorated name (_GiveFnptrsToDll@8), which engine's GetProcAddress("GiveFnptrsToDll") can't find.
     target_sources(crossbot_mm PRIVATE ${CMAKE_SOURCE_DIR}/src/meta/crossbot.def)
 else()
     target_compile_options(crossbot_mm PRIVATE -m32 -Wall -fno-rtti)
@@ -125,8 +120,6 @@ add_executable(navgen ${NAVGEN_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/nav/pm_sim.cpp
 )
 
-# Keep the historical build\tools\navgen\navgen.exe output path so scripts and
-# docs that pre-date the move from tools/ continue to resolve the binary.
 set_target_properties(navgen PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tools/navgen
 )

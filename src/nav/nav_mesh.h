@@ -60,7 +60,6 @@ struct Connection
 
 	float vantageExposure = 1.f;
 
-	// Mean open distance at the crossing, looking the way this connection is travelled.
 	float openDistAB = 0.f;
 	float openDistBA = 0.f;
 

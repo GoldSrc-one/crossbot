@@ -21,9 +21,6 @@ constexpr double kLedgeInset = 17.0;
 constexpr double kWallNormalZ = 0.3;
 constexpr double kNoCeilingZ = 1.0e9;
 
-// A swimmer hangs a hull under the ceiling the way a walker stands a hull on the floor, but with
-// nothing to rest on: leave a little slack so a crossing point on a seam plane is not also touching
-// the solid the seam runs along.
 constexpr double kSwimCeilingSlack = 2.0;
 
 struct AreaInfo
@@ -203,9 +200,6 @@ double SwimHeight(const Area &area, double x, double y, double surfaceZ)
 	return SwimHeightUnder(std::min(AreaCeilingZ(area, x, y), surfaceZ), AreaFloorZ(area, x, y));
 }
 
-// A swim link across a shared wall is a window both areas have to fit through, so its crossing
-// height hangs under the lower of the two ceilings -- the mirror of a walk gate sitting on the
-// shared floor seam. Stacked areas get no common height: the link is there to change depth.
 double SwimHeightShared(const Area &a, const Area &b, double x, double y, double surfaceZ)
 {
 	double ceiling = std::min(std::min(AreaCeilingZ(a, x, y), AreaCeilingZ(b, x, y)), surfaceZ);
@@ -333,9 +327,6 @@ size_t BuildSwimConnections(const BspFile &bsp, int duckHeadnode,
 				Vec3 pointB = ClampIntoArea(info[j],
 					Vec3(contact.x, contact.y, SwimHeight(other, contact.x, contact.y, surfaceZ)));
 
-				// Stacked areas meet at a horizontal seam and each endpoint already sits in its own
-				// area. Across a shared wall the swimmer has to fit through a window hanging under
-				// the lower of the two ceilings, so check the crossing there, not point to point.
 				Vec3 window(contact.x, contact.y,
 					SwimHeightShared(wet, other, contact.x, contact.y, surfaceZ));
 

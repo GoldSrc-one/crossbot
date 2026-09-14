@@ -74,7 +74,6 @@ constexpr const char *kVantageArea = "#5a6470";
 constexpr const char *kWatchRank[4] = {"#ff7043", "#ffd54f", "#4fc3f7", "#ab7ddb"};
 constexpr const char *kCampRing = "#ffffff";
 constexpr const char *kCampClimb = "#9aa7b4";
-// Banded on the spot's spread, tightest first: a narrow sweep is a sniper's lane.
 constexpr const char *kCampSpreadColor[4] = {"#ff7043", "#ffd54f", "#9ccc65", "#4fc3f7"};
 const double kCampSpreadBand[4] = {5.625, 11.25, 22.5, 45.0};
 
@@ -654,7 +653,6 @@ void WriteVantageSvg(const std::string &path, const std::string &mapName, const 
 		{
 			const WatchDir &wd = v.watch[rank];
 			double half = std::max(4.0, std::min(80.0, wd.spread));
-			// Reach, not weight: the picture is of how far a fight carries each way.
 			double radius = std::max(minRadius, maxRadius * (wd.dist / maxWatchDist));
 			double a0 = (wd.yaw - half) * 3.14159265358979323846 / 180.0;
 			double a1 = (wd.yaw + half) * 3.14159265358979323846 / 180.0;
@@ -863,7 +861,6 @@ void WriteCampSvg(const std::string &path, const std::string &mapName, const std
 			}
 		}
 
-		// The wedge is what the camper sweeps; its reach is how far the spot actually sees.
 		double half = std::max(1.5, std::min(90.0, spread));
 		double radius = std::max(unit * 1.5, maxRadius * (dist / maxDist));
 		double a0 = (spot.yaw - half) * 3.14159265358979323846 / 180.0;

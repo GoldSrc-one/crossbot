@@ -332,8 +332,6 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	for (std::atomic<uint32_t> &slot : tally)
 		slot.store(0, std::memory_order_relaxed);
 
-	// Sightline lengths, summed per bin alongside the counts. Freed with the tally,
-	// so the extra footprint never overlaps the shape vectors built further down.
 	std::vector<std::atomic<uint32_t>> distTally(count * binCount);
 	for (std::atomic<uint32_t> &slot : distTally)
 		slot.store(0, std::memory_order_relaxed);

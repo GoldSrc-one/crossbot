@@ -35,7 +35,6 @@ if (-not (Test-Path $exe)) { throw "hlds.exe not found at $exe" }
 
 $errFile = "$logFile.err"
 
-# cmd.exe runs in $HLDSDir, so its redirection targets have to be absolute.
 if (-not [System.IO.Path]::IsPathRooted($logFile)) { $logFile = Join-Path (Get-Location) $logFile }
 $logFile = [System.IO.Path]::GetFullPath($logFile)
 $errFile = "$logFile.err"
@@ -56,7 +55,6 @@ if ($NullStdout) {
     $stdoutTarget = "NUL"
     Remove-Item (Join-Path $HLDSDir "qconsole.log") -ErrorAction SilentlyContinue
 }
-# Real pipe on stdin, and RCON for readiness -- see the long note in test_server_start.ps1.
 $quoted = $launchArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
 $inner = 'waitfor /t 36000 cbstdin{0} | "{1}" {2} 1>"{3}" 2>"{4}"' -f `
     ($Port, $exe, ($quoted -join ' '), $stdoutTarget, $errFile)
@@ -81,9 +79,6 @@ if (-not $ready -or -not $proc) {
 }
 Write-Host "profile_hlds: server up, pid $($proc.Id)"
 
-# The zone profiler and its cvars are behind CROSSBOT_PERF, off by default. Against a stock build
-# this run would finish and simply print nothing, which reads as "no spikes" rather than "not
-# measured", so refuse to start instead.
 $probe = Invoke-CbRcon $Port "crossbot_perf"
 if ($probe -notmatch 'crossbot_perf"?\s+is') {
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }

@@ -23,13 +23,8 @@ struct State
 	float startTime = 0.f;
 	float lastSightTime = 0.f;
 
-	// Has this enemy noticed the bot? Latches on true and is re-tested every frame it stays
-	// false, so a bot that opens an ambush stops ambushing the moment it is spotted.
 	bool enemyAware = false;
 
-	// Does the enemy have melee out, and are they near enough to charge? Unlike enemyAware these
-	// do not latch: the duel is over the moment they draw a gun or leave the area. enemyMelee is
-	// refreshed only on a frame the bot can see them, so it reads hands rather than memory.
 	bool enemyMelee = false;
 	bool enemyInArea = false;
 	bool dueling = false;

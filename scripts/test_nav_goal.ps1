@@ -1,63 +1,3 @@
-<#
-.SYNOPSIS
-    Fully automatic nav goal test: spins up HLDS, runs a bot to a goal,
-    collects movement trace, generates SVG with trace overlay, cleans up.
-
-.DESCRIPTION
-    Input: a test map (.bsp). The script will:
-    1. Start HLDS on a unique port with the given map
-    2. Set crossbot_trace_path cvar to a map-specific trace file
-    3. Add a bot via RCON
-    4. Auto-select a goal (info_target preferred, else farthest spawn pair)
-    5. Send the bot to the goal via crossbot_nav_goal
-    6. Poll crossbot_nav_status until goal reached (hasGoal=0) or timeout
-       - Timeout = min(2x bot's reported ETA, 60s absolute) [configurable]
-    7. Read trace log written by plugin (crossplay/addons/crossbot/trace/nav_trace_<map>.txt)
-    8. Run navgen --dump-svg --trace to produce nav_debug/<map>.svg with overlay
-    9. Also generate .nav file for runtime
-    10. Stop HLDS
-    Exit code: 0 = PASS (goal reached), 1 = FAIL (timeout/error)
-
-.PARAMETER Map
-    Path to the .bsp file (relative to repo root or absolute)
-
-.PARAMETER Timeout
-    Absolute safety timeout in seconds (default: 60). Measured on the wall clock.
-
-.PARAMETER TimeoutMultiplier
-    Multiplier on bot's reported ETA (default: 6.0). This is a fail-fast heuristic,
-    not the real bound -- -Timeout is. Ladder maps take 2.6-3.1x their ETA even
-    run alone, because the planner's estimate does not model falling off and
-    reclimbing, and more than that under parallel load. A genuinely broken map
-    never arrives at all, so it still fails fast on the absolute cap.
-
-.PARAMETER Port
-    HLDS port (default: auto-assign from 29015-29100)
-
-.PARAMETER NavGenPath
-    Path to navgen.exe (default: build\tools\navgen\navgen.exe)
-
-.PARAMETER HLDSDir
-    HLDS installation directory (default: D:\hlds)
-
-.PARAMETER OutputDir
-    Directory for SVG/NAV output (default: nav_debug)
-
-.PARAMETER ServerLog
-    Where to capture this instance's server output (default:
-    <OutputDir>\logs\<map>_server.log). Per-instance, unlike qconsole.log.
-
-.PARAMETER NoIndexUpdate
-    Skip the nav_debug/index.html rewrite. Parallel runners set this and rebuild
-    the index once, serially, at the end -- concurrent read-modify-write on a
-    single html file loses results.
-
-.EXAMPLE
-    .\scripts\test_nav_goal.ps1 -Map maps\test1_simple.bsp
-
-.EXAMPLE
-    .\scripts\test_nav_goal.ps1 -Map maps\test35_smoothwall.bsp -Timeout 120 -TimeoutMultiplier 3.0
-#>
 
 param(
     [Parameter(Mandatory=$true)]
@@ -67,7 +7,7 @@ param(
 
     [double]$TimeoutMultiplier = 6.0,
 
-    [int]$Port = 0,  # 0 = auto-assign from 29015-29100
+    [int]$Port = 0,
 
     [string]$NavGenPath = "build\tools\navgen\navgen.exe",
 
@@ -79,21 +19,10 @@ param(
 
     [switch]$NoIndexUpdate,
 
-    # Extra engine launch arguments, forwarded to test_server_start.ps1 and applied
-    # before the map loads. -ServerArgs "+sys_ticrate","10" runs the whole test at a
-    # 10 Hz server framerate, which is the cheapest way to check that the follower
-    # is frame-rate independent rather than accidentally tuned to 100 Hz frames.
     [string[]]$ServerArgs = @(),
 
-    # Extra console commands run after the boot commands, once the level is active.
-    # Plugin cvars must be set this way and not through -ServerArgs: they are registered
-    # in GameDLLInit, after the engine has parsed the command line, so a "+crossbot_sense 0"
-    # is overwritten by the cvar's own default and silently does nothing.
     [string[]]$BootCommands = @(),
 
-    # How close the bot must end up for hasGoal=0 to count as arrival rather than giving up.
-    # Legitimate arrivals land 24-50 units out (the follower stops at finalRadius, and the goal is
-    # clamped into its area, so it never coincides with the raw entity origin).
     [double]$GoalRadius = 96
 )
 
@@ -104,9 +33,6 @@ $repoRoot = Split-Path $scriptDir -Parent
 . "$scriptDir\nav_index.ps1"
 . "$scriptDir\common.ps1"
 
-# Native tools report warnings on stderr. Under $ErrorActionPreference = 'Stop'
-# a redirected stderr line becomes a terminating error, which failed maps for
-# reasons that had nothing to do with the bot. Warnings must never fail a run.
 function Invoke-Native {
     param([string]$Exe, [string[]]$Arguments)
     $ErrorActionPreference = 'Continue'
@@ -114,7 +40,6 @@ function Invoke-Native {
     return [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
 }
 
-# Resolve paths
 $mapPath = if (Test-Path $Map) { $Map }
 elseif (Test-Path (Join-Path $repoRoot $Map)) { Join-Path $repoRoot $Map }
 elseif (Test-Path (Join-Path $repoRoot "maps\$Map")) { Join-Path $repoRoot "maps\$Map" }
@@ -134,12 +59,10 @@ elseif (Test-Path (Join-Path $repoRoot $OutputDir)) { Join-Path $repoRoot $Outpu
 else { Join-Path $repoRoot $OutputDir }
 if (-not (Test-Path $outputDir)) { New-Item -ItemType Directory -Path $outputDir | Out-Null }
 
-# Auto-assign port if not provided
 if ($Port -eq 0) {
-    $Port = 29015 + (Get-Random -Maximum 85)  # 29015-29100
+    $Port = 29015 + (Get-Random -Maximum 85)
 }
 
-# Map-specific filenames for parallel isolation
 $configName = "_crossbot_autotest_$mapName.cfg"
 $traceCvarPath = "crossplay/addons/crossbot/trace/nav_trace_$mapName.txt"
 $traceLogPath = Join-Path $HLDSDir $traceCvarPath
@@ -168,14 +91,12 @@ if ($ServerArgs.Count -gt 0) { Write-Host "SrvArgs:  $($ServerArgs -join ' ')" }
 $result = "FAIL"
 $reason = "did not run"
 
-# --- Copy map to HLDS maps directory if needed ---
 $hldsMapPath = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMapPath) -or (Get-Item $mapPath).LastWriteTime -gt (Get-Item $hldsMapPath).LastWriteTime) {
     Write-Host "Copying map to HLDS maps directory..."
     Copy-Item $mapPath $hldsMapPath -Force
 }
 
-# --- 0. Run navgen FIRST to generate fresh .nav file ---
 $botNavDir = Join-Path $HLDSDir "crossplay\addons\crossbot\nav"
 if (-not (Test-Path $botNavDir)) { New-Item -ItemType Directory -Path $botNavDir | Out-Null }
 $botNavPath = Join-Path $botNavDir "$mapName.nav"
@@ -191,10 +112,8 @@ if ($navgenRun.ExitCode -ne 0) {
     Write-Host "navgen succeeded, nav file: $botNavPath"
 }
 
-# --- 1. Start HLDS ---
 Remove-Item $traceLogPath -ErrorAction SilentlyContinue
 
-# Boot commands: set trace path, add bot, list spawns/targets
 $bootCommands = @(
     "crossbot_trace_path $traceCvarPath",
     "crossbot_difficulty 1",
@@ -251,14 +170,6 @@ function Parse-SpawnsAndTargetsFromRcon {
 }
 
 try {
-    # --- 2. Wait for the boot cfg to have run, then read spawns/targets over RCON ---
-    # The cfg is exec'd over rcon at readiness; poll for its observable effect
-    # rather than sleeping a fixed amount, which under parallel load was both too
-    # long on small maps and too short on big ones (0 spawns parsed -> bogus FAIL).
-    # An RCON reply can arrive split across UDP packets, and a loaded box can drop
-    # or delay one. A short read looks exactly like a map with fewer spawns or no
-    # info_target at all, which silently picks a different goal. So require the
-    # same counts twice in a row before trusting them.
     Write-Host "Waiting for boot commands and querying spawns/targets via RCON..."
     $bootSw = [System.Diagnostics.Stopwatch]::StartNew()
     $spawns = @()
@@ -283,7 +194,6 @@ try {
         Write-Host "WARNING: bot never reported an origin; continuing anyway"
     }
 
-    # --- 3. Select goal ---
     $goal = $null
     if ($targets.Count -ge 1) {
         $goal = $targets[0]
@@ -311,7 +221,6 @@ try {
         exit 1
     }
 
-    # --- 4. Teleport bot to start (use first spawn point) and set goal ---
     $startSpawn = $spawns[0]
     Write-Host "Teleporting bot to first spawn: ($($startSpawn.X), $($startSpawn.Y), $($startSpawn.Z))"
     Invoke-CbRcon $Port "crossbot_teleport $($startSpawn.X) $($startSpawn.Y) $($startSpawn.Z)" | Out-Null
@@ -323,7 +232,6 @@ try {
     Write-Host ("Setting nav goal to ({0:F1},{1:F1},{2:F1})..." -f $goal.X, $goal.Y, $goal.Z)
     Invoke-CbRcon $Port "crossbot_nav_goal $($goal.X) $($goal.Y) $($goal.Z)" | Out-Null
 
-    # Wait for Repath to run and waypoints to be generated
     Write-Host "Waiting for path planning..."
     $planSw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($planSw.Elapsed.TotalSeconds -lt 5) {
@@ -336,13 +244,6 @@ try {
     Write-Host "Waypoints dump:"
     Write-Host $wpDump
 
-    # --- 5. Poll until arrival or timeout ---
-    # hasGoal=0 from crossbot_nav_status is the primary signal (more reliable than
-    # qconsole.log for short goals). Positions collected here double as a fallback
-    # trajectory if the plugin's own trace log comes back empty.
-    # Everything below is timed on the wall clock: each RCON round trip costs real
-    # time, so counting poll iterations understated elapsed time by ~2.5x and made
-    # both -Timeout and -TimeoutMultiplier mean far more than they said.
     $expectedEta = $null
     $pollInterval = 2
     $reason = "unknown"
@@ -382,9 +283,6 @@ try {
                 $pollTracePoints += [pscustomobject]@{ X = $ox; Y = $oy; Z = $oz }
             }
 
-            # hasGoal=0 means the bot stopped pursuing the goal -- which happens both when it
-            # arrives and when Repath fails and it gives up. Only the first is a pass, so
-            # confirm it actually ended up near the goal.
             if ($hasGoalMatch.Success -and [int]$hasGoalMatch.Groups[1].Value -eq 0) {
                 if ($originMatch.Success -and $dist -gt $GoalRadius) {
                     $result = "FAIL"
@@ -409,9 +307,8 @@ try {
 
     Write-Host "=== RESULT: $result -- $reason ==="
 
-    # --- 6. Collect trace log ---
     Write-Host "Collecting trace log from $traceLogPath..."
-    Start-Sleep -Seconds 1  # Give plugin time to flush
+    Start-Sleep -Seconds 1
 
     $tracePoints = @()
     if (Test-Path $traceLogPath) {
@@ -436,18 +333,15 @@ try {
         Write-Warning "Trace log not found at $traceLogPath (bot may not have reached goal or trace writing failed)"
     }
 
-    # Fallback: use positions collected during polling if trace log is empty
     if ($tracePoints.Count -eq 0 -and $pollTracePoints.Count -gt 0) {
         Write-Host "Using $($pollTracePoints.Count) fallback trace points from polling"
         $tracePoints = $pollTracePoints
     }
 
-    # --- 7. Generate SVG with trace overlay ---
     Write-Host "Generating debug SVG..."
     if ($tracePoints.Count -gt 0) {
         $tracePoints | ForEach-Object { "{0:F1} {1:F1} {2:F1}" -f $_.X, $_.Y, $_.Z } | Set-Content -Path $traceOut
     } else {
-        # Create empty trace file so navgen doesn't error
         "" | Set-Content -Path $traceOut
     }
 
@@ -476,13 +370,10 @@ try {
     }
 }
 finally {
-    # --- Cleanup ---
     Write-Host "Stopping HLDS (PID=$serverPid)..."
     & "$scriptDir\test_server_stop.ps1" -Id $serverPid | Out-Null
-    # Also kill any child processes just in case
     Get-CimInstance Win32_Process -Filter "ParentProcessId=$serverPid" -ErrorAction SilentlyContinue |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    # Clean up autotest config file
     $cfgPath = Join-Path $HLDSDir "$configName"
     Remove-Item $cfgPath -ErrorAction SilentlyContinue
 }

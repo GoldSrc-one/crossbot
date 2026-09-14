@@ -379,8 +379,6 @@ NavPlan::RangeBias Bot_RangeBias(const CBot &bot)
 	if (scale > 1.f)
 		scale = 1.f;
 
-	// The mirror of carefulness: that weighs exposure by how unready the bot is,
-	// this weighs terrain by how ready it is to use the weapon it holds.
 	float readiness = g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory);
 	if (readiness < 0.f)
 		readiness = 0.f;

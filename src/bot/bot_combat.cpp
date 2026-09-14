@@ -153,7 +153,6 @@ namespace
 		Vector theirForward, theirRight, theirUp;
 		g_engfuncs.pfnAngleVectors(enemy->v.v_angle, theirForward, theirRight, theirUp);
 
-		// A nonzero fov means the player is zoomed, which is a narrower cone than the default.
 		float fov = enemy->v.fov;
 		if (fov <= 0.f)
 			fov = kEnemyViewCone;
@@ -389,7 +388,6 @@ namespace
 		}
 		else
 		{
-			// In reach and the swing is ready. Stand and hit them.
 			moveDir = Vector(0.f, 0.f, 0.f);
 			drive = 0.f;
 			st.lastReason = "swinging";
@@ -523,8 +521,6 @@ void BotCombat::Exit(CBot &bot, const char *why)
 	BOT_VLOG("CrossBot: %s left combat with %s after %.1fs: %s\n", bot.name, hadName,
 		gpGlobals->time - st.startTime, why);
 
-	// Whatever it was walking to was dropped when combat took over, so choose again now rather
-	// than idling out the gather retry interval.
 	bot.nextSelectTime = 0.f;
 }
 
@@ -563,23 +559,15 @@ void BotCombat::Update(CBot &bot)
 			Exit(bot, "the monster stopped hunting us");
 		else if (seen && seen != enemy)
 		{
-			// Still a fight, just a different opponent. Dropping out and re-entering would
-			// throw away the probe and the goal it already gave up, for nothing.
 			BOT_VLOG("CrossBot: %s switches from %s to %s\n", bot.name,
 				CBotTargetNameOf(enemy), CBotTargetNameOf(seen));
 			st.enemy.Set(seen);
 			st.lastSightTime = gpGlobals->time;
 
-			// This branch rebinds the enemy without going through Enter, so awareness has to be
-			// recomputed here or the new opponent inherits the last one's verdict. Via SetAware
-			// rather than by assignment, so that dropping an ambush against an opponent who is
-			// already looking re-picks the weapon on this frame.
 			st.enemyAware = false;
 			if (EnemySees(bot, seen))
 				SetAware(bot, "new opponent");
 
-			// Same trap, same fix: the duel verdict is about one opponent's hands and cannot be
-			// carried over to the next one.
 			ClearDuel(bot);
 			UpdateDuel(bot, seen, true);
 		}
@@ -593,7 +581,6 @@ void BotCombat::Update(CBot &bot)
 					SetAware(bot, "turned around");
 			}
 
-			// Being shot settles it whether or not the bot can see them.
 			if (!st.enemyAware && DamageSource(bot.pEdict) == enemy)
 				SetAware(bot, "shot at us");
 
@@ -615,8 +602,6 @@ void BotCombat::Update(CBot &bot)
 		return;
 	}
 
-	// Whoever shot us has seen us, by definition. No cone test can improve on that, and the bot
-	// may not be able to see them at all.
 	edict_t *hurt = DamageSource(bot.pEdict);
 	if (hurt)
 		Enter(bot, hurt, "damage", true);
@@ -628,9 +613,6 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 	if (!st.active)
 		return false;
 
-	// A bot mid-flight, mid-ladder or mid-ride needs its waypoints, and tearing the path out from
-	// under one would drop it. The state is entered on time either way -- only the movement
-	// takeover waits.
 	if (Bot_ManeuverActive(bot))
 	{
 		st.lastReason = "finishing a maneuver";
@@ -653,11 +635,8 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 		BOT_VLOG("CrossBot: %s drops its goal to fight\n", bot.name);
 	}
 
-	// Nothing below plans a route, so keep the stall detector from reading a bot holding a corner
-	// as a bot stuck against geometry.
 	bot.lastProgressTime = gpGlobals->time;
 
-	// Aim belongs to whoever it is shooting: ApplyLook gives BotFire first refusal.
 	BotSense::ApplyLook(bot);
 	Vector angles = Bot_UpdateFacing(bot);
 
@@ -666,8 +645,6 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 	Vector moveDir(0.f, 0.f, 0.f);
 	float drive = 0.f;
 
-	// The duel owns movement outright while it is on. Drop the probe rather than leaving it
-	// standing, or a stale probePoint resurfaces the moment the duel ends.
 	if (DuelDrive(bot, mesh, physics, moveDir, drive))
 	{
 		st.haveProbe = false;

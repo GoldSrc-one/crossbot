@@ -10,10 +10,6 @@ if errorlevel 1 exit /b 1
 cmake --build build
 if errorlevel 1 exit /b 1
 
-rem Deploy into the CrossPlay hyper-game, so test_nav_goal.ps1 always runs the DLL that was just
-rem built. Skipped without complaint when the deploy dir is absent -- not everyone has the server.
-rem gamedata is NOT deployed: D:\hlds\crossplay\gamedata\ belongs to CrossPlay and holds one file
-rem per loaded game. Nothing here writes to anything else under crossplay\.
 if exist "%CROSSBOT_DEPLOY%\" (
     copy /y "%~dp0build\crossbot_mm.dll" "%CROSSBOT_DEPLOY%\crossbot_mm.dll" >nul
     if errorlevel 1 (
