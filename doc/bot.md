@@ -34,14 +34,14 @@ same unroutable item every frame.
 
 The ignore table is for the disagreements that are *route-dependent*. A disagreement that is a static
 property of the mesh has no business reaching it, because the 30 s timer then expires into the same failure
-forever: `AreaCosts` applies the activation gating that does not need a walker (`doc/nav.md`,
+forever: `AreaCosts` applies the activation gating that does not need a walker (`doc/path_planning.md`,
 `GateAllowsCrossing`), so an area behind a door the bot can never open from this side is priced
 `kUnreachableSeconds` and `crossbot_gather_debug` prints `no route` instead of a cost. On `crossfire` that is
 the 12-item secret cache in area 8 — and those 12 are the only items on the map that should read `no route`.
 
 Phase 1 must charge for **`travelSeconds` as well as `costSeconds`**, and getting that wrong is not
 a subtle bug. `Connection::costSeconds` is a surcharge — door waits, flight time, ride time — and it
-is **zero on a plain walk connection** (see `doc/nav.md`, travelSeconds). A Dijkstra over
+is **zero on a plain walk connection** (see `doc/path_planning.md`, travelSeconds). A Dijkstra over
 `costSeconds` alone therefore prices most of the map at 0 and "nearest" degenerates into whichever
 area the heap happens to settle first, which is roughly area-index order. The symptom is a bot that
 walks past the battery at its feet to fetch something across the map, and items in high-numbered
@@ -69,7 +69,7 @@ still drives carefulness.
 The same readiness drives *how* the bot travels, not only where. `Bot_Carefulness` returns
 `(1 - readiness)` scaled by `crossbot_careful`, and both searches take it: `Repath` hands it to
 `Nav::PlanPath` and `SelectGoal` hands it to `Nav::AreaCosts`. An armed, healthy bot routes for speed;
-a bot with nothing to fight with routes for cover, however far around that takes it (`doc/nav.md`,
+a bot with nothing to fight with routes for cover, however far around that takes it (`doc/path_planning.md`,
 "Carefulness: routing away from exposure"). `BotOppo::RebuildCosts` is the one caller that must stay at
 0 -- its gain test is a subtraction against real simulated seconds, so the exposure weighting must not
 distort the cost values.
@@ -89,7 +89,7 @@ is holding. It goes to the same two searches, `Nav::PlanPath` from `Repath` and 
 carefulness at 0.
 
 What the route is weighed against is the connection's mean open sight distance in the direction it is
-crossed (`doc/nav.md`, "Range bias: routing to ground the weapon can use"). A shotgun is happy below
+crossed (`doc/path_planning.md`, "Range bias: routing to ground the weapon can use"). A shotgun is happy below
 `crossbot_range_short` (512), a crossbow wants above `crossbot_range_long` (1024), and in between the
 penalty ramps. Both are cvars because the right numbers are per map: on crossfire the per-connection
 open distance runs a mean of 530 and a max of 1584, so measure with `crossbot_vantage_status` before
@@ -199,7 +199,7 @@ that on a small map with several bots, fun goals get re-selected often. Fighting
 A bot walking to a goal that senses something **closing in on it** breaks off to a camp spot that is
 still on the way, holds there facing the direction the spot was measured at, and resumes as soon as
 nothing is getting closer any more. `NavMesh::camps` had been carried by the `.nav` since v21 with no
-consumer (`doc/nav.md`, *nav_camp.h*); this is the consumer.
+consumer (*nav_camp.h* below); this is the consumer.
 
 Two constraints shaped it, and everything else follows from them:
 
@@ -339,6 +339,27 @@ committed, 22 abandoned by the travel check, 26 reached and held, 21 ended by th
 fill), `crossbot_camp_zoom_dist` (768, the range below which a scope buys nothing),
 `crossbot_camp_debug` (0, gates the per-retarget route line and the scare transitions; the commit,
 arrival and leave lines are plain `BOT_VLOG`).
+
+## nav_camp.h
+
+### Camp spots are carried, not consumed
+navgen picks a reduced list of camp spots -- position, one facing, and four arc ratios per stance --
+and the loader lands them on `NavMesh::camps` as a flat vector. The runtime consumer is
+*bot_camp.cpp* above; `crossbot_camp_status` and `--dump-camp-svg` on the
+navgen side are still how you look at the data itself.
+
+There is deliberately no spatial index, and the consumer that arrived did not need one. `FindAreaExact`
+is still a linear scan and camp spots are a hundred-odd records, so the one pass over `mesh.camps` runs
+once per retarget rather than per frame; the vantage field got a CSR grid only because it is blended
+per bot at 10 Hz. Measured on crossfire: 114 camps, and the pass keeps between 4 and 79 of them
+depending on where the bot is and how far off its target is.
+
+### Why this is not part of the vantage field
+The vantage field is a *continuous* signature: `exposure` and the watch cones are properties of a
+neighbourhood, so IDW between the four nearest samples gives a meaningful answer anywhere. Camping is
+discrete. The midpoint between two camping spots is usually not a camping spot, and the old `focus[4]`
+was measured around each probe's own `watch[0]`, so blending two probes with different main directions
+blended two numbers that were never about the same facing. `focus[]` is gone from the format.
 
 ## bot_strategic.cpp
 
@@ -3746,7 +3767,7 @@ survives into the air, pressed one frame later it finishes on the press itself. 
 
 `MakePlanTraces` attaches the process-wide `g_airmoveCache` to every `PlanTraceContext` it builds, so all
 plan-time `JumpLandsIn` calls share one table. The cache itself, its key, the world-only rule that decides
-what may be stored and the sizing measurements all live in `doc/nav.md` under `airmove_cache.cpp`; what
+what may be stored and the sizing measurements all live in `doc/path_planning.md` under `airmove_cache.cpp`; what
 belongs here is the wiring.
 
 `Bot_ResetAirmoveCache()` clears the table. It is called from both `BotManager::ServerActivate` and
@@ -3799,7 +3820,7 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
 `progressS` anywhere on the stale profile. Both blocks therefore re-check the latch through
 `TryRepath` once their runner returns.
 
-- Uses NavFollow::Track against the `PlanProfile` built at repath time (see doc/nav.md). Progress is
+- Uses NavFollow::Track against the `PlanProfile` built at repath time (see doc/path_execution.md). Progress is
   arclength along the arc chain, so there is no per-waypoint arrival radius or advance loop, and
   waypoint 0 is no longer a special case — the chain starts at the bot's own position.
 - Drive magnitude is the servo's `wishSpeed`, divided by `kDuckingMultiplier` when `FL_DUCKING`
@@ -3847,7 +3868,7 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
 - `Bot_DriftVelocity` is the steering counterpart: the world-frame shove acting on the bot right now,
   read live as `groundentity->v.movedir * speed` when the ground entity carries `FL_CONVEYOR`, plus the
   cached push closure at the bot's origin. It goes into `NavFollow::Config::driftVelocity`, which is what
-  stops a bot on a conveyor or in a current being carried off its own plan — see `doc/nav.md`. The closure
+  stops a bot on a conveyor or in a current being carried off its own plan — see `doc/path_execution.md`. The closure
   lives on `CBot::pushFields` and is refreshed with each repath, because scanning every edict per bot per
   frame is not free.
 - `sv_maxvelocity` matters only where a push field is involved: `bounce`'s pods push at 3800 u/s
@@ -3891,7 +3912,7 @@ The gain came from `SolveDrive` being handed `sv_friction` when the engine was a
 `sv_friction * sv_edgefriction`. `PM_Friction` probes 16 units ahead along the velocity, from foot
 height, 34 units down, and doubles friction when that finds nothing — which is precisely the state
 every air-move approach ends in, since it is walking at the lip it is about to launch from.
-`doc/nav.md` derives the residual: a flat `V* - stopSpeed * (f_real - f_model) * dt`, invisible above a
+`doc/path_execution.md` derives the residual: a flat `V* - stopSpeed * (f_real - f_model) * dt`, invisible above a
 design speed of 80 and unavoidable below it. Crouched approaches are capped near 90, so they are the
 ones that live under the threshold.
 
@@ -3913,7 +3934,7 @@ Two things about the drive are easy to get wrong and both stalled real routes:
   constant, so a raw wish speed under `stopSpeed * friction * edgeFriction / accelerate` moves the bot
   nowhere at all. At a ledge — which is where every dropoff launches from — `sv_edgefriction` doubles
   that to 80 at defaults. A dropoff planned at 57 pressed at full drive and crawled at 2 u/s until the
-  stall timer repathed it, forever. `doc/nav.md` has the derivation.
+  stall timer repathed it, forever. `doc/path_execution.md` has the derivation.
 - **Ducking scales the command, so the command has to be scaled back.** `PM_Duck` multiplies
   forwardmove/sidemove by `kDuckingMultiplier` *after* `PM_CheckParamters` has clamped them, so
   delivering wish speed `W` while `FL_DUCKING` means commanding `W / kDuckingMultiplier` and accepting
@@ -3995,7 +4016,7 @@ a peak error of 264 units, corrected for 96 frames, landing 675 units out.
 
 **A landing outside `airmoveTargetArea` penalizes the connection, then forces a repath.**
 `RunAirmoveFlight` resolves the landed area and calls `Nav::PenalizeConnection` on the index latched at
-launch, or `RewardConnection` when it landed where it was aimed (see `doc/nav.md`). Without that, a
+launch, or `RewardConnection` when it landed where it was aimed (see `doc/path_planning.md`, "Runtime connection penalties"). Without that, a
 maneuver the follower cannot execute was an unbounded loop: both repath triggers re-plan from the
 bot's current position with the full graph, nothing recorded the failure, and the new start position
 could flip which route was cheapest — so the bot alternated between two routes into the same dead end
@@ -4547,7 +4568,7 @@ only happens for a file this field predates — and the version check rejects th
 ### One reverse search, not one per candidate
 
 The comparison needs the cost-to-goal of two different positions, and needs it again every tick.
-`Nav::AreaCostsToGoal` prices *every* area to the goal in one Dijkstra (`doc/nav.md`), so both lookups
+`Nav::AreaCostsToGoal` prices *every* area to the goal in one Dijkstra (`doc/path_planning.md`), so both lookups
 are array indexes and the per-tick cost is a hull-traced `PmSim` run and nothing else.
 
 The field is cached per bot and rebuilt when the goal area changes **or on any successful `Repath`**. The
@@ -5465,7 +5486,7 @@ The pairs that carry the diagnosis:
   repath, since a fresh plan renumbers from the bot's position.
 - `hasGoal=0` with `waypoint=0/0` is ambiguous by itself: it is both "arrived and cleared the goal"
   and "gave up". Distinguish with the distance to the goal, and remember the goal was clamped
-  (see `doc/nav.md`, `PlanPath`).
+  (see `doc/path_planning.md`, `PlanPath`).
 - `item=` with `itemArea=`, `memo=`, `full=` — the gather goal: which entity the bot is after, the
   area it resolved to, and how many entries are in each memo. `item=-` with `hasGoal=1` is a
   commanded `crossbot_nav_goal`, not a gathered one. `charging=` appears only while the charger
@@ -5495,6 +5516,15 @@ The pairs that carry the diagnosis:
   new decision also prints its own line to the server console with distance, speed and trace count,
   which is what makes this tunable from one run — note those lines go to `qconsole.log`, not to the
   RCON transcript the test scripts capture.
+
+## nav.cpp
+
+### Nav namespace
+Global mesh management:
+- `LoadForMap(mapName)` - loads nav file for map
+- `Unload()` - releases mesh
+- `IsLoaded()` - checks if mesh loaded
+- `Get()` - returns pointer to NavMesh
 
 ## bot_perf.cpp
 
@@ -5626,7 +5656,7 @@ an OFF build -- check the configure line, not the flag you think you passed. CMa
 when it is off, which is the only way to tell from the build output.
 
 On by default is the deliberate choice: these lines are how nav work gets debugged, and most of
-`doc/nav.md` and this file quote them. The flag exists so a profiling or saturated-server run can drop
+`doc/path_planning.md`, `doc/path_execution.md` and this file quote them. The flag exists so a profiling or saturated-server run can drop
 them, not so the normal build goes quiet. Pair it with `-DCROSSBOT_PERF=ON` for a profiling build.
 
 Two cvars follow the flag rather than surviving it: `crossbot_gather_debug` (both the item scan dump

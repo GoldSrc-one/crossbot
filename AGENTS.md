@@ -6,10 +6,7 @@ It runs inside **CrossPlay**, a hyper-game that loads several real game DLLs int
 every bot belongs to a game and the plugin talks to game state through `crossplay_api.h` — see
 `doc/crossplay.md` before touching anything that reads private data or calls into a game DLL.
 
-How the systems actually work lives in `doc/`, one file per system, keyed by source file: `doc/navgen.md`,
-`doc/nav.md`, `doc/bot.md`, `doc/game.md`, `doc/console.md`, `doc/crossplay.md`, plus `doc/testing.md`
-for the scripts. This file is build, commands and house rules only. If you find yourself explaining
-behaviour here, it belongs in `doc/`.
+How the systems actually work lives in `doc/`. This file is build, commands and house rules only. If you find yourself explaining behaviour here, it belongs in `doc/`.
 
 ## Code Style
 

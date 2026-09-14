@@ -222,7 +222,7 @@ the bug: a bot with a long strategic route on `dod_flash` froze the server on th
 `crossbot_nav_status`. Any new dump that concatenates per-waypoint or per-area text belongs behind
 the same helper.
 
-`crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/nav.md`,
+`crossbot_nav_penalties` is the only view of what the bots have learned this map (see `doc/path_planning.md`,
 Runtime connection penalties). Everything else is derived state that a repath would rebuild; the
 penalty table is not, and it dies with the map.
 

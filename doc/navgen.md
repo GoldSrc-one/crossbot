@@ -25,7 +25,7 @@ Command-line tool with extensive debug flags:
 - `--dump-airmove` - air-move launch derivation: why no funnel launch was found, every re-simulation
   miss with its launch, yaw, speed and where it landed, every rescaled retry with the speed it
   corrected to and the wanted/travelled distances behind it, and every `retract` attempt with the
-  run-up it needed against the run-up it had (see `doc/nav.md`)
+  run-up it needed against the run-up it had (see `doc/path_planning.md`)
 - `--dump-planes <id>` - one final area's exact plane list (normal+dist) and face windings
 - `--dump-obj <path>` - walkable floor of every area as OBJ mesh (+ MTL): crouch areas colored apart, planned route as ribbon
 - `--dump-svg <path>` - top-down SVG of final area graph
@@ -71,7 +71,7 @@ Command-line tool with extensive debug flags:
   a `master`, no brush model, an unresolvable `target`, a destination off the mesh), where its destination
   lands with the drop and fall damage, and every area that can walk into it
 - `--dump-path` - per-waypoint clearance and per-segment arc/line/gap rows (radius, turn, length,
-  entry/exit speed, cap, and the `reach` pair — the speed the bot can really carry, see `doc/nav.md`)
+  entry/exit speed, cap, and the `reach` pair — the speed the bot can really carry, see `doc/path_planning.md`)
   for the debug route, plus the profile summary line
 - `--trace <path>` - overlays recorded bot trajectory on SVG (one "x y z" per line, empty file = nothing).
   Also reports mean and max lateral deviation of the trace from the planned profile, and the clearance
@@ -83,7 +83,7 @@ Command-line tool with extensive debug flags:
 - `--max-speed <n>` - assumed ground speed in units/sec (default 320), used for air-move sampling and
   for the `--dump-path` debug route. It deliberately does **not** have to match the server: a nav file
   is server-independent, and the runtime planner clamps every launch to its own `sv_maxspeed` (see
-  "Launch speed is clamped to the server" in `doc/nav.md`). Sampling at 320 and letting a 270 server
+  "Launch speed is clamped to the server" in `doc/path_planning.md`). Sampling at 320 and letting a 270 server
   reject what it cannot reach is the intended arrangement — the same nav then works on any server
   without a regen. Lower it only to keep the graph small when you know the target speed — to see what
   a slower server actually plans, use `--plan-speed` instead.
@@ -313,7 +313,7 @@ need (it measures the walk itself) but a walker-less search cannot live without.
 bent around the nearer gate endpoint, so an L-shaped area is not priced as if the bot walked through the
 wall. Non-walk connections get only the ground legs to `pointA` and from `pointB`; their flight, climb or
 ride is already in `ConnectionCostSeconds` and must not be counted twice. It goes in the nav file as
-`travelSeconds` (see `doc/nav.md`) because it is fixed by the mesh and the funnel is not worth redoing per
+`travelSeconds` (see `doc/path_planning.md`) because it is fixed by the mesh and the funnel is not worth redoing per
 frame.
 
 `airmove_prune.cpp`'s own `WalkDijkstra` still uses its local centroid-to-centroid measure rather than this
@@ -382,7 +382,7 @@ blocks exactly the genuinely-upstream case.
 matters: a 280 u/s belt bakes at `320 - 280 = 40` ("expensive but walkable") and is impossible at
 `sv_maxspeed 270`, where the bot would commit to the edge and stall. So `ConnectionDriftTerm` stores a
 speed-independent `crossbot_nav::DriftTerm` and every consumer calls `NavDrift::EvalDrift` with its own
-`maxSpeed`. See `doc/nav.md`.
+`maxSpeed`. See `doc/path_planning.md`.
 
 The term splits the crossing at the connection's own endpoints — leg A is `centroid(areaA) -> pointA`, leg B
 is `pointB -> centroid(areaB)` — and keeps, over the legs whose area actually drifts, the total `length`,
@@ -540,7 +540,7 @@ spawn `SOLID_NOT` and are skipped. They are `SOLID_TRIGGER`, so they never enter
 
 `PM_MoveSimulator::PushAt` sums the push of every field whose hull-expanded bounds contain the origin and
 whose clipnodes classify it solid — the same point test `OnLadder` uses, and the same one `SV_TouchLinks`
-uses to decide a trigger touch. It is handed to `PmSim` as a `PmPushFn`; see `doc/nav.md` for what the
+uses to decide a trigger touch. It is handed to `PmSim` as a `PmPushFn`; see `doc/path_planning.md` for what the
 simulator does with it, and note that a vertical push only acts on an **airborne** player.
 
 **Launch seeding.** `FilterLaunchEdges` keeps only floor-perimeter edges with void ahead, so a push field
@@ -776,7 +776,7 @@ rather than `landingPos` when `fromId` is not `areaA`, and `gateAYaw` is reused 
 ### Scope
 Ladder connections count for `PruneUnreachableAreas` and are expanded by A\* like any other connection —
 both graph builders (`main.cpp` and `src/nav/nav_path.cpp`) now feed `CONN_LADDER` straight through. The
-planner turns one into a mount/dismount waypoint pair; see `doc/nav.md` for that half. The **follower**
+planner turns one into a mount/dismount waypoint pair; see `doc/path_planning.md` for that half. The **follower**
 is still missing: the bot has no `MOVETYPE_FLY` awareness and its pitch is hard-zeroed, so a plan that
 contains a climb waypoint is not yet executable.
 
@@ -1933,6 +1933,62 @@ Serializes MergeResult to crossbot_nav format (v22):
 - Connection records: areaA/B, connType/Flags, gateValid, costSeconds, travelSeconds, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallDamage, flightTime, launchPos/landingPos[3]
 - Area-connection index (uint32 per connection per area)
 - Area planes (normal[3], dist)
+
+## nav_format.h
+
+### Nav File Format (version 22)
+- Magic: "CBNV"
+- Header (128 B): magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex,
+  areaPlanes, detours, detourPoints), designMaxSpeed, vantageCount, vantageSpacing, maxExposure,
+  waterVolumeCount, campCount
+- AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount, waterVolume, pad1[3], submergeZ, driftVelocity[3]
+- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity, waterVolume, pad2[3], submergeZ, drift
+- `gravity` is the `pev->gravity` multiplier the air move was sampled at (1.0 for every other
+  connection type). A map with `trigger_gravity` carries one air move set per distinct multiplier, and
+  the runtime uses only the set matching the bot's current gravity — see "Planning with gravity multipliers" in `doc/path_planning.md`
+- `drift` is a `DriftTerm`: length, along, perp, alongMin, alongMax. Speed-independent by design;
+  see "drift.h: direction-aware cost" in `doc/path_planning.md`
+- `driftVelocity` is the area's conveyor plus push-field velocity, used by the speed profile
+- NavWatchDir (20 B): yaw, pitch, spread, amount, dist. `spread` is an angle in degrees and `amount` a
+  fraction of sightlines; `dist` is the mean *distance* to everything visible inside the cone, which is
+  what the range bias reads through `VantageOpenDistance`
+- NavVantageRecord (96 B): pos[3], exposure, watch[4]. It used to carry a `focus[4]` block; camping is
+  now its own section and the field is gone
+- NavCampRecord (56 B): pos[3], yaw, pitch, score, standScore, standSpread, standDist, crouchScore,
+  crouchSpread, crouchDist, areaId, flags. `pos` is the nav floor point, which is a ducking player's
+  origin, so the standing eye is +46 and the crouching eye +12. `CAMP_NO_STAND` means standing there is
+  impossible and the three `stand*` fields are zero. Each posture's score is targets inside a
+  90-degree FOV over targets outside it; `spread` is the RMS angle they sit off the axis and `dist`
+  their mean range. It used to store four nested arc ratios per posture (90/45/22.5/11.25); one spread
+  says the same thing in one number, and carries the range the arcs never did
+- ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
+- DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
+
+Section order on disk is header, areas, conns, areaConnIndex, areaPlanes, detours, detourPoints, vantages,
+water volumes, camp spots. The detour
+offsets are `uint32_t`; `connOffset`/`planeOffset` remain `uint16_t` into the global arrays and throw past
+65535. Each record has explicit padding and a `static_assert` on its size, because they are written raw.
+
+`nav_loader.cpp` rejects a version mismatch outright, so bumping forces regeneration rather than silently
+loading a stale mesh. Area planes are the exported `boundPlanes`, which for a prism area is its footprint hull
+plus a z-slab rather than its true faces.
+
+### Enums
+- AreaFlags: CROUCH(1), LADDER_TOP(2), WATER(4), DOOR(128), BREAKABLE(256), ELEVATOR(512)
+- ConnType: WALK(0), TELEPORT(1), AIRMOVE(2), LADDER(3), ELEVATOR(4) - a ladder reuses the air-move fields
+  rather than adding its own: launchPos is the mount, landingPos the dismount, exitAngle the climbing yaw,
+  exitSpeed the climb speed, and flightTime/fallDamage belong to the dismount hop. An elevator ride uses
+  launchPos as the boarding point and landingPos as the arrival point, and carries its own rideSeconds /
+  rideWaitSeconds; rideSecondsMax equals rideSeconds today and is the hook for a swept-interval sampler
+- ConnFlags: ONE_WAY(1), NEEDS_CROUCH(2), JUMP(4), WATERJUMP(8) - jump means left ground under impulse, not derivable from jumpBackDist. There is no reverse one-way bit: a drift field blocks a direction only for a given max speed, so that answer is computed per search by `NavDrift::EvalDrift` and never stored
+- DoorActivation: TOUCH(0), BUTTON(1), TRIGGER(2)
+- GateValidFlags: VALID_A(1), VALID_B(2), CLAMPED_A(4), CLAMPED_B(8)
+
+### Gravity multiplier in the nav format
+
+The nav format stores a `gravityMultiplier` on each connection (`Connection::gravityMultiplier` in nav_format.h). This is the `pev->gravity` multiplier this air move was sampled at. For all other connection types (walk, ladder, elevator), it is 1.0.
+
+Base velocity contributed by trigger_push fields overlapping the player origin is stored in units/sec.
 
 ## leaf_extractor.cpp
 

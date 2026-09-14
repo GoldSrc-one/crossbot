@@ -338,7 +338,7 @@ else.
 51-map sweep is unaffected by the tier and stays comparable against transcripts taken before it
 existed. All 51 maps pass. `test54_window` took two fixes. It used to abandon the goal because navgen
 could not route to it at all (`no route from area 1 to area 18`) — that was the launch rescale, see
-"Rescaling a missed launch" in `doc/nav.md`. It then failed a second time, ping-ponging between two
+"Rescaling a missed launch" in `doc/path_planning.md`. It then failed a second time, ping-ponging between two
 routes on the window ledge: once the sweep moved onto the CrossPlay server (`D:\hlds\crossplay`, which
 sets no `sv_maxspeed`) the planner designed launches at the engine default 320 while the valve DLL held
 the bot at 270, so every launch was refused for being 90% of design. `Bot_MaxSpeed` now reads the cap
@@ -1190,7 +1190,7 @@ One cvar and one command, both available in a **stock** build (neither is behind
   miss can be read off together.
 - `crossbot_airmove_cache_stats` — occupancy/capacity, hits, misses, hit rate, inserts, evictions,
   uncacheable, and (under verify) verified and MISMATCH counts. `MISMATCH (N ent)` splits out the ones
-  where the fresh sim touched an entity, which is the known and accepted divergence — see `doc/nav.md`.
+  where the fresh sim touched an entity, which is the known and accepted divergence — see `doc/path_planning.md`.
 
 Counters reset on map change. `profile_hlds.ps1` prints the stats line before it stops the server, so any
 profile run doubles as a cache measurement.

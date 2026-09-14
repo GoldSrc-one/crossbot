@@ -1,38 +1,9 @@
-# Nav System Documentation
+# Mesh and Path Planning
 
-## nav.cpp
-
-### Nav namespace
-Global mesh management:
-- `LoadForMap(mapName)` - loads nav file for map
-- `Unload()` - releases mesh
-- `IsLoaded()` - checks if mesh loaded
-- `Get()` - returns pointer to NavMesh
-
-### Runtime connection penalties
-`PenalizeConnection` / `RewardConnection` / `ConnectionPenalty` are the runtime's only way to write to
-the mesh. They move `Connection::runtimePenalty`, which `BuildGraph` adds to `costSeconds`, so a
-connection the bot failed on gets more expensive and the next plan routes around it if it can. Failure
-adds `kConnFailPenalty` (5 s), success halves it and snaps to zero under 0.1.
-
-Four properties are deliberate:
-
-- **Not a ban.** The edge stays in the graph at a higher price, because it may be the only way into an
-  area. 5 s is far below the `1.0e4f` soft-infinity `ConnectionCostSeconds` uses for lethal falls, so a
-  penalized one-way drop still gets planned rather than stranding the bot.
-- **Mesh-global and in-memory.** One table shared by every bot, cleared when `Unload` frees the mesh.
-  `runtimePenalty` is not in the file format — it is learned state, and navgen would overwrite it.
-- **Offline planning never sees it.** It defaults to 0 and only the runtime writes it, and navgen
-  builds its own graph, so `--dump-path` output is unchanged by this whole mechanism. A route sweep
-  that diffs after a change here must come out empty.
-- **The reward only fires on edges still being planned.** Once a penalty is large enough that an
-  alternative wins, nothing brings that edge back — there is no exploration term. Acceptable because an
-  edge never planned is an edge never paid for.
-
-Attribution runs launch waypoint → bot → mesh: `Cross` stamps `PlanWaypoint::connIndex` on the air-move
-launch waypoint, `RunAirmoveApproach` latches it into `CBot::airmoveConnIndex`, and `RunAirmoveFlight`
-spends it on landing. The teleport branch stamps it too, but nothing spends it yet: a teleport that
-does not fire is not detected. Walk/door keep `-1` and are the remaining extension points.
+The mesh the bots run on — areas, connections, queries, the loader, the vantage field —
+and how routes over it come to exist: the A\* search, its cost model, the funnel, the speed
+profile, the air-move simulator and cache, and the gravity rules. How the bot follows the
+result is `doc/path_execution.md`.
 
 ## nav_mesh.h
 
@@ -47,6 +18,98 @@ Activation data lives only on `planAreas`, loaded straight from the area records
 
 ### Connection struct
 - `gateA`, `gateB` - funnel gates on each side, baked by navgen with player radius already applied (inset at both ends and pushed that far into the owning area). Zero-length gate means opening was too narrow to inset; midpoint is the only way through. `gateValid` says which sides carry one; teleport carries neither.
+
+## nav_query.cpp
+
+Two lookups that answer different questions, and the names say which. `FindAreaExact` asks *which area
+contains this point* and is allowed to answer none. `FindAreaNearest` asks *which area is nearest* and is
+a total function that essentially never fails. Picking the wrong one is a recurring bug — a strict lookup
+where a forgiving one belongs makes a bot on a lip forget where it is, and a forgiving one where a strict
+one belongs scores a maneuver against an area the bot never reached (`doc/bot.md`, `FinishLadder` and
+`FinishElevatorRide`).
+
+### AreaContainsPoint
+The shared predicate both lookups are built from: AABB test with 4-unit epsilon, then exact plane test
+(2-unit epsilon). Public because a caller sometimes knows *which* area it is asking about, and asking
+directly is not the same question as sweeping the mesh. Areas abut on shared planes, so a point on a
+seam is inside both within the plane epsilon and `FindAreaExact` returns whichever comes first in id
+order — arbitrary. `FinishElevatorRide` tests its ride target with this first for exactly that reason
+(`doc/bot.md`, "The target area wins a boundary tie"); the stop slab and the shaft below it share a
+plane, and the sweep would always answer "shaft".
+
+### FindAreaExact
+`AreaContainsPoint` against every area, first hit wins. Null when nothing contains the point. Note the
+point is tested in the mesh's own space: areas are built in hull 3, so their z range is duck-origin z,
+and a caller holding a player's `v.origin` may need `BotNavZ` first. It usually does not matter,
+because an ordinary area spans floor to ceiling and swallows an 18-unit offset — it matters wherever
+areas are thin, which in practice means elevator stop slabs.
+
+### FindAreaNearest
+`FindAreaExact` first, then two fallbacks:
+1. nearest centroid among areas whose AABB holds the point
+2. global nearest centroid
+
+### FindAreaById
+Direct index lookup with fallback to linear search.
+
+## nav_loader.cpp
+
+### LoadNavFile
+Loads and validates .nav file:
+- Checks magic ("CBNV") and version (21)
+- Reads area records, connection records, area-connection indices, area planes, activation detours and
+  detour points, then the vantage section
+- Verifies BSP checksum against live map
+- Converts to runtime NavMesh with PlanArea/PlanConnection views
+- Builds PlanArea boundPlanes from Area planes
+- Builds PlanConnection from Connection (including gates, launch params)
+- Converts `NavVantageRecord`s into `VantageField` and calls `BuildVantageGrid` once
+
+The version check is a hard equality, not a floor, so a file from an older navgen is refused outright
+rather than read with a shifted layout. Every record is `fread` straight into its struct, so any layout
+change is a version bump and a full regeneration of every `.nav`.
+
+## nav_vantage.cpp
+
+### What the field is for
+navgen samples, for every reduced vantage, up to four `WatchDir{yaw, pitch, spread, amount}` — the cones
+that everything with line of sight to that spot arrives *through* — plus `exposure`
+(`doc/navgen.md`, *vantage_sampler.cpp*). This is the runtime half: turn a bot's eye position into a
+blended signature it can steer by. `bot_sense.cpp` refreshes one per bot every 0.1 s.
+
+### The grid exists because there was no spatial index at all
+`FindAreaExact` is a linear scan over every area, and nothing else in `src/nav/` indexes space. A blend
+runs per bot at 10 Hz, so it gets its own CSR uniform grid: count pass, prefix sum, fill pass, one
+allocation for `cellStart` and one for `cellItems` rather than a `vector` per cell. Cell size is the
+header's `vantageSpacing`, floored at 32 and doubled until the cell count is within
+`64 * vantages + 4096`, which keeps a long thin map from allocating a mostly-empty lattice.
+
+`FindNearest` walks cells in expanding rings and stops once the fourth-best distance is inside the
+searched ring's inner radius — the ring is a cube shell, so its inscribed radius is `ring * cell`, and
+anything closer than that cannot be hiding in an unsearched cell.
+
+### Blending: scalars interpolate, directions do not
+`exposure` is IDW-weighted over the four nearest with `1 / (d^2 + 1)` — the same weight
+and the same epsilon navgen's reduction scores its own decimation against, so the runtime reproduces the
+interpolation the decimation assumed was possible.
+
+Watch directions cannot be averaged that way: they are a variable-length list, and a fixed-length vector
+is the only thing that has a distance. So they are merged angularly instead, with the same greedy
+peak-and-absorb `ExtractWatchDirs` runs — take the heaviest entry, mean-shift once over everything
+within 45 degrees, absorb them with summed weight and a weighted-RMS spread, repeat to at most four.
+The difference is that navgen runs it over a 512-bin histogram and this runs it over at most 16 sparse
+entries, each entering at `idw * amount`.
+
+**Merged directions under 5% of the kept weight are dropped.** A far neighbour contributes a direction
+whose weight rounds to nothing, and without the cut it survives as a fourth watch dir with
+`amount 0.000` — which `ApplyVantageLook`'s nearest-to-path search would happily snap the bot's head
+onto. The threshold is navgen's own `minClusterFraction`. Amounts are renormalised over what survives,
+so `watch[0].amount` is always the largest and always meaningful as a denominator.
+
+### Round-tripping is the correctness test
+Blend at a stored vantage's exact position and the distance-0 neighbour dominates the IDW completely, so
+the result must be that vantage's own record back. `crossbot_vantage_status <x y z>` exists to check
+exactly that; anything else means the loader, the grid or the merge is wrong.
 
 ## nav_path.cpp
 
@@ -148,6 +211,31 @@ argument as the exposure bound, and the same cost: a high weight weakens the heu
 planned for, and the nav update forces a repath when the live weapon's class differs. It compares the
 *class*, not the weapon id, so swapping between two close-range guns costs nothing. It is stamped only
 once the plan stands: a failed search must not mark the route as planned, or the retry loses its trigger.
+
+## Runtime connection penalties
+`PenalizeConnection` / `RewardConnection` / `ConnectionPenalty` are the runtime's only way to write to
+the mesh. They move `Connection::runtimePenalty`, which `BuildGraph` adds to `costSeconds`, so a
+connection the bot failed on gets more expensive and the next plan routes around it if it can. Failure
+adds `kConnFailPenalty` (5 s), success halves it and snaps to zero under 0.1.
+
+Four properties are deliberate:
+
+- **Not a ban.** The edge stays in the graph at a higher price, because it may be the only way into an
+  area. 5 s is far below the `1.0e4f` soft-infinity `ConnectionCostSeconds` uses for lethal falls, so a
+  penalized one-way drop still gets planned rather than stranding the bot.
+- **Mesh-global and in-memory.** One table shared by every bot, cleared when `Unload` frees the mesh.
+  `runtimePenalty` is not in the file format — it is learned state, and navgen would overwrite it.
+- **Offline planning never sees it.** It defaults to 0 and only the runtime writes it, and navgen
+  builds its own graph, so `--dump-path` output is unchanged by this whole mechanism. A route sweep
+  that diffs after a change here must come out empty.
+- **The reward only fires on edges still being planned.** Once a penalty is large enough that an
+  alternative wins, nothing brings that edge back — there is no exploration term. Acceptable because an
+  edge never planned is an edge never paid for.
+
+Attribution runs launch waypoint → bot → mesh: `Cross` stamps `PlanWaypoint::connIndex` on the air-move
+launch waypoint, `RunAirmoveApproach` latches it into `CBot::airmoveConnIndex`, and `RunAirmoveFlight`
+spends it on landing. The teleport branch stamps it too, but nothing spends it yet: a teleport that
+does not fire is not detected. Walk/door keep `-1` and are the remaining extension points.
 
 ## plan_search.cpp
 
@@ -251,119 +339,6 @@ unexpected. An execution failure has a correct plan and a bot that does not foll
 place it shows up is the runtime. Changing the cost model can convert the second into a visible
 regression without any planning bug: a route the follower handles badly becomes cheaper, the search
 starts choosing it, and end-to-end pass rates drop while every plan remains valid.
-
-## nav_query.cpp
-
-Two lookups that answer different questions, and the names say which. `FindAreaExact` asks *which area
-contains this point* and is allowed to answer none. `FindAreaNearest` asks *which area is nearest* and is
-a total function that essentially never fails. Picking the wrong one is a recurring bug — a strict lookup
-where a forgiving one belongs makes a bot on a lip forget where it is, and a forgiving one where a strict
-one belongs scores a maneuver against an area the bot never reached (`doc/bot.md`, `FinishLadder` and
-`FinishElevatorRide`).
-
-### AreaContainsPoint
-The shared predicate both lookups are built from: AABB test with 4-unit epsilon, then exact plane test
-(2-unit epsilon). Public because a caller sometimes knows *which* area it is asking about, and asking
-directly is not the same question as sweeping the mesh. Areas abut on shared planes, so a point on a
-seam is inside both within the plane epsilon and `FindAreaExact` returns whichever comes first in id
-order — arbitrary. `FinishElevatorRide` tests its ride target with this first for exactly that reason
-(`doc/bot.md`, "The target area wins a boundary tie"); the stop slab and the shaft below it share a
-plane, and the sweep would always answer "shaft".
-
-### FindAreaExact
-`AreaContainsPoint` against every area, first hit wins. Null when nothing contains the point. Note the
-point is tested in the mesh's own space: areas are built in hull 3, so their z range is duck-origin z,
-and a caller holding a player's `v.origin` may need `BotNavZ` first. It usually does not matter,
-because an ordinary area spans floor to ceiling and swallows an 18-unit offset — it matters wherever
-areas are thin, which in practice means elevator stop slabs.
-
-### FindAreaNearest
-`FindAreaExact` first, then two fallbacks:
-1. nearest centroid among areas whose AABB holds the point
-2. global nearest centroid
-
-### FindAreaById
-Direct index lookup with fallback to linear search.
-
-## nav_loader.cpp
-
-### LoadNavFile
-Loads and validates .nav file:
-- Checks magic ("CBNV") and version (21)
-- Reads area records, connection records, area-connection indices, area planes, activation detours and
-  detour points, then the vantage section
-- Verifies BSP checksum against live map
-- Converts to runtime NavMesh with PlanArea/PlanConnection views
-- Builds PlanArea boundPlanes from Area planes
-- Builds PlanConnection from Connection (including gates, launch params)
-- Converts `NavVantageRecord`s into `VantageField` and calls `BuildVantageGrid` once
-
-The version check is a hard equality, not a floor, so a file from an older navgen is refused outright
-rather than read with a shifted layout. Every record is `fread` straight into its struct, so any layout
-change is a version bump and a full regeneration of every `.nav`.
-
-## nav_camp.h
-
-### Camp spots are carried, not consumed
-navgen picks a reduced list of camp spots -- position, one facing, and four arc ratios per stance --
-and the loader lands them on `NavMesh::camps` as a flat vector. The runtime consumer is
-`bot_camp.cpp` (`doc/bot.md`, *bot_camp.cpp*); `crossbot_camp_status` and `--dump-camp-svg` on the
-navgen side are still how you look at the data itself.
-
-There is deliberately no spatial index, and the consumer that arrived did not need one. `FindAreaExact`
-is still a linear scan and camp spots are a hundred-odd records, so the one pass over `mesh.camps` runs
-once per retarget rather than per frame; the vantage field got a CSR grid only because it is blended
-per bot at 10 Hz. Measured on crossfire: 114 camps, and the pass keeps between 4 and 79 of them
-depending on where the bot is and how far off its target is.
-
-### Why this is not part of the vantage field
-The vantage field is a *continuous* signature: `exposure` and the watch cones are properties of a
-neighbourhood, so IDW between the four nearest samples gives a meaningful answer anywhere. Camping is
-discrete. The midpoint between two camping spots is usually not a camping spot, and the old `focus[4]`
-was measured around each probe's own `watch[0]`, so blending two probes with different main directions
-blended two numbers that were never about the same facing. `focus[]` is gone from the format.
-
-## nav_vantage.cpp
-
-### What the field is for
-navgen samples, for every reduced vantage, up to four `WatchDir{yaw, pitch, spread, amount}` — the cones
-that everything with line of sight to that spot arrives *through* — plus `exposure`
-(`doc/navgen.md`, *vantage_sampler.cpp*). This is the runtime half: turn a bot's eye position into a
-blended signature it can steer by. `bot_sense.cpp` refreshes one per bot every 0.1 s.
-
-### The grid exists because there was no spatial index at all
-`FindAreaExact` is a linear scan over every area, and nothing else in `src/nav/` indexes space. A blend
-runs per bot at 10 Hz, so it gets its own CSR uniform grid: count pass, prefix sum, fill pass, one
-allocation for `cellStart` and one for `cellItems` rather than a `vector` per cell. Cell size is the
-header's `vantageSpacing`, floored at 32 and doubled until the cell count is within
-`64 * vantages + 4096`, which keeps a long thin map from allocating a mostly-empty lattice.
-
-`FindNearest` walks cells in expanding rings and stops once the fourth-best distance is inside the
-searched ring's inner radius — the ring is a cube shell, so its inscribed radius is `ring * cell`, and
-anything closer than that cannot be hiding in an unsearched cell.
-
-### Blending: scalars interpolate, directions do not
-`exposure` is IDW-weighted over the four nearest with `1 / (d^2 + 1)` — the same weight
-and the same epsilon navgen's reduction scores its own decimation against, so the runtime reproduces the
-interpolation the decimation assumed was possible.
-
-Watch directions cannot be averaged that way: they are a variable-length list, and a fixed-length vector
-is the only thing that has a distance. So they are merged angularly instead, with the same greedy
-peak-and-absorb `ExtractWatchDirs` runs — take the heaviest entry, mean-shift once over everything
-within 45 degrees, absorb them with summed weight and a weighted-RMS spread, repeat to at most four.
-The difference is that navgen runs it over a 512-bin histogram and this runs it over at most 16 sparse
-entries, each entering at `idw * amount`.
-
-**Merged directions under 5% of the kept weight are dropped.** A far neighbour contributes a direction
-whose weight rounds to nothing, and without the cut it survives as a fourth watch dir with
-`amount 0.000` — which `ApplyVantageLook`'s nearest-to-path search would happily snap the bot's head
-onto. The threshold is navgen's own `minClusterFraction`. Amounts are renormalised over what survives,
-so `watch[0].amount` is always the largest and always meaningful as a denominator.
-
-### Round-tripping is the correctness test
-Blend at a stored vantage's exact position and the distance-0 neighbour dominates the IDW completely, so
-the result must be that vantage's own record back. `crossbot_vantage_status <x y z>` exists to check
-exactly that; anything else means the loader, the grid or the merge is wrong.
 
 ## astar_graph.h
 
@@ -495,25 +470,6 @@ means what it always did; `crossbot_nav::ConnAllowsDirection` is the shared test
 is "may I leave `from` along this connection". The sites asking a different question -- `airmove_prune`
 testing whether an edge is bidirectional, `activation_detours` looking at entries into an area -- keep
 their own inline check.
-
-### Following a drifting path
-
-`NavFollow::Config::driftVelocity` is the world-frame shove the bot is currently subject to.
-`Bot_DriftVelocity` reads it live from the engine — `groundentity->v.movedir * speed` when the ground entity
-has `FL_CONVEYOR`, plus the cached `Bot_PushFields` closure at the bot's origin — so a `Use`-reversed
-conveyor or a switched-on field is handled without rebaking. The closure is cached on `CBot::pushFields` and
-refreshed with each repath, because scanning every edict per frame per bot is not free.
-
-`Track` does two things with it. The world-speed cap becomes `DriftSpeedAlong(drift, aimDir, maxSpeed)`
-instead of `physics.maxSpeed`, so a bot riding a belt is allowed to exceed its own run speed. And the wanted
-velocity handed to `SolveDrive` is `aimDir * target - drift`: `pev->velocity` is own-only, `SolveDrive`
-solves in the own frame, and its clamp to `physics.maxSpeed` stays correct untouched. Without that
-subtraction a bot crossing undertow's 420 u/s current is simply carried away from its own plan.
-
-`BuildPathProfile`'s `NodeMaxSpeed` applies the same `DriftSpeedAlong` using the waypoint's outgoing segment
-direction (the last waypoint uses its incoming one), which is where `PlanWaypoint::drift` — copied from
-`PlanArea::drift` in `PlanPath` — is used. Corner radii, the forward/backward speed pass and `totalTime` all
-follow from it, so `estimatedArrivalTime` stops being wrong by up to 2x on a belt.
 
 ## funnel_graph.cpp
 
@@ -657,102 +613,6 @@ coast down gently; `PlanProfile` carries `friction`/`stopSpeed` so the sampler c
 curve without the physics struct.
 `ProjectOntoProfile(pos, sMin, sMax)` finds the nearest arclength within a window and the unsigned
 lateral distance to it.
-
-## path_follower.cpp
-
-### NavFollow::Track
-Follows a `PlanProfile`. All the old heuristics (chase point, corner cut, corridor pull, `brakeRadius`
-blend, arrival radii) are gone — the geometry is precomputed, so the tracker only has to stay on it.
-
-**Projection** - monotone: each frame searches only `[s - projectBack, s + speed*dt*4 + projectAhead]`,
-so the bot cannot snap onto a distant part of the route that happens to pass nearby.
-
-**Aim direction** - the tangent one frame ahead, plus a cross-track correction toward the chain scaled
-by `min(1, offset/rejoinDist)`. Deliberately *not* pure pursuit: aiming at a point some lookahead
-ahead makes the bot start turning as soon as that point rounds a corner, cutting the corner by up to
-the lookahead distance. Since the arc already encodes the turn, no anticipation is wanted.
-
-**Speed** - the profile speed at the current arclength, derated by `1 - (lateral - C)/C` (floored at
-`derateFloor`) when outside the clearance budget, so the bot slows to rejoin instead of arcing wider.
-
-**Velocity servo** - `SolveDrive`, below.
-
-**Abort** - `needRepath` once lateral exceeds `rejoinAbort` (96). Previously nothing detected being
-off-path; the corridor pull fought forever until the stall timer fired.
-
-**`done` means arrived, and only that.** The cross-track correction can cancel the tangent exactly — a
-bot barred at a node by `sLimit` and standing beyond it along the tangent sees the chain point directly
-behind, and the two unit vectors sum to zero. That used to fall through to `d.done`, which
-`Bot_MoveNav` announces as reaching the goal and acts on by dropping it, wherever the bot happened to
-be. `test18_elevator` hit it while barred at a lift, printing `reached goal` 312 units away and mid
-shaft. A degenerate blend now keeps the raw tangent, and the surviving zero-direction case — which
-needs an empty tangent, not a cancelled one — asks for a repath instead of claiming success.
-
-The rejoin pull can cancel the tangent exactly -- a bot barred at a node and standing beyond it
-along the tangent sees the chain point directly behind. Falling through to `done` there reports
-an arrival wherever the bot happens to be, so keep the raw tangent and let the lateral test
-decide whether this is worth a repath.
-
-### NavFollow::SolveDrive
-Inverts one engine frame to hit a target velocity `V*`. This is the only correct way to ask the engine
-for a speed, and everything that drives the bot goes through it — `Track` for ordinary following,
-`RunAirmoveDrive` for the air-move approach.
-
-```
-v_af      = velocity after this frame's friction   (guard |v| < 0.1, as PM_Friction does)
-need      = V* - v_af
-wishdir   = normalize(need)
-wishspeed = max(|need| / (sv_accelerate * dt * friction), along + |need|)
-```
-
-The second term matters: `PM_Accelerate` caps its delta at `wishspeed - v.wishdir`, so the rate-based
-form alone commands zero acceleration when already cruising at the target. One formula covers
-acceleration, braking, counter-strafing and arc tracking, saturating when a frame cannot deliver.
-
-The *first* term is what makes low speeds reachable at all, and it is the reason commanding `V*`
-directly as a wish speed is a bug rather than an approximation. Below `sv_stopspeed` the engine's
-friction drop is the constant `stopspeed * f * dt` no matter how slowly the bot is moving, while
-`PM_Accelerate` delivers `sv_accelerate * wishspeed * dt`. A raw wish speed therefore does nothing
-whatsoever until
-
-```
-wishspeed > stopSpeed * groundFriction * edgeFriction / accelerate
-```
-
-which at defaults is 40 on open ground and **80 within a hull's reach of a ledge**, where the engine
-doubles friction by `sv_edgefriction`. `byRate` sidesteps the *stall*: the further the velocity is from
-`V*`, the larger the commanded wish speed, so the bot saturates the frame and closes on `V*` from any
-starting speed. See `doc/bot.md`, `RunAirmoveApproach`, for the dropoff this stalled.
-
-What it does *not* do by itself is arrive at `V*`, and that is the next rule.
-
-**`byRate` does not cover for an unmodelled friction — it converts it into a standing speed error.**
-The formula is a deadbeat solve: it asks for the one wish speed whose `sv_accelerate * dt * wishspeed`
-exactly replaces the drop, so its gain is set by whatever `f` the caller passed. Feed it a friction
-lower than the engine's and it settles short, permanently. At the fixed point the engine takes
-`stopSpeed * f_real * dt` per frame and returns at most `accelerate * dt * W`, so holding still needs
-`W = stopSpeed * f_real / accelerate`; `byRate` produces that W at
-
-```
-v = V* - stopSpeed * (f_real - f_model) * dt
-```
-
-which for an unmodelled ledge doubling is a flat `V* - 400 * dt` at defaults — 4 units short at 100 fps,
-6.7 at 60, whatever `V*` is. Measured on test53_ladder4's crouch jump: 66.8 / 66.4 / 66.2 against a
-design 70.8, on frames of 10.0 / 11.0 / 11.6 ms.
-
-The error exists only *below* the `stopSpeed * groundFriction * edgeFriction / accelerate` threshold
-above — 80 at defaults. Above it `byCap` wins instead, `W = V*`, and a target that high is
-self-sustaining against edge friction anyway, so the model error is invisible. That is why this hid for
-so long: it needs a design speed under 80, and the one place that reliably produces one is a **crouched**
-approach, capped at `maxspeed * kDuckingMultiplier` ≈ 90 and usually decelerating into a launch below
-that.
-
-`physics.edgeFriction` is therefore consumed by the follower, but not by `SolveDrive` itself, which stays
-a pure function of the `PmPhysics` it is handed. `Bot_MoveNav` runs the probe and hands it physics whose
-`groundFriction` is already doubled — see `BotDrivePhysics` in `doc/bot.md`. `BuildPathProfile` is
-deliberately left alone: it is a whole-route model built once at plan time, and folding a momentary
-ledge state into it would make design speeds depend on where the bot stood when it replanned.
 
 ## pm_sim.cpp
 
@@ -1632,56 +1492,6 @@ larger change than this one.
 - `ConnectionCrossing(areas, conn)` - crossing point, still stored on the graph edge
 - `PlanWalker` - the entry point; `NavPlan::PlanRoute` drives it
 
-## nav_format.h
-
-### Nav File Format (version 22)
-- Magic: "CBNV"
-- Header (128 B): magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex,
-  areaPlanes, detours, detourPoints), designMaxSpeed, vantageCount, vantageSpacing, maxExposure,
-  waterVolumeCount, campCount
-- AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount, waterVolume, pad1[3], submergeZ, driftVelocity[3]
-- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity, waterVolume, pad2[3], submergeZ, drift
-- `gravity` is the `pev->gravity` multiplier the air move was sampled at (1.0 for every other
-  connection type). A map with `trigger_gravity` carries one air move set per distinct multiplier, and
-  the runtime uses only the set matching the bot's current gravity — see "Gravity" below
-- `drift` is a `DriftTerm`: length, along, perp, alongMin, alongMax. Speed-independent by design;
-  see "drift.h: direction-aware cost" above
-- `driftVelocity` is the area's conveyor plus push-field velocity, used by the speed profile
-- NavWatchDir (20 B): yaw, pitch, spread, amount, dist. `spread` is an angle in degrees and `amount` a
-  fraction of sightlines; `dist` is the mean *distance* to everything visible inside the cone, which is
-  what the range bias reads through `VantageOpenDistance`
-- NavVantageRecord (96 B): pos[3], exposure, watch[4]. It used to carry a `focus[4]` block; camping is
-  now its own section and the field is gone
-- NavCampRecord (56 B): pos[3], yaw, pitch, score, standScore, standSpread, standDist, crouchScore,
-  crouchSpread, crouchDist, areaId, flags. `pos` is the nav floor point, which is a ducking player's
-  origin, so the standing eye is +46 and the crouching eye +12. `CAMP_NO_STAND` means standing there is
-  impossible and the three `stand*` fields are zero. Each posture's score is targets inside a
-  90-degree FOV over targets outside it; `spread` is the RMS angle they sit off the axis and `dist`
-  their mean range. It used to store four nested arc ratios per posture (90/45/22.5/11.25); one spread
-  says the same thing in one number, and carries the range the arcs never did
-- ActivationDetourRecord: fromAreaId, pointOffset, pointCount, actIndex, waitSeconds, detourSeconds, actKind, flags, pad[2]
-- DetourPointRecord: pos[3], areaId, clearance, flags, pad[3]
-
-Section order on disk is header, areas, conns, areaConnIndex, areaPlanes, detours, detourPoints, vantages,
-water volumes, camp spots. The detour
-offsets are `uint32_t`; `connOffset`/`planeOffset` remain `uint16_t` into the global arrays and throw past
-65535. Each record has explicit padding and a `static_assert` on its size, because they are written raw.
-
-`nav_loader.cpp` rejects a version mismatch outright, so bumping forces regeneration rather than silently
-loading a stale mesh. Area planes are the exported `boundPlanes`, which for a prism area is its footprint hull
-plus a z-slab rather than its true faces.
-
-### Enums
-- AreaFlags: CROUCH(1), LADDER_TOP(2), WATER(4), DOOR(128), BREAKABLE(256), ELEVATOR(512)
-- ConnType: WALK(0), TELEPORT(1), AIRMOVE(2), LADDER(3), ELEVATOR(4) - a ladder reuses the air-move fields
-  rather than adding its own: launchPos is the mount, landingPos the dismount, exitAngle the climbing yaw,
-  exitSpeed the climb speed, and flightTime/fallDamage belong to the dismount hop. An elevator ride uses
-  launchPos as the boarding point and landingPos as the arrival point, and carries its own rideSeconds /
-  rideWaitSeconds; rideSecondsMax equals rideSeconds today and is the hook for a swept-interval sampler
-- ConnFlags: ONE_WAY(1), NEEDS_CROUCH(2), JUMP(4), WATERJUMP(8) - jump means left ground under impulse, not derivable from jumpBackDist. There is no reverse one-way bit: a drift field blocks a direction only for a given max speed, so that answer is computed per search by `NavDrift::EvalDrift` and never stored
-- DoorActivation: TOUCH(0), BUTTON(1), TRIGGER(2)
-- GateValidFlags: VALID_A(1), VALID_B(2), CLAMPED_A(4), CLAMPED_B(8)
-
 ## pm_sim.h
 
 ### PmPhysics
@@ -1715,22 +1525,8 @@ Reaching here with i == numplanes means the loop above found no single plane the
 ### AirAccelerate
 PM_AirAccelerate, wish speed capped at 30, so it can only ever nudge a trajectory in flight.
 
-## Trigger Forces at Runtime
-
-### Gravity multiplier in the nav format
-
-The nav format stores a `gravityMultiplier` on each connection (`Connection::gravityMultiplier` in nav_format.h). This is the `pev->gravity` multiplier this air move was sampled at. For all other connection types (walk, ladder, elevator), it is 1.0.
-
-Base velocity contributed by trigger_push fields overlapping the player origin is stored in units/sec.
-
-### Planning with gravity multipliers
+## Planning with gravity multipliers
 
 During planning, `gravityMultiplier` filters air moves the same way `PlanWalker::Cross` does, so goal selection and route search agree about which jumps exist. The filter is applied at the Dijkstra stage when selecting goals.
 
 When the bot is at a different gravity than an air move was sampled for, that air move simply does not exist in the planner's view of the graph. Only the air moves matching the bot's current gravity are available for planning.
-
-### Physics simulation with gravity
-
-In `pm_sim.cpp`, `PM_AddCorrectGravity` folds the vertical push component into velocity as an acceleration and clears it from the base velocity, so only the horizontal remainder wraps `FlyMove` below.
-
-The horizontal base velocity wraps the move the way `PM_AirMove` and `PM_WalkMove` do: it is added before the clip-and-slide loop, then pulled back out once the ground check has seen it. This ensures consistent handling across all movement types.
