@@ -192,6 +192,7 @@ namespace
 			BotCombat::OnRespawn(bot);
 			BotFire::Reset(bot);
 			BotDeploy::OnRespawn(bot);
+			bot.daze = BotDaze::State();
 			bot.brk = BotBreak::State();
 		}
 

@@ -28,10 +28,6 @@ crossplay/dlls/crossplay.dll -> per-xgame liblist.gam -> hl.dll and friends`. **
 of that top-level Metamod**, so it sits *above* CrossPlay: its hooks always run with CrossPlay's
 `gCaller == -1`, and its `g_engfuncs` is the raw engine table rather than CrossPlay's hooked one.
 
-That placement is not a preference. `CrossPlay::GameContext` wraps the *non-nested* caller-context
-macro, which raises `Caller change not allowed!` if a context is already active. A plugin loaded
-below CrossPlay (in a per-game `addons/metamod/plugins.ini`) would already be inside one.
-
 Registering the plugin — a `win32 addons/crossbot/crossbot_mm.dll` line in
 `crossplay/addons/metamod/plugins.ini` — is an operator step. Nothing in this repo writes that file;
 `test_server_start.ps1` warns when the line is absent.
@@ -165,7 +161,6 @@ each names a broken rule:
 
 | Message | What it means |
 | --- | --- |
-| `Caller change not allowed!` | a context was entered while another was active — rule 1 |
 | `Bad caller!` | an engine call that needs a context was made at `gCaller == -1` |
 | `Entity without owner!` | an entity reached a dispatch with `gEntityOwners == -1` |
 | `Owner mismatch!` | two games claim the same edict |

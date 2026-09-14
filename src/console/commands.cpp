@@ -270,6 +270,57 @@ namespace
 		BotManager::PrintCombatStatus();
 	}
 
+	void Cmd_CrossBotUserMsgs()
+	{
+		BotDaze::PrintUserMsgs();
+	}
+
+	void Cmd_CrossBotDazeStatus()
+	{
+		ForEachBot([](edict_t *ent) { BotDaze::PrintStatus(*BotManager::FindBot(ent)); return true; });
+	}
+
+	void Cmd_CrossBotDazeTest()
+	{
+		if (CMD_ARGC() < 4)
+		{
+			SERVER_PRINT("usage: crossbot_daze_test <bot|*> flash <alpha> [duration] [hold]\n"
+				"       crossbot_daze_test <bot|*> conc <scale>\n");
+			return;
+		}
+
+		bool flash = strcmp(CMD_ARGV(2), "flash") == 0;
+		if (!flash && strcmp(CMD_ARGV(2), "conc") != 0)
+		{
+			SERVER_PRINT("CrossBot: crossbot_daze_test kind must be flash or conc\n");
+			return;
+		}
+
+		int value = atoi(CMD_ARGV(3));
+		float duration = (CMD_ARGC() > 4) ? static_cast<float>(atof(CMD_ARGV(4))) : 12.f;
+		float hold = (CMD_ARGC() > 5) ? static_cast<float>(atof(CMD_ARGV(5))) : 2.67f;
+
+		auto act = [=](edict_t *ent) {
+			CBot *bot = BotManager::FindBot(ent);
+			if (flash)
+				BotDaze::OnScreenFade(*bot, static_cast<int>(duration * 4096.f),
+					static_cast<int>(hold * 4096.f), 0, 255, 255, 255, value);
+			else
+				BotDaze::OnConcuss(*bot, value);
+			return true;
+		};
+
+		if (strcmp(CMD_ARGV(1), "*") == 0)
+		{
+			ForEachBot(act);
+			return;
+		}
+
+		edict_t *ent = nullptr;
+		if (FindBotOrComplain(CMD_ARGV(1), ent))
+			act(ent);
+	}
+
 	void Cmd_CrossBotFireStatus()
 	{
 		BotManager::PrintFireStatus();
@@ -919,6 +970,9 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_camp_status", Cmd_CrossBotCampStatus);
 	ADD_SERVER_COMMAND("crossbot_teams_status", Cmd_CrossBotTeamsStatus);
 	ADD_SERVER_COMMAND("crossbot_combat_status", Cmd_CrossBotCombatStatus);
+	ADD_SERVER_COMMAND("crossbot_usermsgs", Cmd_CrossBotUserMsgs);
+	ADD_SERVER_COMMAND("crossbot_daze_status", Cmd_CrossBotDazeStatus);
+	ADD_SERVER_COMMAND("crossbot_daze_test", Cmd_CrossBotDazeTest);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
 	ADD_SERVER_COMMAND("crossbot_weapon_carry", Cmd_CrossBotWeaponCarry);

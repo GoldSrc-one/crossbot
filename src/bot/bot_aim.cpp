@@ -445,6 +445,7 @@ Vector Bot_UpdateFacing(CBot &bot)
 			desired.x += amp * kDriftPitchScale *
 				sinf(gpGlobals->time * kDriftPitchRate + aim.driftPhasePitch);
 		}
+		BotDaze::Sway(bot, desired);
 	}
 
 	float dt = Bot_FrameTime();

@@ -14,6 +14,7 @@
 #include "bot_break.h"
 #include "bot_camp.h"
 #include "bot_combat.h"
+#include "bot_daze.h"
 #include "bot_deploy.h"
 #include "bot_fire.h"
 #include "bot_fun.h"
@@ -199,6 +200,7 @@ struct CBot
 	BotBreak::State brk;
 	BotCamp::State camp;
 	BotCombat::State combat;
+	BotDaze::State daze;
 	BotDeploy::State deploy;
 	BotSense::State sense;
 	BotFire::State fire;

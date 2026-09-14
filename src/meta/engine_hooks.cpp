@@ -1,6 +1,7 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+#include "../bot/bot_daze.h"
 #include "../bot/bot_manager.h"
 #include "../bot/bot_perf.h"
 #include "../game/fake_cmd.h"
@@ -66,6 +67,36 @@ void PlaybackEvent(int flags, const edict_t *pInvoker, unsigned short eventindex
 	RETURN_META(MRES_IGNORED);
 }
 
+int DazeRegUserMsg(const char *pszName, int iSize)
+{
+	BotDaze::OnRegUserMsg(pszName, META_RESULT_ORIG_RET(int));
+	RETURN_META_VALUE(MRES_IGNORED, 0);
+}
+
+void DazeMessageBegin(int msg_dest, int msg_type, const float *pOrigin, edict_t *ed)
+{
+	BotDaze::OnMessageBegin(msg_dest, msg_type, ed);
+	RETURN_META(MRES_IGNORED);
+}
+
+void DazeWriteByte(int iValue)
+{
+	BotDaze::OnWrite(iValue);
+	RETURN_META(MRES_IGNORED);
+}
+
+void DazeWriteShort(int iValue)
+{
+	BotDaze::OnWrite(iValue);
+	RETURN_META(MRES_IGNORED);
+}
+
+void DazeMessageEnd()
+{
+	BotDaze::OnMessageEnd();
+	RETURN_META(MRES_IGNORED);
+}
+
 C_DLLEXPORT int GetEngineFunctions(enginefuncs_t *pengfuncsFromEngine, int *interfaceVersion)
 {
 	if (!pengfuncsFromEngine) {
@@ -105,6 +136,11 @@ C_DLLEXPORT int GetEngineFunctions_Post(enginefuncs_t *pengfuncsFromEngine, int 
 	memset(pengfuncsFromEngine, 0, sizeof(enginefuncs_t));
 	pengfuncsFromEngine->pfnEmitSound = EmitSound;
 	pengfuncsFromEngine->pfnPlaybackEvent = PlaybackEvent;
+	pengfuncsFromEngine->pfnRegUserMsg = DazeRegUserMsg;
+	pengfuncsFromEngine->pfnMessageBegin = DazeMessageBegin;
+	pengfuncsFromEngine->pfnWriteByte = DazeWriteByte;
+	pengfuncsFromEngine->pfnWriteShort = DazeWriteShort;
+	pengfuncsFromEngine->pfnMessageEnd = DazeMessageEnd;
 #ifdef CROSSBOT_PERF
 	pengfuncsFromEngine->pfnTraceLine = PerfTraceLine_Post;
 	pengfuncsFromEngine->pfnTraceHull = PerfTraceHull_Post;

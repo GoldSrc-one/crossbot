@@ -1148,3 +1148,78 @@ uses, which is what makes this "have I lost every trace of it" rather than "did 
 
 `bot.sense` is not covered by anything that resets on death, so `BotSense::OnRespawn` clears the enemy
 alongside `BotItems::OnRespawn`, `BotFire::Reset` and `BotCombat::OnRespawn`.
+
+## bot_daze.cpp
+
+Flash grenades and concussion grenades, both learned the way a real client learns them: from the user
+message the game DLL addresses to the player. Nothing else in the plugin reads network messages.
+
+### The message hook
+
+`engine_hooks.cpp` hooks `pfnRegUserMsg`, `pfnMessageBegin`, `pfnWriteByte`, `pfnWriteShort` and
+`pfnMessageEnd`, all post. `pfnRegUserMsg` records the ids of `ScreenFade` and `Concuss` as they are
+registered. The engine does not dedupe by name alone: under valve+cstrike+tfc, `ResetHUD`, `Battery`
+and `StatusValue` each hold two ids, apparently where the games disagree on size. `ScreenFade` (96)
+and `Concuss` (156) come out as one id each. A game registering `ScreenFade` with a different size
+would overwrite the stored id and blind only that game's victims; `crossbot_usermsgs` shows it.
+`MessageBegin` arms capture only for `MSG_ONE` / `MSG_ONE_UNRELIABLE` to a fake client that is one of
+our bots, and only for those two ids. Every write hook returns on a single branch while capture is
+disarmed, which is the whole cost on the common path.
+
+Only bytes and shorts are hooked because those are the only field types the two messages use. A third
+message with any other field type must hook those writers too, or its field indices will be wrong.
+
+The ids come only from the hook, so the plugin must be loaded before the game DLLs register -- true for
+`plugins.ini` at startup, false for a later `meta load`. `crossbot_usermsgs` says which case applies.
+
+The handlers touch `CBot` fields and `gpGlobals->time` and nothing else, so they need no game context.
+
+### ScreenFade
+
+10 bytes: `duration` and `holdTime` as 4.12 fixed-point shorts (`seconds = value / 4096`),
+`fadeFlags`, then r, g, b, a. The hook sees the `int` the game DLL passed, before the engine truncates
+it, and masks to 16 bits.
+
+A fade blinds only when `a >= 200` and `FFADE_MODULATE` is clear. 200 is CS's minimum flash alpha
+(`RadiusFlash` sends 255 facing the grenade, 200 facing away), and it is what keeps HL's charged-gauss
+self-fade -- orange, alpha 128 -- from blinding every bot that fires one. A map `env_fade` at full
+alpha does blind bots; the screen really is covered.
+
+Blindness lasts `crossbot_blind_scale * duration`, default 0.33: ReGameDLL's `PlayerBlind` calls
+`Blind(fadeTime * 0.33, ...)` for its own bots, so a bot is blind for a third of the time a human's
+screen stays white. Point blank and facing the grenade that is 12s of fade and 4s of blindness. A
+second flash extends to whichever ends later.
+
+While blind, `BotSense::Update` skips `UpdateVision` and clears `target`, `targetBone`, `visionCands`
+and `visionKeep`, emptying the delay queue if a target was held -- the same cleanup as
+`crossbot_sense 0` except that **`sense.enemy` survives**. A flashed bot still knows someone was
+there. Sound, events and damage reach the suspicion list outside `UpdateVision`, so the bot keeps
+turning toward noise.
+
+`BotCombat::Run` also drives while blind, with or without an open fight. The exposure shuffle never
+reads the enemy, so a blind bot drops its goal and walks toward cover exactly as a fighting one does,
+and `DuelDrive` declines for want of an enemy. `combat.active` is not touched, so
+`crossbot_combat_status` still answers whether there is a fight. When blindness ends with no fight,
+`Run` releases the drive and zeroes `nextSelectTime`, as `Exit` does. Under `crossbot_combat 0` the
+blind drive is off as well, because `Update` calls `Exit` every frame there and the goal would be
+dropped again on each one.
+
+`BotFire` is untouched: a bot that had an enemy keeps shooting where it remembers them.
+
+### Concuss
+
+One byte. A TFC client stores it in `v_idlescale`, and `V_AddIdle` adds
+`scale * sin(t * cycle) * level` to the rendered view: pitch cycle 1 level 0.3, yaw cycle 2 level
+0.3, and roll, which a bot does not have, dropped. `Bot_UpdateFacing` adds the same to its desired
+angles right after the idle drift, so the hand controller smooths it into a wander and
+`Bot_DecomposeMove` makes the bot walk crooked for free. `t` is absolute time, as on the client.
+
+TFC's server, decompiled: `TeamFortress_Concuss` sets the value to 100 for 15s, or 7s for a medic;
+each think recomputes `100 * remaining / duration`, and a message goes out whenever that integer
+changes. About 100 bytes arrive, the last one zero, and the bot tracks the latest -- there is nothing
+to model. At 100 the sway is ±30 degrees on both axes; `crossbot_conc_gain` scales it.
+
+On a client the sway is cosmetic and the real aim is untouched; a human misaims because what they see
+is moving. Applying it to the bot's actual angles is the same miss, taken directly.
+
+Respawn resets the whole state.

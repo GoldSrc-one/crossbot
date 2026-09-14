@@ -78,6 +78,20 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   (`shoot=1`). **Run this first on any cs/tfc/dod map.** Every feature below rests on the mod actually
   filling `pev->team` for a fake client another game DLL created, and this is the only thing that says
   whether it does: all-zero teams means teams idle and bots behave exactly as on a deathmatch map
+- `crossbot_usermsgs` — every user message the loaded game DLLs registered, by id, name and size,
+  with `<- daze` on `ScreenFade` and `Concuss`. Run it before testing flashes or concussions: if
+  either id reads 0, nothing downstream can fire. The ids come from a `pfnRegUserMsg` hook, so a
+  plugin brought in by `meta load` after the game DLLs registered lists the names but marks none;
+  see `doc/perception.md`, `bot_daze.cpp`
+- `crossbot_daze_status` — per bot: seconds of blindness left, the alpha, fade and hold of the last
+  accepted flash, `flashes`, the current `conc` byte and how long it has been non-zero, `updates`
+  received during this concussion, `concs`, and the `sway` being added to pitch and yaw right now.
+  The counters are per life
+- `crossbot_daze_test <bot|*> flash <alpha> [duration] [hold]` and
+  `crossbot_daze_test <bot|*> conc <scale>` — feed a synthetic `ScreenFade` (white, flags 0; duration
+  and hold default to CS's point-blank 12 and 2.67) or `Concuss` byte straight into the handlers, as
+  if the wire had delivered it. Exercises everything downstream of the message hook without a CS or
+  TFC client. `conc 0` clears
 - `crossbot_sense_status` — per bot: the bot's own `team`, aim target and bone, `cands`/`keep` for the
   vision pick, live suspicion count with a `kinds` breakdown
   by player/monster/other, the `tier` that won the look vote, the freshest entry with source, age and
@@ -314,6 +328,13 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   acquires one. Turning it off also stops weapon *switching* and the out-of-combat reload, which are
   the same decision made without a target; see
   `doc/combat.md`, `bot_fire.cpp`
+- `crossbot_daze_debug` — 1 logs every intercepted `ScreenFade` with its raw wire fields and verdict,
+  and the onset and clear of each concussion; 2 adds every intermediate `Concuss` byte and one line
+  per user message addressed to any bot. Default 0. Verbose builds only
+- `crossbot_blind_scale` — how long a flash blinds, as a fraction of the fade duration on the wire.
+  Default 0.33, ReGameDLL's own ratio for its bots
+- `crossbot_conc_gain` — multiplier on the `Concuss` byte before it becomes sway. Default 1, which at
+  TFC's start value of 100 is ±30 degrees on pitch and yaw
 - `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
   `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean
   the test never settles at all

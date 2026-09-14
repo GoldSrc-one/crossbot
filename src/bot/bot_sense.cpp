@@ -1096,7 +1096,19 @@ void BotSense::Update(CBot &bot)
 	}
 	{
 		BOTPERF_SCOPE(ZONE_SN_VISION);
-		UpdateVision(bot);
+		if (BotDaze::Blind(bot))
+		{
+			if (sense.target.Get())
+				BotAim::ClearDelayQueue(bot);
+			sense.target.Clear();
+			sense.targetBone = -1;
+			sense.visionCands = 0;
+			sense.visionKeep = KEEP_NONE;
+		}
+		else
+		{
+			UpdateVision(bot);
+		}
 	}
 	{
 		BOTPERF_SCOPE(ZONE_SN_ENEMY);

@@ -610,8 +610,18 @@ void BotCombat::Update(CBot &bot)
 bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 {
 	State &st = bot.combat;
-	if (!st.active)
+	bool blind = Enabled() && BotDaze::Blind(bot);
+	if (!st.active && !blind)
+	{
+		if (st.driving)
+		{
+			st.driving = false;
+			st.haveProbe = false;
+			st.probeArea = -1;
+			bot.nextSelectTime = 0.f;
+		}
 		return false;
+	}
 
 	if (Bot_ManeuverActive(bot))
 	{

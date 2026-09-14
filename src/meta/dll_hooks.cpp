@@ -388,6 +388,24 @@ cvar_t g_perfSpikeCvar = {
 
 #endif
 
+cvar_t g_dazeDebugCvar = {
+	"crossbot_daze_debug",
+	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_blindScaleCvar = {
+	"crossbot_blind_scale",
+	"0.33",
+	FCVAR_SERVER
+};
+
+cvar_t g_concGainCvar = {
+	"crossbot_conc_gain",
+	"1",
+	FCVAR_SERVER
+};
+
 void GameDLLInit()
 {
 	BotPerf::InstallTraceWrappers();
@@ -447,6 +465,9 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_dazeDebugCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_blindScaleCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_concGainCvar);
 #ifdef CROSSBOT_BSPTRACE
 	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceBlockersCvar);
