@@ -4,7 +4,7 @@
 #include <math.h>
 
 #include "../game/game_profile.h"
-#include "../game/hldm_weapons.h"
+#include "../game/game_profile.h"
 #include "../game/teams.h"
 #include "../nav/nav.h"
 #include "../nav/nav_camp.h"
@@ -65,7 +65,7 @@ namespace
 		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
 			return 0.f;
 
-		const WeaponSpec *spec = HLDM_WeaponSpec(inv.weapons[inv.activeIndex].id);
+		const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(inv.weapons[inv.activeIndex].id) : nullptr;
 		return spec ? spec->zoomFov : 0.f;
 	}
 

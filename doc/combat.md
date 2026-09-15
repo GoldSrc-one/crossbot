@@ -764,6 +764,12 @@ second later, from `WeaponIdle`. `CRpg::PrimaryAttack` creates the rocket inside
 the game first shows the thing existing, and the release is `commitSeen && !live` — never `!live`
 alone, which would fire on the gap between the button and the effect.
 
+**`COMMIT_THROW` opens only for a `WPN_Q_THROW_ARC` mode.** Its whole reason is the delayed grenade,
+and its latch is `m_flStartThrow`. Any other `FIRE_TAP` mode — Ricochet's disc, whose throw leaves on
+the press — just presses. Before that gate a disc throw opened a commit that could never latch (no
+`m_flStartThrow` exists there), held the mode unchecked as `why=primed`, and ran to `kTapTimeout` every
+time.
+
 `COMMIT_THROW` also refuses on `m_flStartThrow` directly, not only on its own state, and that is not
 belt and braces. A primed grenade whose target walks out of the 550-unit reach makes the solve fail,
 which drops the mode and clears the commit — and a bot that then pressed again would skip

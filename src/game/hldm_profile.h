@@ -12,6 +12,8 @@ public:
 	bool IsDead(edict_t *pEdict) const override;
 	edict_t *MonsterEnemy(edict_t *ent) const override;
 	float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const override;
+	bool FallDamage() const override;
+	bool AllowsGoalTier(BotGoal::Tier tier) const override;
 	void Respawn(edict_t *pEdict) const override;
 
 	ItemKind ClassifyItem(edict_t *ent) const override;
@@ -22,6 +24,7 @@ public:
 	float ChargerValue(ItemKind kind, edict_t *pEdict) const override;
 
 	const WeaponSpec *GetWeaponSpec(int id) const override;
+	bool ModeAvailable(edict_t *player, const WeaponSpec &spec, const WeaponMode &mode) const override;
 
 	const char *AmmoEntity(int weaponId, WeaponAmmo pool) const override;
 

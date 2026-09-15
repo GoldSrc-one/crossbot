@@ -1094,8 +1094,13 @@ The `VisIndex` row cache had to move out into a per-worker `VisRowReader` — it
 shared object, i.e. a data race. Decompressing every row up front into one flat bitset was the
 alternative and was rejected: that is `leafCount² / 8` bytes, fine at 8k leaves but 112 MB at 30k.
 
-The dominant term is still N² in vantage count, so `--vantage-grid` remains the real lever: 20 instead of
-15 gives about 18.7k vantages and roughly a third of the pairs.
+The dominant term is still N² in vantage count, so the lattice spacing is the real lever: 20 instead of
+15 gives about 18.7k vantages and roughly a third of the pairs. It is therefore derived, not fixed:
+`grid = max(15, sqrt(footprint / --vantage-points))` with 40000 points, so crossfire (7.4M sq units) keeps
+15 while dod_caen (15.3M) samples at 19.5 and koth_one (38.2M) at 30.9 — all near 40k vantages, where the
+fixed 15 gave koth_one 170k and 14.3G pairs. `--vantage-grid n` still pins it. Camp spots climb over the same
+samples, so they take the derived grid for their neighbour radius, and `--camp-min-visible` is scaled by
+`(15 / grid)²` to keep meaning the same seen floor area.
 
 The other lever is upstream, and it is the bigger one: vantage count is walkable footprint over
 `gridSize`², so pairs go as **footprint squared**. A map with junk floor in it pays for that junk twice

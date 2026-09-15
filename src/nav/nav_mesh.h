@@ -55,6 +55,7 @@ struct Connection
 	float costSeconds = 0.f;
 	float travelSeconds = 0.f;
 	float runtimePenalty = 0.f;
+	float fallDamage = 0.f;
 
 	crossbot_nav::DriftTerm drift;
 

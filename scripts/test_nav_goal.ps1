@@ -9,7 +9,7 @@ param(
 
     [int]$Port = 0,
 
-    [string]$NavGenPath = "build\tools\navgen\navgen.exe",
+    [string]$NavGenPath = "build-x64\tools\navgen\navgen.exe",
 
     [string]$HLDSDir = "D:\hlds",
 

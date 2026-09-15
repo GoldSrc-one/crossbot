@@ -1,12 +1,23 @@
 @echo off
 setlocal
 set CROSSBOT_DEPLOY=D:\hlds\crossplay\addons\crossbot
-call "D:\Program Files\Microsoft Visual Studio\2022\Preview\VC\Auxiliary\Build\vcvarsall.bat" x86
-if errorlevel 1 exit /b 1
+set VCVARSALL=D:\Program Files\Microsoft Visual Studio\2022\Preview\VC\Auxiliary\Build\vcvarsall.bat
 
+rem navgen is 64-bit (build-x64) and crossbot_mm is 32-bit (build), the only kind GoldSrc loads.
+rem Each needs its own compiler environment, so the x64 one is scoped to its own setlocal.
+setlocal
+call "%VCVARSALL%" x64
+if errorlevel 1 exit /b 1
+cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo %* .
+if errorlevel 1 exit /b 1
+cmake --build build-x64
+if errorlevel 1 exit /b 1
+endlocal
+
+call "%VCVARSALL%" x86
+if errorlevel 1 exit /b 1
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo %* .
 if errorlevel 1 exit /b 1
-
 cmake --build build
 if errorlevel 1 exit /b 1
 

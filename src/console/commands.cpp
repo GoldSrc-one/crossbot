@@ -17,6 +17,7 @@
 #include "../game/crossplay.h"
 #include "../game/ent_handle.h"
 #include "../game/game_profile.h"
+#include "../game/gamedata.h"
 #include "../game/give_item.h"
 #include "../game/hldm_weapons.h"
 #include "../nav/bsp_trace.h"
@@ -122,6 +123,14 @@ namespace
 		snprintf(msg, sizeof(msg), "CrossBot:  walked mask 0x%08x, pev->weapons 0x%08x -- %s\n",
 			walked, pevBits, walked == (pevBits & ~kSuitBit) ? "match" : "MISMATCH");
 		SERVER_PRINT(msg);
+
+		if (g_offsets.plr_iPowerups >= 0 && CBotPrivateData(player))
+		{
+			snprintf(msg, sizeof(msg), "CrossBot:  powerups 0x%x, +4 = %d\n",
+				GameData::Peek<int>(CBotPrivateData(player), g_offsets.plr_iPowerups),
+				GameData::Peek<int>(CBotPrivateData(player), g_offsets.plr_iPowerups + 4));
+			SERVER_PRINT(msg);
+		}
 
 		int walkedActive = (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
 			? inv.weapons[inv.activeIndex].id : 0;

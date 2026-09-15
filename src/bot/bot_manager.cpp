@@ -373,6 +373,12 @@ bool AddBot(int iGame, const char *name, const char *arg)
 		return false;
 	}
 
+	if (!Nav::IsLoaded())
+	{
+		SERVER_PRINT("CrossBot: cannot add bot, no nav mesh loaded for this map.\n");
+		return false;
+	}
+
 	CBot *pSlot = FindFreeSlot();
 	if (!pSlot)
 	{

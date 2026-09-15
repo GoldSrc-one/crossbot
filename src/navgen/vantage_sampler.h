@@ -17,7 +17,10 @@ namespace navgen
 constexpr double kDuckEyeLift = 12.0;
 constexpr double kStandEyeLift = 46.0;
 
+// The lattice spacing floor. The actual spacing is derived from the walkable footprint so a map gets about
+// kDefaultVantagePoints samples: pair cost is quadratic in the sample count.
 constexpr double kDefaultVantageGrid = 15.0;
+constexpr size_t kDefaultVantagePoints = 40000;
 constexpr double kDefaultVantageSpacing = 128.0;
 constexpr double kDefaultVantageCone = 45.0;
 constexpr size_t kDefaultVantageNeighbors = 4;
@@ -57,7 +60,8 @@ struct VantageCandidate
 
 struct VantageParams
 {
-	double gridSize = kDefaultVantageGrid;
+	double gridSize = 0.0; // 0 = max(kDefaultVantageGrid, sqrt(footprint / maxPoints))
+	size_t maxPoints = kDefaultVantagePoints;
 	double targetSpacing = kDefaultVantageSpacing;
 	double clusterConeDeg = kDefaultVantageCone;
 	size_t neighborCount = kDefaultVantageNeighbors;
@@ -82,6 +86,7 @@ struct VantageStats
 	size_t budget = 0;
 	size_t kept = 0;
 	double footprintArea = 0.0;
+	double gridSize = 0.0;
 	double maxExposure = 0.0;
 	double meanReductionError = 0.0;
 	double maxReductionError = 0.0;

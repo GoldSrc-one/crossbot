@@ -40,7 +40,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	if (!f)
 	{
 		char msg[560];
-		snprintf(msg, sizeof(msg), "CrossBot: no nav file at %s (bot will wander).\n", navPath);
+		snprintf(msg, sizeof(msg), "CrossBot: no nav file at %s (bots disabled).\n", navPath);
 		SERVER_PRINT(msg);
 		return nullptr;
 	}
@@ -92,7 +92,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	if (liveChecksum == 0)
 	{
 		char msg[1024];
-		snprintf(msg, sizeof(msg), "CrossBot: could not verify %s against live map %s (bot will wander).\n", navPath, bspPath);
+		snprintf(msg, sizeof(msg), "CrossBot: could not verify %s against live map %s (bots disabled).\n", navPath, bspPath);
 		SERVER_PRINT(msg);
 		return nullptr;
 	}
@@ -152,6 +152,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.exitAngle = rec.exitAngle;
 		conn.jumpBackDist = rec.jumpBackDist;
 		conn.flightTime = rec.flightTime;
+		conn.fallDamage = rec.fallDamage;
 		conn.launchPos = Vector(rec.launchPos[0], rec.launchPos[1], rec.launchPos[2]);
 		conn.landingPos = Vector(rec.landingPos[0], rec.landingPos[1], rec.landingPos[2]);
 		conn.rideSeconds = rec.rideSeconds;

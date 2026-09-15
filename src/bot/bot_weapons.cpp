@@ -86,13 +86,15 @@ void Read(edict_t *player, BotInventory &out)
 			w.nextPrimaryAttack = Peek<float>(item, g_offsets.wpn_flNextPrimaryAttack);
 			w.nextSecondaryAttack = Peek<float>(item, g_offsets.wpn_flNextSecondaryAttack);
 			w.reloading = Peek<int>(item, g_offsets.wpn_fInReload) != 0;
-			w.chargeState = Peek<int>(item, g_offsets.ent_fInAttack);
-			w.throwStart = Peek<float>(item, g_offsets.ent_flStartThrow);
+			if (g_offsets.ent_fInAttack >= 0)
+				w.chargeState = Peek<int>(item, g_offsets.ent_fInAttack);
+			if (g_offsets.ent_flStartThrow >= 0)
+				w.throwStart = Peek<float>(item, g_offsets.ent_flStartThrow);
 
 			const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(w.id) : nullptr;
-			if (spec && (spec->primary.quirks & WPN_Q_KEEP_AIMING) != 0)
+			if (spec && (spec->primary.quirks & WPN_Q_KEEP_AIMING) != 0 && g_offsets.rpg_cActiveRockets >= 0)
 				w.guidedCount = Peek<int>(item, g_offsets.rpg_cActiveRockets);
-			if (spec && (spec->primary.quirks & WPN_Q_HIDDEN_STATE) != 0)
+			if (spec && (spec->primary.quirks & WPN_Q_HIDDEN_STATE) != 0 && g_offsets.ent_chargeReady >= 0)
 				w.chargeReady = Peek<int>(item, g_offsets.ent_chargeReady);
 
 			if (item == active)

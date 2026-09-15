@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <functional>
 #include <vector>
 
@@ -96,6 +98,62 @@ struct HullOriginChain
 bool SegmentBlocked(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &end,
     HullOriginChain &chain);
 
+struct BatchTraceScratch
+{
+    const dclipnode_t *clipnodes = nullptr;
+    int headnode = 0;
+    int depth = -1;
+    std::vector<float> ts;
+    std::vector<float> te;
+    std::vector<uint32_t> combo;
+    std::vector<float> p1f;
+    std::vector<float> p2f;
+    std::vector<float> soa;
+    std::vector<uint8_t> blockedShift;
+};
+
+// blocked[i * m + j] = segment starts[i] -> ends[j] reaches a CONTENTS_SOLID leaf. starts and ends are
+// xyz float triplets (3 * n and 3 * m floats), and all plane math is float. n, m <= 65535. Allocates only
+// when scratch has to grow. Fastest when the starts share a leaf and the ends share a leaf. CPUs without
+// SSE4.1 and POPCNT get SegmentBlocked per combo instead.
+void SegmentsBlockedBatch(const HullTree &hull, int headnode, const float *starts, size_t n,
+    const float *ends, size_t m, uint8_t *blocked, BatchTraceScratch &scratch);
+
+inline bool SegmentHitsBox(const Vec3 &a, const Vec3 &b, const Vec3 &mins, const Vec3 &maxs)
+{
+    double origin[3] = {a.x, a.y, a.z};
+    double delta[3] = {b.x - a.x, b.y - a.y, b.z - a.z};
+    double lo[3] = {mins.x, mins.y, mins.z};
+    double hi[3] = {maxs.x, maxs.y, maxs.z};
+
+    double tmin = 0.0;
+    double tmax = 1.0;
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (std::fabs(delta[axis]) < 1e-9)
+        {
+            if (origin[axis] < lo[axis] || origin[axis] > hi[axis])
+                return false;
+            continue;
+        }
+
+        double inv = 1.0 / delta[axis];
+        double t1 = (lo[axis] - origin[axis]) * inv;
+        double t2 = (hi[axis] - origin[axis]) * inv;
+        if (t1 > t2)
+            std::swap(t1, t2);
+
+        tmin = std::max(tmin, t1);
+        tmax = std::min(tmax, t2);
+        if (tmin > tmax)
+            return false;
+    }
+
+    return true;
+}
+
+// Blocker bounds are hull-expanded (see ExtractBlockingVolumes), so segments missing them skip the trace.
 TraceResult TraceHullWithEntities(const BspFile &bsp, int worldHeadnode,
     const std::vector<BlockingVolume> &blockers, const Vec3 &start, const Vec3 &end);
 

@@ -11,6 +11,7 @@
 
 #include "astar_graph.h"
 #include "floor_support.h"
+#include "pm_sim.h"
 #include "waypoint_plan.h"
 
 namespace navgen
@@ -29,7 +30,7 @@ float ConnectionCostSeconds(const MergedConnection &conn)
 	{
 		float damage = static_cast<float>(conn.fallDamage);
 		seconds += static_cast<float>(conn.flightTime);
-		seconds += (damage <= 0.0f) ? 0.0f : (damage >= 100.0f ? 1.0e4f : damage * 0.5f);
+		seconds += PmSim::FallPenaltySeconds(damage);
 	}
 
 	if (conn.connType == crossbot_nav::CONN_LADDER)
@@ -1364,6 +1365,17 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 	std::vector<Winding> footprint = leafFootprint;
 
+	auto WindingBounds = [](const Winding &w)
+	{
+		Bounds b;
+		for (const Vec3 &v : w)
+			b.Add(v);
+		return b;
+	};
+	std::vector<Bounds> leafFootprintBounds(static_cast<size_t>(n));
+	for (int i = 0; i < n; ++i)
+		leafFootprintBounds[static_cast<size_t>(i)] = WindingBounds(leafFootprint[static_cast<size_t>(i)]);
+
 	auto FirstSlabConflict = [&](const std::vector<int> &pending, const Bounds &merged,
 		const Winding &mergedFootprint)
 	{
@@ -1411,9 +1423,14 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 	{
 		std::vector<const Winding *> fps;
 		memberFootprints(pending, fps);
+		Bounds mergedBounds = WindingBounds(mergedFootprint);
 
 		for (int i = 0; i < n; ++i)
 		{
+			// Footprints whose XY boxes do not overlap intersect in zero area, so the claim cannot pass.
+			if (!mergedBounds.OverlapsXY(leafFootprintBounds[static_cast<size_t>(i)], 0.0))
+				continue;
+
 			int r = find(i);
 			if (std::find(pending.begin(), pending.end(), r) != pending.end())
 				continue;

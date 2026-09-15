@@ -29,6 +29,7 @@ struct GameOffsets
 	int plr_rgpPlayerItems;
 	int plr_rgAmmo;
 	int plr_pTank;
+	int plr_iPowerups;
 
 	int tog_toggleState;
 	int tog_flWait;

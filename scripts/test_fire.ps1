@@ -251,7 +251,7 @@ $hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
 Ensure-CbNav -HldsMap $hldsMap -NavPath (Join-Path $HLDSDir "crossplay\addons\crossbot\nav\$mapName.nav") `
-    -NavGenExe (Join-Path $repoRoot "build\tools\navgen\navgen.exe")
+    -NavGenExe (Join-Path $repoRoot "build-x64\tools\navgen\navgen.exe")
 
 $logFile = Join-Path $repoRoot "nav_debug\logs\${mapName}_fire.log"
 

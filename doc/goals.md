@@ -304,6 +304,13 @@ that it is on the way — and wrong for gimmicks, because four bots that all det
 nearest tank produce three bots queueing behind one. The `+ 2` floor keeps a goal the bot is standing
 on from taking the entire weight.
 
+**A profile can switch tiers off.** `CollectTier` returns nothing for a tier the bot's profile refuses
+(`IGameProfile::AllowsGoalTier`, `doc/games.md`). That one gate covers the tier loop and the
+pickup-priority promotion both. Nothing downstream needs its own check: fun behaviour only runs after a
+fun goal mounted or boarded something, and camping needs a camp route, which `Select` only builds for
+tiers above gather. Combat is a state, not a goal, and is unaffected. Ricochet admits `GOAL_GATHER`
+alone.
+
 ### The distant target is sticky; only the leg is re-decided
 
 `state.target` is the goal proper and is held across repaths. `state.stop` is where the current leg

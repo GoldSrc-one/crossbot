@@ -60,11 +60,11 @@ The copy fails if the file is locked, which means a server is still up. Only the
 after the server exits reports `ninja: no work to do` and still deploys, so until that rerun the
 deployed plugin is stale while everything looks fine. **Check for the `build.bat: deployed
 crossbot_mm.dll` line before believing any runtime result.** Output lands in
-`build\tools\navgen\navgen.exe` and `build\crossbot_mm.dll`.
+`build-x64\tools\navgen\navgen.exe` and `build\crossbot_mm.dll`.
 
 ### Run navgen
 ```powershell
-.\build\tools\navgen\navgen.exe maps\test1_simple.bsp -o out.nav
+.\build-x64\tools\navgen\navgen.exe maps\test1_simple.bsp -o out.nav
 ```
 No arguments gives the authoritative flag list; `doc/navgen.md` says what each dump means. Test maps
 live in `maps/`. `.\scripts\generate_all_svgs.ps1` runs navgen over all of them into `nav_debug/` and
@@ -101,7 +101,7 @@ sees neither: one bot per server means no target, and it runs with `crossbot_dep
 ### Sweep the mesh, then the routes
 ```powershell
 Get-ChildItem maps\*.bsp | ForEach-Object { $n=$_.Name
-    & .\build\tools\navgen\navgen.exe $_.FullName --dump-path 2>&1 |
+    & .\build-x64\tools\navgen\navgen.exe $_.FullName --dump-path 2>&1 |
         Select-String '^  wp' | ForEach-Object { "${n}: $_" } } | Set-Content before_wp.txt
 ```
 

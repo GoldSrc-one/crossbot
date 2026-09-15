@@ -2128,7 +2128,7 @@ namespace
 		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
 		BotPerf::Enter(BotPerf::ZONE_RP_PLAN);
 		Nav::PlannedPath path = Nav::PlanPath(mesh, startArea->id, goalArea->id, pEdict->v.origin,
-			clampedGoal, &traces, &planStats, careful, range);
+			clampedGoal, &traces, &planStats, careful, range, Bot_FallDamage(bot));
 		BotPerf::Leave(BotPerf::ZONE_RP_PLAN);
 		float planMs = std::chrono::duration<float, std::milli>(
 			std::chrono::steady_clock::now() - planBegin).count();
@@ -2463,7 +2463,7 @@ void Bot_BailManeuver(CBot &bot, const char *why)
 		float drop = std::max(0.f, BotNavZ(pEdict) - floorZ);
 		float damage = PmSim::FallDamageFor(sqrtf(2.f * Bot_DrivePhysics(pEdict).gravity * drop));
 
-		if (damage >= pEdict->v.health)
+		if (Bot_FallDamage(bot) && damage >= pEdict->v.health)
 		{
 			BOT_VLOG("CrossBot: %s %s, but stays on the ladder: a %.0f drop costs %.0f of %.0f health\n",
 				bot.name, why, drop, damage, pEdict->v.health);

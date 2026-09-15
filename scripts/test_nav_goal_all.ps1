@@ -4,7 +4,7 @@ param(
     [int]$Timeout = 60,
     [double]$TimeoutMultiplier = 6.0,
     [int]$Overhead = 120,
-    [string]$NavGenPath = "build\tools\navgen\navgen.exe",
+    [string]$NavGenPath = "build-x64\tools\navgen\navgen.exe",
     [string]$HLDSDir = "D:\hlds",
     [string]$OutputDir = "nav_debug",
     [string]$MapsDir = "maps",

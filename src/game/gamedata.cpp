@@ -25,15 +25,16 @@ struct Request
 	const char *cls;
 	const char *field;
 	size_t slot;
+	bool optional;
 };
 
 #define CB_OFF(m) offsetof(GameOffsets, m)
 
 const Request kRequests[] = {
 	{ "CBaseEntity",       "pev",                     CB_OFF(pev) },
-	{ "CBaseEntity",       "m_fInAttack",             CB_OFF(ent_fInAttack) },
-	{ "CBaseEntity",       "m_flStartThrow",          CB_OFF(ent_flStartThrow) },
-	{ "CBaseEntity",       "m_chargeReady",           CB_OFF(ent_chargeReady) },
+	{ "CBaseEntity",       "m_fInAttack",             CB_OFF(ent_fInAttack), true },
+	{ "CBaseEntity",       "m_flStartThrow",          CB_OFF(ent_flStartThrow), true },
+	{ "CBaseEntity",       "m_chargeReady",           CB_OFF(ent_chargeReady), true },
 
 	{ "CBasePlayerItem",   "m_pPlayer",               CB_OFF(item_pPlayer) },
 	{ "CBasePlayerItem",   "m_pNext",                 CB_OFF(item_pNext) },
@@ -47,7 +48,7 @@ const Request kRequests[] = {
 	{ "CBasePlayerWeapon", "m_flNextSecondaryAttack", CB_OFF(wpn_flNextSecondaryAttack) },
 	{ "CBasePlayerWeapon", "m_flTimeWeaponIdle",      CB_OFF(wpn_flTimeWeaponIdle) },
 
-	{ "CRpg",              "m_cActiveRockets",        CB_OFF(rpg_cActiveRockets) },
+	{ "CRpg",              "m_cActiveRockets",        CB_OFF(rpg_cActiveRockets), true },
 
 	{ "CBaseMonster",      "m_flNextAttack",          CB_OFF(mon_flNextAttack) },
 	{ "CBaseMonster",      "m_hEnemy",                CB_OFF(mon_hEnemy) },
@@ -56,6 +57,7 @@ const Request kRequests[] = {
 	{ "CBasePlayer",       "m_rgpPlayerItems",        CB_OFF(plr_rgpPlayerItems) },
 	{ "CBasePlayer",       "m_rgAmmo",                CB_OFF(plr_rgAmmo) },
 	{ "CBasePlayer",       "m_pTank",                 CB_OFF(plr_pTank) },
+	{ "CBasePlayer",       "m_iPowerups",             CB_OFF(plr_iPowerups), true },
 
 	{ "CBaseToggle",       "m_toggle_state",          CB_OFF(tog_toggleState) },
 	{ "CBaseToggle",       "m_flWait",                CB_OFF(tog_flWait) },
@@ -223,12 +225,8 @@ const char *LoadOne(const char *path, GameOffsets &out)
 			}
 
 			int field = FindMember(toks, base, fields, kRequests[r].field);
-			if (field < 0)
-				continue;
-
-			int offset = FindMember(toks, base, field, "offset");
 			int value = 0;
-			if (offset < 0 || !TokInt(base, toks[offset], value))
+			if (field < 0 || !TokInt(base, toks[field], value))
 				continue;
 
 			*SlotPtr(out, kRequests[r].slot) = value;
@@ -237,7 +235,7 @@ const char *LoadOne(const char *path, GameOffsets &out)
 
 	for (size_t r = 0; r < kRequestCount; ++r)
 	{
-		if (*SlotPtr(out, kRequests[r].slot) < 0)
+		if (!kRequests[r].optional && *SlotPtr(out, kRequests[r].slot) < 0)
 			return Why("no offset for %s::%s", kRequests[r].cls, kRequests[r].field);
 	}
 

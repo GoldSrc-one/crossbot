@@ -58,6 +58,7 @@ constexpr float kPlayerMaxSafeFallSpeed = 580.f;
 constexpr float kDamageForFallSpeed = 100.f / (kPlayerFatalFallSpeed - kPlayerMaxSafeFallSpeed);
 
 float FallDamageFor(float fallSpeed);
+float FallPenaltySeconds(float damage);
 float PlainJumpHeight(float gravity);
 
 class PmSimulator

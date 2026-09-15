@@ -23,7 +23,7 @@ $hldsMapPath = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
 Copy-CbMap $mapPath $hldsMapPath
 
 Ensure-CbNav -HldsMap $mapPath -NavPath (Join-Path $HLDSDir "crossplay\addons\crossbot\nav\$mapName.nav") `
-    -NavGenExe (Join-Path $repoRoot "build\tools\navgen\navgen.exe") -Force
+    -NavGenExe (Join-Path $repoRoot "build-x64\tools\navgen\navgen.exe") -Force
 
 $logFile = Join-Path $repoRoot "nav_debug\logs\${mapName}_fun.log"
 

@@ -62,6 +62,9 @@ namespace
 	void CollectTier(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
 		BotGoal::Tier tier, std::vector<BotGoal::Candidate> &out)
 	{
+		if (g_pGameProfile && !g_pGameProfile->AllowsGoalTier(tier))
+			return;
+
 		switch (tier)
 		{
 		case BotGoal::GOAL_STRATEGIC:
@@ -321,7 +324,7 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
 
 	std::vector<Candidate> promoted;
 	if (BotDiff::PickupPriority())
@@ -383,7 +386,7 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		Nav::AreaCostsToGoal(mesh, static_cast<uint32_t>(st.target.areaId), st.toTargetCosts,
 			Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-			Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
+			Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
 		st.toTargetArea = st.target.areaId;
 		BotCamp::BuildRoute(bot, mesh, costs);
 	}
@@ -440,13 +443,13 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 	st.skipped.clear();
 
 	Nav::AreaCostsToGoal(mesh, areaId, st.toTargetCosts, Bot_GravityMultiplier(bot.pEdict),
-		Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
+		Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
 	st.toTargetArea = st.target.areaId;
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
 
 	BotCamp::BuildRoute(bot, mesh, costs);
 
@@ -474,7 +477,7 @@ bool Advance(CBot &bot)
 	std::vector<float> costs;
 	Nav::AreaCosts(*mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot));
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
 
 	PickStop(bot, *mesh, costs);
 	Bot_ResetNavPath(bot);

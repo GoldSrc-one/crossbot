@@ -173,6 +173,19 @@ quietly return suboptimal routes. Every edge is scaled by at least this bound `(
 search drifts toward Dijkstra — on crossfire one leg goes 45 expansions / 7ms at `careful 0` to 107
 expansions / 21ms at `careful 1`. Bounded, but it is the number to watch.
 
+### Fall damage is a refund, not a rebuild
+
+navgen prices a fall into the connection: `ConnectionCostSeconds` adds
+`PmSim::FallPenaltySeconds(fallDamage)` — half a second per point of damage, `1e4` for a lethal drop —
+to `costSeconds` for airmove, ladder and teleport connections. The .nav is shared by every game, and
+some games do not hurt on landing (Ricochet), so the penalty cannot simply be left out of the file.
+
+`nav_loader.cpp` keeps the raw `fallDamage` on `Connection`, and `PlanPath`, `AreaCosts` and
+`AreaCostsToGoal` take `fallDamage` (default true). When it is false, `BuildGraph` and
+`AreaCostsImpl` subtract the same `FallPenaltySeconds` from the same three connection types, so a
+lethal drop becomes just its flight time. Both sides call the one shared function, so the refund
+cannot drift from what was baked in. Costs only fall, which keeps the heuristic admissible.
+
 ### Range bias: routing to ground the weapon can use
 
 `PlanPath` also takes a `NavPlan::RangeBias`, and the two factors multiply:

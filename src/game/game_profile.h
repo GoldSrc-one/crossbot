@@ -77,6 +77,10 @@ public:
 
 	virtual float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const = 0;
 
+	virtual bool FallDamage() const = 0;
+
+	virtual bool AllowsGoalTier(BotGoal::Tier tier) const = 0;
+
 	virtual void Respawn(edict_t *pEdict) const = 0;
 
 	virtual ItemKind ClassifyItem(edict_t *ent) const = 0;
@@ -92,6 +96,8 @@ public:
 	virtual float ChargerValue(ItemKind kind, edict_t *pEdict) const = 0;
 
 	virtual const WeaponSpec *GetWeaponSpec(int id) const = 0;
+
+	virtual bool ModeAvailable(edict_t *player, const WeaponSpec &spec, const WeaponMode &mode) const = 0;
 
 	virtual const char *AmmoEntity(int weaponId, WeaponAmmo pool) const = 0;
 

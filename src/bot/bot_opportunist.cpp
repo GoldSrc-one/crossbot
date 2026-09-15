@@ -78,7 +78,7 @@ namespace
 			return true;
 
 		Nav::AreaCostsToGoal(mesh, goalArea->id, bot.oppoCosts, Bot_GravityMultiplier(bot.pEdict),
-			0.f, Bot_MaxSpeed(bot.pEdict));
+			0.f, Bot_MaxSpeed(bot.pEdict), NavPlan::RangeBias(), Bot_FallDamage(bot));
 		bot.oppoCostsGoalArea = static_cast<int>(goalArea->id);
 		return true;
 	}
@@ -150,7 +150,7 @@ bool WantBunnyHop(CBot &bot, const Nav::NavMesh &mesh)
 
 	if (!bot.probeArc.landed)
 		return Refuse(bot, 3);
-	if (PmSim::FallDamageFor(bot.probeArc.fallSpeed) > 0.f)
+	if (Bot_FallDamage(bot) && PmSim::FallDamageFor(bot.probeArc.fallSpeed) > 0.f)
 		return Refuse(bot, 3);
 
 	const Vector &landing = bot.probeArc.points.back();
@@ -251,7 +251,7 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 
 	if (!bot.airmoveArc.landed)
 		return false;
-	if (PmSim::FallDamageFor(bot.airmoveArc.fallSpeed) > 0.f)
+	if (Bot_FallDamage(bot) && PmSim::FallDamageFor(bot.airmoveArc.fallSpeed) > 0.f)
 		return false;
 
 	const Vector &simLanding = bot.airmoveArc.points.back();

@@ -25,6 +25,7 @@ constexpr double kCampNeighborMaxZ = 32.0;
 constexpr double kCampGridCell = 32.0;
 constexpr double kCampMinTargetDistSq = 1.0e-6;
 constexpr double kCampMinGain = 1.02;
+constexpr size_t kCampBatchChunk = 256;
 
 struct CampTarget
 {
@@ -54,8 +55,10 @@ struct SlotState
 {
 	std::unique_ptr<VisRowReader> standReader;
 	std::unique_ptr<VisRowReader> crouchReader;
-	HullOriginChain standChain;
-	HullOriginChain crouchChain;
+	BatchTraceScratch scratch;
+	std::vector<uint8_t> blocked;
+	std::vector<uint8_t> standBlocked;
+	std::vector<uint8_t> crouchBlocked;
 	TraceCounters counters;
 	std::vector<CampTarget> standTargets;
 	std::vector<CampTarget> crouchTargets;
@@ -133,6 +136,12 @@ struct CampContext
 	int worldHeadnode = 0;
 	const BinLayout *bins = nullptr;
 	size_t minVisible = 0;
+	// Targets sorted by leaf: targetOrder[k] is a candidate index, targetEyes its float eye at 3 * k.
+	// Groups are runs of one leaf, at most kCampBatchChunk long.
+	std::vector<size_t> targetOrder;
+	std::vector<float> targetEyes;
+	std::vector<size_t> groupBegin;
+	std::vector<size_t> groupEnd;
 };
 
 void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Evaluation &out)
@@ -162,6 +171,38 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 	slot.standTargets.clear();
 	slot.crouchTargets.clear();
 
+	// World traces go visleaf by visleaf: one batch per target group with the stand and/or crouch eye as
+	// the starts. The loop below reads the results in candidate order, so the target lists keep their order.
+	slot.standBlocked.resize(candidates.size());
+	slot.crouchBlocked.resize(candidates.size());
+	slot.blocked.resize(2 * kCampBatchChunk);
+	const float eyes[6] = {
+		static_cast<float>(standEye.x), static_cast<float>(standEye.y), static_cast<float>(standEye.z),
+		static_cast<float>(crouchEye.x), static_cast<float>(crouchEye.y), static_cast<float>(crouchEye.z)};
+	for (size_t g = 0; g < ctx.groupBegin.size(); ++g)
+	{
+		size_t begin = ctx.groupBegin[g];
+		size_t m = ctx.groupEnd[g] - begin;
+		int leaf = candidates[ctx.targetOrder[begin]].leaf;
+		bool standPvs = canStand && (!standRow || ctx.vis->RowVisible(standRow, leaf));
+		bool crouchPvs = !crouchRow || ctx.vis->RowVisible(crouchRow, leaf);
+		if (!standPvs && !crouchPvs)
+			continue;
+
+		size_t n = (standPvs && crouchPvs) ? 2 : 1;
+		SegmentsBlockedBatch(ctx.hull, ctx.worldHeadnode, standPvs ? eyes : eyes + 3, n,
+			ctx.targetEyes.data() + 3 * begin, m, slot.blocked.data(), slot.scratch);
+		slot.counters.worldTraces += n * m;
+		for (size_t y = 0; y < m; ++y)
+		{
+			size_t j = ctx.targetOrder[begin + y];
+			if (standPvs)
+				slot.standBlocked[j] = slot.blocked[y];
+			if (crouchPvs)
+				slot.crouchBlocked[j] = slot.blocked[(n - 1) * m + y];
+		}
+	}
+
 	for (size_t j = 0; j < candidates.size(); ++j)
 	{
 		if (j == index)
@@ -179,9 +220,8 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 		if (standPvs)
 		{
 			Vec3 delta = target.eye - standEye;
-			if (delta.Dot(delta) > kCampMinTargetDistSq &&
-				!Occluded(ctx.hull, ctx.worldHeadnode, *ctx.blockers, standEye, target.eye, slot.counters,
-					slot.standChain))
+			if (delta.Dot(delta) > kCampMinTargetDistSq && slot.standBlocked[j] == 0 &&
+				!BlockersOccluded(ctx.hull, *ctx.blockers, standEye, target.eye, slot.counters))
 			{
 				CampTarget t;
 				t.dist = delta.Length();
@@ -194,9 +234,8 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 		if (crouchPvs)
 		{
 			Vec3 delta = target.eye - crouchEye;
-			if (delta.Dot(delta) > kCampMinTargetDistSq &&
-				!Occluded(ctx.hull, ctx.worldHeadnode, *ctx.blockers, crouchEye, target.eye, slot.counters,
-					slot.crouchChain))
+			if (delta.Dot(delta) > kCampMinTargetDistSq && slot.crouchBlocked[j] == 0 &&
+				!BlockersOccluded(ctx.hull, *ctx.blockers, crouchEye, target.eye, slot.counters))
 			{
 				CampTarget t;
 				t.dist = delta.Length();
@@ -314,7 +353,34 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	ctx.hull = vis.Hull0();
 	ctx.worldHeadnode = bsp.Models()[0].headnode[kHullPoint];
 	ctx.bins = &bins;
-	ctx.minVisible = params.minVisible;
+	// minVisible counts probes at the kDefaultVantageGrid lattice; a sparser lattice needs proportionally fewer
+	// to cover the same seen floor area.
+	double gridScale = kDefaultVantageGrid / params.gridSize;
+	size_t minVisible = std::max<size_t>(1, static_cast<size_t>(
+		std::lround(static_cast<double>(params.minVisible) * gridScale * gridScale)));
+	ctx.minVisible = minVisible;
+
+	ctx.targetOrder.resize(count);
+	for (size_t i = 0; i < count; ++i)
+		ctx.targetOrder[i] = i;
+	std::stable_sort(ctx.targetOrder.begin(), ctx.targetOrder.end(),
+		[&](size_t a, size_t b) { return candidates[a].leaf < candidates[b].leaf; });
+	ctx.targetEyes.resize(3 * count);
+	for (size_t k = 0; k < count; ++k)
+	{
+		const Vec3 &eye = candidates[ctx.targetOrder[k]].eye;
+		ctx.targetEyes[3 * k] = static_cast<float>(eye.x);
+		ctx.targetEyes[3 * k + 1] = static_cast<float>(eye.y);
+		ctx.targetEyes[3 * k + 2] = static_cast<float>(eye.z);
+		int leaf = candidates[ctx.targetOrder[k]].leaf;
+		if (k == 0 || candidates[ctx.targetOrder[k - 1]].leaf != leaf ||
+			k - ctx.groupBegin.back() >= kCampBatchChunk)
+		{
+			ctx.groupBegin.push_back(k);
+			ctx.groupEnd.push_back(k);
+		}
+		ctx.groupEnd.back() = k + 1;
+	}
 
 	stats.targets = count;
 
@@ -326,7 +392,7 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	stats.budget = budget;
 
 	double denom = (count > 1) ? static_cast<double>(count - 1) : 1.0;
-	double minSeen = static_cast<double>(params.minVisible);
+	double minSeen = static_cast<double>(minVisible);
 
 	struct Entry
 	{

@@ -55,6 +55,13 @@ float FallDamageFor(float fallSpeed)
 	return (fallSpeed - kPlayerMaxSafeFallSpeed) * kDamageForFallSpeed;
 }
 
+float FallPenaltySeconds(float damage)
+{
+	if (damage <= 0.f)
+		return 0.f;
+	return damage >= 100.f ? 1.0e4f : damage * 0.5f;
+}
+
 float PlainJumpHeight(float gravity)
 {
 	if (gravity <= 0.f)

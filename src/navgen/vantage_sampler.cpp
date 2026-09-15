@@ -27,6 +27,7 @@ constexpr double kExposureErrorWeight = 2.0;
 constexpr double kVantagePvsCost = 1.0;
 constexpr double kVantageTraceCost = 18.0;
 constexpr size_t kVantageTileSlots = 256;
+constexpr size_t kVantageBatchChunk = 32;
 
 struct ColumnKey
 {
@@ -284,17 +285,23 @@ std::vector<size_t> HullCornersXY(const std::vector<Vec3> &pts)
 
 std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	const std::vector<BlockingVolume> &visBlockers, const std::vector<Area> &areas,
-	const VantageParams &params, VantageStats *statsOut,
+	const VantageParams &paramsIn, VantageStats *statsOut,
 	std::vector<VantageCandidate> *candidatesOut)
 {
 	VantageStats stats;
 	std::chrono::steady_clock::time_point sampleStart = std::chrono::steady_clock::now();
 
-	std::vector<Vantage> vantages;
-	CollectCandidates(areas, params, vantages, stats);
-
 	for (const Area &area : areas)
 		stats.footprintArea += WindingAreaXY(WalkableFootprint(area.polytope));
+
+	VantageParams params = paramsIn;
+	if (params.gridSize <= 0.0)
+		params.gridSize = std::max(kDefaultVantageGrid,
+			std::sqrt(stats.footprintArea / static_cast<double>(std::max<size_t>(1, params.maxPoints))));
+	stats.gridSize = params.gridSize;
+
+	std::vector<Vantage> vantages;
+	CollectCandidates(areas, params, vantages, stats);
 
 	HullTree hull = vis.Hull0();
 	int worldHeadnode = bsp.Models()[0].headnode[kHullPoint];
@@ -362,7 +369,6 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	threads = std::min(threads, std::max<size_t>(1, count));
 	stats.threads = threads;
 
-	std::vector<size_t> slots(count);
 	std::vector<double> slotCost(count, 0.0);
 	std::vector<int> leafIds;
 	std::vector<size_t> leafBegin;
@@ -370,8 +376,6 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	{
 		for (size_t a = 0; a < count; ++a)
 		{
-			slots[a] = a;
-
 			int leaf = vantages[order[a]].leaf;
 			if (leafIds.empty() || leafIds.back() != leaf)
 			{
@@ -406,9 +410,6 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 			}
 		}
 	}
-
-	std::vector<std::vector<size_t>> workBins =
-		BuildWorkBins(slotCost, slots, kVantageTileSlots, threads);
 
 	std::chrono::steady_clock::time_point pairStart = std::chrono::steady_clock::now();
 
@@ -546,6 +547,44 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	}
 	else
 	{
+	// World traces go visleaf by visleaf: each leaf's vantages (contiguous in `order`) are cut into chunks
+	// of at most kVantageBatchChunk, and every PVS-visible chunk pair is one SegmentsBlockedBatch. The chunk
+	// cap bounds the per-thread scratch, which grows with combos * tree depth.
+	std::vector<float> posF(3 * count);
+	for (size_t a = 0; a < count; ++a)
+	{
+		const Vec3 &p = vantages[order[a]].pos;
+		posF[3 * a] = static_cast<float>(p.x);
+		posF[3 * a + 1] = static_cast<float>(p.y);
+		posF[3 * a + 2] = static_cast<float>(p.z);
+	}
+
+	std::vector<size_t> chunkBegin;
+	std::vector<size_t> chunkEnd;
+	std::vector<int> chunkLeaf;
+	for (size_t l = 0; l < leafIds.size(); ++l)
+	{
+		for (size_t a = leafBegin[l]; a < leafEnd[l]; a += kVantageBatchChunk)
+		{
+			chunkBegin.push_back(a);
+			chunkEnd.push_back(std::min(a + kVantageBatchChunk, leafEnd[l]));
+			chunkLeaf.push_back(leafIds[l]);
+		}
+	}
+	size_t chunkCount = chunkBegin.size();
+
+	// A chunk owns its pairs with every later slot, which is exactly the sum of its slots' costs.
+	std::vector<size_t> chunkSlots(chunkCount);
+	std::vector<double> chunkCost(chunkCount, 0.0);
+	for (size_t c = 0; c < chunkCount; ++c)
+	{
+		chunkSlots[c] = c;
+		for (size_t a = chunkBegin[c]; a < chunkEnd[c]; ++a)
+			chunkCost[c] += slotCost[a];
+	}
+	std::vector<std::vector<size_t>> workBins = BuildWorkBins(chunkCost, chunkSlots,
+		std::max<size_t>(1, kVantageTileSlots / kVantageBatchChunk), threads);
+
 	std::vector<VantageStats> binStats(threads);
 	std::vector<double> binWall(threads, 0.0);
 
@@ -555,32 +594,43 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 		VantageStats &local = binStats[binIndex];
 		VisRowReader reader(vis);
 		TraceCounters counters;
-		HullOriginChain chain;
+		BatchTraceScratch scratch;
+		std::vector<uint8_t> blocked(kVantageBatchChunk * kVantageBatchChunk);
 		double traceTicks = 0.0;
 
-		for (size_t a : workBins[binIndex])
+		for (size_t c : workBins[binIndex])
 		{
-			size_t i = order[a];
-			const uint8_t *row = reader.VisRow(vantages[i].leaf);
-			for (size_t b = a + 1; b < count; ++b)
+			const uint8_t *row = reader.VisRow(chunkLeaf[c]);
+			size_t n = chunkEnd[c] - chunkBegin[c];
+			for (size_t d = c; d < chunkCount; ++d)
 			{
-				size_t j = order[b];
-				if (row && !vis.RowVisible(row, vantages[j].leaf))
+				if (row && !vis.RowVisible(row, chunkLeaf[d]))
 					continue;
 
-				++local.pvsPairs;
-
+				size_t m = chunkEnd[d] - chunkBegin[d];
 				std::chrono::steady_clock::time_point traceStart = std::chrono::steady_clock::now();
-				bool blocked = Occluded(hull, worldHeadnode, blockers, vantages[i].pos, vantages[j].pos,
-					counters, chain);
+				SegmentsBlockedBatch(hull, worldHeadnode, posF.data() + 3 * chunkBegin[c], n,
+					posF.data() + 3 * chunkBegin[d], m, blocked.data(), scratch);
 				traceTicks += std::chrono::duration<double>(
 					std::chrono::steady_clock::now() - traceStart).count();
 
-				if (blocked)
-					continue;
+				for (size_t x = 0; x < n; ++x)
+				{
+					size_t i = order[chunkBegin[c] + x];
+					// Inside one chunk only the pairs above the diagonal are new.
+					for (size_t y = (d == c) ? x + 1 : 0; y < m; ++y)
+					{
+						size_t j = order[chunkBegin[d] + y];
+						++local.pvsPairs;
+						++counters.worldTraces;
+						if (blocked[x * m + y] != 0 ||
+							BlockersOccluded(hull, blockers, vantages[i].pos, vantages[j].pos, counters))
+							continue;
 
-				++local.visiblePairs;
-				recordVisible(i, j);
+						++local.visiblePairs;
+						recordVisible(i, j);
+					}
+				}
 			}
 		}
 

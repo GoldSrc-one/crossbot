@@ -11,7 +11,6 @@
 #include "bot_perf.h"
 #include "bot_timing.h"
 #include "../game/game_profile.h"
-#include "../game/hldm_weapons.h"
 #include "../nav/baked_blockers.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
@@ -326,6 +325,11 @@ float Bot_Carefulness(const CBot &bot)
 	return (1.f - readiness) * scale;
 }
 
+bool Bot_FallDamage(const CBot &)
+{
+	return !g_pGameProfile || g_pGameProfile->FallDamage();
+}
+
 WeaponRangeClass Bot_RangeClass(const CBot &bot)
 {
 	cvar_t *force = g_engfuncs.pfnCVarGetPointer("crossbot_range_force");
@@ -341,7 +345,7 @@ WeaponRangeClass Bot_RangeClass(const CBot &bot)
 	if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
 		return RANGE_NONE;
 
-	const WeaponSpec *spec = HLDM_WeaponSpec(inv.weapons[inv.activeIndex].id);
+	const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(inv.weapons[inv.activeIndex].id) : nullptr;
 	return spec ? spec->rangeClass : RANGE_NONE;
 }
 

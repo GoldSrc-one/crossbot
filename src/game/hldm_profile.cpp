@@ -17,6 +17,7 @@
 #include "hldm_profile.h"
 #include "hldm_weapons.h"
 #include "player_models.h"
+#include "ricochet_profile.h"
 
 namespace
 {
@@ -158,6 +159,16 @@ float CHLDMProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) con
 	return survive * std::clamp(arms, 0.f, 1.f);
 }
 
+bool CHLDMProfile::FallDamage() const
+{
+	return true;
+}
+
+bool CHLDMProfile::AllowsGoalTier(BotGoal::Tier) const
+{
+	return true;
+}
+
 void CHLDMProfile::Respawn(edict_t *pEdict) const
 {
 	unsigned short buttons = (pEdict->v.deadflag == DEAD_RESPAWNABLE) ? IN_ATTACK : 0;
@@ -232,6 +243,11 @@ float CHLDMProfile::ChargerValue(ItemKind kind, edict_t *pEdict) const
 const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
 {
 	return HLDM_WeaponSpec(id);
+}
+
+bool CHLDMProfile::ModeAvailable(edict_t *, const WeaponSpec &, const WeaponMode &) const
+{
+	return true;
 }
 
 bool CHLDMProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
@@ -408,9 +424,12 @@ void CHLDMProfile::CollectStrategicGoals(const CBot &, const Nav::NavMesh &,
 IGameProfile *GameProfile_Detect(const char *gamedir)
 {
 	static CHLDMProfile hldmProfile;
+	static CRicochetProfile ricochetProfile;
 
 	if (hldmProfile.Detect(gamedir))
 		return &hldmProfile;
+	if (ricochetProfile.Detect(gamedir))
+		return &ricochetProfile;
 
 	return NULL;
 }

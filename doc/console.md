@@ -46,7 +46,10 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   are **not** per life — respawn clears the memo and any placement in flight but leaves the tallies
   alone, so a drop in them is a bug rather than a death; see `doc/movement.md`, `bot_deploy.cpp`
 - `crossbot_weapons [name]` — the inventory snapshot: every weapon with its `m_iId`, clip, ammo indices
-  and carried counts, both attack timers, and a `*` on the active one; see `doc/combat.md`, `bot_weapons.cpp`
+  and carried counts, both attack timers, and a `*` on the active one; see `doc/combat.md`, `bot_weapons.cpp`.
+  In a game with `plr_iPowerups` (Ricochet) it also prints `powerups 0x<m_iPowerups>, +4 = <m_iPowerupDiscs>`,
+  which is the live check that the hand-filled offset is right: 0 normally, `0x4` and 3 right after
+  `crossbot_equip item_powerup_hard`
 - `crossbot_weaponspec [name]` — how each gun is operated. With no argument, dumps the whole
   weapon table: per weapon id, the classname, clip size, `value`, range class and scope FOV, then one
   line per firing mode with its button pattern, aim requirement, toggle, ammo pool and ballistics. The

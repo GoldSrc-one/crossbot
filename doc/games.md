@@ -187,8 +187,9 @@ Each `CBot` carries `gameDll`. It is set once in `AddBot` and is the key to ever
 
 ### IGameProfile
 The mod-specific half of the bot. Everything a bot needs to know that is not geometry lives behind
-this interface, so `src/bot/` never names a Half-Life classname or constant. `CHLDMProfile` is the
-only implementation today and `GameProfile_Detect` returns a function-local static.
+this interface, so `src/bot/` never names a Half-Life classname or constant. `CHLDMProfile` and
+`CRicochetProfile` (which derives from it) are the implementations, and `GameProfile_Detect` returns
+function-local statics.
 
 `g_pGameProfile` is a real global (defined in `bot_manager.cpp`) rather than a `BotManager` accessor
 because it is read on nearly every item decision; an accessor bought nothing and cost a call.
@@ -272,6 +273,19 @@ it is a constant. "Armed" means holding a weapon with a mode that can actually d
 ammo to do it — `BotFire::WeaponArmed`, which reuses the existing `AmmoReady` rather than restating the
 clip and reserve rules. A mode with `AIM_NONE` is skipped there, which is what stops a dry python
 counting as armed on the strength of its zoom toggle.
+
+Three methods exist because Ricochet broke an HLDM assumption, and `CHLDMProfile` answers each with
+the old behaviour:
+
+- `FallDamage()` is whether landing hurts. When false, `Bot_FallDamage` tells the planners to refund
+  the fall penalty navgen baked into `costSeconds` (`doc/path_planning.md`, "Fall damage is a refund")
+  and switches off the runtime `FallDamageFor` vetoes in `bot_opportunist.cpp`, `bot_gauss.cpp` and
+  the ladder bail.
+- `AllowsGoalTier(tier)` is which goal tiers this game's bots pursue at all (`doc/goals.md`,
+  `bot_goal.cpp`).
+- `ModeAvailable(player, spec, mode)` is a per-player veto on a firing mode that no `WeaponSpec` field
+  can express, because it depends on state the table does not describe. `BotFire::ModeViable` asks it
+  right before `AmmoReady`, so a refused mode is never selected and never pressed.
 
 ### ItemKind
 The classification the gather goals key off. `ITEM_WEAPON`/`ITEM_AMMO`/`ITEM_PICKUP` are touched to
@@ -395,6 +409,48 @@ reason: `CBaseEntity::TakeHealth` refuses to heal past `pev->max_health`, which 
 
 These two are also now asked *before* travelling and not only on arrival — see `BotItems::Sated` in `doc/goals.md`.
 
+## ricochet_profile.cpp
+
+`CRicochetProfile` derives from `CHLDMProfile` and overrides only what Discwar changes. Respawn, player
+models, `IsDead`, the charger plumbing and everything else HLDM-shaped is inherited, because under
+CrossPlay a Ricochet player runs Half-Life's pmove on whatever map is up — jumping, ducking and the
+long jump all work, even though Ricochet's own `pm_shared.c` returns early from `PM_Jump` and `PM_Duck`.
+
+### One weapon, one row
+
+`weapon_disc` is id 1 and every player always holds it. Ammo is `m_rgAmmo[disc]`, three at most, and a
+thrown disc gives itself back when it returns — after up to seven bounces, so nothing predicts when.
+The row does not try: `AmmoReady` already releases the trigger until the pool is back, however long
+that takes.
+
+- **Secondary** is the decapitator, the only throw that kills. `SecondaryAttack` refuses unless the
+  player holds all three discs and then spends them all, so the row says `AMMO_PRIMARY`,
+  `ammoPerShot 3`. `FIRE_TAP`, `AIM_LEAD` at 1000 u/s, no gravity.
+- **Primary** is the same throw with one disc and **does no damage** — it only pushes. It is in the
+  row so the bot can use it with the hard-disc powerup, and `ModeAvailable` refuses it otherwise:
+  primary is allowed only while `CBasePlayer::m_iPowerups & POW_HARD` (4), read through
+  `plr_iPowerups`. A hard disc always decapitates. `GivePowerup` refills `m_iPowerupDiscs` to three and
+  the powerup flag clears when they run out, so the flag alone answers "are there hard discs left".
+
+`POW_FAST` also lets secondary fire with a single disc. The row ignores that and waits for three.
+
+### Never combat-ready
+
+`EvaluateCombat` is always 0. Carefulness is `1 - readiness`, so a Ricochet bot always routes for
+cover, and the range bias, which scales by readiness, is always off.
+
+### Gathers `item_*` and nothing else
+
+`AllowsGoalTier` admits `GOAL_GATHER` only — no strategic goals, no fun goals, and therefore no camping,
+because camp routes are only built for tiers above gather. `ClassifyItem` is `item_` prefix or
+nothing: no weapons, ammo, chargers or healing volumes. On a Ricochet map that means the
+`item_powerup*` family; `ItemRespawnDelay` is their `DISC_POWERUP_RESPAWN_TIME`, 10 s. A powerup that is
+waiting to respawn is `EF_NODRAW`, which the item scan already skips.
+
+### No fall damage
+
+Ricochet's `CBasePlayer::PostThink` has the fall-damage call commented out, so `FallDamage()` is false.
+
 ## gamedata.cpp
 
 The bot's only way into the game DLL's own data. `edict_t::v` (`entvars_t`) is a shared struct the
@@ -418,6 +474,29 @@ struct of ints and not a per-class hierarchy.
 `CBaseEntity::pev` at 4 is the one offset the plugin hardcodes rather than trusting, because it is the
 offset it needs in order to check that any other offset was right (see `bot_weapons.cpp`). The loader
 still reads it from the file and refuses to run if the file disagrees.
+
+### The format is a bare number per field
+
+A class is `{ "baseClass": ..., "fields": { "m_iClip": 104, ... }, "virtualFunctions": ... }`, and a
+field's value is its offset and nothing else — the older dumps wrapped it as `{ "offset", "size",
+"type" }`. `LoadOne` reads only the new shape; a file in the old one fails every required field and
+the game is reported as having no gamedata.
+
+### Optional fields, and Ricochet's hand-filled ones
+
+A `Request` can be `optional`, and a missing optional field stays -1 instead of failing the game. Every
+reader of an optional offset tests it first. Five are optional, because they exist only in some games:
+`ent_fInAttack`, `ent_flStartThrow` and `ent_chargeReady` (Half-Life's client-weapon state parked on
+`CBaseEntity`, which Ricochet's `CBaseEntity` does not have), `rpg_cActiveRockets` (no RPG), and
+`plr_iPowerups` (only Ricochet has powerups).
+
+**`ricochet-win.json` was completed by hand.** The generated dump lacked `CBaseEntity::pev` (4),
+`CBasePlayerWeapon::m_fInReload` (116), `CBaseMonster::m_flNextAttack` (232) and `m_hEnemy` (236), and
+`CBasePlayer::m_iPowerups` (1196). They were computed from the Ricochet SDK headers and checked against
+anchors the dump does have: `CBaseToggle` ending at 192, `CEnvExplosion::m_iMagnitude` at 284,
+`CBasePlayer::m_iTargetVolume` at 292, and `m_rgpPlayerItems` 804 + 6 × 4 = `m_pActiveItem` 828.
+`m_iPowerups` has no anchor past `m_rgAmmo` (840) and was walked field by field from there. **A
+regenerated file loses these five**; the first four are required, so Ricochet then reports no gamedata.
 
 ### Only fields common to every weapon
 
@@ -549,7 +628,7 @@ down.
 
 Loading is the one place that had to soften. CrossPlay routinely loads games CrossBot has no data for,
 and killing the server over `dod` would take `valve` with it. `LoadOne` returns a reason string instead
-of aborting — unreadable file, unparseable JSON, an absent field, a `pev` that is not 4 — and
+of aborting — unreadable file, unparseable JSON, an absent required field, a `pev` that is not 4 — and
 `LoadAll` prints it and leaves that game's flag false. A game without usable gamedata is simply not
 playable: `XPlay::Supported` is false for it, and `crossbot_add` refuses it by name.
 

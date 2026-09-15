@@ -1248,7 +1248,7 @@ every point moves:
 
 ```powershell
 Get-ChildItem maps\*.bsp | ForEach-Object { $n=$_.Name
-    & .\build\tools\navgen\navgen.exe $_.FullName --dump-path 2>&1 |
+    & .\build-x64\tools\navgen\navgen.exe $_.FullName --dump-path 2>&1 |
         Select-String '^  wp' | ForEach-Object { "${n}: $_" } } | Set-Content before_wp.txt
 ```
 

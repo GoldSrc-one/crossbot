@@ -867,9 +867,9 @@ namespace
 		return 0;
 	}
 
-	unsigned short TapButtons(BotFire::State &fire, const BotWeapon &w, bool onTarget)
+	unsigned short TapButtons(BotFire::State &fire, const BotWeapon &w, bool onTarget, bool thrown)
 	{
-		if (fire.commit == BotFire::COMMIT_THROW || w.throwStart != 0.f)
+		if (thrown && (fire.commit == BotFire::COMMIT_THROW || w.throwStart != 0.f))
 		{
 			fire.lastReason = "primed";
 			return 0;
@@ -883,7 +883,8 @@ namespace
 		if (!onTarget)
 			return 0;
 
-		StartCommit(fire, BotFire::COMMIT_THROW);
+		if (thrown)
+			StartCommit(fire, BotFire::COMMIT_THROW);
 		fire.lastReason = "firing";
 		return AttackButton(fire.mode);
 	}
@@ -1042,6 +1043,13 @@ bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict)
 	{
 		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
 		if (spec && IsChargeWeapon(*spec) && &m != &spec->secondary)
+			return false;
+	}
+
+	if (g_pGameProfile)
+	{
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+		if (spec && !g_pGameProfile->ModeAvailable(bot.pEdict, *spec, m))
 			return false;
 	}
 
@@ -2002,7 +2010,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	if (tap)
 	{
-		return TapButtons(fire, w, onTarget);
+		return TapButtons(fire, w, onTarget, IsThrow(*m));
 	}
 
 	if (!onTarget)

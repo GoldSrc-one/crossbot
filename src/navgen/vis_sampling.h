@@ -43,40 +43,6 @@ inline void AnglesFromDir(const Vec3 &dir, double &yawDeg, double &pitchDeg)
 	pitchDeg = -std::atan2(dir.z, flat) / kVisDeg;
 }
 
-inline bool SegmentHitsBox(const Vec3 &a, const Vec3 &b, const Vec3 &mins, const Vec3 &maxs)
-{
-	double origin[3] = {a.x, a.y, a.z};
-	double delta[3] = {b.x - a.x, b.y - a.y, b.z - a.z};
-	double lo[3] = {mins.x, mins.y, mins.z};
-	double hi[3] = {maxs.x, maxs.y, maxs.z};
-
-	double tmin = 0.0;
-	double tmax = 1.0;
-
-	for (int axis = 0; axis < 3; ++axis)
-	{
-		if (std::fabs(delta[axis]) < 1e-9)
-		{
-			if (origin[axis] < lo[axis] || origin[axis] > hi[axis])
-				return false;
-			continue;
-		}
-
-		double inv = 1.0 / delta[axis];
-		double t1 = (lo[axis] - origin[axis]) * inv;
-		double t2 = (hi[axis] - origin[axis]) * inv;
-		if (t1 > t2)
-			std::swap(t1, t2);
-
-		tmin = std::max(tmin, t1);
-		tmax = std::min(tmax, t2);
-		if (tmin > tmax)
-			return false;
-	}
-
-	return true;
-}
-
 inline std::vector<VisBlockerBox> BuildVisBlockerBoxes(const std::vector<BlockingVolume> &blockers)
 {
 	std::vector<VisBlockerBox> boxes;
@@ -94,13 +60,10 @@ inline std::vector<VisBlockerBox> BuildVisBlockerBoxes(const std::vector<Blockin
 	return boxes;
 }
 
-inline bool Occluded(const HullTree &hull, int worldHeadnode, const std::vector<VisBlockerBox> &blockers,
+// The blocker half of Occluded, for callers that traced the world already (SegmentsBlockedBatch).
+inline bool BlockersOccluded(const HullTree &hull, const std::vector<VisBlockerBox> &blockers,
 	const Vec3 &a, const Vec3 &b, TraceCounters &counters)
 {
-	++counters.worldTraces;
-	if (SegmentBlocked(hull, worldHeadnode, a, b))
-		return true;
-
 	for (const VisBlockerBox &blocker : blockers)
 	{
 		if (!SegmentHitsBox(a, b, blocker.mins, blocker.maxs))
@@ -115,23 +78,23 @@ inline bool Occluded(const HullTree &hull, int worldHeadnode, const std::vector<
 }
 
 inline bool Occluded(const HullTree &hull, int worldHeadnode, const std::vector<VisBlockerBox> &blockers,
+	const Vec3 &a, const Vec3 &b, TraceCounters &counters)
+{
+	++counters.worldTraces;
+	if (SegmentBlocked(hull, worldHeadnode, a, b))
+		return true;
+
+	return BlockersOccluded(hull, blockers, a, b, counters);
+}
+
+inline bool Occluded(const HullTree &hull, int worldHeadnode, const std::vector<VisBlockerBox> &blockers,
 	const Vec3 &a, const Vec3 &b, TraceCounters &counters, HullOriginChain &chain)
 {
 	++counters.worldTraces;
 	if (SegmentBlocked(hull, worldHeadnode, a, b, chain))
 		return true;
 
-	for (const VisBlockerBox &blocker : blockers)
-	{
-		if (!SegmentHitsBox(a, b, blocker.mins, blocker.maxs))
-			continue;
-
-		++counters.blockerTraces;
-		if (SegmentBlocked(hull, blocker.headnode, a - blocker.origin, b - blocker.origin))
-			return true;
-	}
-
-	return false;
+	return BlockersOccluded(hull, blockers, a, b, counters);
 }
 
 class BinLayout

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -175,7 +176,10 @@ void PrintUsage(const char *argv0)
 		"  --dump-svg <path> write a top-down SVG of the final area graph, for offline inspection\n"
 		"  --dump-vantage-svg <path> sample the visibility field and write it as a top-down SVG: one\n"
 		"                    glyph per vantage point, with its watch directions and exposure\n"
-		"  --vantage-grid <n> lattice spacing the visibility field is sampled at, in units (default %.0f)\n"
+		"  --vantage-grid <n> lattice spacing the visibility field is sampled at, in units (default: derived\n"
+		"                    as sqrt(walkable footprint / vantage points), at least %.0f)\n"
+		"  --vantage-points <n> sample count the derived lattice spacing aims for (default %zu); pair\n"
+		"                    cost is quadratic in it\n"
 		"  --vantage-spacing <n> average spacing between vantages after reduction, in units (default\n"
 		"                    %.0f): one kept sample per n-by-n square of walkable floor, spent adaptively\n"
 		"  --vantage-cone <n> half-angle in degrees a watch direction clusters over (default %.0f)\n"
@@ -202,6 +206,8 @@ void PrintUsage(const char *argv0)
 		"  --dump-vis-probe \"x y z x y z\" report what the visibility sampler sees between two world\n"
 		"                    points: the BSP leaf each lands in, whether the PVS links them, and the\n"
 		"                    hull-0 traceline result. Repeatable\n"
+		"  --test-batch-trace <k> dev: sample k points per empty leaf, check SegmentsBlockedBatch against\n"
+		"                    SegmentBlocked on PVS-visible leaf pairs, time both, then exit\n"
 		"  --trace <path>    overlay a recorded bot trajectory on the SVG: one \"x y z\" per line, as\n"
 		"                    the plugin's crossbot_trace_path writes it. An empty file draws nothing\n"
 		"  --airmove-samples <n> air-move launch samples per unit of edge length (default 1: a 128-unit\n"
@@ -254,7 +260,7 @@ void PrintUsage(const char *argv0)
 		"  --threads <n>     worker threads for air-move sampling and vantage pair checking\n"
 		"                    (default: one per logical processor plus one, %zu here). 1 runs serially\n"
 		"  -o <path>         write the baked .nav file (crossbot_nav format)\n",
-		argv0, navgen::kDefaultVantageGrid, navgen::kDefaultVantageSpacing, navgen::kDefaultVantageCone,
+		argv0, navgen::kDefaultVantageGrid, navgen::kDefaultVantagePoints, navgen::kDefaultVantageSpacing, navgen::kDefaultVantageCone,
 		navgen::kDefaultVantageNeighbors, navgen::kDefaultCampSpacing,
 		navgen::kDefaultCampMinVisible, navgen::kDefaultCampClimbSteps,
 		navgen::PhysicsParams().maxSpeed,
@@ -850,6 +856,169 @@ std::vector<navgen::Vec3> BuildDebugPath(const std::vector<navgen::Entity> &enti
 
 }
 
+// ponytail: dev hack for SegmentsBlockedBatch, single-threaded; delete once the batch lands or is dropped.
+static int RunBatchTraceTest(const navgen::BspFile &bsp, const dmodel_t &worldModel, size_t per)
+{
+	navgen::VisIndex vis(bsp);
+	navgen::HullTree hull = vis.Hull0();
+	int headnode = worldModel.headnode[navgen::kHullPoint];
+	const std::vector<dleaf_t> &leafs = bsp.Leafs();
+	std::mt19937 rng(1);
+
+	// points[idx * per .. (idx + 1) * per) all lie in leaf leafIds[idx].
+	std::vector<int> leafIds;
+	std::vector<navgen::Vec3> points;
+	for (size_t leaf = 1; leaf < leafs.size(); ++leaf)
+	{
+		const dleaf_t &l = leafs[leaf];
+		if (l.contents != CONTENTS_EMPTY)
+			continue;
+
+		std::uniform_real_distribution<double> dx(l.mins[0], l.maxs[0]);
+		std::uniform_real_distribution<double> dy(l.mins[1], l.maxs[1]);
+		std::uniform_real_distribution<double> dz(l.mins[2], l.maxs[2]);
+		size_t first = points.size();
+		for (size_t tries = 0; tries < 64 * per && points.size() - first < per; ++tries)
+		{
+			navgen::Vec3 p(dx(rng), dy(rng), dz(rng));
+			if (vis.LeafForPoint(p) == static_cast<int>(leaf))
+				points.push_back(p);
+		}
+		if (points.size() - first < per)
+			points.resize(first);
+		else
+			leafIds.push_back(static_cast<int>(leaf));
+	}
+
+	if (leafIds.size() < 2)
+	{
+		std::fprintf(stderr, "batch trace test: only %zu usable leaves\n", leafIds.size());
+		return 1;
+	}
+
+	// The batch takes xyz float triplets; the scalar reference keeps the double points.
+	std::vector<float> pointsF;
+	pointsF.reserve(points.size() * 3);
+	for (const navgen::Vec3 &p : points)
+	{
+		pointsF.push_back(static_cast<float>(p.x));
+		pointsF.push_back(static_cast<float>(p.y));
+		pointsF.push_back(static_cast<float>(p.z));
+	}
+
+	navgen::VisRowReader rows(vis);
+	std::vector<std::pair<size_t, size_t>> pairs;
+	std::uniform_int_distribution<size_t> pick(0, leafIds.size() - 1);
+	for (size_t attempt = 0; pairs.size() < 2000 && attempt < 10000000; ++attempt)
+	{
+		size_t a = pick(rng);
+		size_t b = pick(rng);
+		if (a != b && rows.RowVisible(rows.VisRow(leafIds[a]), leafIds[b]))
+			pairs.push_back({a, b});
+	}
+
+	std::printf("batch trace test: %zu of %zu leaves usable, %zu PVS-visible pairs, %zux%zu per pair\n",
+		leafIds.size(), leafs.size(), pairs.size(), per, per);
+
+	const size_t perPair = per * per;
+	navgen::BatchTraceScratch scratch;
+	std::vector<uint8_t> blocked(perPair);
+	size_t combos = 0;
+	size_t refBlocked = 0;
+	size_t falseBlocked = 0;
+	size_t falseClear = 0;
+	for (const std::pair<size_t, size_t> &pr : pairs)
+	{
+		const navgen::Vec3 *s = &points[pr.first * per];
+		const navgen::Vec3 *e = &points[pr.second * per];
+		navgen::SegmentsBlockedBatch(hull, headnode, &pointsF[pr.first * per * 3], per,
+			&pointsF[pr.second * per * 3], per, blocked.data(), scratch);
+		for (size_t i = 0; i < per; ++i)
+		{
+			for (size_t j = 0; j < per; ++j)
+			{
+				bool ref = navgen::SegmentBlocked(hull, headnode, s[i], e[j]);
+				bool got = blocked[i * per + j] != 0;
+				++combos;
+				refBlocked += ref ? 1 : 0;
+				if (ref == got)
+					continue;
+				if (falseBlocked + falseClear < 5)
+				{
+					navgen::TraceResult tr = navgen::TraceHull(hull, headnode, s[i], e[j]);
+					std::printf("  mismatch: batch %s, scalar %s, fraction %.6f: --dump-vis-probe "
+						"\"%.17g %.17g %.17g %.17g %.17g %.17g\"\n",
+						got ? "blocked" : "clear", ref ? "blocked" : "clear", tr.fraction,
+						s[i].x, s[i].y, s[i].z, e[j].x, e[j].y, e[j].z);
+				}
+				if (got)
+					++falseBlocked;
+				else
+					++falseClear;
+			}
+		}
+	}
+	std::printf("batch trace test: %zu combos, %zu blocked, mismatches: %zu batch-only blocked, "
+		"%zu batch-only clear\n", combos, refBlocked, falseBlocked, falseClear);
+
+	// Best of 7 interleaved rounds: background load (Defender, telemetry) can inflate a single run by half.
+	using Clock = std::chrono::steady_clock;
+	auto nsPerCombo = [combos](Clock::duration d) {
+		return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count()) /
+			static_cast<double>(combos);
+	};
+	double bestScalar = 1e30;
+	double bestChain = 1e30;
+	double bestBatch = 1e30;
+	for (int round = 0; round < 7; ++round)
+	{
+		size_t sumScalar = 0;
+		size_t sumChain = 0;
+
+		Clock::time_point t0 = Clock::now();
+		for (const std::pair<size_t, size_t> &pr : pairs)
+		{
+			const navgen::Vec3 *s = &points[pr.first * per];
+			const navgen::Vec3 *e = &points[pr.second * per];
+			for (size_t i = 0; i < per; ++i)
+				for (size_t j = 0; j < per; ++j)
+					sumScalar += navgen::SegmentBlocked(hull, headnode, s[i], e[j]) ? 1 : 0;
+		}
+
+		Clock::time_point t1 = Clock::now();
+		navgen::HullOriginChain chain;
+		for (const std::pair<size_t, size_t> &pr : pairs)
+		{
+			const navgen::Vec3 *s = &points[pr.first * per];
+			const navgen::Vec3 *e = &points[pr.second * per];
+			for (size_t i = 0; i < per; ++i)
+				for (size_t j = 0; j < per; ++j)
+					sumChain += navgen::SegmentBlocked(hull, headnode, s[i], e[j], chain) ? 1 : 0;
+		}
+
+		Clock::time_point t2 = Clock::now();
+		size_t sumBatch = 0;
+		for (const std::pair<size_t, size_t> &pr : pairs)
+		{
+			navgen::SegmentsBlockedBatch(hull, headnode, &pointsF[pr.first * per * 3], per,
+				&pointsF[pr.second * per * 3], per, blocked.data(), scratch);
+			for (size_t c = 0; c < perPair; ++c)
+				sumBatch += blocked[c];
+		}
+		Clock::time_point t3 = Clock::now();
+
+		bestScalar = std::min(bestScalar, nsPerCombo(t1 - t0));
+		bestChain = std::min(bestChain, nsPerCombo(t2 - t1));
+		bestBatch = std::min(bestBatch, nsPerCombo(t3 - t2));
+		std::printf("  round %d: scalar %.1f ns, chain %.1f ns, batch %.1f ns per combo (blocked %zu / %zu / %zu)\n",
+			round, nsPerCombo(t1 - t0), nsPerCombo(t2 - t1), nsPerCombo(t3 - t2), sumScalar, sumChain, sumBatch);
+	}
+	std::printf("  best of 7: scalar %.1f ns, chain %.1f ns, batch %.1f ns per combo\n", bestScalar, bestChain,
+		bestBatch);
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2)
@@ -908,6 +1077,7 @@ int main(int argc, char **argv)
 		navgen::Vec3 b;
 	};
 	std::vector<VisProbe> visProbes;
+	int batchTraceK = 0;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1152,7 +1322,8 @@ int main(int argc, char **argv)
 			}
 			vantageSvgPath = argv[++i];
 		}
-		else if (arg == "--vantage-grid" || arg == "--vantage-spacing" || arg == "--vantage-cone")
+		else if (arg == "--vantage-grid" || arg == "--vantage-points" || arg == "--vantage-spacing" ||
+			arg == "--vantage-cone")
 		{
 			if (i + 1 >= argc)
 			{
@@ -1169,6 +1340,8 @@ int main(int argc, char **argv)
 			}
 			if (arg == "--vantage-grid")
 				vantageParams.gridSize = parsed;
+			else if (arg == "--vantage-points")
+				vantageParams.maxPoints = static_cast<size_t>(std::ceil(parsed));
 			else if (arg == "--vantage-spacing")
 				vantageParams.targetSpacing = parsed;
 			else
@@ -1329,6 +1502,20 @@ int main(int argc, char **argv)
 			}
 			visProbes.push_back({navgen::Vec3(v[0], v[1], v[2]), navgen::Vec3(v[3], v[4], v[5])});
 		}
+		else if (arg == "--test-batch-trace")
+		{
+			if (i + 1 >= argc)
+			{
+				PrintUsage(argv[0]);
+				return 1;
+			}
+			batchTraceK = std::atoi(argv[++i]);
+			if (batchTraceK < 1 || batchTraceK > 256)
+			{
+				std::fprintf(stderr, "--test-batch-trace: expected 1..256, got \"%s\"\n", argv[i]);
+				return 1;
+			}
+		}
 		else if (arg == "--trace")
 		{
 			if (i + 1 >= argc)
@@ -1370,7 +1557,6 @@ int main(int argc, char **argv)
 
 	vantageParams.threadCount = threadCount;
 	campParams.threadCount = threadCount;
-	campParams.gridSize = vantageParams.gridSize;
 	campParams.yawBins = vantageParams.yawBins;
 	campParams.pitchBins = vantageParams.pitchBins;
 	campParams.pitchRangeDeg = vantageParams.pitchRangeDeg;
@@ -1380,6 +1566,9 @@ int main(int argc, char **argv)
 	{
 		navgen::BspFile bsp(bspPath);
 		const dmodel_t &worldModel = bsp.Models()[0];
+
+		if (batchTraceK > 0)
+			return RunBatchTraceTest(bsp, worldModel, static_cast<size_t>(batchTraceK));
 
 		std::vector<navgen::ExtractedLeaf> leaves =
 			navgen::ExtractHullLeaves(bsp, worldModel, kMapRadius, navgen::kHullDuck);
@@ -2220,10 +2409,10 @@ int main(int argc, char **argv)
 			vantages = navgen::BuildVantages(bsp, visIndex, visBlockers, merged.areas, vantageParams,
 				&vantageStats, noCamp ? nullptr : &candidates);
 
-			std::printf("%s: vantage field: %zu lattice points, %zu sampled (%zu solid), "
+			std::printf("%s: vantage field: %zu lattice points at grid %.1f, %zu sampled (%zu solid), "
 				"%zu/%zu pairs passed PVS, %zu visible, %zu kept (budget %zu over %.0f sq units), "
 				"reduction err mean %.5f max %.5f, watch dist mean %.0f max %.0f\n",
-				bspPath.c_str(), vantageStats.latticePoints, vantageStats.sampled,
+				bspPath.c_str(), vantageStats.latticePoints, vantageStats.gridSize, vantageStats.sampled,
 				vantageStats.solidRejected, vantageStats.pvsPairs, vantageStats.totalPairs,
 				vantageStats.visiblePairs, vantageStats.kept, vantageStats.budget,
 				vantageStats.footprintArea, vantageStats.meanReductionError,
@@ -2261,6 +2450,7 @@ int main(int argc, char **argv)
 
 			if (!noCamp)
 			{
+				campParams.gridSize = vantageStats.gridSize;
 				camps = navgen::BuildCampSpots(bsp, visIndex, visBlockers, candidates, campParams,
 					&campStats);
 

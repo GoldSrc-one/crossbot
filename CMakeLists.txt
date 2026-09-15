@@ -8,10 +8,14 @@ project(crossbot CXX)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# GoldSrc only loads a 32-bit plugin, while navgen is an offline tool built 64-bit. Each configure
+# builds one of them: 32-bit gives crossbot_mm, 64-bit gives navgen. build.bat does both.
+set(CROSSBOT_64BIT OFF)
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR
-        "crossbot must be built 32-bit (GoldSrc requirement). "
-        "On MSVC, configure with: cmake -B build -A Win32")
+    set(CROSSBOT_64BIT ON)
+    message(STATUS "crossbot: 64-bit configure, building navgen only")
+else()
+    message(STATUS "crossbot: 32-bit configure, building crossbot_mm only")
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -25,6 +29,8 @@ endif()
 set(HLSDK_DIR ${CMAKE_SOURCE_DIR}/external/hlsdk)
 set(METAMOD_DIR ${CMAKE_SOURCE_DIR}/external/metamod)
 set(CROSSPLAY_DIR ${CMAKE_SOURCE_DIR}/external/crossplay)
+
+if(NOT CROSSBOT_64BIT)
 
 file(GLOB CROSSBOT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
@@ -106,6 +112,10 @@ if(CROSSBOT_PERF)
     message(STATUS "crossbot: zone profiler ENABLED")
 endif()
 
+endif() # NOT CROSSBOT_64BIT
+
+if(CROSSBOT_64BIT)
+
 file(GLOB NAVGEN_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/navgen/*.cpp
 )
@@ -141,3 +151,5 @@ if(MSVC)
 else()
     target_compile_options(navgen PRIVATE -Wall)
 endif()
+
+endif() # CROSSBOT_64BIT

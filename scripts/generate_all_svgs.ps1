@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = $PSScriptRoot
 $projectRoot = Split-Path $scriptDir -Parent
-$navgen = Join-Path $projectRoot "build\tools\navgen\navgen.exe"
+$navgen = Join-Path $projectRoot "build-x64\tools\navgen\navgen.exe"
 $mapsDir = Join-Path $projectRoot "maps"
 $outputDir = Join-Path $projectRoot "nav_debug"
 $indexHtml = Join-Path $outputDir "index.html"

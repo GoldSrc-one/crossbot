@@ -8,6 +8,7 @@
 
 #include "astar_graph.h"
 #include "nav_water.h"
+#include "pm_sim.h"
 
 namespace Nav
 {
@@ -20,8 +21,18 @@ bool WaterBlocks(const NavMesh &mesh, const Connection &c)
 	return crossbot_nav::ConnBlockedByWater(c.connType, ConnSubmerged(mesh, c));
 }
 
+float FallRefund(const Connection &c, bool fallDamage)
+{
+	if (fallDamage)
+		return 0.f;
+	if (c.connType != crossbot_nav::CONN_AIRMOVE && c.connType != crossbot_nav::CONN_LADDER &&
+		c.connType != crossbot_nav::CONN_TELEPORT)
+		return 0.f;
+	return PmSim::FallPenaltySeconds(c.fallDamage);
+}
+
 void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaConnIndices,
-	std::vector<NavAStar::Connection> &conns)
+	std::vector<NavAStar::Connection> &conns, bool fallDamage)
 {
 	areaConnIndices.assign(mesh.areas.size(), std::vector<uint32_t>());
 	for (size_t i = 0; i < mesh.areas.size(); ++i)
@@ -47,7 +58,7 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 		gc.crossing = NavPlan::ConnectionCrossing(mesh.planAreas, mesh.planConns[i]);
 		gc.oneWay = (c.connFlags & crossbot_nav::CONN_FLAG_ONE_WAY) != 0;
 		gc.drift = c.drift;
-		gc.costSeconds = c.costSeconds + c.runtimePenalty;
+		gc.costSeconds = c.costSeconds + c.runtimePenalty - FallRefund(c, fallDamage);
 		gc.exposure = c.vantageExposure;
 		gc.openDistAB = c.openDistAB;
 		gc.openDistBA = c.openDistBA;
@@ -75,11 +86,11 @@ bool GateAllowsCrossing(const NavMesh &mesh, uint32_t connIdx, uint32_t fromId, 
 
 PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint, const NavPlan::PlanTraceContext *traces,
-	NavPlan::PlanStats *stats, float careful, const NavPlan::RangeBias &range)
+	NavPlan::PlanStats *stats, float careful, const NavPlan::RangeBias &range, bool fallDamage)
 {
 	std::vector<std::vector<uint32_t>> areaConnIndices;
 	std::vector<NavAStar::Connection> graphConns;
-	BuildGraph(mesh, areaConnIndices, graphConns);
+	BuildGraph(mesh, areaConnIndices, graphConns, fallDamage);
 
 	float maxSpeed = (traces && traces->physics.maxSpeed > 1.f) ? traces->physics.maxSpeed
 		: mesh.designMaxSpeed;
@@ -103,7 +114,8 @@ namespace
 constexpr float kGravityEpsilon = 0.01f;
 
 void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::vector<float> &out,
-	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range)
+	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range,
+	bool fallDamage)
 {
 	size_t n = mesh.areas.size();
 	out.assign(n, kUnreachableSeconds);
@@ -155,7 +167,8 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 			if (!drift.passable)
 				continue;
 
-			float base = c.travelSeconds + c.costSeconds + c.runtimePenalty + drift.seconds;
+			float base = c.travelSeconds + c.costSeconds + c.runtimePenalty + drift.seconds -
+				FallRefund(c, fallDamage);
 			if (base < 0.f)
 				base = 0.f;
 			float openDist = (c.areaA == from) ? c.openDistAB : c.openDistBA;
@@ -173,17 +186,19 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 }
 
 void AreaCosts(const NavMesh &mesh, uint32_t startArea, std::vector<float> &out,
-	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range)
+	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range,
+	bool fallDamage)
 {
 	AreaCostsImpl(mesh, startArea, false, out, gravityMultiplier, careful,
-		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed, range);
+		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed, range, fallDamage);
 }
 
 void AreaCostsToGoal(const NavMesh &mesh, uint32_t goalArea, std::vector<float> &out,
-	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range)
+	float gravityMultiplier, float careful, float maxSpeed, const NavPlan::RangeBias &range,
+	bool fallDamage)
 {
 	AreaCostsImpl(mesh, goalArea, true, out, gravityMultiplier, careful,
-		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed, range);
+		maxSpeed > 1.f ? maxSpeed : mesh.designMaxSpeed, range, fallDamage);
 }
 
 }
