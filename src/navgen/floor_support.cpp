@@ -329,6 +329,29 @@ bool EdgeLiesOnFloorFace(const std::vector<const Face *> &floors, const Vec3 &a,
 	return false;
 }
 
+bool WindingTouchesBox(const Winding &w, const Vec3 &mins, const Vec3 &maxs)
+{
+	constexpr double kMargin = 1.0;
+
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		double lo = 1e30;
+		double hi = -1e30;
+		for (const Vec3 &v : w)
+		{
+			double c = axis == 0 ? v.x : axis == 1 ? v.y : v.z;
+			lo = std::min(lo, c);
+			hi = std::max(hi, c);
+		}
+
+		double boxMin = axis == 0 ? mins.x : axis == 1 ? mins.y : mins.z;
+		double boxMax = axis == 0 ? maxs.x : axis == 1 ? maxs.y : maxs.z;
+		if (lo > boxMax + kMargin || hi < boxMin - kMargin)
+			return false;
+	}
+	return true;
+}
+
 void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers,
 	const Winding &w, const Vec3 &bias, std::vector<Winding> &solid, std::vector<Winding> &empty)
 {
@@ -341,12 +364,26 @@ void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<Bloc
 			break;
 
 		std::vector<Winding> stillRemaining;
-		for (const Winding &piece : remaining)
+		for (Winding &piece : remaining)
 		{
+			// Blocker bounds are hull-expanded, so a piece outside them cannot reach its solid.
+			if (!WindingTouchesBox(piece, blocker.mins, blocker.maxs))
+			{
+				stillRemaining.push_back(std::move(piece));
+				continue;
+			}
+
 			std::vector<Winding> blockerSolid;
 			std::vector<Winding> blockerEmpty;
 			CarveWindingAgainstTreeSided(bsp, blocker.headnode,
 				TranslateWinding(piece, blocker.origin * -1.0), bias, blockerSolid, blockerEmpty);
+
+			// A blocker that removes nothing leaves the piece whole; its tree planes would only fragment it.
+			if (blockerSolid.empty())
+			{
+				stillRemaining.push_back(std::move(piece));
+				continue;
+			}
 
 			for (const Winding &part : blockerSolid)
 				solid.push_back(TranslateWinding(part, blocker.origin));

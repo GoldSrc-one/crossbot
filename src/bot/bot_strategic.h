@@ -16,6 +16,30 @@ namespace BotStrategic
 
 constexpr float kGoalMoveRadius = 32.f;
 
+enum Kind
+{
+	KIND_MAP = 0,
+	KIND_ATTACK,
+	KIND_DELIVER,
+	KIND_FETCH,
+	KIND_ESCORT,
+	KIND_HUNT,
+	KIND_DEFEND,
+	KIND_ROAM,
+};
+
+struct Intent
+{
+	edict_t *ent = nullptr;
+	edict_t *aim = nullptr;
+	Vector point;
+	bool volume = false;
+	bool pulse = false;
+	unsigned short buttons = 0;
+	int kind = KIND_MAP;
+	int rank = 0;
+};
+
 struct Memo
 {
 	CBotEntHandle ent;
@@ -25,6 +49,10 @@ struct Memo
 struct State
 {
 	CBotEntHandle goal;
+	int payload = 0;
+	CBotEntHandle aim;
+	unsigned short buttons = 0;
+	bool pulse = false;
 
 	bool arrival = false;
 	bool pressed = false;
@@ -39,11 +67,19 @@ bool DebugEnabled();
 
 bool IsGoal(edict_t *ent);
 
-bool ValidFor(const CBot &bot, edict_t *ent);
+bool ValidFor(const CBot &bot, edict_t *ent, int payload);
 
 bool ResolvePoint(const Nav::NavMesh &mesh, const Vector &origin, uint32_t &areaId, Vector &point);
 
+void Intents(const CBot &bot, std::vector<Intent> &out);
+
 void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Candidate> &out);
+
+void Prioritize(std::vector<BotGoal::Candidate> &cands);
+
+const char *KindName(int payload);
+
+float MoveRadius(int payload);
 
 void Accept(CBot &bot, const BotGoal::Candidate &cand);
 
@@ -58,5 +94,7 @@ void OnBlocked(CBot &bot, const char *what);
 void OnRespawn(CBot &bot);
 
 void PrintCandidates(const Nav::NavMesh &mesh);
+
+void PrintIntents(const CBot &bot);
 
 }

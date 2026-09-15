@@ -358,6 +358,55 @@ The tram adds nothing measurable on top of that. Its track polyline and board po
 per map on the first `Collect` that has a mesh; per selection it contributes one cached lookup, and
 per waiting frame one `ProjectOnTrack` over 43 nodes. subtransit is the only map that pays any of it.
 
+## scripts/test_objectives.ps1
+
+The objectives module's driver, built like `test_fun.ps1`: no verdict, a decision log to read. It boots
+HLDS with `valve` plus the map's game, prints `crossbot_list_objectives`, adds bots, waits, prints it
+again and tails the strategic decisions out of `nav_debug/logs/<map>_objectives.log`. The map and its
+`.nav` must already be installed; nothing is copied or generated.
+
+    pwsh -File scripts/test_objectives.ps1 -Map dod_escape -Game dod -Bots 6 -Seconds 120
+
+`-StrategicDebug` sets `crossbot_strategic_debug 1`. `-Plugin` sets `crossbot_objectives 0`, which is
+the same run on the AMXX plugin's goals, the A/B control.
+
+**Read the first listing before the behaviour.** It runs before any bot joins, so it is a pure map
+assertion:
+
+| map | must list |
+| --- | --- |
+| de_dust2 | 2 `func_bomb_target`, attack 2 defend 1, need id 1 |
+| cs_assault | 4 `hostage_entity` payloads, carry 1; 16 `info_player_start` rescue sites, because the map has no rescue-zone entity |
+| as_oilrig | 1 `func_vip_safetyzone`, attack 1, need id 3 |
+| dod_avalanche | 5 `dod_capture_area`, all `attack 1,2`; #304, #305 and #307 need 2 players; no `dod_control_point` rows |
+| dod_escape | 2 capture areas needing group 1 (`allies_obj`), 1 `func_breakable` attack 2 with group -1, 22 `dod_object` in two groups |
+
+**Then read the team columns.** On a cstrike map every player line must show `pev->team` and `m_iTeam`
+disagreeing (1/2 or 2/1), and the bots on `pev->team 1` must be the ones fetching hostages or defending
+bomb sites. If they agree, the inversion the reader is built on has changed.
+
+Healthy runs, measured:
+
+- dod_avalanche: capture areas change owner within 40 s, and each site's `attack` mask narrows to the
+  team that does not hold it.
+- dod_escape: carriers appear by t+50, allies carrying `allies_obj` list `deliver rank 3` for both
+  capture areas, and the axis carrier lists `deliver rank 3` for the breakable.
+- de_dust2: holders cycle, `is holding the defend goal` followed about 30 s later by `has held the
+  defend goal ... moving on` and a different site.
+
+Two signatures worth recognising:
+
+- **A stream of `follows the strategic goal` lines for two bots at once** is bots escorting each other.
+  Carriers no longer escort, so if it comes back, look at who is not carrying.
+- **`could not get past player reaching the strategic goal` repeating on one site** is every bot on a
+  team piling into the only objective it has, as on as_oilrig when all six land on one team. That is
+  crowding, which the objectives module does nothing about yet.
+- **A hostage fetch that never logs `works hostage_entity` on cs_assault** is usually not objectives.
+  The CT route from spawn crosses the vent, an air move lands off the mesh (`area -1 (wanted 61) ... conn
+  565`), and the bot then logs `mid-route repath (stalled) ... wp 1/N` at about (-564,2464,502) for the
+  rest of the run. Two 2-bot runs out of two hit it; a run where the CT was already beside the hostages
+  used one on the first try.
+
 ## scripts/test_sense.ps1
 
 Drives the sense system and the aim delay queue, which nothing else can. `test_nav_goal.ps1` spawns

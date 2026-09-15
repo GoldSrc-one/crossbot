@@ -56,10 +56,52 @@ struct GameOffsets
 	int ms_iTotal;
 };
 
+struct MapOffsets
+{
+	int cs_plrHasC4;
+	int cs_plrIsVIP;
+	int cs_plrTeam;
+	int cs_monTargetEnt;
+	int cs_grnIsC4;
+	int cs_boxIsBomb;
+
+	int dod_cpTeam;
+	int dod_cpAlliesCantTouch;
+	int dod_cpAxisCantTouch;
+	int dod_acOwningTeam;
+	int dod_acAlliesNumCap;
+	int dod_acAxisNumCap;
+	int dod_acAlliesCanCap;
+	int dod_acAxisCanCap;
+	int dod_acRequiresObject;
+	int dod_acRequiredGroup;
+	int dod_objTeam;
+	int dod_objGroup;
+	int dod_objOwner;
+
+	int tfc_teamNo;
+	int tfc_goalNo;
+	int tfc_groupNo;
+	int tfc_goalState;
+	int tfc_ownedBy;
+	int tfc_goalActivation;
+	int tfc_itemsAllowed;
+	int tfc_hasItemFromGroup;
+	int tfc_ifGoalActive;
+	int tfc_ifGoalInactive;
+	int tfc_ifGoalRemoved;
+	int tfc_ifGroupActive;
+	int tfc_ifGroupInactive;
+	int tfc_ifGroupRemoved;
+	int tfc_increaseTeam;
+};
+
 extern GameOffsets g_offsets;
 
 namespace GameData
 {
+	const char *LoadMap(const char *gamedir, MapOffsets &out);
+
 	template <typename T>
 	inline T Peek(void *base, int offset)
 	{

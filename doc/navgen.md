@@ -852,7 +852,10 @@ nothing else reaches the tunnel at all.
 ### SplitLeavesByFloorSupport
 For each leaf:
 1. Take every floor face (normal.z > 0.7)
-2. Probe 1 unit down from each → carves against world + blockers
+2. Probe 1 unit down from each → carves against world + blockers. A piece is carved only through blockers
+   whose hull-expanded bounds it touches, and a blocker that removes nothing leaves the piece whole. Without
+   that, every blocker tree's planes re-split the piece even when no part of it was solid. On dod_caen that
+   stage was ~40 s serial across 167 blockers.
 3. Cut planes from seams between supported/unsupported (vertical through edge midpoints, outward from supported centroid, check 2 units beyond for void)
 4. Fragment leaf by cut planes
 5. Fragments with supported floor become leaves; the rest go to `AbsorbFloorlessPieces`
@@ -924,6 +927,10 @@ the old behaviour for comparison.
 health bar, so any standing spot you can only arrive at by falling through one is not a place a bot can
 be — and, unlike a wall, nothing in the leaf pipeline notices it, because a trigger brush is not solid in
 any hull.
+
+Skipped: start-off (2), no-clients (8), and DoD's `DontHurtAllies` / `DontHurtAxis` (64 / 128). The DoD pair
+is spawn protection that kills only the other team, so treating it as lethal deleted the spawn exits
+(dod_sturm reached 26 of 1767 areas).
 
 The test is per leaf, on its lowest floor face's centroid. The floor is dead when it is inside a lethal
 volume's xy footprint, below that volume's top, and a duck-hull trace straight up from the floor into the
@@ -1554,6 +1561,10 @@ entities it can classify go in `passable`, ones it cannot go in `impassable` and
   is deliberate: pruning then reports honestly that there is no way through. A door whose activators exist but
   are unreachable is *not* carved — it keeps its area and gets blocked detour entries instead.
 - **`SF_DOOR_START_OPEN` / `SF_DOOR_PASSABLE`** never occupy their brush space, so neither carved nor split.
+- **DoD breakables a bot cannot break** → impassable, like the no-activator case. `dod.fgd` flags 8 (only
+  grenades), 64 (object cap / TNT only), 256 (bazooka or grenades), 512 (only bazooka). Applied only on maps
+  with `info_player_allies` / `info_player_axis`, because HL reads 256 as instant crowbar. The carve is baked:
+  the nav does not route through the gap even after the brush is blown.
 
 Opening time, from the real SDK (`external/hlsdk-full`; the vendored `external/hlsdk` is headers-only):
 

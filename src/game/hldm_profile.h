@@ -43,9 +43,6 @@ public:
 
 	bool IsFunTerminal(edict_t *ent) const override;
 
-	void CollectStrategicGoals(const CBot &bot, const Nav::NavMesh &mesh,
-		std::vector<BotGoal::Candidate> &out) const override;
-
 	void ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
 		unsigned int size) const override;
 };

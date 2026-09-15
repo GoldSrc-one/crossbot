@@ -22,6 +22,7 @@
 #include "../game/crossplay.h"
 #include "../game/gamedata.h"
 #include "../game/game_profile.h"
+#include "../game/objectives.h"
 #include "../game/player_models.h"
 #include "../game/teams.h"
 #include "../nav/bsp_trace.h"
@@ -117,6 +118,7 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	XPlay::DetectProfiles();
 	Teams::DetectMap();
+	Objectives::DetectMap();
 
 	if (XPlay::PickRandomSupported() < 0)
 		SERVER_PRINT("CrossBot: no loaded game is playable; bots disabled.\n");
@@ -141,6 +143,7 @@ void ServerDeactivate()
 
 	XPlay::ForgetProfiles();
 	Teams::ForgetMap();
+	Objectives::ForgetMap();
 	PlayerModels::Forget();
 	Nav::Unload();
 }
@@ -292,7 +295,10 @@ void StartFrame()
 	}
 
 	if (anyBot)
+	{
 		CheckDriftSpeeds();
+		Objectives::Refresh();
+	}
 
 	for (auto &bot : g_bots)
 	{

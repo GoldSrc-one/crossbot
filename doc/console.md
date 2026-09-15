@@ -33,8 +33,15 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_list_goals` — every `bot_goal` entity in the world with its resolved nav area, the
   player it belongs to (or `everyone` for a map-placed one), its `aiment` and the buttons it asks
   for. Ends with a count. Zero on a `valve` map is correct: the entity only exists where the
-  `bot_goal.sma` plugin is running, which is on `cstrike`, `tfc` and `dod` maps; see
-  `doc/goals.md`, `bot_strategic.cpp`
+  `bot_goal.sma` plugin is running, which is on `cstrike`, `tfc` and `dod` maps. With
+  `crossbot_objectives 1` on a map the objectives module reads, CrossBot's bots ignore every owned
+  entity this lists; see `doc/goals.md`, `bot_strategic.cpp`
+- `crossbot_list_objectives` — the map's objective tables. First the status line: which reader, or why
+  there is none (`off for 'tfc' -- no offset for ...` names the file). Then one line per site, payload and
+  carrier with its team masks, need id / group and player count, the DoD object group names, one line per
+  live player with `pev->team` (and `m_iTeam` on a cstrike map), and every bot's intents with kind and
+  rank. **On a cstrike map read the two team columns first:** they are inverted, and the reader keys on
+  `pev->team`. Works with no bots connected; see `doc/goals.md`, `objectives.cpp`
 - `crossbot_list_gates` — every walk gate that could hold a mine: the mesh width, the *measured*
   opening, the chosen surface, the mount point and the rejection reason. A gate that failed only at
   the surface or coverage stage is printed too, so the near misses are visible; ones filtered earlier
@@ -266,7 +273,12 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   or `dod` map falls back to fun and gather, which is the control that separates "the objective
   logic is wrong" from "the navigation is wrong"
 - `crossbot_strategic_debug` — one line per `bot_goal` per selection saying whether it was
-  taken, left on its cooldown memo, or could not be placed in a nav area
+  taken, left on its cooldown memo, or could not be placed in a nav area, and one per native objective
+  that could not be placed
+- `crossbot_objectives` — native objectives. Default 1. On a map owned by `cstrike`/`czero`, `dod` or
+  `tfc` whose objective offsets loaded, bots take their strategic goals from `objectives.cpp` and ignore
+  the per-bot `bot_goal` entities the AMXX plugin publishes. 0 restores the plugin's goals. A map with no
+  reader, or with offsets missing, behaves identically either way
 - `crossbot_goal_bias` — exponent in the fun/strategic weight `1 / (cost + 2)^bias`. Default 2. 0 is
   uniform random across candidates, which is how you tell a selection problem from a distance-weighting
   one; large values collapse to nearest-first. Does not affect gather, which is always cheapest-first

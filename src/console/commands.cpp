@@ -20,6 +20,7 @@
 #include "../game/gamedata.h"
 #include "../game/give_item.h"
 #include "../game/hldm_weapons.h"
+#include "../game/objectives.h"
 #include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 #include "../nav/nav_water.h"
@@ -808,6 +809,12 @@ namespace
 		ListCandidates(BotStrategic::PrintCandidates);
 	}
 
+	void Cmd_CrossBotListObjectives()
+	{
+		Objectives::PrintStatus();
+		ForEachBot([](edict_t *ent) { BotStrategic::PrintIntents(*BotManager::FindBot(ent)); return true; });
+	}
+
 	void Cmd_CrossBotListGates()
 	{
 		ListCandidates(BotDeploy::PrintGates);
@@ -960,6 +967,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 	ADD_SERVER_COMMAND("crossbot_list_fun", Cmd_CrossBotListFun);
 	ADD_SERVER_COMMAND("crossbot_list_goals", Cmd_CrossBotListGoals);
+	ADD_SERVER_COMMAND("crossbot_list_objectives", Cmd_CrossBotListObjectives);
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
 	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
 	ADD_SERVER_COMMAND("crossbot_airmove_cache_stats", Cmd_CrossBotAirmoveCache);

@@ -25,6 +25,8 @@ constexpr size_t kMaxNullEvents = 20;
 constexpr double kInflationReportRatio = 2.0;
 
 constexpr int kSfBreakTriggerOnly = 1;
+// dod.fgd: only grenades, object cap (TNT) only, bazooka or grenades, only bazooka. HL reads 256 as instant crowbar.
+constexpr int kSfBreakDodExplosiveOnly = 8 | 64 | 256 | 512;
 constexpr int kSfDoorStartOpen = 1;
 constexpr int kSfDoorPassable = 8;
 constexpr int kSfDoorUseOnly = 256;
@@ -32,6 +34,8 @@ constexpr int kSfPushOnce = 1;
 constexpr int kSfPushStartOff = 2;
 constexpr int kSfHurtStartOff = 2;
 constexpr int kSfHurtNoClients = 8;
+// dod.fgd DontHurtAllies / DontHurtAxis: spawn protection that only kills the other team. Unused bits in HL.
+constexpr int kSfHurtOneTeam = 64 | 128;
 constexpr double kLethalHurtDamage = 100.0;
 
 constexpr double kDefaultPushSpeed = 100.0;
@@ -527,7 +531,7 @@ std::vector<BlockingVolume> ExtractHurtVolumes(const BspFile &bsp, const std::ve
 		if (ent.Get("classname") != "trigger_hurt")
 			continue;
 
-		if ((ParseInt(ent.Get("spawnflags"), 0) & (kSfHurtStartOff | kSfHurtNoClients)) != 0)
+		if ((ParseInt(ent.Get("spawnflags"), 0) & (kSfHurtStartOff | kSfHurtNoClients | kSfHurtOneTeam)) != 0)
 			continue;
 
 		if (ParseDouble(ent.Get("dmg"), 0.0) < kLethalHurtDamage)
@@ -602,6 +606,11 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 
 	PassableSet result;
 
+	bool dodMap = std::any_of(entities.begin(), entities.end(), [](const Entity &ent) {
+		const std::string &classname = ent.Get("classname");
+		return classname == "info_player_allies" || classname == "info_player_axis";
+	});
+
 	for (size_t entIndex = 0; entIndex < entities.size(); ++entIndex)
 	{
 		const Entity &ent = entities[entIndex];
@@ -636,6 +645,12 @@ PassableSet ExtractPassableVolumes(const BspFile &bsp, const std::vector<Entity>
 		vol.maxs = Vec3(model.maxs[0] + hullMaxs.x, model.maxs[1] + hullMaxs.y,
 			model.maxs[2] + hullMaxs.z) + vol.origin;
 		vol.entityIndex = static_cast<int>(entIndex);
+
+		if (dodMap && !isDoor && (spawnflags & kSfBreakDodExplosiveOnly) != 0)
+		{
+			result.impassable.push_back(vol);
+			continue;
+		}
 
 		PassableVolume pass;
 		pass.volume = vol;

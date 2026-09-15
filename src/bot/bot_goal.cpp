@@ -69,8 +69,6 @@ namespace
 		{
 		case BotGoal::GOAL_STRATEGIC:
 			BotStrategic::Collect(bot, mesh, out);
-			if (g_pGameProfile)
-				g_pGameProfile->CollectStrategicGoals(bot, mesh, out);
 			break;
 		case BotGoal::GOAL_FUN:
 			BotFun::Collect(bot, mesh, out);
@@ -90,6 +88,32 @@ namespace
 			[&](const BotGoal::Candidate &c) {
 				return CandCost(bot, mesh, costs, c) >= Nav::kUnreachableSeconds;
 			}), cands.end());
+	}
+
+	void KeepCheapestPerEntity(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
+		std::vector<BotGoal::Candidate> &cands)
+	{
+		std::vector<BotGoal::Candidate> kept;
+		std::vector<float> keptCost;
+		for (const BotGoal::Candidate &c : cands)
+		{
+			float cost = CandCost(bot, mesh, costs, c);
+			size_t i = 0;
+			while (i < kept.size() && (kept[i].ent != c.ent || kept[i].payload != c.payload))
+				++i;
+
+			if (i == kept.size())
+			{
+				kept.push_back(c);
+				keptCost.push_back(cost);
+			}
+			else if (cost < keptCost[i])
+			{
+				kept[i] = c;
+				keptCost[i] = cost;
+			}
+		}
+		cands.swap(kept);
 	}
 
 	const BotGoal::Candidate *PickCheapest(const CBot &bot, const Nav::NavMesh &mesh,
@@ -164,7 +188,7 @@ namespace
 			return !BotItems::IsUnavailable(ent, static_cast<ItemKind>(target.payload));
 
 		if (target.tier == BotGoal::GOAL_STRATEGIC)
-			return BotStrategic::ValidFor(bot, ent);
+			return BotStrategic::ValidFor(bot, ent, target.payload);
 
 		return true;
 	}
@@ -342,6 +366,11 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		cands.clear();
 		CollectTier(bot, mesh, costs, static_cast<Tier>(t), cands);
 		PruneUnreachable(bot, mesh, costs, cands);
+		if (t == GOAL_STRATEGIC)
+		{
+			BotStrategic::Prioritize(cands);
+			KeepCheapestPerEntity(bot, mesh, costs, cands);
+		}
 		if (t == GOAL_FUN)
 		{
 			BotFun::Prioritize(cands);
@@ -377,8 +406,10 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 	st.skipped.clear();
 	st.active = true;
 
-	BOT_VLOG("CrossBot: %s wants %s%s %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
+	bool strategic = best->tier == GOAL_STRATEGIC;
+	BOT_VLOG("CrossBot: %s wants %s%s%s%s %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
 		bot.name, TierName(best->tier), (best->tier != tier) ? " (promoted)" : "",
+		strategic ? " to " : "", strategic ? BotStrategic::KindName(best->payload) : "",
 		CBotClassOf(best->ent), best->point.x, best->point.y,
 		best->point.z, best->areaId, cost, cands.size());
 
@@ -414,13 +445,13 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 	st.nextRefreshTime = gpGlobals->time + kStrategicRefreshInterval;
 
 	edict_t *ent = st.target.ent.Get();
-	if (!BotStrategic::ValidFor(bot, ent))
+	if (!BotStrategic::ValidFor(bot, ent, st.target.payload))
 	{
 		Clear(bot);
 		return;
 	}
 
-	if ((ent->v.origin - st.targetOrigin).Length() <= BotStrategic::kGoalMoveRadius)
+	if ((ent->v.origin - st.targetOrigin).Length() <= BotStrategic::MoveRadius(st.target.payload))
 		return;
 
 	if (bot.currentAreaId < 0)

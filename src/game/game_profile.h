@@ -116,9 +116,6 @@ public:
 
 	virtual bool IsFunTerminal(edict_t *ent) const = 0;
 
-	virtual void CollectStrategicGoals(const CBot &bot, const Nav::NavMesh &mesh,
-		std::vector<BotGoal::Candidate> &out) const = 0;
-
 	virtual void ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
 		unsigned int size) const = 0;
 };

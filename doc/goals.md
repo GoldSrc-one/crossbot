@@ -525,14 +525,95 @@ fill), `crossbot_camp_zoom_dist` (768, the range below which a scope buys nothin
 arrival and leave lines are plain `BOT_VLOG`).
 
 
-The top tier's only producer, and a deliberate stepping stone. CrossBot plays `valve` rules on maps
-that belong to `cstrike`, `tfc` and `dod`, where it knows nothing about what the map is *for*. That
-knowledge lives outside this repo, in the AMXX plugin `bot_goal.sma`, which reads CS hostages and
-C4, TFC flags and dropoffs, and DOD control points and capture areas, and publishes its answer as a
-`bot_goal` entity in the world. foxbot, Parabot and marine_bot_dod already consume it; this file is
-CrossBot's half of the same contract. When that logic is eventually ported into
-`IGameProfile::CollectStrategicGoals` this file goes away, which is why it is a standalone module
-and not part of a profile.
+## objectives.cpp
+
+What a `cstrike`, `dod` or `tfc` map is *for*, read from the map's own entities. It replaced the
+`bot_goal.sma` AMXX plugin for CrossBot's bots. The plugin keeps running for foxbot, Parabot and
+marine_bot_dod, and `crossbot_objectives 0` hands CrossBot back to it, which is the A/B switch.
+
+### Keyed on the map owner, not the bot
+
+`Objectives::DetectMap` runs next to `Teams::DetectMap` and picks a reader from
+`XPlay::GameDir(XPlay::MapOwner())`: `cstrike`/`czero`, `dod`, `tfc`, or none. Every other owner gets
+no reader, the strategic tier sees only mapper-placed `bot_goal` entities, and bots play fun and gather
+exactly as before. The reader cannot live on `IGameProfile` -- that is the *bot's* game, which is `valve`
+on every one of these maps -- so `CollectStrategicGoals` is gone. The offsets it reads are the map
+owner's too; see `doc/games.md`, "Objective offsets belong to the map, not the bot".
+
+### Three tables, not N game modes
+
+A reader fills three tables and decides nothing:
+
+| table | CS | DoD | TFC |
+| --- | --- | --- | --- |
+| **Site**: act on a place | bomb target, rescue zone, VIP safety zone, escape zone, planted C4 | `dod_capture_area`, touchable `dod_control_point`, TNT `func_breakable` | touch `info_tfgoal` that scores |
+| **Payload**: a loose thing to carry | dropped C4 (`weaponbox` + `m_bIsBomb`), free hostage | `dod_object` | `item_tfgoal` |
+| **Carrier**: a player bearing one | `m_bHasC4` (hidden from CT), `m_bIsVIP`, the player a hostage follows | `CObject::m_hOwner` | the item's `pev->owner` / `aiment` |
+
+A site carries per-team attack and defend masks and an optional need, a payload id or group. A carrier
+carries the id and group of what it bears. `BotStrategic::Intents` turns the tables into goals with one
+set of rules, so a VIP, a bomb carrier, a hostage rescuer and a flag runner are the same thing to every
+other bot:
+
+| relation | intent | rank |
+| --- | --- | --- |
+| I carry what a site needs, or the site is urgent | `deliver` / `attack` | 3 |
+| a site with no need; a loose payload my team carries | `attack` / `fetch` | 2 |
+| a teammate carrier; a known enemy carrier; a site whose need nobody can fetch | `escort` / `hunt` / `attack` | 1 |
+| a site or payload my team defends | `defend` | 0 |
+| nothing at all | `roam` to a spawn | 0 |
+
+`BotStrategic::Prioritize` keeps the highest rank present, `KeepCheapestPerEntity` keeps one entrance
+per volume so a brush with eight entrances is not eight tickets, and the ordinary `1/(cost+2)^bias`
+roulette picks among what is left. The hostage cap is the plugin's, `max(1, hostages / live teammates)`.
+The rank rides in `Candidate::payload` above the kind, so the tier needs no new fields.
+
+### Holding
+
+What ends a native hold is the intent disappearing: `ValidFor` re-derives the intents and looks for the
+same entity and kind, so the area being taken, the hostage following, or the flag being picked up all end
+it with no special case. `attack`, `deliver`, `fetch` and `defend` also give up after 30 s and memo the
+entity for 20 s. That rotates defenders between sites and stops an attacker waiting forever on a numcap-2
+area it cannot take alone. `roam` memos its spawn for 60 s on arrival. Hostage `+USE` is pulsed at 0.2 s,
+because a hostage wants a press edge; the planted C4 is held, because defusing is continuous use.
+
+A point goal that is itself solid is placed short of it: 40 units toward the bot for a `+USE` fetch,
+inside the 64-unit use range, and 96 for `defend` and `escort`, falling back to the entity's own point when
+that spot resolves to no area. Aimed at the hostage's own origin, the route ended inside the hostage and a
+CT on cs_assault logged `could not get past hostage_entity` five times before its first `works
+hostage_entity`. `escort` and `hunt` also re-target only after the player has moved 160 units rather than
+32, and a bot that is carrying something never escorts, which is what stopped two carriers on dod_escape
+chasing each other and re-planning at 4 Hz.
+
+### Measured facts the readers rest on
+
+- **CS `pev->team` is the reverse of `CBasePlayer::m_iTeam`.** Every bot on `de_dust2` read
+  `pev->team 2 m_iTeam 1`. The reader keys on `pev->team` (1 = CT, 2 = T), because that is the number
+  `Teams::TeamOf` and every other gate use; ReGameDLL never writes `pev->team` for a player at all.
+  `crossbot_list_objectives` prints both columns so this can be re-checked.
+- **DoD's `point_can_allies_touch` key means the opposite.** A value above 0 sets `m_bAlliesCantTouch`
+  (dod.c:118399), so the reader reads the bool, never the key. On `dod_avalanche` every point is
+  cant-touch for both teams and all five objectives are capture areas.
+- **TFC `items_allowed` is a goal number, not a mask.** `APMeetsCriteria` (tfc.c:111822) passes only if
+  the `item_tfgoal` with that `goal_no` has the activator as `pev->owner`; `has_item_from_group` is the
+  same test on `group_no`. A touch goal fires only with `goal_activation & 1` and `goal_state != 1`
+  (tfc.c:114591), and the reader mirrors the `if_goal_is_*` / `if_group_is_*` conditions against live
+  `goal_state`. That polling is what replaces FoxBot's per-map scripts, which are almost entirely
+  waypoint groups switched on broadcast strings.
+
+### What it does not do
+
+Rocket-only DoD breakables (spawnflag 512) and `dod_point_relay` chains are not read: a `valve` bot has
+no rocket, and a relay only says which point a breakable leads to. VIP detection only sees real `cstrike`
+players. TFC VIP maps get their scoring escape goal but no civilian hunt. There are no roles, flanks or
+team coordination yet; every bot still decides alone.
+
+## bot_strategic.cpp
+
+The top tier. It has two producers: the native intents above, and `bot_goal` entities. With
+`crossbot_objectives 1` on a map `objectives.cpp` reads, a `bot_goal` owned by a player is ignored and
+only ownerless, mapper-placed ones still count; everywhere else both kinds are consumed as they always
+were.
 
 ### The wire protocol
 
@@ -582,9 +663,10 @@ the plugin rewrites it every tick, so there is nothing to latch and nothing to p
 
 Standing still **is** the objective for a DOD capture area or a TFC dropoff, and the plugin is what
 ends the hold: it moves or deletes the goal when the objective flips, and its roaming fallback
-re-rolls once the bot is within 256 units. So `RunArrival` returns false on exactly two conditions —
-the entity died, or it moved further than `kGoalMoveRadius` — and the ordinary `reached goal` path
-then re-selects against wherever it went. Combat needs no special case: `BotCombat::Run` runs earlier
+re-rolls once the bot is within 256 units. So for a `bot_goal` entity `RunArrival` returns false on
+exactly two conditions — the entity died, or it moved further than `kGoalMoveRadius` — and the
+ordinary `reached goal` path then re-selects against wherever it went. Native intents add two exits of
+their own; see `objectives.cpp`, "Holding". Combat needs no special case: `BotCombat::Run` runs earlier
 in `Bot_MoveNav` and clears the goal.
 
 A repath failure or a hard block puts that goal on a 10 s per-bot memo rather than killing the tier,

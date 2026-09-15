@@ -632,6 +632,28 @@ of aborting — unreadable file, unparseable JSON, an absent required field, a `
 `LoadAll` prints it and leaves that game's flag false. A game without usable gamedata is simply not
 playable: `XPlay::Supported` is false for it, and `crossbot_add` refuses it by name.
 
+### Two JSON shapes, one reader
+
+CrossPlay's generator changed the field format under us. Older files (`ricochet-win.json`) carry
+`"pev": 4`; current ones (`valve`, `cstrike`, `dod`) carry `"pev": { "offset": 4, "size": 4, "type":
+"entvars_t*" }`. `LoadOne` used to read only the flat form, so every nested file failed on its very first
+request and **valve bots were quietly unplayable** — the only trace was `no gamedata for 'valve' -- no
+offset for CBaseEntity::pev` near the top of the log. `TokOffset` takes either: an object is looked up
+for its `offset` member, a primitive is read as it stands.
+
+### Objective offsets belong to the map, not the bot
+
+`GameData::LoadMap(gamedir, MapOffsets &)` is a second request list per game — `kCsRequests`,
+`kDodRequests`, `kTfcRequests` — read for the **map owner** only, from `Objectives::DetectMap` at
+`ServerActivate`. They describe entities of the map's game (a `CAreaCapture`, a `CHostage`), so they are
+read through `XPlay::PrivateData(ent, mapOwner)` and never through `g_offsets`, which belongs to whichever
+bot is thinking. A missing field turns objectives off with the reason and the path printed and touches
+nothing else. `tfc-win.json` is not in `crossplay/gamedata/` today, so TFC maps still run on plugin goals.
+
+Two layouts are worth knowing before adding to these lists. `m_hTargetEnt` and `m_hOwner` are `EHANDLE`s,
+a pointer then a serial, and are read with the serial check. `sz_RequiredObjectGroup` and `sz_Group` are
+inline `char[256]`, not `string_t`, so they are copied out with a length bound.
+
 ### Loaded at GameDLLInit, one table per loaded game
 
 `GameData::LoadAll` runs from `GameDLLInit` (`dll_hooks.cpp`), not from `ServerActivate`: offsets

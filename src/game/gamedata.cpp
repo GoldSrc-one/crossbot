@@ -86,14 +86,59 @@ const Request kRequests[] = {
 
 constexpr size_t kRequestCount = ARRAYSIZE(kRequests);
 
+#define CB_MAP(m) offsetof(MapOffsets, m)
+
+const Request kCsRequests[] = {
+	{ "CBasePlayer",   "m_bHasC4",                CB_MAP(cs_plrHasC4) },
+	{ "CBasePlayer",   "m_bIsVIP",                CB_MAP(cs_plrIsVIP) },
+	{ "CBasePlayer",   "m_iTeam",                 CB_MAP(cs_plrTeam) },
+	{ "CBaseMonster",  "m_hTargetEnt",            CB_MAP(cs_monTargetEnt) },
+	{ "CGrenade",      "m_bIsC4",                 CB_MAP(cs_grnIsC4) },
+	{ "CWeaponBox",    "m_bIsBomb",               CB_MAP(cs_boxIsBomb) },
+};
+
+const Request kDodRequests[] = {
+	{ "CControlPoint", "m_iTeam",                 CB_MAP(dod_cpTeam) },
+	{ "CControlPoint", "m_bAlliesCantTouch",      CB_MAP(dod_cpAlliesCantTouch) },
+	{ "CControlPoint", "m_bAxisCantTouch",        CB_MAP(dod_cpAxisCantTouch) },
+	{ "CAreaCapture",  "m_nOwningTeam",           CB_MAP(dod_acOwningTeam) },
+	{ "CAreaCapture",  "m_nAlliesNumCap",         CB_MAP(dod_acAlliesNumCap) },
+	{ "CAreaCapture",  "m_nAxisNumCap",           CB_MAP(dod_acAxisNumCap) },
+	{ "CAreaCapture",  "m_bAlliesCanCap",         CB_MAP(dod_acAlliesCanCap) },
+	{ "CAreaCapture",  "m_bAxisCanCap",           CB_MAP(dod_acAxisCanCap) },
+	{ "CAreaCapture",  "m_bRequiresObject",       CB_MAP(dod_acRequiresObject) },
+	{ "CAreaCapture",  "sz_RequiredObjectGroup",  CB_MAP(dod_acRequiredGroup) },
+	{ "CObject",       "m_iTeam",                 CB_MAP(dod_objTeam) },
+	{ "CObject",       "sz_Group",                CB_MAP(dod_objGroup) },
+	{ "CObject",       "m_hOwner",                CB_MAP(dod_objOwner) },
+};
+
+const Request kTfcRequests[] = {
+	{ "CBaseEntity",   "team_no",                 CB_MAP(tfc_teamNo) },
+	{ "CBaseEntity",   "goal_no",                 CB_MAP(tfc_goalNo) },
+	{ "CBaseEntity",   "group_no",                CB_MAP(tfc_groupNo) },
+	{ "CBaseEntity",   "goal_state",              CB_MAP(tfc_goalState) },
+	{ "CBaseEntity",   "owned_by",                CB_MAP(tfc_ownedBy) },
+	{ "CBaseEntity",   "goal_activation",         CB_MAP(tfc_goalActivation) },
+	{ "CBaseEntity",   "items_allowed",           CB_MAP(tfc_itemsAllowed) },
+	{ "CBaseEntity",   "has_item_from_group",     CB_MAP(tfc_hasItemFromGroup) },
+	{ "CBaseEntity",   "if_goal_is_active",       CB_MAP(tfc_ifGoalActive) },
+	{ "CBaseEntity",   "if_goal_is_inactive",     CB_MAP(tfc_ifGoalInactive) },
+	{ "CBaseEntity",   "if_goal_is_removed",      CB_MAP(tfc_ifGoalRemoved) },
+	{ "CBaseEntity",   "if_group_is_active",      CB_MAP(tfc_ifGroupActive) },
+	{ "CBaseEntity",   "if_group_is_inactive",    CB_MAP(tfc_ifGroupInactive) },
+	{ "CBaseEntity",   "if_group_is_removed",     CB_MAP(tfc_ifGroupRemoved) },
+	{ "CBaseEntity",   "increase_team",           CB_MAP(tfc_increaseTeam) },
+};
+
 GameOffsets g_gameOffsets[XPlay::kMaxGames];
 bool g_gameLoaded[XPlay::kMaxGames];
 
 char g_why[512];
 
-int *SlotPtr(GameOffsets &offsets, size_t slot)
+int *SlotPtr(void *out, size_t slot)
 {
-	return reinterpret_cast<int *>(reinterpret_cast<char *>(&offsets) + slot);
+	return reinterpret_cast<int *>(reinterpret_cast<char *>(out) + slot);
 }
 
 bool TokEq(const char *js, const jsmntok_t &tok, const char *name)
@@ -148,6 +193,13 @@ bool TokInt(const char *js, const jsmntok_t &tok, int &out)
 	return true;
 }
 
+bool TokOffset(const std::vector<jsmntok_t> &toks, const char *js, int i, int &out)
+{
+	if (toks[i].type == JSMN_OBJECT)
+		i = FindMember(toks, js, i, "offset");
+	return i >= 0 && TokInt(js, toks[i], out);
+}
+
 bool ReadWholeFile(const char *path, std::vector<char> &out)
 {
 	FILE *f = fopen(path, "rb");
@@ -179,10 +231,10 @@ const char *Why(const char *fmt, ...)
 	return g_why;
 }
 
-const char *LoadOne(const char *path, GameOffsets &out)
+const char *LoadOne(const char *path, const Request *requests, size_t count, void *out)
 {
-	for (size_t r = 0; r < kRequestCount; ++r)
-		*SlotPtr(out, kRequests[r].slot) = -1;
+	for (size_t r = 0; r < count; ++r)
+		*SlotPtr(out, requests[r].slot) = -1;
 
 	std::vector<char> js;
 	if (!ReadWholeFile(path, js))
@@ -212,9 +264,9 @@ const char *LoadOne(const char *path, GameOffsets &out)
 		i = SkipValue(toks, key);
 
 		int fields = -1;
-		for (size_t r = 0; r < kRequestCount; ++r)
+		for (size_t r = 0; r < count; ++r)
 		{
-			if (!TokEq(base, toks[key], kRequests[r].cls))
+			if (!TokEq(base, toks[key], requests[r].cls))
 				continue;
 
 			if (fields < 0)
@@ -224,25 +276,31 @@ const char *LoadOne(const char *path, GameOffsets &out)
 					break;
 			}
 
-			int field = FindMember(toks, base, fields, kRequests[r].field);
+			int field = FindMember(toks, base, fields, requests[r].field);
 			int value = 0;
-			if (field < 0 || !TokInt(base, toks[field], value))
+			if (field < 0 || !TokOffset(toks, base, field, value))
 				continue;
 
-			*SlotPtr(out, kRequests[r].slot) = value;
+			*SlotPtr(out, requests[r].slot) = value;
 		}
 	}
 
-	for (size_t r = 0; r < kRequestCount; ++r)
+	for (size_t r = 0; r < count; ++r)
 	{
-		if (!kRequests[r].optional && *SlotPtr(out, kRequests[r].slot) < 0)
-			return Why("no offset for %s::%s", kRequests[r].cls, kRequests[r].field);
+		if (!requests[r].optional && *SlotPtr(out, requests[r].slot) < 0)
+			return Why("no offset for %s::%s", requests[r].cls, requests[r].field);
 	}
 
-	if (out.pev != 4)
-		return Why("CBaseEntity::pev is at %d, but the plugin assumes 4", out.pev);
-
 	return nullptr;
+}
+
+const char *Platform()
+{
+#if defined(_WIN32)
+	return "win";
+#else
+	return "linux";
+#endif
 }
 
 }
@@ -295,11 +353,7 @@ void LoadAll()
 	char hyperdir[256] = { 0 };
 	g_engfuncs.pfnGetGameDir(hyperdir);
 
-#if defined(_WIN32)
-	const char *platform = "win";
-#else
-	const char *platform = "linux";
-#endif
+	const char *platform = Platform();
 
 	char msg[900];
 	for (int iGame = 0; iGame < XPlay::NumGames(); ++iGame)
@@ -309,7 +363,9 @@ void LoadAll()
 		char path[512];
 		snprintf(path, sizeof(path), "%s/gamedata/%s-%s.json", hyperdir, gamedir, platform);
 
-		const char *why = LoadOne(path, g_gameOffsets[iGame]);
+		const char *why = LoadOne(path, kRequests, kRequestCount, &g_gameOffsets[iGame]);
+		if (!why && g_gameOffsets[iGame].pev != 4)
+			why = Why("CBaseEntity::pev is at %d, but the plugin assumes 4", g_gameOffsets[iGame].pev);
 		if (why)
 		{
 			snprintf(msg, sizeof(msg), "CrossBot: no gamedata for '%s' -- %s (%s).\n", gamedir, why, path);
@@ -322,6 +378,47 @@ void LoadAll()
 			path, static_cast<int>(kRequestCount));
 		SERVER_PRINT(msg);
 	}
+}
+
+const char *LoadMap(const char *gamedir, MapOffsets &out)
+{
+	out = MapOffsets();
+
+	const Request *requests = nullptr;
+	size_t count = 0;
+	if (CB_STRICMP(gamedir, "cstrike") == 0 || CB_STRICMP(gamedir, "czero") == 0)
+	{
+		requests = kCsRequests;
+		count = ARRAYSIZE(kCsRequests);
+	}
+	else if (CB_STRICMP(gamedir, "dod") == 0)
+	{
+		requests = kDodRequests;
+		count = ARRAYSIZE(kDodRequests);
+	}
+	else if (CB_STRICMP(gamedir, "tfc") == 0)
+	{
+		requests = kTfcRequests;
+		count = ARRAYSIZE(kTfcRequests);
+	}
+	else
+	{
+		return Why("no objective offsets are defined for this game");
+	}
+
+	char hyperdir[256] = { 0 };
+	g_engfuncs.pfnGetGameDir(hyperdir);
+
+	char path[512];
+	snprintf(path, sizeof(path), "%s/gamedata/%s-%s.json", hyperdir, gamedir, Platform());
+
+	const char *why = LoadOne(path, requests, count, &out);
+	if (!why)
+		return nullptr;
+
+	char reason[512];
+	snprintf(reason, sizeof(reason), "%s", why);
+	return Why("%s (%s)", reason, path);
 }
 
 }

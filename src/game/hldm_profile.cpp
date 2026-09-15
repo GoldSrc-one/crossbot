@@ -416,11 +416,6 @@ bool CHLDMProfile::IsFunTerminal(edict_t *ent) const
 	return false;
 }
 
-void CHLDMProfile::CollectStrategicGoals(const CBot &, const Nav::NavMesh &,
-	std::vector<BotGoal::Candidate> &) const
-{
-}
-
 IGameProfile *GameProfile_Detect(const char *gamedir)
 {
 	static CHLDMProfile hldmProfile;
