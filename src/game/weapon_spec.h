@@ -49,6 +49,10 @@ enum WeaponQuirks : unsigned int
 	WPN_Q_KEEP_AIMING   = 1u << 5,
 	WPN_Q_HOMING        = 1u << 6,
 	WPN_Q_STICKY        = 1u << 7,
+	WPN_Q_LASER_ON      = 1u << 8,
+	WPN_Q_SPINUP        = 1u << 9,
+	WPN_Q_AIM_FEET      = 1u << 10,
+	WPN_Q_BRACE         = 1u << 11,
 };
 
 struct WeaponMode

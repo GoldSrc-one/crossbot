@@ -13,7 +13,6 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_weapons.h"
-#include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
 #include "../nav/path_follower.h"
@@ -104,18 +103,21 @@ namespace
 
 	int WantWeaponId(const CBot &bot)
 	{
-		int melee = g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
+		if (!g_pGameProfile)
+			return ActiveWeaponId(bot);
+
+		int melee = g_pGameProfile->MeleeWeapon();
 
 		if (bot.brk.standoff > 0.f)
 		{
 			int active = ActiveWeaponId(bot);
-			if (active != 0 && active != melee)
+			if (active != 0 && !g_pGameProfile->IsMeleeWeapon(active))
 				return active;
 
 			const BotInventory &inv = bot.inventory;
 			for (int i = 0; i < inv.count; ++i)
 			{
-				if (inv.weapons[i].id != 0 && inv.weapons[i].id != melee)
+				if (inv.weapons[i].id != 0 && !g_pGameProfile->IsMeleeWeapon(inv.weapons[i].id))
 					return inv.weapons[i].id;
 			}
 			return active;
@@ -135,7 +137,7 @@ namespace
 		if (!spec || !spec->classname)
 			return NULL;
 
-		return FakeCmd::Run(bot.pEdict, spec->classname) ? spec->classname : NULL;
+		return g_pGameProfile->SelectWeapon(bot.pEdict, *spec) ? spec->classname : NULL;
 	}
 
 	void RestoreWeapon(CBot &bot)

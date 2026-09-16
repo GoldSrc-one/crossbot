@@ -55,6 +55,9 @@ void Read(edict_t *player, BotInventory &out)
 	if (!player || player->free || !CBotPrivateData(player))
 		return;
 
+	if (g_pGameProfile && g_pGameProfile->ReadInventory(player, out))
+		return;
+
 	void *priv = CBotPrivateData(player);
 
 	out.nextAttack = Peek<float>(priv, g_offsets.mon_flNextAttack);
@@ -66,7 +69,8 @@ void Read(edict_t *player, BotInventory &out)
 	void *active = Peek<void *>(priv, g_offsets.plr_pActiveItem);
 	void *const *items = reinterpret_cast<void *const *>(reinterpret_cast<char *>(priv) + g_offsets.plr_rgpPlayerItems);
 
-	for (int slot = 0; slot < MAX_ITEM_TYPES; ++slot)
+	int slots = g_pGameProfile ? g_pGameProfile->ItemSlots() : MAX_ITEM_TYPES;
+	for (int slot = 0; slot < slots; ++slot)
 	{
 		void *item = items[slot];
 		for (int guard = 0; item && guard < kMaxBotWeapons; ++guard)
@@ -96,6 +100,8 @@ void Read(edict_t *player, BotInventory &out)
 				w.guidedCount = Peek<int>(item, g_offsets.rpg_cActiveRockets);
 			if (spec && (spec->primary.quirks & WPN_Q_HIDDEN_STATE) != 0 && g_offsets.ent_chargeReady >= 0)
 				w.chargeReady = Peek<int>(item, g_offsets.ent_chargeReady);
+			if (spec && (spec->secondary.quirks & WPN_Q_LASER_ON) != 0 && g_offsets.eagle_iLaserActive >= 0)
+				w.laserActive = Peek<int>(item, g_offsets.eagle_iLaserActive);
 
 			if (item == active)
 				out.activeIndex = out.count;
@@ -110,6 +116,10 @@ int ActiveWeaponId(edict_t *player)
 {
 	if (!player || player->free || !CBotPrivateData(player))
 		return 0;
+
+	BotInventory own;
+	if (g_pGameProfile && g_pGameProfile->ReadInventory(player, own))
+		return (own.activeIndex >= 0 && own.activeIndex < own.count) ? own.weapons[own.activeIndex].id : 0;
 
 	void *item = Peek<void *>(CBotPrivateData(player), g_offsets.plr_pActiveItem);
 	if (!item)

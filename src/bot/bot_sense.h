@@ -127,6 +127,8 @@ float Decay();
 
 Vector EntitySoundOrigin(const edict_t *ent);
 
+bool NoTarget(const edict_t *ent);
+
 void Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_t *ent);
 
 void Hear(CBot &bot, const edict_t *src, const Vector &pos, float volume, float attenuation);

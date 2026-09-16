@@ -213,13 +213,21 @@ the grenade and the snark, and the `AIM_LEAD` flight-time gate caps the grenade 
 snark near 300. When nothing survives, `PickAmbush` returns -1 and the frame falls through to ordinary
 selection -- which is exactly "blast him with whatever is in hand", written by not writing it.
 
+**Three passes, in order: reach, thrown, last.** `PASS_REACH` is melee with a finite `range`, which is
+the old contact pass; it had to stop being "any melee" once the grapple joined the melee set, because
+its range is 0 and `BuildChoices` offers it at every distance -- the ambush would have opened with it
+every time. `PASS_THROWN` is the grenade, snark and penguin. `PASS_LAST` is `AMBUSH_GRAPPLE` alone,
+with no distance or splash gate: out of grenades but holding a grapple, the bot draws it at any range
+and fires the tongue.
+
 ### Mirroring an opponent who draws melee
 
 If the enemy has melee out, the bot draws melee too and fights the duel properly: close, swing, back
 off, close again. Two flags carry it, and neither latches -- unlike `enemyAware`, a duel is over the
 moment the opponent draws a gun.
 
-`enemyMelee` is `BotWeapons::ActiveWeaponId(enemy) == MeleeWeapon()`. That reader is new and
+`enemyMelee` is `IsMeleeWeapon(BotWeapons::ActiveWeaponId(enemy))` -- a set, since OP4 has a knife,
+a pipewrench and a grapple beside the crowbar (`doc/games.md`, `gearbox_profile.cpp`). That reader is new and
 deliberately not `BotWeapons::Read`: the full walk exists to build an inventory, and it validates
 every slot through `ItemEdict`, which calls `GameData::Fatal` on a bad pointer. That is a reasonable
 trade once a frame for a bot's own inventory and an unreasonable one for a question this narrow, so
@@ -270,7 +278,9 @@ a bot charging bare-handed. Three states:
 | `dist > range * 0.8` | toward the enemy |
 | otherwise | stand still and swing |
 
-The reach comes from the melee spec's own `primary.range`, never from a constant here. 0.4s is a
+The reach comes from the *held* melee spec's own `primary.range`, never from a constant here. A range
+of 0 is the grapple's "unlimited": the charging row is skipped, so a grapple duel only swings and backs
+off, and the tongue does the closing. 0.4s is a
 little under the crowbar's own refire, so the bot is back in range for the next swing. In practice
 `swinging` is the rarest of the three: the bot fires as soon as it is inside 32 units, which puts it
 straight into the backoff window.
@@ -756,6 +766,12 @@ lone `charging` bool when a second and third weapon needed the same shape:
 | `COMMIT_CHARGE` | press and hold | — | the shot, or the aim gate | `chargeMax - kChargeSafety` |
 | `COMMIT_THROW` | press one frame | `m_flStartThrow != 0` | it returns to 0 | `kTapTimeout` |
 | `COMMIT_GUIDE` | press **on a ready weapon** | `m_cActiveRockets > 0` | it returns to 0 | `kGuideMax` |
+| `COMMIT_SPINUP` | press one frame | — (time only) | `chargeFull + kSpinupSlack` elapsed | the same |
+
+`COMMIT_SPINUP` is the displacer's: its ball leaves about a second after the press, aimed along the
+view at that moment. Nothing observable marks the launch, so the commit is purely timed. While it runs
+the buttons stay released, the aim keeps tracking (no `ClearAim` when the target drops out, the same
+exception as guiding), and `AimBase` leads the target by `chargeFull` on top of the flight time.
 
 The two new ones share a structure the charge does not need: the bot **cannot see its own action
 immediately**. `CHandGrenade::PrimaryAttack` pulls the pin and returns; the grenade leaves half a
@@ -1026,6 +1042,52 @@ It takes `CBot &` instead of `edict_t *` for that reason alone.
 The jump split means a held `IN_ATTACK` can span two `pfnRunPlayerMove` calls in one frame. That is
 harmless, and it is why nothing here depends on button *edges* — which is just as well, since
 `ITEM_FLAG_NOAUTOFIRE` does not exist in this SDK and no weapon reads `m_afButtonPressed`.
+
+### Brace: stop and duck to fire
+
+`WPN_Q_BRACE` is for guns whose cone depends on the shooter's stance. In OP4 that is only the M249, and
+it reads the command's *button bits*, not velocity: `IN_DUCK` 3°, any of `IN_FORWARD/BACK/MOVELEFT/
+MOVERIGHT` 15°, otherwise 6°. The combat drive sets those bits whenever it strafes, so a strafing bot
+used to spray at 15°. CS and DoD weapons are the expected next users.
+
+`BotFire::Brace` is called from `Bot_RunPlayerMove` right after `Buttons`, for the same reason the
+trigger lives there: it is the one funnel every movement path goes through, and `Think` has already
+decided this frame's weapon and mode. When it answers yes, the move is zeroed, the four move bits
+are cleared, and `IN_DUCK` is added if ducking is allowed.
+
+It answers yes only when all of these hold:
+
+- the bot wants to fire: a mode is chosen, the aim is valid, and the mode carries the quirk;
+- it is on the ground, not on a ladder (`MOVETYPE_FLY`) and not swimming;
+- nothing asked for a jump this frame;
+- the weapon will be ready by the time the bot can stop: not reloading, and the larger of the mode's
+  timer and the player's `m_flNextAttack` is at most `NavPlan::StopTime(speed2D)`.
+
+**The readiness rule is what stops it flickering.** `StopTime` is HL ground friction, above
+`stopSpeed` exponential and below it linear: `ln(v/stop)/f + 1/f`, about 0.54 s from 320 u/s. A
+stopped bot has a stopping time of 0, so any real wait (a reload, a slow cycle) releases it, and it
+brakes again exactly when the remaining wait falls under its current stopping time. The M249's 0.067 s
+cycle keeps it braced through a burst; its 3.78 s reload lets it move.
+
+**Ducking needs a clear line from the ducked eye.** A trace from the eye 34 units lower (or the current
+eye, if already ducked) to `fire.targetPoint` decides it, cached for 0.1 s. Blocked means the bot still
+stops but stays standing, so waist-high cover does not blind it. `crossbot_fire_status` reports
+`bracing=1` (ducked) or `2` (standing) and a per-life `braces=` count; `crossbot_brace 0` turns it off
+for A/B runs.
+
+### Aiming at the feet, and throwing from a moving frame
+
+`AimBase` shifts the predicted point before any solve. `WPN_Q_AIM_FEET` drops it to the target's
+feet, the height of its origin plus `mins.z`, measured against the sensed point so the offset holds
+for whichever bone was sampled. The displacer needs this because a direct hit only teleports the
+target. `WPN_Q_SPINUP` pushes the point ahead by `chargeFull` seconds of target velocity.
+
+A plain arc with `WPN_Q_INHERIT_VEL` (the spore grenade: `800 * forward + player velocity`, gravity 1)
+is solved in the thrower's frame. There the projectile leaves at `dir * speed`, and the target moves at
+`vel - botVel`, so `SolveArcLead` is called with that relative velocity. The world impact is the
+answer plus `botVel * flight`, and the launch handed to the simulator is `dir * speed + botVel`.
+Gravity is the same in both frames, so the solve itself is untouched. `ArcOnTarget` adds the same
+drift. The MP5 grenade carries no `INHERIT_VEL` and takes the old path unchanged.
 
 ### The shot counter counts the game DLL, not the plugin
 

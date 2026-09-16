@@ -291,7 +291,7 @@ namespace
 
 	bool Candidate(const CBot &bot, edict_t *ent)
 	{
-		if (!ent || ent == bot.pEdict || !CBotIsLivePlayer(ent))
+		if (!ent || ent == bot.pEdict || !CBotIsLivePlayer(ent) || BotSense::NoTarget(ent))
 			return false;
 		if (g_pGameProfile && g_pGameProfile->IsDead(ent))
 			return false;
@@ -313,7 +313,7 @@ namespace
 	{
 		if (!ent || ent->free || ent == bot.pEdict || !g_pGameProfile)
 			return false;
-		if ((ent->v.flags & FL_MONSTER) == 0)
+		if ((ent->v.flags & FL_MONSTER) == 0 || BotSense::NoTarget(ent))
 			return false;
 		if (g_pGameProfile->IsDead(ent))
 			return false;
@@ -373,7 +373,7 @@ namespace
 	float LiveWeight(const BotSense::Suspicion &entry, float decay)
 	{
 		edict_t *ent = entry.ent.Get();
-		if (!ent)
+		if (!ent || BotSense::NoTarget(ent))
 			return 0.f;
 		if (entry.kind != BotSense::KIND_OTHER && g_pGameProfile && g_pGameProfile->IsDead(ent))
 			return 0.f;
@@ -623,7 +623,7 @@ namespace
 		BotSense::State &sense = bot.sense;
 
 		edict_t *enemy = sense.enemy.Get();
-		if (enemy && (g_pGameProfile->IsDead(enemy) ||
+		if (enemy && (g_pGameProfile->IsDead(enemy) || BotSense::NoTarget(enemy) ||
 			gpGlobals->time - sense.enemyTime > BotSense::Decay()))
 		{
 			BotSense::ForgetEnemy(bot);
@@ -808,6 +808,11 @@ Vector BotSense::EntitySoundOrigin(const edict_t *ent)
 	return ent->v.origin + (ent->v.mins + ent->v.maxs) * 0.5f;
 }
 
+bool BotSense::NoTarget(const edict_t *ent)
+{
+	return ent && (ent->v.flags & FL_NOTARGET) != 0;
+}
+
 void BotSense::ResetBoneCache()
 {
 	for (size_t i = 0; i < kMaxBoneSets; ++i)
@@ -881,7 +886,7 @@ const char *BotSense::KeepName(VisionKeep keep)
 
 void BotSense::Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_t *ent)
 {
-	if (!ent || ent->free)
+	if (!ent || ent->free || NoTarget(ent))
 		return;
 
 	State &sense = bot.sense;

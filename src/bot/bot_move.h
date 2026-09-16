@@ -36,7 +36,7 @@ bool Bot_FallDamage(const CBot &bot);
 
 WeaponRangeClass Bot_RangeClass(const CBot &bot);
 
-NavPlan::RangeBias Bot_RangeBias(const CBot &bot);
+NavPlan::RangeBias Bot_RangeBias(const CBot &bot, bool readiness = true);
 
 void Bot_NoteMoveMaxSpeed(int playerIndex, float maxspeed);
 

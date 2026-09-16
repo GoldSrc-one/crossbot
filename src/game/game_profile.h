@@ -56,6 +56,8 @@ enum AmbushKind
 {
 	AMBUSH_GRENADE = 0,
 	AMBUSH_SNARK,
+	AMBUSH_PENGUIN,
+	AMBUSH_GRAPPLE,
 	AMBUSH_COUNT,
 };
 
@@ -97,6 +99,16 @@ public:
 
 	virtual const WeaponSpec *GetWeaponSpec(int id) const = 0;
 
+	virtual int WeaponSlotCount() const = 0;
+
+	virtual const WeaponSpec *WeaponSlot(int slot) const = 0;
+
+	virtual int ItemSlots() const = 0;
+
+	virtual bool ReadInventory(edict_t *player, BotInventory &out) const = 0;
+
+	virtual bool SelectWeapon(edict_t *player, const WeaponSpec &spec) const = 0;
+
 	virtual bool ModeAvailable(edict_t *player, const WeaponSpec &spec, const WeaponMode &mode) const = 0;
 
 	virtual const char *AmmoEntity(int weaponId, WeaponAmmo pool) const = 0;
@@ -104,6 +116,8 @@ public:
 	virtual bool ItemPreferred(edict_t *ent, ItemKind kind) const = 0;
 
 	virtual int MeleeWeapon() const = 0;
+
+	virtual bool IsMeleeWeapon(int id) const = 0;
 
 	virtual int AmbushWeapon(AmbushKind kind) const = 0;
 

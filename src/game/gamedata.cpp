@@ -49,6 +49,7 @@ const Request kRequests[] = {
 	{ "CBasePlayerWeapon", "m_flTimeWeaponIdle",      CB_OFF(wpn_flTimeWeaponIdle) },
 
 	{ "CRpg",              "m_cActiveRockets",        CB_OFF(rpg_cActiveRockets), true },
+	{ "CEagle",            "m_iLaserActive",          CB_OFF(eagle_iLaserActive), true },
 
 	{ "CBaseMonster",      "m_flNextAttack",          CB_OFF(mon_flNextAttack) },
 	{ "CBaseMonster",      "m_hEnemy",                CB_OFF(mon_hEnemy) },
@@ -58,6 +59,12 @@ const Request kRequests[] = {
 	{ "CBasePlayer",       "m_rgAmmo",                CB_OFF(plr_rgAmmo) },
 	{ "CBasePlayer",       "m_pTank",                 CB_OFF(plr_pTank) },
 	{ "CBasePlayer",       "m_iPowerups",             CB_OFF(plr_iPowerups), true },
+	{ "CBasePlayer",       "m_iQuakeItems",           CB_OFF(plr_iQuakeItems), true },
+	{ "CBasePlayer",       "m_iQuakeWeapon",          CB_OFF(plr_iQuakeWeapon), true },
+	{ "CBasePlayer",       "m_iAmmoShells",           CB_OFF(plr_iAmmoShells), true },
+	{ "CBasePlayer",       "m_iAmmoNails",            CB_OFF(plr_iAmmoNails), true },
+	{ "CBasePlayer",       "m_iAmmoRockets",          CB_OFF(plr_iAmmoRockets), true },
+	{ "CBasePlayer",       "m_iAmmoCells",            CB_OFF(plr_iAmmoCells), true },
 
 	{ "CBaseToggle",       "m_toggle_state",          CB_OFF(tog_toggleState) },
 	{ "CBaseToggle",       "m_flWait",                CB_OFF(tog_flWait) },
@@ -194,13 +201,6 @@ bool TokInt(const char *js, const jsmntok_t &tok, int &out)
 	return true;
 }
 
-bool TokOffset(const std::vector<jsmntok_t> &toks, const char *js, int i, int &out)
-{
-	if (toks[i].type == JSMN_OBJECT)
-		i = FindMember(toks, js, i, "offset");
-	return i >= 0 && TokInt(js, toks[i], out);
-}
-
 bool ReadWholeFile(const char *path, std::vector<char> &out)
 {
 	FILE *f = fopen(path, "rb");
@@ -279,7 +279,7 @@ const char *LoadOne(const char *path, const Request *requests, size_t count, voi
 
 			int field = FindMember(toks, base, fields, requests[r].field);
 			int value = 0;
-			if (field < 0 || !TokOffset(toks, base, field, value))
+			if (field < 0 || !TokInt(base, toks[field], value))
 				continue;
 
 			*SlotPtr(out, requests[r].slot) = value;

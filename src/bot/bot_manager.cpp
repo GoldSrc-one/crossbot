@@ -1072,7 +1072,8 @@ void PrintFireStatus()
 			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d "
 			"stickyshots=%d uphill=%d selfveto=%d aimveto=%d targetaims=%d "
 			"switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
-			"idlereload=%d ambush=%d duel=%d target=%s\n",
+			"idlereload=%d ambush=%d duel=%d spinups=%d lasers=%d braces=%d bracing=%d "
+			"target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
 			fire.leadShots, fire.chargeShots, fire.arcShots, fire.throwShots, fire.guides,
@@ -1080,6 +1081,7 @@ void PrintFireStatus()
 			fire.uphillVetoes, fire.selfVetoes, fire.aimVetoes, fire.targetAims,
 			fire.switches, fire.reloads,
 			fire.emptySwitches, fire.idleSwitches, fire.idleReloads, fire.ambushes, fire.duels,
+			fire.spinups, fire.lasers, fire.braces, fire.bracing,
 			target ? CBotTargetNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}

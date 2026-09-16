@@ -19,7 +19,6 @@
 #include "../game/game_profile.h"
 #include "../game/gamedata.h"
 #include "../game/give_item.h"
-#include "../game/hldm_weapons.h"
 #include "../game/objectives.h"
 #include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
@@ -406,6 +405,10 @@ namespace
 			{ WPN_Q_KEEP_AIMING,   "keepaiming" },
 			{ WPN_Q_STICKY,        "sticky" },
 			{ WPN_Q_HOMING,        "homing" },
+			{ WPN_Q_LASER_ON,      "laseron" },
+			{ WPN_Q_SPINUP,        "spinup" },
+			{ WPN_Q_AIM_FEET,      "aimfeet" },
+			{ WPN_Q_BRACE,         "brace" },
 		};
 
 		out[0] = '\0';
@@ -515,25 +518,36 @@ namespace
 		int shown = 0;
 		int broken = 0;
 
-		for (int slot = 0; slot < kHLDMWeaponSlots; ++slot)
+		for (int game = 0; game < XPlay::NumGames(); ++game)
 		{
-			const WeaponSpec *raw = HLDM_WeaponSlot(slot);
-			if (!raw || !raw->classname)
+			const IGameProfile *profile = XPlay::ProfileFor(game);
+			if (!profile)
 				continue;
 
-			if (raw->id != slot)
+			char msg[192];
+			snprintf(msg, sizeof(msg), "CrossBot: '%s' (%s) weapon table\n",
+				XPlay::GameDir(game), profile->GetName());
+			SERVER_PRINT(msg);
+
+			for (int slot = 0; slot < profile->WeaponSlotCount(); ++slot)
 			{
-				char msg[192];
-				snprintf(msg, sizeof(msg),
-					"CrossBot: TABLE BROKEN -- slot %d holds id %d (%s)\n",
-					slot, raw->id, raw->classname);
-				SERVER_PRINT(msg);
-				++broken;
-				continue;
-			}
+				const WeaponSpec *raw = profile->WeaponSlot(slot);
+				if (!raw || !raw->classname)
+					continue;
 
-			PrintWeaponSpec(*raw);
-			++shown;
+				if (raw->id != slot)
+				{
+					snprintf(msg, sizeof(msg),
+						"CrossBot: TABLE BROKEN -- slot %d holds id %d (%s)\n",
+						slot, raw->id, raw->classname);
+					SERVER_PRINT(msg);
+					++broken;
+					continue;
+				}
+
+				PrintWeaponSpec(*raw);
+				++shown;
+			}
 		}
 
 		char msg[192];

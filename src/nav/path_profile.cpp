@@ -131,6 +131,15 @@ float AccelForward(float v0, float dist, float accel, float friction, float stop
 	return lo;
 }
 
+float StopTime(float speed, float friction, float stopSpeed)
+{
+	if (speed <= 0.f || friction <= 0.f || stopSpeed <= 0.f)
+		return 0.f;
+	if (speed <= stopSpeed)
+		return speed / (stopSpeed * friction);
+	return std::log(speed / stopSpeed) / friction + 1.f / friction;
+}
+
 float AccelDistance(float v0, float v1, float accel, float friction, float stopSpeed)
 {
 	float v = std::max(v0, 0.f);

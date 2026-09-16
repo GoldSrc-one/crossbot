@@ -38,6 +38,7 @@ file(GLOB CROSSBOT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/bot/*.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/*.cpp
     ${CMAKE_SOURCE_DIR}/src/game/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/*/*.cpp
     ${CMAKE_SOURCE_DIR}/src/meta/*.cpp
 )
 

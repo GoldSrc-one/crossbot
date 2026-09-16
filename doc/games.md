@@ -176,8 +176,14 @@ each names a broken rule:
 - `crossplay.cpp` holds `g_profiles[kMaxGames]`, filled by `XPlay::DetectProfiles()` at
   `ServerActivate` via `GameProfile_Detect(gamedir)`. `g_pGameProfile` is the active one.
 - A game is **playable** (`XPlay::Supported`) only with both. `crossbot_add` refuses anything else and
-  `XPlay::PickRandomSupported()` draws only from that set. Today only `valve` qualifies, because
-  `CHLDMProfile::Detect` matches that directory alone.
+  `XPlay::PickRandomSupported()` draws only from that set. Today `valve`, `ricochet`, `gearbox` and
+  `dmc` qualify, one profile each.
+
+The profiles live one directory per game: `src/game/hldm/`, `src/game/ricochet/`, `src/game/gearbox/`,
+`src/game/dmc/`.
+`src/game/game_profile.cpp` holds `GameProfile_Detect`, the only file that names them all. Anything
+that is not a profile — teams, objectives, gamedata — stays in `src/game/` itself, because it keys off
+the map's game rather than the bot's.
 
 Each `CBot` carries `gameDll`. It is set once in `AddBot` and is the key to everything above.
 
@@ -187,9 +193,22 @@ Each `CBot` carries `gameDll`. It is set once in `AddBot` and is the key to ever
 
 ### IGameProfile
 The mod-specific half of the bot. Everything a bot needs to know that is not geometry lives behind
-this interface, so `src/bot/` never names a Half-Life classname or constant. `CHLDMProfile` and
-`CRicochetProfile` (which derives from it) are the implementations, and `GameProfile_Detect` returns
-function-local statics.
+this interface, so `src/bot/` never names a Half-Life classname or constant. `CHLDMProfile` is the
+base implementation; `CRicochetProfile` and `CGearboxProfile` derive from it. `GameProfile_Detect`
+returns function-local statics.
+
+`WeaponSlotCount()` / `WeaponSlot(i)` walk the raw table, empty and broken rows included, for the two
+places that need every weapon rather than one id: `ItemPreferred` (which weapon's ammo counts as
+preferred) and `crossbot_weaponspec`. `CHLDMProfile` used to call `HLDM_WeaponSpec` and
+`HLDM_WeaponSlot` directly from `EvaluateCombat`, `AmmoEntity` and `ItemPreferred`, which made every
+derived profile silently see HL's table; all three now go through the virtuals.
+
+`ItemSlots()` is how many `m_rgpPlayerItems` buckets the game's `CBasePlayer` has. HL has 6
+(`MAX_ITEM_TYPES` in the SDK the plugin compiles against), OP4 has 7. It is a profile value rather than
+a gamedata one because the JSON is a bare offset per field and carries no array sizes.
+
+`IsMeleeWeapon(id)` is the set, `MeleeWeapon()` the one to prefer. HLDM's set is the crowbar alone;
+see `gearbox_profile.cpp` below for why the distinction exists.
 
 `g_pGameProfile` is a real global (defined in `bot_manager.cpp`) rather than a `BotManager` accessor
 because it is read on nearly every item decision; an accessor bought nothing and cost a call.
@@ -220,8 +239,9 @@ bot's own live charges — and `bot_avoid.cpp` needs the second to recognise a b
 no deployables returns 0 and null and the whole feature idles.
 
 `AmbushWeapon(kind)` follows the same rule for a third role: what to open with against someone who
-has not noticed the bot yet. `AmbushKind` is `AMBUSH_GRENADE` / `AMBUSH_SNARK`, which in HLDM are the
-hand grenade and the snark.
+has not noticed the bot yet. `AmbushKind` is `AMBUSH_GRENADE` / `AMBUSH_SNARK` / `AMBUSH_PENGUIN`
+(the thrown group) and `AMBUSH_GRAPPLE` (the last resort). HLDM answers the first two with the hand
+grenade and the snark and 0 for the rest; gearbox adds the penguin and the grapple.
 
 `ApplyAddArg(iGame, pEdict, arg, out, size)` is the profile's claim on the optional third
 `crossbot_add` argument. The command does not interpret it — it maps `*` and the empty string to null
@@ -451,6 +471,136 @@ waiting to respawn is `EF_NODRAW`, which the item scan already skips.
 
 Ricochet's `CBasePlayer::PostThink` has the fall-damage call commented out, so `FallDamage()` is false.
 
+## gearbox_profile.cpp
+
+`CGearboxProfile` is Opposing Force **deathmatch**. It derives from `CHLDMProfile` because OP4's
+multiplayer is HLDM with ten more weapons: the spawn loadout is the same crowbar and glock, and the HL
+weapons (ids 1–15) have the same timings and speeds as in the HL SDK. CTF (`op4ctf_*`: its own
+`m_iTeamNum` teams, flags, a pipewrench/eagle/grapple loadout) is not covered.
+
+### The ids come from retail, not from the reconstructed source
+
+`halflife-op4-updated` numbers the weapons 16–25 with no gap. Retail `opfor.dll` leaves **21 unused**
+and runs 22–26, and the first live `crossbot_weaponspec <bot>` said so by printing `MISMATCH` on every
+weapon past the displacer. jk_botti and Parabot both carry the retail numbers. The table
+(`gearbox_weapons.cpp`) is 27 slots: 0–15 fall through to `HLDM_WeaponSpec`, 21 is an empty row.
+
+| id | weapon | value | range | handling |
+|---|---|---|---|---|
+| 16 | grapple | 0.1 | close | hold, lead 2000, no ammo, sticky; melee and last-resort ambush |
+| 17 | eagle | 0.3 | long | hold, target, clip 7; secondary is the laser, `WPN_Q_LASER_ON` |
+| 18 | pipewrench | 0.1 | close | the crowbar row |
+| 19 | m249 | 0.3 | close | hold, target, clip 50, sticky, `WPN_Q_BRACE` |
+| 20 | displacer | 0.4 | close | tap, lead 500, 20 uranium, splash 300, `WPN_Q_SPINUP` + `WPN_Q_AIM_FEET` |
+| 22 | shockrifle | 0.2 | close | hold, lead 2000, self-charging pool, sticky, no underwater |
+| 23 | sporelauncher | 0.3 | long | primary lead 2400 splash 200; secondary a lob at 800, gravity 1, inherits velocity |
+| 24 | sniperrifle | 0.5 | long | hold, target, clip 5, zoom 18 (zoomed row is the same shot) |
+| 25 | knife | 0.1 | close | the crowbar row |
+| 26 | penguin | 0.2 | close | the snark row plus splash 250 (it explodes with hand-grenade damage) |
+
+What was deliberately left out:
+- The pipewrench's charged swing and the knife's 100× backstab. Both are crowbar skins.
+- The displacer's secondary: it teleports the *user* to a spawn point, so it is not an attack.
+- The grapple's movement use, which only sticks to `xeno_grapple` textures and would be navgen work.
+
+The shock rifle fires underwater as a radius blast that kills its own holder, which is what
+`WPN_Q_NO_UNDERWATER` is for there.
+
+### Melee is a set
+
+The duel, the ambush's contact pass, idle selection and the breaker all used to compare against the
+single `MeleeWeapon()` id, so an enemy holding a knife never started a duel. `IsMeleeWeapon` is
+crowbar, knife, pipewrench and grapple. The grapple is **full** melee on purpose: its range is 0
+(unlimited), so `DuelDrive` never charges with it and the ambush's contact pass (`PASS_REACH`) skips
+it — that pass wants a finite reach. `MeleeWeapon()` stays the crowbar, which is what the breaker draws.
+
+### Ambush order
+
+`AMBUSH_PENGUIN` joins the thrown group beside the grenade and the snark. `AMBUSH_GRAPPLE` is a
+separate last resort (`PASS_LAST`): no distance and no splash gate, taken only when the bot has no
+melee in reach and nothing throwable. HLDM returns 0 for both, so valve is unchanged.
+
+### Expert pickups
+
+`ItemPreferred` adds `weapon_displacer` and `weapon_sniperrifle` to HLDM's set. The displacer is there
+for the ammo as much as the gun: a pickup carries 40 uranium, the gauss and egon pool, so it counts
+even for a bot that already holds one.
+
+## dmc_profile.cpp
+
+`CDMCProfile` is Deathmatch Classic. It derives from `CHLDMProfile` for respawn, `IsDead`, player
+models and item classification, and replaces everything about weapons, because DMC keeps no weapon
+entities at all.
+
+### The inventory is four ints and a bitmask
+
+Every DMC player carries exactly one item object, a dummy `weapon_quakegun` whose `m_iId` is 2 -- the
+glock's id -- and which only fires whatever the player's state says. The real state is on
+`CBasePlayer`: `m_iQuakeItems` holds `IT_*` bits (weapons in bits 0-7: axe, shotgun, super shotgun,
+nailgun, super nailgun, grenade launcher, rocket launcher, lightning gun), `m_iQuakeWeapon` is the one
+bit in hand, and the ammo is `m_iAmmoShells` / `Nails` / `Rockets` / `Cells`. `pev->weapons` is
+meaningless, which is why `crossbot_weapons` prints `MISMATCH` against it on every DMC bot.
+
+So the item walk in `BotWeapons::Read` would be wrong, not merely empty -- it would report a glock.
+`IGameProfile::ReadInventory` lets a profile fill `BotInventory` itself; `CHLDMProfile` returns false
+and the walk runs as before. `CDMCProfile` emits one `BotWeapon` per set bit with no edict, no clip,
+and `primaryAmmoType` 0-3 indexing a synthetic `ammo[]` of shells, nails, rockets, cells. The refire
+timer is the player's `m_flNextAttack`; it is copied onto the held weapon's `nextPrimaryAttack` so the
+shot detector in `bot_fire.cpp` sees a timer rise when a shot leaves. `BotWeapons::ActiveWeaponId`
+takes the same path. The six fields are optional requests in `gamedata.cpp`; a DMC profile running
+without them is `GameData::Fatal`.
+
+**The weapon id is the bit plus one.** That is exactly DMC's `usercmd.weaponselect` number (1 axe ..
+8 lightning), and it keeps id 0 meaning "none" as HLDM's code expects.
+
+Checked live, one give at a time: every pickup sets the expected bit and adds the SDK's ammo (super
+shotgun +5 shells, nailgun +30 nails, launchers +5 rockets, lightning +15 cells). **A death wipes
+`m_iQuakeItems`**, and the backpack a victim later collects carries the killer's current weapon, so a
+bot's arsenal after a fight need not resemble what it was given.
+
+### Switching is weaponselect, not a command
+
+DMC comments out impulses 1-8 and has no `weapon_` command; the only selector is `CmdStart` reading
+`usercmd.weaponselect` into `W_ChangeWeapon`, which refuses a weapon the player lacks or has no ammo
+for. `pfnRunPlayerMove` has no field for it, so `CDMCProfile::SelectWeapon` calls
+`MDLL_CmdStart` / `MDLL_CmdEnd` itself with an otherwise empty usercmd -- Parabot's route. The switch
+is instant. `IGameProfile::SelectWeapon` is the hook; `CHLDMProfile` still sends `weapon_<name>`.
+
+### The table
+
+No clips, no secondary modes. Hitscan shotguns and the lightning gun (range 600, 0.1 s per cell) are
+`AIM_TARGET`; nails and rockets fly at 1000 and are led; the rocket launcher carries `WPN_Q_AIM_FEET`.
+Splash is `Q_RadiusDamage`'s reach, damage + 40 = 160. Both shotguns spend one shell per press
+because the super shotgun falls back to a single shot on one shell.
+
+**The grenade launcher is `WPN_Q_THROW_ARC`** even though nothing is thrown by hand: its launch is
+`forward * 600 + up * 200`, so it leaves 18.4 degrees above the aim at 632.5 u/s, and only
+`ThrowLaunch` can say that. It is `FIRE_HOLD`, not `FIRE_TAP` -- the tap path's throw commit waits for
+a handgrenade's `m_flStartThrow`, which DMC never sets. It does not inherit the player's velocity, and
+the throw solve used to add it unconditionally; it now asks `WPN_Q_INHERIT_VEL`, which the handgrenade
+row carries, so HLDM is unchanged. The grenade spawns at `pev->origin`, not the eye, and the solve
+ignores those 18-odd units.
+
+### Fall damage follows mp_falldamage
+
+DMC's default `mp_falldamage 0` is a flat 5 per landing, so `FallDamage()` is false (refund the baked
+penalty) unless the cvar is non-zero, where DMC uses the HL formula `PmSim::FallDamageFor` models.
+
+### CrossPlay hangs a dmc-only server
+
+CrossPlay's `PM_Move` routes a ducking DMC player (`noDuck`) to the move donor, and its donor search
+loop never increments its index. With `valve` as game 0 the first check succeeds; with `dmc` alone,
+or `dmc` first, the server spins forever the first time a bot crouch-jumps. **Load `valve` first:**
+`-xgame1 valve -xgame2 dmc`. That loop is CrossPlay's to fix.
+
+### Known gaps
+
+- `mp_weaponstay` defaults to 1: touching an owned weapon does nothing, and only the item timeouts
+  teach the bot that.
+- Quad, pentagram and invisibility are not read.
+- DMC's jump is 295 u/s against HL's ~268; plans are conservative.
+- `WPN_Q_NO_UNDERWATER` tests `waterlevel == 3`, but the lightning gun discharges at `> 1`.
+
 ## gamedata.cpp
 
 The bot's only way into the game DLL's own data. `edict_t::v` (`entvars_t`) is a shared struct the
@@ -485,10 +635,15 @@ the game is reported as having no gamedata.
 ### Optional fields, and Ricochet's hand-filled ones
 
 A `Request` can be `optional`, and a missing optional field stays -1 instead of failing the game. Every
-reader of an optional offset tests it first. Five are optional, because they exist only in some games:
+reader of an optional offset tests it first. Six are optional, because they exist only in some games:
 `ent_fInAttack`, `ent_flStartThrow` and `ent_chargeReady` (Half-Life's client-weapon state parked on
-`CBaseEntity`, which Ricochet's `CBaseEntity` does not have), `rpg_cActiveRockets` (no RPG), and
-`plr_iPowerups` (only Ricochet has powerups).
+`CBaseEntity`, which Ricochet's `CBaseEntity` does not have), `rpg_cActiveRockets` (no RPG),
+`plr_iPowerups` (only Ricochet has powerups), and `eagle_iLaserActive` (only OP4 has the Desert Eagle).
+
+`eagle_iLaserActive` is `CEagle::m_iLaserActive`, an `int` at 200 in retail `opfor.dll` (the
+reconstructed OP4 source has a `bool m_bLaserActive` there instead). It breaks the base-class rule
+exactly the way `rpg_cActiveRockets` does and is gated the same way: `BotWeapons::Read` peeks it only
+for a weapon whose secondary mode carries `WPN_Q_LASER_ON`.
 
 **`ricochet-win.json` was completed by hand.** The generated dump lacked `CBaseEntity::pev` (4),
 `CBasePlayerWeapon::m_fInReload` (116), `CBaseMonster::m_flNextAttack` (232) and `m_hEnemy` (236), and
@@ -632,15 +787,6 @@ of aborting — unreadable file, unparseable JSON, an absent required field, a `
 `LoadAll` prints it and leaves that game's flag false. A game without usable gamedata is simply not
 playable: `XPlay::Supported` is false for it, and `crossbot_add` refuses it by name.
 
-### Two JSON shapes, one reader
-
-CrossPlay's generator changed the field format under us. Older files (`ricochet-win.json`) carry
-`"pev": 4`; current ones (`valve`, `cstrike`, `dod`) carry `"pev": { "offset": 4, "size": 4, "type":
-"entvars_t*" }`. `LoadOne` used to read only the flat form, so every nested file failed on its very first
-request and **valve bots were quietly unplayable** — the only trace was `no gamedata for 'valve' -- no
-offset for CBaseEntity::pev` near the top of the log. `TokOffset` takes either: an object is looked up
-for its `offset` member, a primitive is read as it stands.
-
 ### Objective offsets belong to the map, not the bot
 
 `GameData::LoadMap(gamedir, MapOffsets &)` is a second request list per game — `kCsRequests`,
@@ -708,7 +854,9 @@ scanning keeps CrossBot independent of CrossPlay's config format and still works
 ## fake_cmd.cpp
 
 Making a fake client issue a console command. `FakeCmd::Run(player, "weapon_9mmAR")` is the whole
-interface, and today it has exactly one caller: `BotFire::Think` changing weapons.
+interface, and its one caller is `CHLDMProfile::SelectWeapon`. Every weapon switch in `src/bot/`
+goes through `IGameProfile::SelectWeapon`, because DMC has no `weapon_` command to send (see
+`dmc_profile.cpp`).
 
 ### Why a client command is the only correct route
 
@@ -1134,6 +1282,30 @@ it now is. The gate that makes the counter safe would make the flag safe. Knowin
 let the bot press a button it is forbidden to press, to restore a state that was never lost. The one
 case it would help — a human toggles the spot off and a bot picks the weapon up — leaves the rocket
 flying along its launch aim, which mostly still arrives.
+
+### The OP4 quirks
+
+Four bits arrived with Opposing Force. Each says how to operate one weapon, and none is a type tag.
+
+- **`WPN_Q_LASER_ON`** (Eagle secondary): keep this toggle on. The RPG laser starts on and the table
+  handles it by never pressing; the Eagle laser starts **off**, and on is the mode worth having
+  (0.001 spread instead of 0.1, at a 0.5 s cycle instead of 0.22). The primary row describes laser-on,
+  which is why it is not sticky. `Buttons` presses IN_ATTACK2 while the gated
+  `eagle_iLaserActive` reads 0 — once per weapon object, since holstering keeps the flag.
+- **`WPN_Q_SPINUP`** (displacer primary): the shot leaves `chargeFull` seconds after the press, aimed
+  wherever the player looks *then*. `chargeFull` keeps its meaning of "seconds the press takes to
+  pay off"; `ShotCost` still only multiplies for `FIRE_CHARGE`, so the 20-uranium cost is untouched.
+  `WPN_Q_KEEP_AIMING` could not be reused, because it gates a read of `CRpg::m_cActiveRockets` that
+  would land in unrelated memory on a `CDisplacer`.
+- **`WPN_Q_AIM_FEET`** (displacer primary): aim at the ground under the target. A direct hit on a
+  player teleports them and does no damage (`CDisplacerBall::BallTouch`); the 250 comes from the splash
+  when the ball hits geometry beside them.
+- **`WPN_Q_BRACE`** (M249 primary): stop and duck to fire. The M249 is the only HL or OP4 weapon whose
+  cone depends on stance, and it reads the *button bits*: `IN_DUCK` 3°, any move button 15°,
+  otherwise 6°. See `doc/combat.md`.
+
+`WPN_Q_INHERIT_VEL` is no longer rejected on a plain arc: the spore grenade is the first row with both,
+and `bot_fire.cpp` now solves that case in the thrower's frame.
 
 ### Rejected fields
 

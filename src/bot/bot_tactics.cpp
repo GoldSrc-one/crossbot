@@ -1,6 +1,7 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+#include <algorithm>
 #include <cmath>
 #include <unordered_map>
 #include <vector>
@@ -8,13 +9,16 @@
 #include "../game/objectives.h"
 #include "../game/teams.h"
 #include "../nav/astar_graph.h"
+#include "../nav/nav_camp.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_path.h"
+#include "../nav/plan_search.h"
 #include "bot.h"
 #include "bot_camp.h"
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
+#include "bot_move.h"
 #include "bot_strategic.h"
 #include "bot_tactics.h"
 
@@ -28,6 +32,7 @@ namespace
 	constexpr float kSupportHoldMax = 10.f;
 	constexpr float kDefendHoldMin = 5.f;
 	constexpr float kDefendHoldMax = 15.f;
+	constexpr float kFitFloor = 0.1f;
 
 	std::unordered_map<uint32_t, std::vector<float>> g_spawnFields;
 
@@ -36,6 +41,7 @@ namespace
 		int campIndex = -1;
 		float out = 0.f;
 		float runner = 0.f;
+		float fit = 1.f;
 	};
 
 	float CvarValue(const char *name, float fallback)
@@ -130,16 +136,21 @@ namespace
 
 		float total = 0.f;
 		for (const Choice &c : choices)
-			total += Weight(c.out);
+			total += Weight(c.out) * c.fit;
 
 		float roll = g_engfuncs.pfnRandomFloat(0.f, total);
 		for (size_t i = 0; i < choices.size(); ++i)
 		{
-			roll -= Weight(choices[i].out);
+			roll -= Weight(choices[i].out) * choices[i].fit;
 			if (roll <= 0.f)
 				return static_cast<int>(i);
 		}
 		return static_cast<int>(choices.size()) - 1;
+	}
+
+	float Fit(const NavPlan::RangeBias &range, const Nav::CampSpot &camp)
+	{
+		return std::max(kFitFloor, 1.f - range.Weight() * range.Mismatch(BotCamp::SpotDist(camp)));
 	}
 
 	bool Usable(const CBot &bot, const Nav::CampSpot &camp, size_t index)
@@ -185,6 +196,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 	float budget = CvarValue("crossbot_tactics_budget", kDefaultBudget);
 	float margin = CvarValue("crossbot_tactics_margin", kDefaultMargin);
 	bool defend = kind == BotStrategic::KIND_DEFEND;
+	NavPlan::RangeBias range = Bot_RangeBias(bot, false);
 
 	edict_t *runner = nullptr;
 	int spawnIndex = -1;
@@ -250,6 +262,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 			c.campIndex = static_cast<int>(i);
 			c.out = out;
 			c.runner = r;
+			c.fit = Fit(range, camp);
 			choices.push_back(c);
 		}
 	}
@@ -262,12 +275,13 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 			: g_engfuncs.pfnRandomFloat(0.f, kSupportHoldMax);
 
 		if (defend)
-			BOT_VLOG("CrossBot: %s guards %s against spawn %d at spot %d (%.1fs, enemy %.1fs, %.0fs into its life), "
-				"holding %.1fs\n", bot.name, CBotTargetNameOf(targetEnt), spawnIndex, c.campIndex, c.out, c.runner,
-				clock, hold);
+			BOT_VLOG("CrossBot: %s guards %s against spawn %d at spot %d (%.1fs, enemy %.1fs, %.0fs into its life, "
+				"fit %.2f), holding %.1fs\n", bot.name, CBotTargetNameOf(targetEnt), spawnIndex, c.campIndex, c.out,
+				c.runner, clock, c.fit, hold);
 		else
-			BOT_VLOG("CrossBot: %s supports %s toward %s, camps at spot %d (%.1fs, runner %.1fs), holding %.1fs\n",
-				bot.name, CBotPlayerNameOf(runner), CBotTargetNameOf(targetEnt), c.campIndex, c.out, c.runner, hold);
+			BOT_VLOG("CrossBot: %s supports %s toward %s, camps at spot %d (%.1fs, runner %.1fs, fit %.2f), "
+				"holding %.1fs\n", bot.name, CBotPlayerNameOf(runner), CBotTargetNameOf(targetEnt), c.campIndex, c.out,
+				c.runner, c.fit, hold);
 
 		BotCamp::CommitTimed(bot, mesh, c.campIndex, hold, c.runner, c.out, clock + margin);
 		return true;
@@ -293,6 +307,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 		Choice c;
 		c.campIndex = static_cast<int>(i);
 		c.out = out;
+		c.fit = Fit(range, camp);
 		choices.push_back(c);
 	}
 
@@ -302,8 +317,8 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 
 	const Choice &c = choices[pick];
 	float hold = g_engfuncs.pfnRandomFloat(kDefendHoldMin, kDefendHoldMax);
-	BOT_VLOG("CrossBot: %s falls back to spot %d near %s (%.1fs from it, %.0fs into its life), holding %.1fs\n",
-		bot.name, c.campIndex, CBotTargetNameOf(targetEnt), c.out, clock, hold);
+	BOT_VLOG("CrossBot: %s falls back to spot %d near %s (%.1fs from it, %.0fs into its life, fit %.2f), "
+		"holding %.1fs\n", bot.name, c.campIndex, CBotTargetNameOf(targetEnt), c.out, clock, c.fit, hold);
 
 	BotCamp::CommitTimed(bot, mesh, c.campIndex, hold, 0.f, 0.f, 0.f);
 	return true;

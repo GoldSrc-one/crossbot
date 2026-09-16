@@ -144,6 +144,16 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 
 	buttons |= BotFire::Buttons(bot, angles);
 
+	bool braceDuck = false;
+	if (BotFire::Brace(bot, buttons, braceDuck))
+	{
+		fmove = 0.f;
+		smove = 0.f;
+		buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+		if (braceDuck)
+			buttons |= IN_DUCK;
+	}
+
 	ApplyBeamGuard(bot, angles, fmove, smove, buttons);
 
 	if (!allowLongJump && (buttons & (IN_JUMP | IN_DUCK)) == (IN_JUMP | IN_DUCK) &&
@@ -349,7 +359,7 @@ WeaponRangeClass Bot_RangeClass(const CBot &bot)
 	return spec ? spec->rangeClass : RANGE_NONE;
 }
 
-NavPlan::RangeBias Bot_RangeBias(const CBot &bot)
+NavPlan::RangeBias Bot_RangeBias(const CBot &bot, bool readiness)
 {
 	NavPlan::RangeBias bias;
 
@@ -382,14 +392,19 @@ NavPlan::RangeBias Bot_RangeBias(const CBot &bot)
 		return bias;
 	if (scale > 1.f)
 		scale = 1.f;
+	if (!readiness)
+	{
+		bias.weight = scale;
+		return bias;
+	}
 
-	float readiness = g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory);
-	if (readiness < 0.f)
-		readiness = 0.f;
-	if (readiness > 1.f)
-		readiness = 1.f;
+	float ready = g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory);
+	if (ready < 0.f)
+		ready = 0.f;
+	if (ready > 1.f)
+		ready = 1.f;
 
-	bias.weight = readiness * scale;
+	bias.weight = ready * scale;
 	return bias;
 }
 

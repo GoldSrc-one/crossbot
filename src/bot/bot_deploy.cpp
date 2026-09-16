@@ -16,7 +16,6 @@
 #include "bot_sense.h"
 #include "bot_weapons.h"
 #include "../game/ent_handle.h"
-#include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_query.h"
@@ -323,7 +322,7 @@ namespace
 		if (!spec || !spec->classname)
 			return NULL;
 
-		return FakeCmd::Run(bot.pEdict, spec->classname) ? spec->classname : NULL;
+		return g_pGameProfile->SelectWeapon(bot.pEdict, *spec) ? spec->classname : NULL;
 	}
 
 	void RestoreWeapon(CBot &bot)

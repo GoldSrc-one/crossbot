@@ -21,6 +21,7 @@ struct GameOffsets
 	int wpn_flTimeWeaponIdle;
 
 	int rpg_cActiveRockets;
+	int eagle_iLaserActive;
 
 	int mon_flNextAttack;
 	int mon_hEnemy;
@@ -30,6 +31,12 @@ struct GameOffsets
 	int plr_rgAmmo;
 	int plr_pTank;
 	int plr_iPowerups;
+	int plr_iQuakeItems;
+	int plr_iQuakeWeapon;
+	int plr_iAmmoShells;
+	int plr_iAmmoNails;
+	int plr_iAmmoRockets;
+	int plr_iAmmoCells;
 
 	int tog_toggleState;
 	int tog_flWait;

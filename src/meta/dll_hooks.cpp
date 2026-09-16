@@ -64,6 +64,12 @@ cvar_t g_duelCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_braceCvar = {
+	"crossbot_brace",
+	"1",
+	FCVAR_SERVER
+};
+
 cvar_t g_gatherDebugCvar = {
 	"crossbot_gather_debug",
 	"0",
@@ -450,6 +456,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_ambushCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_duelCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_braceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_funCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_funDebugCvar);

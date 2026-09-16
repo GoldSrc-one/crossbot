@@ -700,8 +700,13 @@ toTarget[c] < toTarget[runner]                                   ahead of the ru
 fromRunner[c] + toTarget[c] - toTarget[runner] <= budget          on a near-ideal runner -> target path
 clock + fromBot[c] + margin < fromRunner[c]                       the bot arrives first
 not in the bot's spot memo, no friend within 96 units
-weighted 1/(fromBot + 2)^crossbot_goal_bias
+weighted fit/(fromBot + 2)^crossbot_goal_bias
 ```
+
+`fit` makes the spot suit the held weapon: `max(0.1, 1 - w * mismatch(dist))`, where `dist` is the camp's
+`standDist` or `crouchDist` for the stance it will hold, and `w` and `mismatch` come from the routing range
+bias (`Bot_RangeBias`, `crossbot_range_short/long/pref/pin/force`) without its readiness factor. A long
+weapon favours far-seeing spots, a close one near ones; a weapon with no range class leaves `fit` at 1.
 
 That is the gather detour's acceptance test with the runner in place of the bot. Nothing stores anyone's
 path: an area is on a near-ideal path exactly when the two fields around it sum to the direct cost, so a

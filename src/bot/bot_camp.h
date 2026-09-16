@@ -10,6 +10,7 @@ struct CBot;
 namespace Nav
 {
 struct NavMesh;
+struct CampSpot;
 }
 
 namespace BotCamp
@@ -109,5 +110,7 @@ void CommitTimed(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdF
 void NoteSpot(CBot &bot, int campIndex, float seconds);
 
 bool SpotReady(const CBot &bot, int campIndex);
+
+float SpotDist(const Nav::CampSpot &camp);
 
 }

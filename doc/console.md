@@ -318,6 +318,9 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   with whatever it would otherwise have picked, and the `melee=`/`inarea=` flags are still reported so
   the A/B is readable. Inert without `crossbot_combat`. Note that a bot holding melee out of range is
   the *point* here rather than a bug: the charge is what closes the gap
+- `crossbot_brace` — stop and duck to fire a `WPN_Q_BRACE` weapon (the OP4 M249). Default 1. 0 lets the
+  bot keep moving while it sprays, for A/B runs; `bracing=` and `braces=` in `crossbot_fire_status`
+  show it working. See `doc/combat.md`, "Brace"
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/goals.md`

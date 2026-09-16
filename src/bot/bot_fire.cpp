@@ -13,11 +13,12 @@
 #include "bot_deploy.h"
 #include "bot_fun.h"
 #include "bot_weapons.h"
-#include "../game/fake_cmd.h"
 #include "../game/game_profile.h"
 #include "../game/give_item.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
+#include "../nav/path_profile.h"
+#include "bot_move_nav.h"
 
 namespace
 {
@@ -73,6 +74,14 @@ namespace
 	constexpr float kTapTimeout = 1.5f;
 
 	constexpr float kGuideMax = 6.f;
+
+	constexpr float kSpinupSlack = 0.2f;
+
+	constexpr float kFeetLift = 2.f;
+
+	constexpr float kBraceTraceInterval = 0.1f;
+
+	constexpr float kDuckEyeDrop = 34.f;
 
 	constexpr int kMaxChoices = 64;
 
@@ -270,6 +279,28 @@ namespace
 		if ((m.quirks & WPN_Q_SLOW_IN_WATER) != 0 && bot.pEdict->v.waterlevel == 3)
 			speed *= 0.5f;
 		return speed;
+	}
+
+	Vector InheritedVelocity(const CBot &bot, const WeaponMode &m)
+	{
+		if ((m.quirks & WPN_Q_INHERIT_VEL) == 0)
+			return Vector(0.f, 0.f, 0.f);
+		return bot.pEdict->v.velocity;
+	}
+
+	Vector AimBase(const CBot &bot, const WeaponMode &m, const Vector &basePoint,
+		const Vector &baseVel)
+	{
+		Vector base = basePoint;
+
+		if ((m.quirks & WPN_Q_SPINUP) != 0)
+			base = base + baseVel * m.chargeFull;
+
+		edict_t *target = bot.sense.target.Get();
+		if ((m.quirks & WPN_Q_AIM_FEET) != 0 && target)
+			base.z += target->v.origin.z + target->v.mins.z + kFeetLift - bot.sense.targetPoint.z;
+
+		return base;
 	}
 
 	bool SolveLead(const Vector &eye, const Vector &base, const Vector &vel, float speed,
@@ -758,7 +789,7 @@ namespace
 	{
 		Vector view = angles + bot.pEdict->v.punchangle;
 		float speed = ModeSpeed(bot, m);
-		Vector drift(0.f, 0.f, 0.f);
+		Vector drift = InheritedVelocity(bot, m);
 
 		if (IsThrow(m))
 		{
@@ -770,7 +801,6 @@ namespace
 			}
 
 			view.x = -elevation;
-			drift = bot.pEdict->v.velocity;
 		}
 
 		MAKE_VECTORS(view);
@@ -867,8 +897,11 @@ namespace
 		return 0;
 	}
 
-	unsigned short TapButtons(BotFire::State &fire, const BotWeapon &w, bool onTarget, bool thrown)
+	unsigned short TapButtons(BotFire::State &fire, const BotWeapon &w, const WeaponMode &m,
+		bool onTarget)
 	{
+		bool thrown = IsThrow(m);
+
 		if (thrown && (fire.commit == BotFire::COMMIT_THROW || w.throwStart != 0.f))
 		{
 			fire.lastReason = "primed";
@@ -885,6 +918,12 @@ namespace
 
 		if (thrown)
 			StartCommit(fire, BotFire::COMMIT_THROW);
+		if ((m.quirks & WPN_Q_SPINUP) != 0)
+		{
+			StartCommit(fire, BotFire::COMMIT_SPINUP);
+			fire.commitFor = m.chargeFull + kSpinupSlack;
+			++fire.spinups;
+		}
 		fire.lastReason = "firing";
 		return AttackButton(fire.mode);
 	}
@@ -962,6 +1001,7 @@ const char *CommitName(Commit commit)
 	case COMMIT_CHARGE: return "charge";
 	case COMMIT_THROW: return "throw";
 	case COMMIT_GUIDE: return "guide";
+	case COMMIT_SPINUP: return "spinup";
 	}
 	return "?";
 }
@@ -987,7 +1027,7 @@ bool Supported(const WeaponMode &mode)
 		return false;
 
 	unsigned int reject = WPN_Q_HIDDEN_STATE;
-	if (!homing && !thrown && !IsGuided(mode))
+	if (!homing && !thrown && !arc && !IsGuided(mode))
 		reject |= WPN_Q_INHERIT_VEL;
 
 	return (mode.quirks & reject) == 0;
@@ -1262,32 +1302,41 @@ enum Pass
 	PASS_NO_MELEE = 0,
 	PASS_ANY,
 	PASS_MELEE,
+	PASS_REACH,
 	PASS_THROWN,
+	PASS_LAST,
 };
+
+static bool IsMeleeId(int id)
+{
+	return id != 0 && g_pGameProfile && g_pGameProfile->IsMeleeWeapon(id);
+}
 
 static bool ChoiceEligible(const CBot &bot, const Choice &choice, Pass pass, float dist)
 {
 	int id = bot.inventory.weapons[choice.index].id;
-	int melee = g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
+	int last = g_pGameProfile ? g_pGameProfile->AmbushWeapon(AMBUSH_GRAPPLE) : 0;
+
+	const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(id) : nullptr;
+	const WeaponMode *m = spec ? ModeOf(*spec, choice.mode, bot.fire.zoomed) : nullptr;
 
 	switch (pass)
 	{
 	case PASS_ANY:
 		return true;
 	case PASS_NO_MELEE:
-		return id != melee;
+		return !IsMeleeId(id);
 	case PASS_MELEE:
-		return id == melee;
+		return IsMeleeId(id);
+	case PASS_REACH:
+		return IsMeleeId(id) && m && m->range > 0.f;
+	case PASS_LAST:
+		return id != 0 && id == last;
 	case PASS_THROWN:
 		break;
 	}
 
-	if (!IsAmbushWeapon(id))
-		return false;
-
-	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(id);
-	const WeaponMode *m = spec ? ModeOf(*spec, choice.mode, bot.fire.zoomed) : nullptr;
-	if (!m)
+	if (!IsAmbushWeapon(id) || id == last || !m)
 		return false;
 
 	return m->splash <= 0.f || dist >= m->splash;
@@ -1392,9 +1441,11 @@ static int PickAmbush(CBot &bot, const Choice *choices, int count, float dist)
 	if (count <= 0)
 		return -1;
 
-	int pick = PickBest(bot, choices, count, PASS_MELEE, dist);
+	int pick = PickBest(bot, choices, count, PASS_REACH, dist);
 	if (pick < 0)
 		pick = PickBest(bot, choices, count, PASS_THROWN, dist);
+	if (pick < 0)
+		pick = PickBest(bot, choices, count, PASS_LAST, dist);
 
 	return pick;
 }
@@ -1411,7 +1462,7 @@ static bool SelectWeapon(CBot &bot, const Choice &choice, const char *reason)
 
 	Idle(fire, reason);
 
-	if (!spec || !spec->classname || !FakeCmd::Run(bot.pEdict, spec->classname))
+	if (!spec || !spec->classname || !g_pGameProfile->SelectWeapon(bot.pEdict, *spec))
 		return false;
 
 	++fire.switches;
@@ -1458,8 +1509,9 @@ static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
 		if (!holding && !ModeUsable(bot, active, *m, dist, rise, strict))
 			continue;
 
-		Vector point = basePoint;
-		Vector look = basePoint;
+		Vector aimBase = AimBase(bot, *m, basePoint, baseVel);
+		Vector point = aimBase;
+		Vector look = aimBase;
 		float flight = 0.f;
 
 		if (IsArc(*m))
@@ -1470,8 +1522,8 @@ static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
 			if (IsThrow(*m))
 			{
 				ThrowShot shot;
-				if (!SolveThrowLead(*m, eye, basePoint, baseVel,
-					bot.pEdict->v.velocity, ArcGravity(*m), shot, point))
+				if (!SolveThrowLead(*m, eye, aimBase, baseVel,
+					InheritedVelocity(bot, *m), ArcGravity(*m), shot, point))
 					continue;
 
 				dir = shot.dir;
@@ -1484,11 +1536,13 @@ static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
 			}
 			else
 			{
-				if (!SolveArcLead(eye, basePoint, baseVel, ModeSpeed(bot, *m),
+				Vector drift = InheritedVelocity(bot, *m);
+				if (!SolveArcLead(eye, aimBase, baseVel - drift, ModeSpeed(bot, *m),
 					ArcGravity(*m), dir, point, flight))
 					continue;
 
-				launch = dir * ModeSpeed(bot, *m);
+				point = point + drift * flight;
+				launch = dir * ModeSpeed(bot, *m) + drift;
 				look = eye + dir * (point - eye).Length();
 			}
 
@@ -1503,7 +1557,7 @@ static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
 		else
 		{
 			if (m->aim == AIM_LEAD && !IsHoming(*m) &&
-				!SolveLead(eye, basePoint, baseVel, ModeSpeed(bot, *m), point, flight))
+				!SolveLead(eye, aimBase, baseVel, ModeSpeed(bot, *m), point, flight))
 				continue;
 
 			look = point;
@@ -1625,7 +1679,7 @@ static void IdleSelect(CBot &bot)
 
 	int wantId = inv.weapons[choices[pick].index].id;
 
-	if (active && active->id != g_pGameProfile->MeleeWeapon())
+	if (active && !IsMeleeId(active->id))
 	{
 		bool heldViable = false;
 
@@ -1749,6 +1803,11 @@ void Think(CBot &bot)
 			holding = false;
 		}
 	}
+	else if (fire.commit == COMMIT_SPINUP && gpGlobals->time - fire.commitStart > fire.commitFor)
+	{
+		fire.commit = COMMIT_NONE;
+		holding = false;
+	}
 
 	edict_t *target = bot.sense.target.Get();
 	if (target)
@@ -1766,10 +1825,11 @@ void Think(CBot &bot)
 	{
 		if (holding)
 		{
-			if (fire.commit != COMMIT_GUIDE)
+			if (fire.commit != COMMIT_GUIDE && fire.commit != COMMIT_SPINUP)
 				ClearAim(fire);
 
-			fire.lastReason = (fire.commit == COMMIT_GUIDE) ? "guiding" : "carrying";
+			fire.lastReason = (fire.commit == COMMIT_GUIDE) ? "guiding"
+				: (fire.commit == COMMIT_SPINUP) ? "spinning" : "carrying";
 			return;
 		}
 
@@ -1816,9 +1876,8 @@ void Think(CBot &bot)
 		}
 	}
 
-	int meleeId = g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
-	if (!throttled && !holding && meleeId != 0 && BotCombat::Dueling(bot) &&
-		(!active || active->id != meleeId))
+	if (!throttled && !holding && BotCombat::Dueling(bot) &&
+		(!active || !IsMeleeId(active->id)))
 	{
 		int count = BuildChoices(bot, true, false, dist, rise, 0, choices, kMaxChoices);
 		int pick = PickBest(bot, choices, count, PASS_MELEE, dist);
@@ -1932,15 +1991,27 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 		}
 	}
 
+	if (fire.commit == COMMIT_NONE && !w.reloading && inv.nextAttack <= 0.f)
+	{
+		const WeaponSpec *held = g_pGameProfile->GetWeaponSpec(w.id);
+		if (held && (held->secondary.quirks & WPN_Q_LASER_ON) != 0 && w.laserActive == 0 &&
+			w.nextSecondaryAttack <= 0.f)
+		{
+			++fire.lasers;
+			fire.lastReason = "laser-on";
+			return IN_ATTACK2;
+		}
+	}
+
 	if (fire.mode == MODE_NONE)
 		return IdleReloadButton(bot, w);
 
 	if (w.id != fire.weaponId)
 		return 0;
 
-	if (fire.commit == COMMIT_GUIDE)
+	if (fire.commit == COMMIT_GUIDE || fire.commit == COMMIT_SPINUP)
 	{
-		fire.lastReason = "guiding";
+		fire.lastReason = (fire.commit == COMMIT_GUIDE) ? "guiding" : "spinning";
 		return 0;
 	}
 
@@ -2010,7 +2081,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	if (tap)
 	{
-		return TapButtons(fire, w, onTarget, IsThrow(*m));
+		return TapButtons(fire, w, *m, onTarget);
 	}
 
 	if (!onTarget)
@@ -2035,6 +2106,71 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	fire.pressedLead = fire.aimLead;
 	fire.pressedArc = fire.aimArc;
 	return AttackButton(fire.mode);
+}
+
+bool BraceEnabled()
+{
+	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_brace");
+	return !cvar || cvar->value != 0.f;
+}
+
+bool Brace(CBot &bot, unsigned short buttons, bool &duck)
+{
+	State &fire = bot.fire;
+	bool was = fire.bracing != 0;
+	fire.bracing = 0;
+	duck = false;
+
+	if (!BraceEnabled() || !Enabled() || !g_pGameProfile)
+		return false;
+	if (fire.mode == MODE_NONE || !fire.aimValid || (buttons & IN_JUMP) != 0)
+		return false;
+
+	const BotInventory &inv = bot.inventory;
+	if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
+		return false;
+
+	const BotWeapon &w = inv.weapons[inv.activeIndex];
+	if (w.id != fire.weaponId || w.reloading)
+		return false;
+
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+	const WeaponMode *m = spec ? ModeOf(*spec, fire.mode, fire.zoomed) : nullptr;
+	if (!m || (m->quirks & WPN_Q_BRACE) == 0)
+		return false;
+
+	edict_t *pEdict = bot.pEdict;
+	if ((pEdict->v.flags & FL_ONGROUND) == 0 || pEdict->v.movetype == MOVETYPE_FLY ||
+		pEdict->v.waterlevel >= 2)
+		return false;
+
+	float timer = (fire.mode == MODE_SECONDARY) ? w.nextSecondaryAttack : w.nextPrimaryAttack;
+	float wait = std::max(timer, inv.nextAttack);
+
+	PmSim::PmPhysics physics = Bot_DrivePhysics(pEdict);
+	Vector flat(pEdict->v.velocity.x, pEdict->v.velocity.y, 0.f);
+	float stop = NavPlan::StopTime(flat.Length(), physics.groundFriction * physics.friction,
+		physics.stopSpeed);
+	if (wait > stop)
+		return false;
+
+	if (gpGlobals->time >= fire.braceTraceTime)
+	{
+		Vector eye = pEdict->v.origin + pEdict->v.view_ofs;
+		if ((pEdict->v.flags & FL_DUCKING) == 0)
+			eye.z -= kDuckEyeDrop;
+
+		TraceResult tr;
+		TRACE_LINE(eye, fire.targetPoint, ignore_monsters, pEdict, &tr);
+		fire.braceDuckClear = tr.flFraction >= 1.f;
+		fire.braceTraceTime = gpGlobals->time + kBraceTraceInterval;
+	}
+
+	duck = fire.braceDuckClear;
+	fire.bracing = duck ? 1 : 2;
+	if (!was)
+		++fire.braces;
+	return true;
 }
 
 }

@@ -214,7 +214,9 @@ The preferred set is game-specific and lives behind `IGameProfile::ItemPreferred
 `MeleeWeapon` and `AmbushWeapon`. HLDM answers yes for the gauss, crossbow and egon, their ammo
 entities (resolved through `AmmoEntity` rather than hardcoding the strings a second time),
 `item_healthkit`, `item_battery`, `item_longjump`, and every charger and heal volume. The longjump
-module is on that list because it feeds the movement code an expert leans on hardest.
+module is on that list because it feeds the movement code an expert leans on hardest. Gearbox adds
+`weapon_displacer` and `weapon_sniperrifle` through the same helper; the displacer is there as much
+for its 40 uranium as for the gun (`doc/games.md`, `gearbox_profile.cpp`).
 
 **The tier loop is not the only path to an item.** `BotGoal::PickStop` runs a *second*
 `BotItems::Collect` for detours whenever a fun or strategic goal is active. Under the old hard

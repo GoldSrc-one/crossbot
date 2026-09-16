@@ -595,6 +595,11 @@ bool SpotReady(const CBot &bot, int campIndex)
 	return true;
 }
 
+float SpotDist(const Nav::CampSpot &camp)
+{
+	return ChooseDuck(camp) ? camp.crouchDist : camp.standDist;
+}
+
 void OnRespawn(CBot &bot)
 {
 	State &st = bot.camp;

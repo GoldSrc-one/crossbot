@@ -64,6 +64,8 @@ float AccelForward(float v0, float dist, float accel, float friction, float stop
 
 float AccelDistance(float v0, float v1, float accel, float friction, float stopSpeed);
 
+float StopTime(float speed, float friction, float stopSpeed);
+
 float SpeedForRadius(float radius, float accel, float friction, float stopSpeed);
 
 float RadiusForSpeed(float speed, float accel, float friction, float stopSpeed);

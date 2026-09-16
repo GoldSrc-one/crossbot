@@ -31,6 +31,7 @@ enum Commit
 	COMMIT_CHARGE,
 	COMMIT_THROW,
 	COMMIT_GUIDE,
+	COMMIT_SPINUP,
 };
 
 struct State
@@ -101,6 +102,13 @@ struct State
 	int duels = 0;
 	int idleReloads = 0;
 	int gaussJumps = 0;
+	int spinups = 0;
+	int lasers = 0;
+	int braces = 0;
+	float commitFor = 0.f;
+	int bracing = 0;
+	bool braceDuckClear = false;
+	float braceTraceTime = 0.f;
 };
 
 bool Enabled();
@@ -137,6 +145,10 @@ void Think(CBot &bot);
 bool AimPoint(const CBot &bot, Vector &point);
 
 unsigned short Buttons(CBot &bot, const Vector &angles);
+
+bool BraceEnabled();
+
+bool Brace(CBot &bot, unsigned short buttons, bool &duck);
 
 const char *ModeName(Mode mode);
 

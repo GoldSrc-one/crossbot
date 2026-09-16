@@ -174,9 +174,9 @@ namespace
 			BOT_VLOG("CrossBot: %s is spotted (%s), ambush off\n", bot.name, how);
 	}
 
-	int MeleeId()
+	bool IsMelee(int id)
 	{
-		return g_pGameProfile ? g_pGameProfile->MeleeWeapon() : 0;
+		return id != 0 && g_pGameProfile && g_pGameProfile->IsMeleeWeapon(id);
 	}
 
 	bool EnemyInOurArea(const CBot &bot, edict_t *enemy)
@@ -200,11 +200,9 @@ namespace
 	{
 		BotCombat::State &st = bot.combat;
 
-		int melee = MeleeId();
-
 		if (visible)
-			st.enemyMelee = melee != 0 && (enemy->v.flags & FL_CLIENT) != 0 &&
-				BotWeapons::ActiveWeaponId(enemy) == melee;
+			st.enemyMelee = (enemy->v.flags & FL_CLIENT) != 0 &&
+				IsMelee(BotWeapons::ActiveWeaponId(enemy));
 
 		st.enemyInArea = st.enemyMelee && EnemyInOurArea(bot, enemy);
 
@@ -351,9 +349,9 @@ namespace
 		if (!BotCombat::Dueling(bot))
 			return false;
 
-		int melee = MeleeId();
+		int melee = HeldId(bot);
 
-		if (melee == 0 || HeldId(bot) != melee)
+		if (!IsMelee(melee))
 			return false;
 
 		edict_t *enemy = st.enemy.Get();
@@ -380,7 +378,7 @@ namespace
 				return false;
 			st.lastReason = "backing off";
 		}
-		else if (dist > spec->primary.range * kDuelCloseFrac)
+		else if (spec->primary.range > 0.f && dist > spec->primary.range * kDuelCloseFrac)
 		{
 			if (!ResolveSpot(mesh, bot, enemy->v.origin, spot))
 				return false;
@@ -470,7 +468,7 @@ edict_t *BotCombat::DamageSource(edict_t *pEdict)
 		return nullptr;
 
 	edict_t *ent = pEdict->v.dmg_inflictor;
-	if (!ent || ent->free || ent == pEdict)
+	if (!ent || ent->free || ent == pEdict || BotSense::NoTarget(ent))
 		return nullptr;
 	if (g_engfuncs.pfnIndexOfEdict(ent) == 0)
 		return nullptr;
@@ -486,7 +484,7 @@ edict_t *BotCombat::DamageSource(edict_t *pEdict)
 	if (!CBotIsLivePlayer(ent))
 		ent = ent->v.owner;
 
-	if (!ent || ent->free || ent == pEdict || !CBotIsLivePlayer(ent))
+	if (!ent || ent->free || ent == pEdict || !CBotIsLivePlayer(ent) || BotSense::NoTarget(ent))
 		return nullptr;
 	if (g_pGameProfile && g_pGameProfile->IsDead(ent))
 		return nullptr;
@@ -551,6 +549,8 @@ void BotCombat::Update(CBot &bot)
 			Exit(bot, "the enemy handle went stale");
 		else if (g_pGameProfile && g_pGameProfile->IsDead(enemy))
 			Exit(bot, "the enemy died");
+		else if (BotSense::NoTarget(enemy))
+			Exit(bot, "the enemy went notarget");
 		else if (!Teams::Attackable(bot.pEdict, enemy))
 			Exit(bot, "the enemy is on our team");
 		else if ((enemy->v.flags & FL_CLIENT) == 0 && g_pGameProfile &&
