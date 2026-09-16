@@ -2,6 +2,7 @@
 #include <meta_api.h>
 
 #include "bot_manager.h"
+#include "bot_tactics.h"
 #include "bot.h"
 #include "bot_camp.h"
 #include "bot_combat.h"
@@ -144,6 +145,7 @@ void ServerDeactivate()
 	XPlay::ForgetProfiles();
 	Teams::ForgetMap();
 	Objectives::ForgetMap();
+	BotTactics::ForgetMap();
 	PlayerModels::Forget();
 	Nav::Unload();
 }
@@ -190,6 +192,7 @@ namespace
 			BOTPERF_SCOPE(ZONE_RESPAWN);
 			bot.wasDead = false;
 			bot.gravity = 1.f;
+			bot.spawnHoldUntil = gpGlobals->time + g_engfuncs.pfnRandomFloat(0.f, 1.f);
 			BotGoal::OnRespawn(bot);
 			BotSense::OnRespawn(bot);
 			BotCombat::OnRespawn(bot);

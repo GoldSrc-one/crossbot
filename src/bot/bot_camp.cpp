@@ -37,6 +37,8 @@ namespace
 	constexpr float kDefaultZoomDist = 768.f;
 	constexpr float kFriendCheckInterval = 0.2f;
 	constexpr float kFriendFallbackCone = 90.f;
+	constexpr float kSpotForever = 1.0e9f;
+	constexpr float kSpotReuse = 30.f;
 
 	bool ChooseDuck(const Nav::CampSpot &camp)
 	{
@@ -294,7 +296,14 @@ bool Consider(CBot &bot)
 
 	if (bot.goal.stop.camp)
 	{
-		if (!st.holding && !Enabled())
+		if (!st.holding && st.spot.timed && st.spot.raceOut > 0.f && st.scared)
+		{
+			NoteSpot(bot, st.spot.campIndex, kSpotForever);
+			Abandon(bot, "something closed in before it got there");
+			BotGoal::Advance(bot);
+			return true;
+		}
+		if (!st.holding && !st.spot.timed && !Enabled())
 		{
 			Abandon(bot, "camping is off");
 			BotGoal::Advance(bot);
@@ -387,21 +396,29 @@ bool Run(CBot &bot)
 	if (!st.holding)
 		return false;
 
-	if (!Enabled() || !bot.goal.stop.camp)
+	if ((!Enabled() && !st.spot.timed) || !bot.goal.stop.camp)
 	{
 		Leave(bot, "camping is off");
 		BotGoal::Advance(bot);
 		return false;
 	}
 
-	if (st.friendInView)
+	if (st.spot.timed)
+	{
+		if (gpGlobals->time - st.holdStart >= st.spot.holdFor)
+		{
+			Leave(bot, "its time is up");
+			BotGoal::Advance(bot);
+			return false;
+		}
+	}
+	else if (st.friendInView)
 	{
 		Leave(bot, "a friend is in view");
 		BotGoal::Advance(bot);
 		return false;
 	}
-
-	if (!st.scared)
+	else if (!st.scared)
 	{
 		Leave(bot, "nothing has come closer");
 		BotGoal::Advance(bot);
@@ -434,6 +451,18 @@ bool CheckTravel(CBot &bot, float seconds)
 		return false;
 
 	st.checkTravel = false;
+	if (st.spot.timed)
+	{
+		if (st.spot.raceOut <= 0.f || seconds + st.spot.raceLead < st.spot.raceRunner * seconds / st.spot.raceOut)
+			return false;
+
+		BOT_VLOG("CrossBot: %s lost the race to spot %d (%.1fs planned, %.1fs estimated, runner %.1fs, lead %.1fs), "
+			"not trying it again this life\n", bot.name, st.spot.campIndex, seconds, st.spot.raceOut,
+			st.spot.raceRunner, st.spot.raceLead);
+		NoteSpot(bot, st.spot.campIndex, kSpotForever);
+		Abandon(bot, "it lost the race");
+		return true;
+	}
 	if (seconds <= kCampMaxTravel)
 		return false;
 
@@ -506,10 +535,71 @@ bool WantZoom(const CBot &bot, bool &want)
 	return false;
 }
 
+void CommitTimed(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdFor, float runner, float out,
+	float lead)
+{
+	State &st = bot.camp;
+	const Nav::CampSpot &camp = mesh.camps[campIndex];
+	const std::vector<float> &toGoal = bot.goal.toTargetCosts;
+
+	RouteSpot spot;
+	spot.campIndex = campIndex;
+	spot.areaId = camp.areaId;
+	spot.pos = camp.pos;
+	spot.yaw = camp.yaw;
+	spot.pitch = camp.pitch;
+	spot.toGoal = (camp.areaId >= 0 && static_cast<size_t>(camp.areaId) < toGoal.size())
+		? toGoal[camp.areaId] : Nav::kUnreachableSeconds;
+	spot.flags = camp.flags;
+	spot.duck = ChooseDuck(camp);
+	spot.zoom = ChooseZoom(camp, spot.duck, HeldZoomFov(bot));
+	spot.timed = true;
+	spot.holdFor = holdFor;
+	spot.raceRunner = runner;
+	spot.raceOut = out;
+	spot.raceLead = lead;
+
+	st.holding = false;
+	st.spot = spot;
+	st.checkTravel = true;
+	NoteSpot(bot, campIndex, kSpotReuse);
+
+	BotGoal::CommitCampStop(bot, camp.pos, camp.areaId, campIndex);
+}
+
+void NoteSpot(CBot &bot, int campIndex, float seconds)
+{
+	float ready = gpGlobals->time + seconds;
+	for (SpotMemo &m : bot.camp.memo)
+	{
+		if (m.campIndex != campIndex)
+			continue;
+		if (ready > m.readyTime)
+			m.readyTime = ready;
+		return;
+	}
+
+	SpotMemo memo;
+	memo.campIndex = campIndex;
+	memo.readyTime = ready;
+	bot.camp.memo.push_back(memo);
+}
+
+bool SpotReady(const CBot &bot, int campIndex)
+{
+	for (const SpotMemo &m : bot.camp.memo)
+	{
+		if (m.campIndex == campIndex)
+			return gpGlobals->time >= m.readyTime;
+	}
+	return true;
+}
+
 void OnRespawn(CBot &bot)
 {
 	State &st = bot.camp;
 	Reset(bot);
+	st.memo.clear();
 	st.scared = false;
 	st.scareDist = 0.f;
 	st.scareTime = 0.f;

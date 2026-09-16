@@ -104,6 +104,7 @@ struct CBot
 	std::vector<Nav::Waypoint> waypoints;
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;
+	float spawnHoldUntil = 0.f;
 	WeaponRangeClass plannedRangeClass = RANGE_NONE;
 
 	NavPlan::PlanProfile followProfile;
@@ -212,6 +213,8 @@ struct CBot
 
 	float lastProgressTime = 0.f;
 	float lastProgressS = 0.f;
+	int stallRepaths = 0;
+	Vector stallOrigin;
 
 	Vector lastOrigin;
 	bool hasLastOrigin = false;

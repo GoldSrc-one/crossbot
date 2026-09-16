@@ -111,6 +111,7 @@ const Request kDodRequests[] = {
 	{ "CObject",       "m_iTeam",                 CB_MAP(dod_objTeam) },
 	{ "CObject",       "sz_Group",                CB_MAP(dod_objGroup) },
 	{ "CObject",       "m_hOwner",                CB_MAP(dod_objOwner) },
+	{ "CBreakable",    "sz_Group",                CB_MAP(dod_brkGroup) },
 };
 
 const Request kTfcRequests[] = {

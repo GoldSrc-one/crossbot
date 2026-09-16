@@ -6,6 +6,7 @@ param(
     [int]$Seconds = 120,
     [switch]$StrategicDebug,
     [switch]$Plugin,
+    [int]$Tactics = 1,
     [string]$HLDSDir = "D:\hlds"
 )
 
@@ -22,6 +23,7 @@ $logFile = Join-Path $repoRoot "nav_debug\logs\${Map}_objectives.log"
 $commands = @('mp_timelimit 0')
 if ($StrategicDebug) { $commands += 'crossbot_strategic_debug 1' }
 if ($Plugin) { $commands += 'crossbot_objectives 0' }
+$commands += "crossbot_tactics $Tactics"
 
 Write-Host "Starting HLDS on port $Port..."
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port -Games @('valve', $Game) -WaitSeconds 90 `

@@ -648,11 +648,11 @@ for its `offset` member, a primitive is read as it stands.
 `ServerActivate`. They describe entities of the map's game (a `CAreaCapture`, a `CHostage`), so they are
 read through `XPlay::PrivateData(ent, mapOwner)` and never through `g_offsets`, which belongs to whichever
 bot is thinking. A missing field turns objectives off with the reason and the path printed and touches
-nothing else. `tfc-win.json` is not in `crossplay/gamedata/` today, so TFC maps still run on plugin goals.
+nothing else.
 
 Two layouts are worth knowing before adding to these lists. `m_hTargetEnt` and `m_hOwner` are `EHANDLE`s,
-a pointer then a serial, and are read with the serial check. `sz_RequiredObjectGroup` and `sz_Group` are
-inline `char[256]`, not `string_t`, so they are copied out with a length bound.
+a pointer then a serial, and are read with the serial check. `sz_RequiredObjectGroup` and `sz_Group` (on both `CObject`
+and DoD's `CBreakable`) are inline `char[256]`, not `string_t`, so they are copied out with a length bound.
 
 ### Loaded at GameDLLInit, one table per loaded game
 

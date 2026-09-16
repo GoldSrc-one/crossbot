@@ -401,11 +401,15 @@ Two signatures worth recognising:
 - **`could not get past player reaching the strategic goal` repeating on one site** is every bot on a
   team piling into the only objective it has, as on as_oilrig when all six land on one team. That is
   crowding, which the objectives module does nothing about yet.
-- **A hostage fetch that never logs `works hostage_entity` on cs_assault** is usually not objectives.
-  The CT route from spawn crosses the vent, an air move lands off the mesh (`area -1 (wanted 61) ... conn
-  565`), and the bot then logs `mid-route repath (stalled) ... wp 1/N` at about (-564,2464,502) for the
-  rest of the run. Two 2-bot runs out of two hit it; a run where the CT was already beside the hostages
-  used one on the first try.
+- **A hostage fetch that never logs `works hostage_entity` on cs_assault** used to be a movement bug,
+  not objectives. The CT route crossed the vent and dropped through `func_breakable` *77, a grate the
+  planner phases out and a valve bot cannot damage. It landed on the grate (`area -1 (wanted 61) ... conn
+  565`), then logged `mid-route repath (stalled) ... wp 1/N` at about (-564,2464,502) for the rest of the
+  run. That happened in two 2-bot runs out of two. Since `BotBreak::IsTarget` only accepts the bot's own
+  game's entities, no route uses conn 565, and the CT takes the vent ladder down. The first run after the
+  fix logged 0 stalls and a `works hostage_entity`; see `doc/movement.md`, "What counts as breakable". If
+  a stall like that comes back anywhere, it should now end in `made no progress across 3 stalled
+  repaths` and `could not get past repeated stalls`, not a silent loop.
 
 ## scripts/test_sense.ps1
 

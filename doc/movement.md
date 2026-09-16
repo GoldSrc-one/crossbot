@@ -190,6 +190,16 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
   mid-air and repaths from an airborne origin. The cost of holding the clock open is that a flight which
   never ends is invisible to every other timer, which is why the flight bounds itself — see
   `RunAirmoveFlight`.
+- A stall that repeats in place escalates. `stallRepaths` counts stalled repaths since the bot was last
+  more than `kStallEscapeDistance` (64) from `stallOrigin`, and at `kStallRepathLimit` (3) the bot calls
+  `BotGoal::OnBlocked(bot, "repeated stalls")` instead of planning again. Before this a stall could only
+  repath, and a repath that succeeds resets `lastProgressTime`, so a plan the bot physically could not
+  follow looped forever and the goal layer was never told. On cs_assault a bot stranded on a vent grate
+  logged `mid-route repath (stalled) ... wp 1/N` about forty times in a row, for the rest of the run.
+
+  The count is displacement, not `progressS`. Every repath rebases arclength to zero, and a bot pinned
+  against a wall slides 18 units sideways along it, which reads as progress. A first version reset the
+  count on progress and escalated once in a dozen stalls.
 - `Bot_MaxSpeed` returns the cap the *engine* will actually enforce on this bot, which is not any cvar.
   `PM_CheckParamters` computes it as `min(clientmaxspeed, maxspeed)` and writes it back to
   `pmove->maxspeed`, so `PM_Move_Post` reads the finished value out of the `playermove_t` and
@@ -764,6 +774,11 @@ the stopping instead. `lastProgressTime` is stamped every frame for the same rea
 and the 150-unit teleport reset at the top of `Bot_MoveNav` is skipped while riding, since a server hitch
 would otherwise repath from mid-shaft where `FindAreaNearest` finds nothing and the bot drops its goal.
 
+A jump that lands off `plannedAreaPath` is not a teleporter but a CS/DoD round-start respawn, so it sets the
+same `spawnHoldUntil` a bot gets coming back from death: a random 0-1 s during which `Bot_MoveNav` idles in
+front of goal selection. A whole team's `AreaCosts` floods and `PlanPath` calls then spread over a second
+instead of landing on one frame. A planned teleport lands on its own path and repaths at once.
+
 The arrival test is `BotNavZ` against the arrival waypoint's own floor Z, directional with
 `kElevatorArriveSlack`. The slack means the bot can step off up to 8 units short, and that is safe for a
 reason worth stating: navgen only builds a walk seam off a stop when the step is under 18 units, so
@@ -1227,6 +1242,17 @@ the bot simply walked into the brush and stalled. `RouteExemptsHit` now reports 
 through a `wantsBreak` out-param, and a hit exempted for `requiresBreak` goes straight to
 `BotBreak::Engage`. No duck, no jump, no side search — the planner has already decided and already paid.
 
+**Under the feet.** `Repath` plans inside `BotBreak::PhaseThrough`, so an air move may fall through a
+breakable, and nothing makes that breakable part of the target area. A grate over a shaft is the case:
+the arc is sampled straight through it into the room below, `AirmovePlug` finds the target area unplugged,
+and the bot lands on the grate, off the mesh. `BreakBlockedAirmove` falls back to `v.groundentity` when it
+passes `IsTarget`, and breaks it with `Engage` like any other. `Run` sees the target is the bot's own
+`groundentity` and holds `IN_DUCK`: standing, the floor is 64 units below the eye, but `VEC_DUCK_VIEW`
+puts it 30 below, and `CCrowbar::Swing` traces 32 from the gun position. The usual `kBreakReach` of 28 would
+still refuse that, so an underfoot target is measured against `kBreakFloorReach` (31), inside the real
+32 even at the 89-degree pitch clamp. Shooting it would work too but spends ammo on a two-swing job.
+`Finish` forces the repath once the floor is gone.
+
 **Off the route.** An unplanned breakable in the way, which is the ordinary avoidance path. Here
 breaking is the *last* resort, after `canJump`, `canDuck` and `RunSideSearch` have all failed:
 `TakeBreakTarget` sits on both non-receding failure paths in `RunSideSearch`, ahead of the
@@ -1611,6 +1637,12 @@ monster, `takedamage != DAMAGE_NO`, and `0 < health <= kBreakMaxHealth`. There i
 classname test: `takedamage` and `health` are the properties that actually decide it, and dropping the
 classname picks up mod breakables for free. Nothing that is meant to be avoided qualifies — `func_wall`,
 the chargers and the doors are all `DAMAGE_NO`.
+
+**Another game's entities qualify too.** There is no owner test. Each game DLL keeps its own
+`gMultiDamage`, but CrossPlay's `TraceAttack` proxy (`crossplay/vfproxies.cpp`) clears the owner's copy,
+runs the call in the owner's context and re-adds whatever it queued to the caller's, so a valve glock does
+break a cstrike `func_breakable`. An owner test was tried once on the belief that it could not, and it only
+hid the cs_assault grate from the planner instead of explaining why the shots at it did nothing.
 
 `takedamage` is the exact inverse of `SF_BREAK_TRIGGER_ONLY`: `CBreakable::Spawn` sets `DAMAGE_NO` for
 that flag and `DAMAGE_YES` otherwise, which is the same distinction navgen makes with

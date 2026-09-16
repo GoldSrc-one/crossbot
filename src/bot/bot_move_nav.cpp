@@ -163,6 +163,8 @@ namespace
 
 	constexpr float kMineSafeRadius = 375.f;
 	constexpr float kRepathInterval = 2.f;
+	constexpr int kStallRepathLimit = 3;
+	constexpr float kStallEscapeDistance = 64.f;
 	constexpr float kEtaSafetyMargin = 1.6f;
 	constexpr float kProgressEpsilon = 8.f;
 	constexpr float kMoveButtonDeadzone = 0.01f;
@@ -566,11 +568,19 @@ namespace
 	bool BreakBlockedAirmove(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		edict_t *plug = AirmovePlug(bot, mesh);
-		if (!plug || !BotBreak::Engage(bot, plug))
+		if (plug && BotBreak::Engage(bot, plug))
+		{
+			BOT_VLOG("CrossBot: %s cannot land in area %d, it is plugged by %s\n", bot.name,
+				bot.airmoveTargetArea, CBotClassOf(plug));
+			return true;
+		}
+
+		edict_t *ground = bot.pEdict->v.groundentity;
+		if (!BotBreak::Engage(bot, ground))
 			return false;
 
-		BOT_VLOG("CrossBot: %s cannot land in area %d, it is plugged by %s\n", bot.name,
-			bot.airmoveTargetArea, CBotClassOf(plug));
+		BOT_VLOG("CrossBot: %s landed on %s short of area %d, breaking through it\n", bot.name,
+			CBotClassOf(ground), bot.airmoveTargetArea);
 
 		return true;
 	}
@@ -1991,6 +2001,7 @@ namespace
 		bot.estimatedArrivalTime = 0.f;
 		bot.lastProgressTime = 0.f;
 		bot.lastProgressS = 0.f;
+		bot.stallRepaths = 0;
 		bot.nextRepathTime = 0.f;
 	}
 
@@ -2567,18 +2578,23 @@ void Bot_MoveNav(CBot &bot)
 		if (!mesh)
 			return;
 
-		if (bot.hasLastOrigin && !bot.rideActive && !bot.fun.aboard &&
-			(pEdict->v.origin - bot.lastOrigin).Length() > kTeleportJumpThreshold)
-			ResetPath(bot);
-	bot.lastOrigin = pEdict->v.origin;
-	bot.hasLastOrigin = true;
-
 	const Nav::Area *curArea = nullptr;
 	{
 		BOTPERF_SCOPE(ZONE_FINDAREA);
 		curArea = Nav::FindAreaNearest(*mesh, pEdict->v.origin);
 	}
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
+
+	if (bot.hasLastOrigin && !bot.rideActive && !bot.fun.aboard &&
+		(pEdict->v.origin - bot.lastOrigin).Length() > kTeleportJumpThreshold)
+	{
+		if (!curArea || std::find(bot.plannedAreaPath.begin(), bot.plannedAreaPath.end(), curArea->id) ==
+			bot.plannedAreaPath.end())
+			bot.spawnHoldUntil = gpGlobals->time + g_engfuncs.pfnRandomFloat(0.f, 1.f);
+		ResetPath(bot);
+	}
+	bot.lastOrigin = pEdict->v.origin;
+	bot.hasLastOrigin = true;
 
 	{
 		BOTPERF_SCOPE(ZONE_SENSE);
@@ -2600,6 +2616,7 @@ void Bot_MoveNav(CBot &bot)
 		Bot_BailManeuver(bot, "took fire");
 
 	BotCamp::Track(bot);
+	BotStrategic::NoteLife(bot);
 
 	{
 		BOTPERF_SCOPE(ZONE_MEMOS);
@@ -2647,6 +2664,14 @@ void Bot_MoveNav(CBot &bot)
 		}
 	}
 
+	if (gpGlobals->time < bot.spawnHoldUntil)
+	{
+		BotSense::ApplyLook(bot);
+		Vector angles = Bot_UpdateFacing(bot);
+		RunIdleMove(bot, angles);
+		return;
+	}
+
 	{
 		BOTPERF_SCOPE(ZONE_ITEM_SELECT);
 		BotGoal::RefreshStrategic(bot, *mesh);
@@ -2692,8 +2717,31 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
+	if (stalled && !forcedRepath && bot.stallRepaths >= kStallRepathLimit &&
+		(pEdict->v.origin - bot.stallOrigin).Length() <= kStallEscapeDistance)
+	{
+		BOT_VLOG("CrossBot: %s made no progress across %d stalled repaths at (%.1f,%.1f,%.1f), "
+			"giving up on the goal\n", bot.name, bot.stallRepaths,
+			pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z);
+		bot.stallRepaths = 0;
+		BotGoal::OnBlocked(bot, "repeated stalls");
+		BotSense::ApplyLook(bot);
+		Vector angles = Bot_UpdateFacing(bot);
+		RunIdleMove(bot, angles);
+		return;
+	}
+
 	if (bot.waypoints.empty() || forcedRepath || stalled)
 	{
+		if (stalled && !forcedRepath)
+		{
+			if (bot.stallRepaths == 0 || (pEdict->v.origin - bot.stallOrigin).Length() > kStallEscapeDistance)
+			{
+				bot.stallOrigin = pEdict->v.origin;
+				bot.stallRepaths = 0;
+			}
+			++bot.stallRepaths;
+		}
 		if (!TryRepath(bot, *mesh, pEdict, forcedRepath ? "forced" : "stalled"))
 			return;
 

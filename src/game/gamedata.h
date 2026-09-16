@@ -78,6 +78,7 @@ struct MapOffsets
 	int dod_objTeam;
 	int dod_objGroup;
 	int dod_objOwner;
+	int dod_brkGroup;
 
 	int tfc_teamNo;
 	int tfc_goalNo;

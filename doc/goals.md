@@ -284,8 +284,7 @@ has nothing to go for. Leave it off unless reading the log.
 
 ## bot_goal.cpp
 
-Owns *what the bot wants*, in three tiers: `GOAL_STRATEGIC` (`bot_strategic.cpp`, plus the
-still-empty `CollectStrategicGoals` profile seam), `GOAL_FUN` (`bot_fun.cpp`), `GOAL_GATHER`
+Owns *what the bot wants*, in three tiers: `GOAL_STRATEGIC` (`bot_strategic.cpp`), `GOAL_FUN` (`bot_fun.cpp`), `GOAL_GATHER`
 (`bot_items.cpp`). It knows what none of them are. `Select` asks each in turn, highest first, and the
 first tier with a surviving candidate wins outright — a bot with a tank to mount does not weigh it
 against a shotgun, it goes to the tank.
@@ -558,10 +557,16 @@ other bot:
 | relation | intent | rank |
 | --- | --- | --- |
 | I carry what a site needs, or the site is urgent | `deliver` / `attack` | 3 |
-| a site with no need; a loose payload my team carries | `attack` / `fetch` | 2 |
-| a teammate carrier; a known enemy carrier; a site whose need nobody can fetch | `escort` / `hunt` / `attack` | 1 |
-| a site or payload my team defends | `defend` | 0 |
+| a loose payload my team carries, under the shared cap; an urgent site I defend | `fetch` / `defend` | 2 |
+| a site I attack that needs nothing, or whose need is not lying loose | `support` | 1 |
+| a payload my team defends | `defend` | 1 |
+| a site my team defends | `defend` | 0 |
 | nothing at all | `roam` to a spawn | 0 |
+
+There is no escort or hunt. A friendly carrier is not a target; it is the runner a `support` bot plans
+around (`bot_tactics.cpp`). An enemy carrier is not known to anyone who has not sensed it. When a bot has
+both rank-1 `support` and rank-1 `defend` intents, `BotStrategic::State::defender`, rolled once per life,
+keeps one kind and drops the other, so a two-sided map splits its team by coin flip rather than by board.
 
 `BotStrategic::Prioritize` keeps the highest rank present, `KeepCheapestPerEntity` keeps one entrance
 per volume so a brush with eight entrances is not eight tickets, and the ordinary `1/(cost+2)^bias`
@@ -594,6 +599,12 @@ chasing each other and re-planning at 4 Hz.
 - **DoD's `point_can_allies_touch` key means the opposite.** A value above 0 sets `m_bAlliesCantTouch`
   (dod.c:118399), so the reader reads the bool, never the key. On `dod_avalanche` every point is
   cant-touch for both teams and all five objectives are capture areas.
+- **A DoD TNT breakable's team bits are optional.** `dod.fgd` gives 16 Allies Only, 32 Axis Only and 64
+  Object Cap Only. With neither team bit the charge belongs to whichever team can carry its
+  `CBreakable::sz_Group` object, so the reader takes the attackers from the payloads and carriers of that
+  group, and both teams only when no object matches. Reading the team bits alone dropped `dod_escape`'s
+  `blow2` (`*178`, spawnflags 64, `axis_obj`), the charge that actually scores through `rebar` ->
+  `dod_point_relay` -> `axis_flag`, while keeping the bridge charge beside it (`*204`, spawnflags 96).
 - **TFC `items_allowed` is a goal number, not a mask.** `APMeetsCriteria` (tfc.c:111822) passes only if
   the `item_tfgoal` with that `goal_no` has the activator as `pev->owner`; `has_item_from_group` is the
   same test on `group_no`. A touch goal fires only with `goal_activation & 1` and `goal_state != 1`
@@ -603,10 +614,9 @@ chasing each other and re-planning at 4 Hz.
 
 ### What it does not do
 
-Rocket-only DoD breakables (spawnflag 512) and `dod_point_relay` chains are not read: a `valve` bot has
-no rocket, and a relay only says which point a breakable leads to. VIP detection only sees real `cstrike`
-players. TFC VIP maps get their scoring escape goal but no civilian hunt. There are no roles, flanks or
-team coordination yet; every bot still decides alone.
+Rocket- and grenade-only DoD breakables (spawnflags 512, 256, 8) and `dod_point_relay` chains are not
+read: a `valve` bot has neither, and a relay only says which point a breakable leads to. VIP detection only sees real `cstrike`
+players. TFC VIP maps get their scoring escape goal but no civilian hunt.
 
 ## bot_strategic.cpp
 
@@ -672,6 +682,92 @@ in `Bot_MoveNav` and clears the goal.
 A repath failure or a hard block puts that goal on a 10 s per-bot memo rather than killing the tier,
 so an unreachable objective lets fun and gather have a turn instead of trapping the bot in a
 re-select loop against something it can never walk to.
+
+## bot_tactics.cpp
+
+Decides where a `support` or `defend` bot actually stands. There is no team board: a bot knows where its
+friends are and nothing about what they intend, and every bot applies the same rule, so spreading out and
+leapfrogging are what falls out of it rather than something coordinated.
+
+### One primitive: a camp spot ahead of a runner
+
+`BotTactics::Pick` runs from `PickStop` in `bot_goal.cpp`, before the gather detour, whenever the strategic
+target is a `support` or `defend`. It picks a `mesh.camps` spot `c` that lies ahead of a *runner* on its way to
+the target, and that the bot reaches first:
+
+```
+toTarget[c] < toTarget[runner]                                   ahead of the runner
+fromRunner[c] + toTarget[c] - toTarget[runner] <= budget          on a near-ideal runner -> target path
+clock + fromBot[c] + margin < fromRunner[c]                       the bot arrives first
+not in the bot's spot memo, no friend within 96 units
+weighted 1/(fromBot + 2)^crossbot_goal_bias
+```
+
+That is the gather detour's acceptance test with the runner in place of the bot. Nothing stores anyone's
+path: an area is on a near-ideal path exactly when the two fields around it sum to the direct cost, so a
+human teammate and a bot teammate are the same thing to it.
+
+| job | runner | fallback when nothing qualifies |
+| --- | --- | --- |
+| `support` with a leader | the nearest friendly carrier whose payload the site needs (`BotStrategic::Leader`) | the site itself |
+| `support` without one | a random live friend, weighted toward nearer | the site itself |
+| `defend` | a random enemy spawn from `Objectives::Tables::spawns` | a spot within 4s of the target, else the target |
+
+Every pick lands strictly closer to the target than its runner. A bot behind its friend jumps ahead of it; the
+friend, picking in turn, jumps ahead again; and once no spot is left between a runner and the site, the bot
+goes to the site. Leaderless attackers leapfrog in and converge instead of waiting on each other.
+
+### The defender's clock is in its head
+
+A defender assumes the enemy spawned when it did. `clock` is seconds since `BotStrategic::State::spawnTime`, so
+the imagined enemy has already walked `clock` seconds of its path. Straight after spawning almost every spot on
+that path passes the race and the defender ranges out along it; as the clock runs, only spots far from the
+enemy spawn, which is near the site, still pass; past the enemy's travel time to the site nothing does and it
+holds a spot near the site. The same rule serves CS rounds and DoD/TFC respawns.
+
+`spawnTime` resets in `BotStrategic::OnRespawn` and in `NoteLife`, which runs every frame beside
+`BotCamp::Track`. `NoteLife` covers what `OnRespawn` misses: the first spawn after `crossbot_add` (a bot starts
+with `wasDead` false) and a CS new round, where survivors are moved to a spawn without dying. It resets when
+the bot moved more than 128 units in one frame and landed within 64 of one of its own team's spawns.
+
+### Fields
+
+`toTarget` is `bot.goal.toTargetCosts`, already computed for the target. `fromBot` is the forward field
+`Select` or `Advance` just ran. A friend runner costs one `Nav::AreaCosts` per pick; an enemy spawn's field is
+cached per spawn area until `BotTactics::ForgetMap` at map change. Runner fields use default planner parameters:
+the runner is assumed generic.
+
+### Holding, re-picking, failing
+
+The spot is committed by `BotCamp::CommitTimed` as an ordinary camp stop marked `timed`, so arrival, facing,
+crouch and zoom are the camp module's. A timed hold ignores the scare and friend-in-view rules and ends on
+its own clock: 0 to 10s for `support`, 5 to 15s for `defend`. Leaving calls `BotGoal::Advance`, which runs
+`PickStop` and therefore `Pick` again against the same target, with a fresh runner.
+
+Every picked spot goes into `BotCamp::State::memo` for 30s, so the next pick differs. A raced spot fails for
+the rest of the life on either of two checks:
+- **The planned route loses.** `CheckTravel` reads `followProfile.totalTime` on the frame after the commit, as
+  it already does for scare camps. The comparison is made in one unit. The pick compared two field estimates,
+  and the planned route runs well above its field estimate: on de_dust2, 5.3s planned against 3.0s
+  estimated, and 12.7 against 6.5. Comparing the planned time with the runner's raw field time made
+  nearly every support pick lose. The runner's estimate is scaled by the bot's own planned/estimated ratio,
+  and the spot fails when `planned + clock + margin >= runner * planned / estimated`.
+- **Something closes in on the bot before it arrives.**
+
+A frightened bot skips the race entirely: `support` goes for the site, `defend` only considers spots near the
+target. Near-target spots carry no race, so neither check abandons them. Before that, a defender
+walking to one while a contact closed in abandoned it, re-picked the next near spot, and abandoned that too:
+62 such aborts in four minutes, and the bot burned every spot around the site for the rest of its life.
+
+Log lines: `supports X toward Y, camps at spot N (...)`, `guards Y against spawn N at spot M (...)`,
+`falls back to spot N near Y`, `lost the race to spot N ... not trying it again this life`, and
+`starts a life as an attacker|a defender`.
+
+### cvars
+
+`crossbot_tactics` (1; 0 keeps the intents but never picks a spot, so `support` walks to the site and `defend`
+guards it -- the A/B lever), `crossbot_tactics_budget` (3s of path slack), `crossbot_tactics_margin` (1s the
+bot must beat the runner by), `crossbot_tactics_debug` (0, adds the no-spot line).
 
 ## bot_fun.cpp
 

@@ -25,8 +25,8 @@ namespace
 	constexpr float kGoalDuckRange = 128.f;
 	constexpr float kGoalUseRange = 64.f;
 	constexpr float kGoalStandRadius = 8.f;
-	constexpr float kEscortStandRadius = 128.f;
-	constexpr float kPlayerMoveRadius = 160.f;
+	constexpr float kSpawnJump = 128.f;
+	constexpr float kSpawnNear = 64.f;
 	constexpr float kUseStandoff = 40.f;
 	constexpr float kGuardStandoff = 96.f;
 	constexpr float kGoalFailCooldown = 10.f;
@@ -43,11 +43,6 @@ namespace
 	constexpr int kRankIdle = 0;
 
 	using BotStrategic::Intent;
-
-	int KindOf(int payload)
-	{
-		return payload & kKindMask;
-	}
 
 	int RankOf(int payload)
 	{
@@ -182,7 +177,7 @@ namespace
 			return 0.f;
 		if (intent.kind == BotStrategic::KIND_FETCH && intent.buttons != 0)
 			return kUseStandoff;
-		if (intent.kind == BotStrategic::KIND_DEFEND || intent.kind == BotStrategic::KIND_ESCORT)
+		if (intent.kind == BotStrategic::KIND_DEFEND)
 			return kGuardStandoff;
 		return 0.f;
 	}
@@ -205,7 +200,33 @@ namespace
 	bool HoldLimited(int kind)
 	{
 		return kind == BotStrategic::KIND_ATTACK || kind == BotStrategic::KIND_DELIVER ||
-			kind == BotStrategic::KIND_FETCH || kind == BotStrategic::KIND_DEFEND;
+			kind == BotStrategic::KIND_FETCH || kind == BotStrategic::KIND_DEFEND || kind == BotStrategic::KIND_SUPPORT;
+	}
+
+	void StartLife(CBot &bot)
+	{
+		BotStrategic::State &st = bot.strat;
+		st.spawnTime = gpGlobals->time;
+		st.defender = g_engfuncs.pfnRandomLong(0, 1) != 0;
+		st.lastOrigin = bot.pEdict->v.origin;
+
+		if (Objectives::Active())
+			BOT_VLOG("CrossBot: %s starts a life as %s\n", bot.name, st.defender ? "a defender" : "an attacker");
+	}
+
+	bool NearOwnSpawn(const CBot &bot)
+	{
+		if (!Objectives::Active())
+			return false;
+
+		int team = Teams::TeamOf(bot.pEdict);
+		for (const Objectives::Spawn &spawn : Objectives::Get().spawns)
+		{
+			edict_t *ent = spawn.ent.Get();
+			if (ent && spawn.team == team && (ent->v.origin - bot.pEdict->v.origin).Length() <= kSpawnNear)
+				return true;
+		}
+		return false;
 	}
 }
 
@@ -322,12 +343,12 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 		{
 			bool needs = site.needId != 0 || site.needGroup != 0;
 			Intent *intent = nullptr;
-			if (!needs)
-				intent = &Push(out, ent, site.point, site.volume, KIND_ATTACK, site.urgent ? kRankDeliver : kRankTake);
-			else if (meets(site))
+			if (!needs && site.urgent)
+				intent = &Push(out, ent, site.point, site.volume, KIND_ATTACK, kRankDeliver);
+			else if (needs && meets(site))
 				intent = &Push(out, ent, site.point, site.volume, KIND_DELIVER, kRankDeliver);
-			else if (!loose(site))
-				intent = &Push(out, ent, site.point, site.volume, KIND_ATTACK, kRankSupport);
+			else if (!needs || !loose(site))
+				intent = &Push(out, ent, site.point, site.volume, KIND_SUPPORT, kRankSupport);
 
 			if (intent)
 			{
@@ -360,30 +381,23 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 		}
 		else if ((payload.defendTeams & bit) != 0)
 		{
-			Push(out, ent, ent->v.origin, false, KIND_DEFEND, kRankIdle);
+			Push(out, ent, ent->v.origin, false, KIND_DEFEND, kRankSupport);
 		}
 	}
 
-	for (size_t i = 0; i < tables.carriers.size(); ++i)
+	bool support = false;
+	bool defend = false;
+	for (const Intent &intent : out)
 	{
-		const Objectives::Carrier &carrier = tables.carriers[i];
-		edict_t *player = carrier.player.Get();
-		if (!player || player == bot.pEdict)
-			continue;
-
-		bool seen = false;
-		for (size_t j = 0; j < i && !seen; ++j)
-			seen = tables.carriers[j].player.Is(player);
-		if (seen)
-			continue;
-
-		if (carrier.team == team)
-		{
-			if (held.empty())
-				Push(out, player, player->v.origin, false, KIND_ESCORT, kRankSupport);
-		}
-		else if (carrier.known)
-			Push(out, player, player->v.origin, false, KIND_HUNT, kRankSupport);
+		support = support || (intent.kind == KIND_SUPPORT && intent.rank <= kRankSupport);
+		defend = defend || (intent.kind == KIND_DEFEND && intent.rank <= kRankSupport);
+	}
+	if (support && defend)
+	{
+		int drop = bot.strat.defender ? KIND_SUPPORT : KIND_DEFEND;
+		out.erase(std::remove_if(out.begin(), out.end(), [drop](const Intent &intent) {
+			return intent.kind == drop && intent.rank <= kRankSupport;
+		}), out.end());
 	}
 
 	if (!out.empty())
@@ -496,10 +510,9 @@ void Prioritize(std::vector<BotGoal::Candidate> &cands)
 		[best](const BotGoal::Candidate &cand) { return RankOf(cand.payload) != best; }), cands.end());
 }
 
-float MoveRadius(int payload)
+float MoveRadius(int)
 {
-	int kind = KindOf(payload);
-	return (kind == KIND_ESCORT || kind == KIND_HUNT) ? kPlayerMoveRadius : kGoalMoveRadius;
+	return kGoalMoveRadius;
 }
 
 const char *KindName(int payload)
@@ -510,8 +523,7 @@ const char *KindName(int payload)
 	case KIND_ATTACK: return "attack";
 	case KIND_DELIVER: return "deliver";
 	case KIND_FETCH: return "fetch";
-	case KIND_ESCORT: return "escort";
-	case KIND_HUNT: return "hunt";
+	case KIND_SUPPORT: return "support";
 	case KIND_DEFEND: return "defend";
 	case KIND_ROAM: return "roam";
 	default: break;
@@ -639,8 +651,7 @@ bool RunArrival(CBot &bot)
 		BotSense::ApplyLook(bot);
 
 	Vector angles = Bot_UpdateFacing(bot);
-	float radius = (kind == KIND_ESCORT) ? kEscortStandRadius : kGoalStandRadius;
-	Bot_DriveTo(bot, angles, bot.goalPoint, false, buttons, 0.f, radius);
+	Bot_DriveTo(bot, angles, bot.goalPoint, false, buttons, 0.f, kGoalStandRadius);
 	return true;
 }
 
@@ -675,7 +686,64 @@ void OnBlocked(CBot &bot, const char *what)
 void OnRespawn(CBot &bot)
 {
 	bot.strat.memo.clear();
+	StartLife(bot);
 	Forget(bot);
+}
+
+void NoteLife(CBot &bot)
+{
+	State &st = bot.strat;
+	Vector origin = bot.pEdict->v.origin;
+	bool jumped = (origin - st.lastOrigin).Length() > kSpawnJump;
+	st.lastOrigin = origin;
+	if (st.spawnTime > 0.f && !(jumped && NearOwnSpawn(bot)))
+		return;
+
+	StartLife(bot);
+}
+
+int KindOf(int payload)
+{
+	return payload & kKindMask;
+}
+
+edict_t *Leader(const CBot &bot, edict_t *siteEnt)
+{
+	if (!Objectives::Active())
+		return nullptr;
+
+	const Objectives::Tables &tables = Objectives::Get();
+	const Objectives::Site *site = nullptr;
+	for (const Objectives::Site &s : tables.sites)
+	{
+		if (s.ent.Is(siteEnt))
+		{
+			site = &s;
+			break;
+		}
+	}
+	if (!site || (site->needId == 0 && site->needGroup == 0))
+		return nullptr;
+
+	int team = Teams::TeamOf(bot.pEdict);
+	edict_t *best = nullptr;
+	float bestDist = 0.f;
+	for (const Objectives::Carrier &carrier : tables.carriers)
+	{
+		edict_t *player = carrier.player.Get();
+		if (!player || player == bot.pEdict || carrier.team != team || !CBotIsLivePlayer(player))
+			continue;
+		if (!Matches(carrier.id, carrier.group, site->needId, site->needGroup))
+			continue;
+
+		float d = (player->v.origin - bot.pEdict->v.origin).Length();
+		if (!best || d < bestDist)
+		{
+			best = player;
+			bestDist = d;
+		}
+	}
+	return best;
 }
 
 void PrintCandidates(const Nav::NavMesh &mesh)

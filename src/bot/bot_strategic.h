@@ -22,8 +22,7 @@ enum Kind
 	KIND_ATTACK,
 	KIND_DELIVER,
 	KIND_FETCH,
-	KIND_ESCORT,
-	KIND_HUNT,
+	KIND_SUPPORT,
 	KIND_DEFEND,
 	KIND_ROAM,
 };
@@ -59,6 +58,10 @@ struct State
 	float startTime = 0.f;
 
 	std::vector<Memo> memo;
+
+	float spawnTime = 0.f;
+	bool defender = false;
+	Vector lastOrigin;
 };
 
 bool Enabled();
@@ -92,6 +95,12 @@ void OnRepathFailed(CBot &bot);
 void OnBlocked(CBot &bot, const char *what);
 
 void OnRespawn(CBot &bot);
+
+void NoteLife(CBot &bot);
+
+int KindOf(int payload);
+
+edict_t *Leader(const CBot &bot, edict_t *site);
 
 void PrintCandidates(const Nav::NavMesh &mesh);
 

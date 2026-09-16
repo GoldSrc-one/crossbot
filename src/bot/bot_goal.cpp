@@ -18,6 +18,7 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_strategic.h"
+#include "bot_tactics.h"
 
 extern IGameProfile *g_pGameProfile;
 
@@ -257,6 +258,9 @@ namespace
 			CommitStop(bot, st.target, false);
 			return;
 		}
+
+		if (st.target.tier == BotGoal::GOAL_STRATEGIC && BotTactics::Pick(bot, mesh, fromBot))
+			return;
 
 		float budget = BotGoal::DetourBudget();
 

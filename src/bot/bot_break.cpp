@@ -23,6 +23,7 @@ namespace
 {
 	constexpr float kBreakMaxHealth = 100.f;
 	constexpr float kBreakReach = 28.f;
+	constexpr float kBreakFloorReach = 31.f;
 	constexpr float kBreakStandRadius = 8.f;
 	constexpr float kBreakAimTolerance = 8.f;
 	constexpr float kBreakNudge = 2.f;
@@ -303,8 +304,9 @@ bool EngageStandoff(CBot &bot, edict_t *ent, float minRange)
 	st.nextSwingTime = 0.f;
 	snprintf(st.targetName, sizeof(st.targetName), "%s", CBotClassOf(ent));
 
+	Vector center = (ent->v.absmin + ent->v.absmax) * 0.5f;
 	BOT_VLOG("CrossBot: %s is shooting %s at (%.1f,%.1f,%.1f) from %.0f units\n", bot.name,
-		st.targetName, ent->v.origin.x, ent->v.origin.y, ent->v.origin.z, minRange);
+		st.targetName, center.x, center.y, center.z, minRange);
 
 	return true;
 }
@@ -385,8 +387,9 @@ bool Run(CBot &bot)
 
 	Vector los = aimPoint - eye;
 	bool standoff = st.standoff > 0.f;
+	bool underfoot = !standoff && pEdict->v.groundentity == ent;
 	bool inRange = canHit && (standoff ? los.Length() >= st.standoff
-		: los.Length() <= kBreakReach);
+		: los.Length() <= (underfoot ? kBreakFloorReach : kBreakReach));
 	bool aimed =
 		fabsf(Bot_NormalizeAngle(bot.desiredAngles.y - angles.y)) <= kBreakAimTolerance &&
 		fabsf(Bot_NormalizeAngle(bot.desiredAngles.x - angles.x)) <= kBreakAimTolerance;
@@ -428,6 +431,7 @@ bool Run(CBot &bot)
 	else if (fmove < -kBreakMoveDeadzone) buttons |= IN_BACK;
 	if (smove > kBreakMoveDeadzone) buttons |= IN_MOVERIGHT;
 	else if (smove < -kBreakMoveDeadzone) buttons |= IN_MOVELEFT;
+	if (underfoot) buttons |= IN_DUCK;
 
 	int wantId = WantWeaponId(bot);
 	int activeId = ActiveWeaponId(bot);

@@ -279,6 +279,12 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   `tfc` whose objective offsets loaded, bots take their strategic goals from `objectives.cpp` and ignore
   the per-bot `bot_goal` entities the AMXX plugin publishes. 0 restores the plugin's goals. A map with no
   reader, or with offsets missing, behaves identically either way
+- `crossbot_tactics` — camp-spot tactics for `support` and `defend` strategic goals. Default 1. 0 keeps the
+  intents but never picks a spot; see `doc/goals.md`, `bot_tactics.cpp`
+- `crossbot_tactics_budget` — seconds a spot may add to a runner's best path and still count as on it.
+  Default 3
+- `crossbot_tactics_margin` — seconds a bot must beat the runner to a spot by. Default 1
+- `crossbot_tactics_debug` — also log when a supporter finds no spot ahead of its runner. Default 0
 - `crossbot_goal_bias` — exponent in the fun/strategic weight `1 / (cost + 2)^bias`. Default 2. 0 is
   uniform random across candidates, which is how you tell a selection problem from a distance-weighting
   one; large values collapse to nearest-first. Does not affect gather, which is always cheapest-first

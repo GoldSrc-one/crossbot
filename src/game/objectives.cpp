@@ -348,8 +348,25 @@ void ReadDod()
 				attack |= TeamBit(teams[i]);
 		}
 
-		if (attack)
-			AddSite(ent, attack, both & ~attack, 0, Objectives::kAnyGroup);
+		std::string name = Chars(ent, g_off.dod_brkGroup);
+		int group = GroupId(name);
+		if (!attack && group)
+		{
+			for (const Objectives::Payload &payload : g_tables.payloads)
+			{
+				if (payload.group == group)
+					attack |= payload.carryTeams;
+			}
+			for (const Objectives::Carrier &carrier : g_tables.carriers)
+			{
+				if (carrier.group == group)
+					attack |= TeamBit(carrier.team);
+			}
+		}
+		if (!attack)
+			attack = both;
+
+		AddSite(ent, attack, both & ~attack, 0, group ? group : Objectives::kAnyGroup);
 	});
 
 	ForEach("info_player_allies", [](edict_t *ent) { AddSpawn(ent, kDodAllies); });
