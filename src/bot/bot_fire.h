@@ -127,6 +127,9 @@ bool Supported(const WeaponMode &mode);
 
 const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed);
 
+bool SolveOffhand(const WeaponMode &mode, const Vector &src, const Vector &base, const Vector &vel,
+	Vector &look, float &flight);
+
 bool WeaponArmed(const BotInventory &inv, const BotWeapon &w);
 
 bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict);
@@ -148,7 +151,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles);
 
 bool BraceEnabled();
 
-bool Brace(CBot &bot, unsigned short buttons, bool &duck);
+bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly);
 
 const char *ModeName(Mode mode);
 

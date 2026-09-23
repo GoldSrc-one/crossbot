@@ -23,6 +23,7 @@ enum ItemKind
 	ITEM_HEALTHCHARGER,
 	ITEM_RECHARGE,
 	ITEM_HEALVOLUME,
+	ITEM_STATION,
 };
 
 inline bool ItemKindIsCharger(ItemKind kind)
@@ -42,7 +43,7 @@ inline bool ItemKindIsBrush(ItemKind kind)
 
 inline bool ItemKindUsesValue(ItemKind kind)
 {
-	return ItemKindIsCharger(kind) || ItemKindIsVolume(kind);
+	return ItemKindIsCharger(kind) || ItemKindIsVolume(kind) || kind == ITEM_STATION;
 }
 
 enum DeployKind
@@ -61,7 +62,34 @@ enum AmbushKind
 	AMBUSH_COUNT,
 };
 
+enum OffhandUse
+{
+	OFFHAND_NONE = 0,
+	OFFHAND_ATTACK,
+	OFFHAND_SCARED,
+};
+
+struct OffhandInfo
+{
+	OffhandUse use = OFFHAND_NONE;
+	int type = 0;
+	int count = 0;
+	float pin = 0.f;
+	float fuse = 0.f;
+	float minRange = 0.f;
+	float maxRange = 0.f;
+	WeaponMode mode = {};
+};
+
+constexpr int kMaxOffhandSlots = 2;
+
 struct BotInventory;
+struct CBot;
+
+namespace Nav
+{
+struct NavMesh;
+}
 
 class IGameProfile
 {
@@ -84,6 +112,34 @@ public:
 	virtual bool AllowsGoalTier(BotGoal::Tier tier) const = 0;
 
 	virtual void Respawn(edict_t *pEdict) const = 0;
+
+	virtual bool PreThink(edict_t *) const { return false; }
+
+	virtual bool OffhandRead(edict_t *, int, OffhandInfo &) const { return false; }
+
+	virtual const char *OffhandCommand(int, bool) const { return nullptr; }
+
+	virtual bool OffhandPrimed(edict_t *) const { return false; }
+
+	virtual const char *HazardEntity() const { return nullptr; }
+
+	virtual bool AbilityRun(CBot &, const Nav::NavMesh &) const { return false; }
+
+	virtual void RefreshWorld() const {}
+
+	virtual bool Disguised(edict_t *) const { return false; }
+
+	virtual bool HoldFire(const CBot &) const { return false; }
+
+	virtual bool ItemUsable(edict_t *, edict_t *) const { return true; }
+
+	virtual bool Fortifies(edict_t *) const { return false; }
+
+	virtual bool CanDetpack(edict_t *) const { return false; }
+
+	virtual void NoteSound(edict_t *, const char *) const {}
+
+	virtual void Patients(edict_t *, std::vector<edict_t *> &) const {}
 
 	virtual ItemKind ClassifyItem(edict_t *ent) const = 0;
 

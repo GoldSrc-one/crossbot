@@ -7,8 +7,9 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   always the game directory; `*` or nothing picks a random playable one, and an unknown name lists
   what is loaded. A game is playable only with both gamedata and a game profile — see
   `doc/games.md`. The third argument belongs to that game's profile rather than to this command:
-  in deathmatch it is a player model, and in a team mod it will be a team. `*` or nothing means the
-  profile chooses — a random installed model in deathmatch. A model the scan did not find is a
+  in deathmatch it is a player model, and for `tfc` it is a class (`scout` .. `engineer`,
+  `civilian`, `randompc`). `*` or nothing means the profile chooses — a random installed model in
+  deathmatch, `randompc` in TFC, which rolls a new class on every spawn. A model the scan did not find is a
   warning rather than a refusal: it prints the installed list and uses the name anyway, because
   models living inside a `.pak` are invisible to the scan. See `doc/games.md`, `player_models.cpp`,
   for where the list comes from and why CrossPlay may clamp the result.
@@ -102,6 +103,18 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   and hold default to CS's point-blank 12 and 2.67) or `Concuss` byte straight into the handlers, as
   if the wire had delivered it. Exercises everything downstream of the message hook without a CS or
   TFC client. `conc 0` clears
+- `crossbot_ability_status` — per bot, the class ability state (`tfc_ability.cpp`): the running
+  `task` (`heal`, `repair`, `build`, `stab`, `pipes`, `pad`, `touch`, `disarm`, `detpack`, or `none`),
+  the last `why`, the player class, and counters that survive respawn: `heals`, `repairs`, `builds`,
+  `buildfails`, `disguises` (commands sent), `feigns`, `stabs`, `pipes` (bursts started), `dets`,
+  `pads`, `padfails` (a pad that would not send), `touches`, `uncovers` (spies unmasked), `disarms`
+  (enemy detpacks defused), `detpacks` (set), `calls` (`saveme` sent)
+- `crossbot_grenade_status` — per bot, the off-hand grenade state (`bot_grenade.cpp`, TFC only):
+  `slot` being cooked (0 none), `why`, `held` seconds, the last solved `flight`, and counters `primes`,
+  `throws`, `forced` (released at 1 s left without a shot, toward the most open direction), `refused`
+  (the game never set the primed bit), `scared` (caltrop throws). `slots=type:count,type:count` is what
+  the profile read last, `sightings`/`rejects` count attack decisions and how many failed the range or
+  friend gate, `dist`/`min` the last and smallest target distance seen. Counters survive respawn
 - `crossbot_sense_status` — per bot: the bot's own `team`, aim target and bone, `cands`/`keep` for the
   vision pick, live suspicion count with a `kinds` breakdown
   by player/monster/other, the `tier` that won the look vote, the freshest entry with source, age and
@@ -320,7 +333,10 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   the *point* here rather than a bug: the charge is what closes the gap
 - `crossbot_brace` — stop and duck to fire a `WPN_Q_BRACE` weapon (the OP4 M249). Default 1. 0 lets the
   bot keep moving while it sprays, for A/B runs; `bracing=` and `braces=` in `crossbot_fire_status`
-  show it working. See `doc/combat.md`, "Brace"
+  show it working (`bracing=3` is an expert holding its speed and bracing for one frame). See
+  `doc/combat.md`, "Brace"
+- `crossbot_grenade_cook`, `crossbot_backstab`, `crossbot_brace_moving` — tier flags, default -1.
+  See `doc/difficulty.md`
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/goals.md`
@@ -370,6 +386,7 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   cannot creep more slowly than this, so it never fully stops: it dithers across the nearest mouse count and
   `crossbot_aim_status` shows an idle hand speed of 21 rather than 0. 0 disables
 
+- `crossbot_grenade` — whether bots prime and throw off-hand grenades (TFC). Default 1.
 - `crossbot_deploy` — whether bots place tripmines and satchels. Default 1. **The nav sweep sets it to
   0**, the same way it sets `crossbot_gather 0`: a mine changes every route through the doorway it
   blocks, and the sweep's per-map waypoint diffs depend on the route being repeatable. With it off the

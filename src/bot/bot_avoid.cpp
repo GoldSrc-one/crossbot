@@ -63,6 +63,8 @@ namespace
 	constexpr float kAvoidBeamDepth = 32.f;
 	constexpr float kAvoidBeamPad = 4.f;
 	constexpr float kAvoidBeamXY = 16.f;
+	constexpr float kAvoidWalkOverTime = 1.f;
+	constexpr float kAvoidPadRadius = 48.f;
 
 	const char *ClassOf(edict_t *ent)
 	{
@@ -170,11 +172,18 @@ namespace
 		if (bot.goalItem.Is(hit))
 			return true;
 
-		if (solid != SOLID_BSP)
-			return false;
-
 		size_t begin = std::max(bot.waypointIndex, bot.avoid.detourEnd);
 		size_t end = std::min(bot.waypoints.size(), begin + kAvoidRouteLookahead);
+
+		for (size_t i = begin; i < end; ++i)
+		{
+			const Nav::Waypoint &wp = bot.waypoints[i];
+			if (wp.requiresTeleport && (hit->v.origin - wp.point).Length2D() <= kAvoidPadRadius)
+				return true;
+		}
+
+		if (solid != SOLID_BSP)
+			return false;
 		for (size_t i = begin; i < end; ++i)
 		{
 			const Nav::Waypoint &wp = bot.waypoints[i];
@@ -559,7 +568,7 @@ namespace
 	bool TakeMineTarget(CBot &bot, BotAvoid::Decision &out, edict_t *hit,
 		const BotDeploy::Beam *beam, const char *why)
 	{
-		if (!beam || !hit)
+		if (!beam || !hit || beam->hazard)
 			return false;
 
 		out.mineTarget = hit;
@@ -569,6 +578,16 @@ namespace
 			bot.name, ClassOf(hit), bot.pEdict->v.origin.x, bot.pEdict->v.origin.y,
 			bot.pEdict->v.origin.z, why);
 
+		return true;
+	}
+
+	bool WalkOverHazard(CBot &bot, edict_t *hit, const BotDeploy::Beam *beam)
+	{
+		if (!beam || !beam->hazard)
+			return false;
+
+		bot.avoid.walkOverUntil = gpGlobals->time + kAvoidWalkOverTime;
+		BOT_VLOG("CrossBot: %s avoid walks over %s, no way around\n", bot.name, ClassOf(hit));
 		return true;
 	}
 
@@ -624,6 +643,8 @@ namespace
 		size_t d = bot.waypointIndex;
 		if (!PickDestination(bot, ctx, hit, beam, origin, hullHalf, dest, d))
 		{
+			if (WalkOverHazard(bot, hit, beam))
+				return;
 			if (!recedes && TakeMineTarget(bot, out, hit, beam, "no clear rejoin point"))
 				return;
 			if (!recedes && TakeBreakTarget(bot, out, hit, "no clear rejoin point"))
@@ -668,6 +689,8 @@ namespace
 			return;
 		}
 
+		if (WalkOverHazard(bot, hit, beam))
+			return;
 		if (!recedes && TakeMineTarget(bot, out, hit, beam, ok ? "too long" : "no way around"))
 			return;
 		if (!recedes && TakeBreakTarget(bot, out, hit, ok ? "too long" : "no way around"))

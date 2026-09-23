@@ -250,6 +250,24 @@ cvar_t g_bunnyHopCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_grenadeCookCvar = {
+	"crossbot_grenade_cook",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_backstabCvar = {
+	"crossbot_backstab",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_braceMovingCvar = {
+	"crossbot_brace_moving",
+	"-1",
+	FCVAR_SERVER
+};
+
 cvar_t g_aimDelayCvar = {
 	"crossbot_aim_delay",
 	"-1",
@@ -343,6 +361,12 @@ cvar_t g_rangePinCvar = {
 cvar_t g_rangeForceCvar = {
 	"crossbot_range_force",
 	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_grenadeCvar = {
+	"crossbot_grenade",
+	"1",
 	FCVAR_SERVER
 };
 
@@ -487,6 +511,9 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_pickupPriorityCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gaussCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_bunnyHopCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_grenadeCookCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_backstabCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_braceMovingCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);
@@ -504,6 +531,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_rangePinCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_rangeForceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_grenadeCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);

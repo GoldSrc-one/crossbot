@@ -873,7 +873,13 @@ charge every time the bot's aim was off at the wrong instant. So the machine rel
 
 A held charge outranks everything else in the file. `Think` checks `fire.charging` **before** the
 no-target bail, so a bot that loses its target keeps the weapon, keeps the charge, reports
-`why=carrying` and walks around with it until someone reappears. It also bypasses `ModeUsable` while
+`why=carrying` and walks around with it until someone reappears, or until `chargeMax - kChargeSafety`,
+where the carry is dropped and the button comes up — a gauss past that would zap its holder, and a TFC
+sniper crawls at 80 u/s for as long as it aims. That release is not counted in `capped`, which stays
+the "release logic broke while a target was in view" signal `test_fire.ps1` fails on. The cap is only
+checked on the no-target path: with a target in view `ChargeButtons` owns the timeout, and dropping
+the commit earlier in the frame would let it restart the press without the one-frame release that
+fires the shot. It also bypasses `ModeUsable` while
 holding — the ammo was already spent, so "can you afford this shot" is no longer a question — and
 pins the mode order to one entry so selection cannot switch modes underneath it.
 
@@ -1050,6 +1056,16 @@ it reads the command's *button bits*, not velocity: `IN_DUCK` 3°, any of `IN_FO
 MOVERIGHT` 15°, otherwise 6°. The combat drive sets those bits whenever it strafes, so a strafing bot
 used to spray at 15°. CS and DoD weapons are the expected next users.
 
+**An expert does not have to stop, only to look stopped on the frame it fires.** The cone is read from
+`pev->button` when the shot leaves, and player movement comes from `cmd.forwardmove`/`sidemove`, not
+from the bits — so on the frames the M249 actually fires (its timer is up and `IN_ATTACK` is set), an
+expert keeps its movement values, clears just the four move bits and adds `IN_DUCK` for the 3° cone.
+The duck is a single-frame tap that never reaches `FL_DUCKING`, so it costs no speed, and the shot
+happens on that same command. Every other frame it moves normally. This is `crossbot_brace_moving`,
+expert-only, and it applies **only in OP4**: the M249 is the one weapon whose spread is button-based.
+The TFC sniper rifle is velocity-based (it will not start a charge above 50 u/s) and CS and DoD
+weapons will be the same, so they keep the full stop at every tier.
+
 `BotFire::Brace` is called from `Bot_RunPlayerMove` right after `Buttons`, for the same reason the
 trigger lives there: it is the one funnel every movement path goes through, and `Think` has already
 decided this frame's weapon and mode. When it answers yes, the move is zeroed, the four move bits
@@ -1147,6 +1163,50 @@ was selected when the sampled `aim=` field can only witness it by luck.
 
 Every counter is per life. `BotFire::Reset` runs on respawn from `BotManager::StartFrame`, so a drop
 in any of them is a death, which is how `test_fire.ps1` counts deaths without reading the scoreboard.
+
+### Off-hand grenades (bot_grenade.cpp)
+
+TFC grenades are not weapons. `+gren1`/`+gren2` prime one without touching `m_pActiveItem`, and
+`-gren1`/`-gren2` release it, so the bot keeps firing its gun through the whole cook. Everything
+game-specific sits behind three profile hooks — `OffhandRead` (per slot: `OffhandUse`, type, count,
+pin, fuse, range gate, the ballistic `WeaponMode`), `OffhandCommand` and `OffhandPrimed` — and every
+other profile returns nothing, so the module is inert outside TFC. It runs from `Bot_RunPlayerMove`,
+the same funnel as `BotFire::Buttons`, because the throw needs the frame's view angles.
+
+**What the game does** (`CTFPrimeGrenade`, tfc.c 101597-101947). Priming sets `tfstate |= 1` and a
+think at +pin (0.8 s); the grenade explodes at prime + pin + prime time (3.0 s; caltrops 0.5 s), in
+hand if still held. A release only sets `tfstate |= 0x400`, and the throw happens at the grenade's
+next think — never before +0.8 s — from the player's **origin**, along `v_angle`: 600 forward +
+200±10 up ± 10 right, gravity 0.81, no inherited velocity. That is the grenade launcher's launch, so
+`ThrowLaunch` is shared with DMC (`DMC_ThrowLaunch`), and `BotFire::SolveOffhand` wraps the existing
+`SolveThrowLead` to return a look direction and a flight time.
+
+**Deciding.** Every 0.25 s, with nothing cooking, each slot is read and the first one that fits is
+primed with a 35% chance per try (a failed roll waits 1 s; a finished throw waits 4-9 s):
+
+- `OFFHAND_ATTACK` (frag, conc, nail, MIRV, napalm, gas, EMP): the sense target seen in the last
+  0.3 s, its feet (origin + mins.z + 8) and velocity, within [minRange, 650] and with no teammate
+  within 300 of it. minRange is 250 for frag/napalm, 300 for conc/nail/gas/EMP, 350 for MIRV. 650 is
+  about the arc's reach; 2fort's sightings are 1800-2200 out, so grenades there are rare, while
+  casbah's are not.
+- `OFFHAND_SCARED` (caltrops): `BotCamp`'s scared state, the nearest live suspicion, and a point
+  60% of the way toward it clamped to 200-300 (a caltrop flies at most ~0.5 s before it scatters),
+  trace-clipped. **Never with a teammate within 400 of the bot or of that point.**
+
+**Cooking is a difficulty flag.** Only hard and expert hold a grenade (`crossbot_grenade_cook`);
+easy and normal release it the moment they have a solution, so their grenades arrive with most of the
+fuse left and can be walked away from. While primed, the shot is re-solved every frame. A cooking
+attack grenade is released once the fuse left is at most flight + 0.3 s, so it lands just before it
+goes off; a caltrop is released at once (the game holds it until +0.8 s anyway). If the target falls inside minRange or a friend walks
+near it, there is no shot. At 1 s left the grenade is forced out toward the most open of eight
+directions at pitch -20 (`OpenLook`), never toward a stale aim, which is what got bots killed by
+their own frags. The release angles are held until the grenade has actually left (`primeTime + pin`,
+or the primed bit clearing, plus 0.1 s). While those angles differ from the planned ones,
+`Bot_RunPlayerMove` re-decomposes `fmove`/`smove` for the new yaw, so the bot keeps walking where it
+was going instead of lurching sideways for up to 0.8 s.
+
+Measured on casbah, 12 bots, 5 minutes: 55 throws, 37 of them forced, 10 grenade kills, no grenade
+suicides. The forced share is high because targets rarely stay in sight for a 3-second cook.
 
 ### What is not here
 

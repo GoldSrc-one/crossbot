@@ -176,11 +176,11 @@ each names a broken rule:
 - `crossplay.cpp` holds `g_profiles[kMaxGames]`, filled by `XPlay::DetectProfiles()` at
   `ServerActivate` via `GameProfile_Detect(gamedir)`. `g_pGameProfile` is the active one.
 - A game is **playable** (`XPlay::Supported`) only with both. `crossbot_add` refuses anything else and
-  `XPlay::PickRandomSupported()` draws only from that set. Today `valve`, `ricochet`, `gearbox` and
-  `dmc` qualify, one profile each.
+  `XPlay::PickRandomSupported()` draws only from that set. Today `valve`, `ricochet`, `gearbox`,
+  `dmc` and `tfc` qualify, one profile each.
 
 The profiles live one directory per game: `src/game/hldm/`, `src/game/ricochet/`, `src/game/gearbox/`,
-`src/game/dmc/`.
+`src/game/dmc/`, `src/game/tfc/`.
 `src/game/game_profile.cpp` holds `GameProfile_Detect`, the only file that names them all. Anything
 that is not a profile — teams, objectives, gamedata — stays in `src/game/` itself, because it keys off
 the map's game rather than the bot's.
@@ -333,7 +333,7 @@ about behaviour that would read as broken.
 
 `DetectMap()` reads `XPlay::GameDir(XPlay::MapOwner())` — `gEntityOwners[0]`, the game that owns
 worldspawn — and matches it against `cstrike`, `tfc` and `dod`. It cannot key off the bot's own game:
-today only `valve` has a profile, so every bot is a `valve` bot, and it is the *map* that decides
+a `valve` or `dmc` bot on a cs/dod map has no team mod of its own, and it is the *map* that decides
 whether the server is playing a team game. It cannot be `gpGlobals->teamplay` either, which CrossPlay
 swaps to the *entered* game's value, so inside a `valve` bot's context it reads `valve`'s.
 
@@ -378,8 +378,8 @@ to `team=2` on its own — which is the whole reason the team is re-read live in
 
 **The first minute of a round is all-friends, and that is not a bug.** Bots join on one side before the
 mod balances them, and while they are all on one team they will not fight each other — correctly, since
-they *are* teammates. Nothing here joins a team or picks a side; if bots need to start split, that is
-team join, and it is a separate piece of work. `crossbot_teams 0` is the switch for anyone who wants
+they *are* teammates. Nothing here joins a team or picks a side. A `tfc` bot is the exception: its
+profile joins with `jointeam 5`, so TFC bots start split (see `tfc_profile.cpp`). `crossbot_teams 0` is the switch for anyone who wants
 the old free-for-all on a team map.
 
 ### Where the gates are
@@ -600,6 +600,274 @@ or `dmc` first, the server spins forever the first time a bot crouch-jumps. **Lo
 - Quad, pentagram and invisibility are not read.
 - DMC's jump is 295 u/s against HL's ~268; plans are conservative.
 - `WPN_Q_NO_UNDERWATER` tests `waterlevel == 3`, but the lightning gun discharges at `> 1`.
+
+## tfc_profile.cpp
+
+`CTFCProfile` is Team Fortress Classic. TFC is the Half-Life SDK with QuakeC Team Fortress 2.x ported
+into it, and the two halves show in the data: the inventory is a normal HL item chain
+(`m_rgpPlayerItems`, `m_pActiveItem`, `CBasePlayerWeapon`), while everything TF — ammo, grenades,
+`tfstate`, disguise, buildings, goal keys — is a QuakeC field living **on `CBaseEntity`**
+(`tfstate` +140, `ammo_shells`/`nails`/`cells`/`rockets` +212/220/228/236, `no_grenades_1/2`,
+`tp_grenades_1/2`, `is_building`, `is_feigning`, `team_no` ...). Class and team are mirrored into
+`pev->playerclass` and `pev->team`. It derives from `CHLDMProfile`; `Detect` does not look at
+`deathmatch`. References below are into the decompiled `tfc.c`.
+
+### Joining is two commands, checked against state
+
+`ClientPutInServer` leaves the player with no team and no class, and CrossPlay's `joinTeam` feature
+holds its spawn until `pev->playerclass` is set. `IGameProfile::PreThink` runs first in every think and owns the bot
+until both are set: `jointeam 5` while `pev->team` is 0 (5 is auto-assign, the smallest team with
+room, `TeamFortress_TeamPutPlayerInTeam`), then the class command. Each send is 1.2 s after the
+last, because `TeamSet` and `ChangeClass` refuse anything inside `m_fNextTeamOrClassChange` (1 s).
+Nothing waits for `VGUIMenu`: the menus only prompt, and the commands work without them. The check
+re-runs every think, so a bot the mod moves back to team 0 or strips of its class simply joins
+again. While joining the bot runs an empty `pfnRunPlayerMove` and is marked `wasDead`, so the usual
+respawn resets happen when it first spawns.
+
+The third `crossbot_add` argument is a class: `scout sniper soldier demoman medic hwguy pyro spy
+engineer civilian randompc`. Anything else, `*` or nothing is `randompc`. The choice lives in a
+per-edict-index table in `tfc_profile.cpp`, since the profile is a shared static.
+
+**`randompc` re-rolls on every spawn** (`ChangeClass` 75766, `Spawn` 74997-75229). It sets
+`tfstate |= 8`, and each `Spawn` then draws a class from 1-9 that is not the previous one, not in the
+map's `illegalclasses`, and not spy when `spy_off` is set. `pev->playerclass` always holds the real
+class. Seen live: a `randompc` pyro came back from `crossbot_kill` as a scout.
+
+A class command while the player already has a class only sets `nextpc` for the next spawn, unless
+the userinfo key `hud_classautokill` is set; the bot never changes class alive, so it does not set it.
+
+### Ammo is read from the QuakeC fields
+
+The item walk is `BotWeapons::ReadItems`, shared with the HL path; `ReadInventory` runs it and then
+overwrites `ammo[primaryAmmoType]` from the entity field that weapon draws on (`TFC_AmmoField`).
+`SendAmmoUpdate` (71073) copies those four fields into `m_rgAmmo` only when the client data is
+updated, so `m_rgAmmo` is a mirror at best, and a stale one for a fake client.
+
+The sniper rifle has no `m_fInAttack`. Its aiming state is `tfstate & 0x800` on the player, and
+`ReadInventory` reports that as the rifle's `chargeState`, which is all the shot counter needs to see a
+release.
+
+### The table
+
+| id | classname | notes |
+| --- | --- | --- |
+| 3, 4, 5, 23 | medikit, spanner, axe, knife | melee, `IsMeleeWeapon`; `MeleeWeapon` is the axe |
+| 6 | sniperrifle | `FIRE_CHARGE`, `WPN_Q_BRACE`, charge 2 s, carry cap 12 s |
+| 7 | autorifle | hitscan, sticky |
+| 8, 9 | shotgun, supershotgun | clips 8 and 16; the super shotgun spends 2 |
+| 10, 11 | ng, superng | nails at 1000, no gravity (`MOVETYPE_FLYMISSILE`); super spends 2 |
+| 12, 22 | gl, pl | clip 6, `WPN_Q_THROW_ARC`, launch like DMC's (600 forward + 200 up) |
+| 13 | flamethrower | bursts at 600, range 300 |
+| 14, 15 | rpg, ic | rockets at 900 and 600, `WPN_Q_AIM_FEET`; the RPG has a clip of 4 |
+| 17 | ac | hitscan, sticky |
+| 20, 21 | tranq, railgun | nails at 1500 |
+
+Speeds come from each projectile's `Spawn` (103660-104076), clip sizes and ammo names from each
+`GetItemInfo`. The pipebomb launcher is worth almost nothing (0.02) because its bombs only go off on
+`detpipe`. `ThrowLaunch` is `DMC_ThrowLaunch`, shared with `dmc_profile.cpp`.
+
+**The sniper rifle fires on release and only when aimed.** `ItemPostFrame` (144056) starts aiming
+only while horizontal speed is at most 50, slows the player to 80, grows damage from 50 at 50 per
+second up to 400, and fires on the button release — if the player is on the ground. A release in the
+air prints `#Sniper_cantfire`. `WPN_Q_BRACE` is what stops the bot first.
+
+**The assault cannon does not brace.** Its cone is the constant 0.1 passed to `FireBullets`
+(`CTFAssaultC::Fire` 138102) — no stance term, no velocity term. What it does have is a slowdown, and
+that one is *state*-based, not button-based: the wind-up (`PrimaryAttack` 138185, which needs
+`IN_ATTACK` once) sets `tfstate |= 0x800`, `TeamFortress_SetSpeed` (74241) then caps `maxspeed` at 80,
+and only `WeaponIdle`, `WindDown` or `Holster` clears the bit after the spin times out. Releasing the
+button between shots does not give the speed back, so there is nothing for a bot to game. The row
+carried `WPN_Q_BRACE` on an assumption; it is gone.
+
+### Gamedata
+
+`tfc-win.json` has no `CFuncTank::m_iszMaster`; that request is optional now, and `bot_fun.cpp`
+already skips a negative offset. The TF fields are optional requests too.
+
+### Class abilities (tfc_ability.cpp)
+
+`IGameProfile::AbilityRun` is called from `Bot_MoveNav` right after `BotCamp::Track`, before break,
+deploy, fun, combat and camp; returning true owns the frame. The per-bot state is the generic
+`BotAbility::State` (`src/bot/bot_ability.h`), so `src/bot/` names no TFC constant; everything TF
+lives in `src/game/tfc/tfc_ability.cpp`. While a task is active `BotFire::Think` idles with
+`why=ability` and `Bot_ManeuverActive` is true, so the task presses its own buttons and nothing
+else turns the bot. Tasks drive in a straight line (`Drive`, the deploy approach pattern), so each
+one starts only for a target in sight and nearby. `crossbot_ability_status` prints the task, the
+last `why` and per-life-surviving counters.
+
+| class | what | trigger | commands / buttons |
+| --- | --- | --- | --- |
+| medic | `heal` | a friend under 95% health standing in the medic's own nav area, no enemy engaged; ends when the patient leaves the area and is 64+ away | medikit, attack within 64 |
+| engineer | `build` | holding a camp spot: sentry (130 cells), else dispenser (100), else exit teleporter (entrance exists, 125). Near its own spawn with sentry and dispenser up: entrance (125) | `build 2` / `build 1` / `build 5` / `build 4` |
+| engineer | `repair` | any building of its own team (`team_no`; its own only when teams are off) below `max_health`, or a sentry not on `sentry3.mdl` with 130 cells; in sight within 700 | spanner, attack within 64 |
+| spy | disguise | teams on, `is_undercover == 0` (2 = in progress, 1 = done), not engaged, not carrying a goal, every 5 s at most | `disguise_enemy <1-7,9>` |
+| all but medic | call | leaving combat (`Engaged` goes false) below 50% health, teams on, not feigning | `saveme` |
+| spy | feign | damage taken, chance `1 - health/max`, on the ground, no grenade cooking | `feign` |
+| spy | `stab` | hard/expert only: the sense target is within 300 and faces away (dot < -0.3) | knife, attack within 56; ends if the victim turns (dot > 0.3) |
+| scout | `touch` | a player that *looks* friendly, within 800, in the view cone, closer to an enemy suspicion than to any other friendly-looking player | drives into it; an enemy scout's touch strips a spy's disguise |
+| scout | `disarm` | an enemy `detpack` in sight within 1000 | drives into it; a scout's touch defuses it and scores a frag |
+| demoman | `detpack` | see **Detpacks** below | `detstart N`, then a planned retreat |
+| demoman | `pipes` | `BotCamp` scared, fewer than 6 own pipes, no friend within 400 of the aim point | pipe launcher, arc-solved toward 70% of the way to the contact (max 500) |
+| demoman | detonate | an own `tf_gl_pipebomb` 150+ from the bot has a live suspicion within 120 and no friend | `detpipe` |
+| all | `pad` | the route's next teleport waypoint is a runtime teleporter within 64 | see below |
+
+**A medic answers `saveme`.** TFC's `saveme` plays `speech/saveme1.wav` or `saveme2.wav` through
+`EmitSound`, so `BotManager::OnSound` sees human and bot calls alike and hands them to
+`IGameProfile::NoteSound`, which stamps the caller's slot. For 30 s after a call, while the caller is
+a live friend below max health, `IGameProfile::Patients` lists it and `BotStrategic::Intents` gives a
+medic that carries no payload a rank-4 (override) `HEAL` intent on it. The strategic goal follows the
+patient as it moves, and preempts a held goal too: `RefreshStrategic` now checks `Outranked` before
+its arrival early-out. Once the medic stands in the patient's area, the `heal` task takes over. A
+healed or dead patient drops out of `Patients`, which invalidates the goal.
+
+**Building.** The yaw is the camp spot's watch yaw (exit behind it, dispenser beside it), turned to the
+first of eight offsets with a clear 72-unit hull trace, since TFC places the building 64 ahead. The
+bot stands still, faces it, sends `build N` once settled, and expects `is_building` within 1 s; a
+refusal (no metal, no room, already has one) waits 10 s.
+
+**A sentry faces backwards unless you turn it.** Every TFC building is created at
+`AngleMod(owner->pev->angles.y + 180)` (`CreateSentryBase` 83984), so a sentry built while looking
+along the camp yaw watches the engineer instead of the approach, sweeping `yaw ± 50`
+(`CTFSentrygunBase::Finished` 83816). `pev->angles` on the gun never changes afterwards — the sweep
+lives in `m_iRightBound`/`m_iLeftBound`, and `rotatesentry` adds 45° to both, `rotatesentry180` 180°.
+So once `is_building` clears, the build task sends one `rotatesentry180` plus `rotatesentry` × k,
+where `45k = (180 − offset) mod 360` and the offset is whatever the room trace chose (always a
+multiple of 45). Measured on casbah: sweep centre 136 for a camp yaw of 137, and 138 for 137.
+
+**An engineer works on any building of its team.** `CTFSpanner::AxeHit` (139525) has no owner check —
+it calls `EngineerUse` for anything `IsAlly` says is friendly — so `StartRepair` accepts a building
+whose `team_no` matches, not just `real_owner`. Seen live: `"Sentry_Upgrade_Level_2" against` another
+engineer's sentry.
+
+**Attacking engineers fortify what their team will have to hold.** `IGameProfile::Fortifies` is true
+for an engineer with no sentry; `BotStrategic::Intents` then gives such a bot — if it is not already
+this life's defender — a rank-2 `DEFEND` intent on every site its team *attacks* that needs a payload
+delivered: the rescue point on a CS hostage map, the bomb site on a bomb map, the capture point on a
+TFC flag map. That is where a defend phase will happen. `StartBuild` refuses to plant a sentry at a
+camp spot when such a site exists and the bot's current strategic goal is not a `DEFEND`, which keeps
+sentries off the attack path and out of scared route camps. Maps whose attack sites need nothing
+(dustbowl-style touch captures) keep the old behaviour.
+
+**Feigning is owned by `PreThink`.** A feigning spy has `deadflag == 5`, which `IsDead` reports as
+dead — so other bots ignore it, as intended, and `ThinkOneBot` would run the respawn path for the
+spy itself. `CTFCProfile::PreThink` runs before that check: while feigning it holds the bot with an
+empty move and sends `feign` again (stand up) after 3 s once no enemy within 500 is looking at it
+(dot > 0.8, line of sight), or after 12 s regardless.
+
+**Teleporters.** `IGameProfile::RefreshWorld` runs once a second for every loaded game, inside that
+game's context, from `BotManager::StartFrame`. TFC's pairs every `building_teleporter` entrance
+(`CTFTeleporter::m_iType` 4) with its owner's exit (5), both with `m_iState > 0`, and keeps one
+runtime connection per pair through `Nav::AddTeleport` (see `doc/path_planning.md`), with
+`SetTeleportWait` 0 while the entrance is ready (`m_iState == 2`) and 3 s otherwise; pairs that went
+away are removed. The team mask is the owner's team.
+
+The game only sends a player who stands on the entrance with velocity exactly 0
+(`TeleporterTouch`, tfc.c:136005); standing on it adds it to the touch list every frame. So the
+`pad` task drives onto the pad at a speed capped by distance, brakes against its own velocity, and
+holds. It ends when the teleport waypoint leaves the route (a teleport resets the path; the log says
+how far from the pad the bot now is), when the connection is unlinked, or after 10 s, which also
+penalizes the connection.
+
+**It gives up the moment the entrance refuses.** A ready entrance moves to `m_iState == 3` (sending)
+on the touch that accepts the player, so once the bot is standing on the entrance (`groundentity`) at
+a speed under 1, the state has 0.3 s to reach 3. If it does not — the pad is recharging, its exit is
+gone, the owner's team is not ours — the task ends with "not teleported", penalizes the connection and
+repaths, instead of standing there for the full 10 s. The 10 s timeout now only covers never reaching
+the pad at all. Seen live: bots waited 1-2 s on the pad and came out 2592 units away.
+`RouteExemptsHit` in `bot_avoid.cpp` exempts a solid within 48 of a route teleport waypoint, or the
+avoid layer would steer around the pad it is meant to stand on.
+
+**A disguised spy is invisible to bots, and holds its fire.** Neither TFC nor CrossPlay hides a spy:
+the disguise only rewrites the client's `model`, `topcolor` and `bottomcolor` keys
+(`TeamFortress_SetSkin` 74390), `pev->team` and `pev->playerclass` still carry the truth, and nothing
+sets `FL_NOTARGET` (TFC's own sentries just skip a player whose `undercover_team` is theirs, 84230).
+So CrossBot hides him instead: `IGameProfile::Disguised` is asked inside `BotSense::NoTarget`, in the
+owner game's context, which covers every place a bot can acquire a target — the sight scan, the
+damage source and the keep-or-drop test — whatever game the watching bot comes from. TFC answers yes
+for `is_undercover == 1` with an `undercover_team` that is not his own and no goal item carried; DMC
+answers yes for `m_iQuakeItems & IT_INVISIBILITY`, so the ring hides a DMC bot the same way. Firing
+drops the disguise in-game (131453), which makes the spy visible again on its own.
+`IGameProfile::HoldFire` keeps the disguised spy out of combat entirely (`BotCombat::Update` exits
+with "disguised", `BotFire::Think` idles), so he walks his route instead of shooting and blowing the
+disguise; being hurt in the last 2 s lifts the hold so a spy who has been seen through fights back.
+Every tier disguises — for easy and normal that is simply a way into enemy territory, since only
+hard and expert take the backstab.
+
+Spies do not need help with goals: `item_tfgoal_touch` (114802) and `tfgoal_touch` never look at
+`is_undercover`, so a disguised spy can pick up and capture; goals with `goal_result & 0x10` strip the
+disguise themselves (114309). The bot only stops re-disguising while it carries something.
+
+**Detpacks.** `detstart N` clamps the fuse to 5-50 s, freezes the demoman for 3 s while arming
+(`TeamFortress_SetDetpack` 23303, `tfstate |= 0x10000`), and refuses within 65 units of a player or
+building, in the air, or with a pack already out. The blast (`DetpackExplode` 22955) triggers every
+`info_tfgoal` with `goal_activation & 2` within 1500 units that it can trace to, and hurts everything
+within 700 for `1400 − d`. An enemy scout defuses it by touching it (22731).
+
+`ReadTfc` turns those goals into sites flagged `detpack` (see `doc/goals.md`), and a demoman who can
+set one (`IGameProfile::CanDetpack`: class 4, `ammo_detpack >= 1`, not already arming) gets them at a
+rank above everything else, so the map's detpack objective *is* his objective. The task waits until
+the site is within 1400 and either in sight or the bot is standing on its planned spot, then arms,
+holds still for the 3 s, and walks a planned route to an area at least 800 units away for the rest of
+the fuse — it keeps shooting while retreating. The fuse is the difficulty: easy and normal take the
+longest (50 s), hard and expert take 5 s when something is closing in and 10 s otherwise. On a map
+with no detpack goal at all a scared demoman may instead drop one where he stands, timed so the
+contact arrives as it goes off (`scareDist` over his own `maxspeed`, since the enemy's speed is not
+knowable), which is why the objective maps never spend the pack that way.
+
+**Not done.** Dismantling a sentry the objective moved away from, conc jumping and rocket jumping.
+
+### Backpacks and dispensers are gather goals
+
+A TFC resupply pack is an `info_tfgoal` with the touch bit and no score: `ClassifyItem` calls one
+`ITEM_PICKUP` when `goal_activation & 1`, `health >= 0`, `frags <= 0`, no `increase_team`, and it
+actually gives something (`health`, `armorvalue`, `ammo_*`, `no_grenades_1/2`, `ammo_detpack`).
+`item_tfgoal` is explicitly *not* an item any more — flags are strategic payloads, and the `item_*`
+prefix rule in `hldm_profile.cpp` used to hand them to the gather layer.
+
+Wanting one is a separate question from seeing one, so `IGameProfile::ItemUsable` (new, asked in
+`BotItems::ScanItems`) answers it: the pack's `team_no`, `playerclass` and `items_allowed` must admit
+this bot (`APMeetsCriteria` 111796), and at least one thing it gives must be below the bot's maximum.
+Without that check a pack the bot cannot take would be touched, not vanish, and `NoteFull` would
+ignore *every* `info_tfgoal` for the full timeout.
+
+A dispenser is not a pickup but a station: `DispenserTouch` (24095) starts a refill thinker that tops
+the toucher up 0.2 s later and then once a second while they stay within 24 units, giving ammo and
+armour but no health. That is a new `ITEM_STATION` kind, driven by the charger loop in
+`bot_move_nav.cpp`: no `IN_USE`, "in range" means the boxes are touching, and once touching the bot
+stands still and lets the refills run until the value stops climbing. `ChargerValue` for a station is
+the percentage of a bot's ammo and armour capacity it is currently carrying, and `ItemUsable` keeps a
+bot to its own team's dispensers even though TFC would happily refill an enemy.
+
+### Discarded ammo is a gather goal too
+
+`discard` (`TeamFortress_Discard` 107478) zeroes the ammo pools the player's class has no weapon for,
+spawns a `CWeaponBox` named `tf_ammobox` and throws it along `v_forward * 400 + v_up * 200` from the
+player's **current `v_angle`**. It gives the box `pev->enemy` = the dropper, `m_flTouchableAt` =
+now + 2 and a 30 s life. When nothing is owed, no box spawns, so there is no point checking the bot's
+ammo first. The engineer's branch also turns spare cells into shells, nails and rockets for the box.
+
+`TASK_DISCARD` is the class-agnostic fallback after the per-class starters in `TFCAbility::Run`. The
+target is the nearest live friend in the bot's nav area whose `playerclass` differs and whose
+`XPlay::OwnerOf` matches the bot's. The owner check is required: a crossplay ally from another game DLL
+has no meaningful `playerclass`. The bot turns until `AimedAt` agrees with the real `v_angle`, because
+that angle is the throw, then sends `discard`. The 60 s cooldown starts when the attempt starts,
+succeed or not. Otherwise a bot whose aim never settles would stand for 1.5 s out of every 2 s. The
+cooldown resets on respawn because `BotAbility::Reset` does not carry it over.
+
+`CWeaponBox::Touch` (131692) pays out through `GiveTFAmmo` from the box's own `ammo_shells/nails/
+rockets/cells`, the same `CBaseEntity` fields a pack uses, so `ent_ammo*` reads it with no new offsets.
+Touch refuses the toucher in four cases: the box is still in the air, `time < m_flTouchableAt`, the
+toucher is not a live client, or the toucher is holding `IN_ATTACK`. A refused touch leaves the box in
+place, and `NoteFull` would then ignore *every* `tf_ammobox`. `ClassifyItem` therefore only reports a
+box once it is `FL_ONGROUND` and past `m_flTouchableAt`, which is read through
+`CWeaponBox::m_flTouchableAt` in CrossPlay's gamedata. Touch has **no team check**, so `ItemUsable`
+has none either. It refuses only the dropper's own box (`pev->enemy`), then asks `NeedsAmmo` of the
+four pools. The `IN_ATTACK` refusal is not guarded: a bot that touches a box mid-fight still trips
+`NoteFull`.
+
+The `tfc.c` decompile is not the live DLL. Every field it touches sits exactly 16 bytes past the
+offset in `tfc-win.json` (`ammo_shells` 228 vs 212, `team_no` 312 vs 296, `m_flTouchableAt` 1164 vs
+1148). Match its fields by name, never by byte offset.
 
 ## gamedata.cpp
 

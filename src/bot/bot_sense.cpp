@@ -15,6 +15,7 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_perf.h"
+#include "../game/crossplay.h"
 #include "../game/game_profile.h"
 #include "../game/teams.h"
 #include "../nav/nav.h"
@@ -810,7 +811,18 @@ Vector BotSense::EntitySoundOrigin(const edict_t *ent)
 
 bool BotSense::NoTarget(const edict_t *ent)
 {
-	return ent && (ent->v.flags & FL_NOTARGET) != 0;
+	if (!ent)
+		return false;
+	if ((ent->v.flags & FL_NOTARGET) != 0)
+		return true;
+	if ((ent->v.flags & FL_CLIENT) == 0)
+		return false;
+
+	int game = XPlay::OwnerOf(ent);
+	if (!XPlay::Supported(game))
+		return false;
+	XPlay::ScopedGame ctx(game);
+	return g_pGameProfile->Disguised(const_cast<edict_t *>(ent));
 }
 
 void BotSense::ResetBoneCache()

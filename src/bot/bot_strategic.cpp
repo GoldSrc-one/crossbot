@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../game/game_profile.h"
 #include "../game/objectives.h"
 #include "../game/teams.h"
 #include "bot.h"
@@ -34,9 +35,14 @@ namespace
 	constexpr float kHoldCooldown = 20.f;
 	constexpr float kRoamCooldown = 60.f;
 	constexpr float kUsePulse = 0.2f;
+	constexpr float kOverrideRetry = 10.f;
+	constexpr float kDetpackSpotRange = 1400.f;
+	constexpr float kDetpackSpotEye = 36.f;
+	constexpr size_t kDetpackSpotCount = 128;
 
 	constexpr int kRankShift = 8;
 	constexpr int kKindMask = 0xFF;
+	constexpr int kRankOverride = 4;
 	constexpr int kRankDeliver = 3;
 	constexpr int kRankTake = 2;
 	constexpr int kRankSupport = 1;
@@ -197,6 +203,35 @@ namespace
 		return BotStrategic::ResolvePoint(mesh, intent.point, place.areaId, place.point);
 	}
 
+	void DetpackSpots(const Nav::NavMesh &mesh, const Vector &goal, std::vector<BotItems::Placement> &out)
+	{
+		std::vector<std::pair<float, BotItems::Placement>> found;
+		for (const Nav::Area &area : mesh.areas)
+		{
+			BotItems::Placement place;
+			place.areaId = area.id;
+			place.point = BotItems::ClampToArea(area, goal);
+			float dist = (place.point - goal).Length();
+			if (dist > kDetpackSpotRange)
+				continue;
+
+			TraceResult tr;
+			TRACE_LINE(place.point + Vector(0.f, 0.f, kDetpackSpotEye), goal, ignore_monsters, nullptr, &tr);
+			if (tr.flFraction < 1.f)
+				continue;
+			found.push_back(std::make_pair(dist, place));
+		}
+
+		std::sort(found.begin(), found.end(),
+			[](const std::pair<float, BotItems::Placement> &a, const std::pair<float, BotItems::Placement> &b) {
+				return a.first < b.first;
+			});
+		if (found.size() > kDetpackSpotCount)
+			found.resize(kDetpackSpotCount);
+		for (const auto &entry : found)
+			out.push_back(entry.second);
+	}
+
 	bool HoldLimited(int kind)
 	{
 		return kind == BotStrategic::KIND_ATTACK || kind == BotStrategic::KIND_DELIVER ||
@@ -314,6 +349,14 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 			++sharedTotal;
 	}
 
+	if (held.empty() && g_pGameProfile)
+	{
+		std::vector<edict_t *> patients;
+		g_pGameProfile->Patients(bot.pEdict, patients);
+		for (edict_t *patient : patients)
+			Push(out, patient, patient->v.origin, false, KIND_HEAL, kRankOverride);
+	}
+
 	auto meets = [&](const Objectives::Site &site) {
 		for (const Held &h : held)
 		{
@@ -339,6 +382,15 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 		if (!ent)
 			continue;
 
+		if (site.detpack)
+		{
+			if ((site.attackTeams & bit) != 0 && g_pGameProfile && g_pGameProfile->CanDetpack(bot.pEdict))
+				Push(out, ent, site.point, false, KIND_ATTACK, kRankOverride).detpack = true;
+			else if ((site.defendTeams & bit) != 0)
+				Push(out, ent, site.point, false, KIND_DEFEND, kRankIdle);
+			continue;
+		}
+
 		if ((site.attackTeams & bit) != 0)
 		{
 			bool needs = site.needId != 0 || site.needGroup != 0;
@@ -359,6 +411,16 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 		else if ((site.defendTeams & bit) != 0)
 		{
 			Push(out, ent, site.point, site.volume, KIND_DEFEND, site.urgent ? kRankTake : kRankIdle);
+		}
+	}
+
+	if (!bot.strat.defender && g_pGameProfile && g_pGameProfile->Fortifies(bot.pEdict))
+	{
+		for (const Objectives::Site &site : tables.sites)
+		{
+			edict_t *ent = site.ent.Get();
+			if (ent && BotStrategic::FortifyTarget(site, bit))
+				Push(out, ent, site.point, site.volume, KIND_DEFEND, kRankTake);
 		}
 	}
 
@@ -471,7 +533,9 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Can
 			continue;
 
 		places.clear();
-		if (intent.volume)
+		if (intent.detpack)
+			DetpackSpots(mesh, intent.point, places);
+		else if (intent.volume)
 			BotItems::VolumeAreas(mesh, intent.ent, bot.pEdict->v.origin, places);
 
 		if (places.empty())
@@ -482,6 +546,7 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Can
 				if (DebugEnabled())
 					BOT_VLOG("CrossBot: %s cannot place the %s objective %s in any nav area\n", bot.name,
 						KindName(intent.kind), CBotTargetNameOf(intent.ent));
+				NoteCooldown(const_cast<CBot &>(bot), intent.ent, kGoalFailCooldown);
 				continue;
 			}
 			places.push_back(place);
@@ -526,6 +591,7 @@ const char *KindName(int payload)
 	case KIND_SUPPORT: return "support";
 	case KIND_DEFEND: return "defend";
 	case KIND_ROAM: return "roam";
+	case KIND_HEAL: return "heal";
 	default: break;
 	}
 	return "?";
@@ -700,6 +766,66 @@ void NoteLife(CBot &bot)
 		return;
 
 	StartLife(bot);
+}
+
+bool Outranked(const CBot &bot, int payload)
+{
+	if (KindOf(payload) == KIND_MAP || RankOf(payload) >= kRankOverride)
+		return false;
+	float since = gpGlobals->time - bot.strat.overrideDrop;
+	if (since >= 0.f && since < kOverrideRetry)
+		return false;
+	std::vector<Intent> intents;
+	Intents(bot, intents);
+	for (const Intent &intent : intents)
+	{
+		if (intent.rank >= kRankOverride && MemoReady(bot, intent.ent) <= gpGlobals->time)
+			return true;
+	}
+	return false;
+}
+
+int TargetKind(const CBot &bot)
+{
+	const BotGoal::Stop &target = bot.goal.target;
+	return target.tier == BotGoal::GOAL_STRATEGIC ? KindOf(target.payload) : -1;
+}
+
+bool FortifyTarget(const Objectives::Site &site, int teamBit)
+{
+	return !site.detpack && (site.attackTeams & teamBit) != 0 && (site.needId != 0 || site.needGroup != 0);
+}
+
+bool HasFortifyTarget(const CBot &bot)
+{
+	if (!Enabled() || !Objectives::Active())
+		return false;
+	int bit = Objectives::TeamBit(Teams::TeamOf(bot.pEdict));
+	for (const Objectives::Site &site : Objectives::Get().sites)
+	{
+		if (site.ent.Get() && FortifyTarget(site, bit))
+			return true;
+	}
+	return false;
+}
+
+const Objectives::Site *DetpackGoal(const CBot &bot)
+{
+	edict_t *goal = bot.goal.target.ent.Get();
+	if (!goal || !Objectives::Active() || TargetKind(bot) != KIND_ATTACK)
+		return nullptr;
+	for (const Objectives::Site &site : Objectives::Get().sites)
+	{
+		if (site.detpack && site.ent.Is(goal))
+			return &site;
+	}
+	return nullptr;
+}
+
+void LeaveGoal(CBot &bot, float seconds)
+{
+	NoteCooldown(bot, bot.goal.target.ent.Get(), seconds);
+	BotGoal::Clear(bot);
 }
 
 int KindOf(int payload)

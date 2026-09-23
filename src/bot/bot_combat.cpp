@@ -537,6 +537,12 @@ void BotCombat::Update(CBot &bot)
 		return;
 	}
 
+	if (g_pGameProfile && g_pGameProfile->HoldFire(bot))
+	{
+		Exit(bot, "disguised");
+		return;
+	}
+
 	Seed(bot);
 
 	edict_t *seen = bot.sense.target.Get();

@@ -440,7 +440,7 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 {
 	State &st = bot.goal;
 
-	if (!st.active || st.target.tier != GOAL_STRATEGIC || bot.strat.arrival)
+	if (!st.active || st.target.tier != GOAL_STRATEGIC)
 		return;
 
 	if (gpGlobals->time < st.nextRefreshTime)
@@ -454,6 +454,18 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 		Clear(bot);
 		return;
 	}
+
+	if (BotStrategic::Outranked(bot, st.target.payload))
+	{
+		BOT_VLOG("CrossBot: %s drops the %s goal for a more urgent one\n", bot.name,
+			BotStrategic::KindName(st.target.payload));
+		bot.strat.overrideDrop = gpGlobals->time;
+		Clear(bot);
+		return;
+	}
+
+	if (bot.strat.arrival)
+		return;
 
 	if ((ent->v.origin - st.targetOrigin).Length() <= BotStrategic::MoveRadius(st.target.payload))
 		return;

@@ -16,6 +16,13 @@ namespace Nav
 namespace
 {
 
+uint32_t g_planTeamMask = 0;
+
+bool TeamBlocks(const Connection &c)
+{
+	return c.teamMask != 0 && (c.teamMask & g_planTeamMask) == 0;
+}
+
 bool WaterBlocks(const NavMesh &mesh, const Connection &c)
 {
 	return crossbot_nav::ConnBlockedByWater(c.connType, ConnSubmerged(mesh, c));
@@ -42,7 +49,7 @@ void BuildGraph(const NavMesh &mesh, std::vector<std::vector<uint32_t>> &areaCon
 		dst.reserve(src.size());
 		for (uint32_t idx : src)
 		{
-			if (idx < mesh.conns.size() && WaterBlocks(mesh, mesh.conns[idx]))
+			if (idx < mesh.conns.size() && (WaterBlocks(mesh, mesh.conns[idx]) || TeamBlocks(mesh.conns[idx])))
 				continue;
 			dst.push_back(idx);
 		}
@@ -82,6 +89,11 @@ bool GateAllowsCrossing(const NavMesh &mesh, uint32_t connIdx, uint32_t fromId, 
 	return detour != nullptr && !detour->blocked && !detour->points.empty();
 }
 
+}
+
+void SetPlanTeamMask(uint32_t mask)
+{
+	g_planTeamMask = mask;
 }
 
 PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
@@ -160,7 +172,7 @@ void AreaCostsImpl(const NavMesh &mesh, uint32_t rootArea, bool reverse, std::ve
 			if (c.connType == crossbot_nav::CONN_AIRMOVE &&
 				std::fabs(c.gravity - gravityMultiplier) > kGravityEpsilon)
 				continue;
-			if (WaterBlocks(mesh, c))
+			if (WaterBlocks(mesh, c) || TeamBlocks(c))
 				continue;
 
 			NavDrift::DriftEval drift = NavDrift::EvalDrift(c.drift, maxSpeed, c.areaA == from);

@@ -29,6 +29,7 @@
 #include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
+#include "../nav/nav_path.h"
 
 #include <cmath>
 #include <string>
@@ -168,9 +169,26 @@ void ClientDisconnect(edict_t *pEntity)
 
 namespace
 {
+	bool IsCarrier(const edict_t *pEdict)
+	{
+		for (const Objectives::Carrier &carrier : Objectives::Get().carriers)
+		{
+			if (carrier.player.Get() == pEdict)
+				return true;
+		}
+		return false;
+	}
+
 	void ThinkOneBot(CBot &bot)
 	{
 		BotPerf::NoteBot(bot.name);
+
+		if (g_pGameProfile->PreThink(bot.pEdict))
+		{
+			bot.wasDead = true;
+			BotTiming::EndBot(bot);
+			return;
+		}
 
 		bool dead = g_pGameProfile->IsDead(bot.pEdict);
 		if (dead)
@@ -197,6 +215,8 @@ namespace
 			BotSense::OnRespawn(bot);
 			BotCombat::OnRespawn(bot);
 			BotFire::Reset(bot);
+			BotGrenade::Reset(bot);
+			BotAbility::Reset(bot);
 			BotDeploy::OnRespawn(bot);
 			bot.daze = BotDaze::State();
 			bot.brk = BotBreak::State();
@@ -208,12 +228,35 @@ namespace
 			BotFire::AccrueCarry(bot);
 		}
 
+		Nav::SetPlanTeamMask(IsCarrier(bot.pEdict) ? 0u
+			: static_cast<uint32_t>(Objectives::TeamBit(bot.pEdict->v.team)));
+
 		{
 			BOTPERF_SCOPE(ZONE_MOVENAV);
 			Bot_MoveNav(bot);
 		}
 
 		BotTiming::EndBot(bot);
+	}
+
+	constexpr float kWorldRefresh = 1.f;
+	float g_nextWorldRefresh = 0.f;
+
+	void RefreshWorlds()
+	{
+		float now = gpGlobals->time;
+		if (now < g_nextWorldRefresh && g_nextWorldRefresh - now <= kWorldRefresh)
+			return;
+		g_nextWorldRefresh = now + kWorldRefresh;
+
+		for (int g = 0; g < XPlay::NumGames(); ++g)
+		{
+			const IGameProfile *profile = XPlay::ProfileFor(g);
+			if (!profile || !XPlay::Supported(g))
+				continue;
+			XPlay::EnterGame(g);
+			XPlay::InGame(g, [profile] { profile->RefreshWorld(); });
+		}
 	}
 
 	bool NoteDriftSpeed(float speed)
@@ -301,6 +344,7 @@ void StartFrame()
 	{
 		CheckDriftSpeeds();
 		Objectives::Refresh();
+		RefreshWorlds();
 	}
 
 	for (auto &bot : g_bots)
@@ -1184,7 +1228,7 @@ void PrintWeaponCarry()
 
 void OnSound(edict_t *src, int channel, const char *sample, float volume, float attenuation)
 {
-	if (!BotSense::Enabled() || !src || src->free)
+	if (!src || src->free)
 		return;
 	if (g_engfuncs.pfnIndexOfEdict(src) == 0)
 		return;
@@ -1193,7 +1237,8 @@ void OnSound(edict_t *src, int channel, const char *sample, float volume, float 
 	if (sample && strcmp(sample, "common/null.wav") == 0)
 		return;
 
-	Vector pos = BotSense::EntitySoundOrigin(src);
+	bool hear = BotSense::Enabled();
+	Vector pos = hear ? BotSense::EntitySoundOrigin(src) : src->v.origin;
 
 	for (auto &bot : g_bots)
 	{
@@ -1204,7 +1249,9 @@ void OnSound(edict_t *src, int channel, const char *sample, float volume, float 
 		if (!g_pGameProfile)
 			continue;
 
-		XPlay::InGame(bot.gameDll, [&] { BotSense::Hear(bot, src, pos, volume, attenuation); });
+		g_pGameProfile->NoteSound(src, sample);
+		if (hear)
+			XPlay::InGame(bot.gameDll, [&] { BotSense::Hear(bot, src, pos, volume, attenuation); });
 	}
 }
 

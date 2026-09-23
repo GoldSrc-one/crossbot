@@ -28,6 +28,9 @@ struct Row
 	bool pickupPriority;
 	bool gaussPolicy;
 	bool bunnyHop;
+	bool grenadeCook;
+	bool backstab;
+	bool braceMoving;
 };
 
 constexpr float kDelaySpread = 0.2f;
@@ -66,6 +69,12 @@ bool PickupPriority();
 bool GaussPolicy();
 
 bool BunnyHop();
+
+bool GrenadeCook();
+
+bool Backstab();
+
+bool BraceMoving();
 
 void PrintStatus();
 

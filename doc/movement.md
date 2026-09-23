@@ -1622,6 +1622,36 @@ The margin lives in the beam's own XY extent rather than in the lookahead. `Beam
 the diagnostics keep `pad` at 0 so they still report true contact. Padding z would be wrong — it would
 make a beam above head height read as an obstacle.
 
+### The registry reads every loaded game, and was empty for a while
+
+`RefreshBeams` runs at the top of `BotManager::StartFrame`, before any game is entered, and the
+previous frame ended with `XPlay::LeaveGame()`, which nulls `g_pGameProfile`. From the CrossPlay port
+until the TFC work it asked `g_pGameProfile` for the mine classname and returned on the null, so the
+registry was always empty and none of the beam logic above ran. It now collects the classnames from
+`XPlay::ProfileFor(g)` for every loaded game, which needs no context: `DeployEntity(DEPLOY_TRIPMINE)`
+is a beam, `IGameProfile::HazardEntity()` is a floor hazard. `test_deploy.ps1 -Phase tripmine` passes
+with it.
+
+### Floor hazards: TFC caltrops
+
+A caltrop (`tf_weapon_caltrop`) is a `SOLID_TRIGGER` that hurts on touch — 10 damage and leg damage —
+so, like a beam, no hull trace reports it. Caltrops hurt enemies, their thrower, and teammates too
+whenever `teamplay` enables friendly fire (`CaltropTouch`, tfc.c), so every one is avoided, own
+included. They scatter for a moment and then lie for 10-15 s.
+
+A landed caltrop (`FL_ONGROUND`; one still flying is skipped, or the bot would duck under it) goes
+into the registry as a vertical `Beam` from `absmin.z` to `absmax.z + 2` with `hazard` set. Everything
+above then applies unchanged: `BeamAlong` sees it on the stride, the side search walks around it, and
+`BeamGuard` stops a fighting bot from strafing into it. Two things differ from a tripmine:
+
+- **It is never shot.** `TakeMineTarget` refuses a hazard.
+- **With no way around, the bot walks over it.** `WalkOverHazard` logs `avoid walks over`, returns
+  no maneuver, and opens `walkOverUntil` for 1 s, during which `BeamGuard` ignores hazards so it does
+  not brake the bot right back. Standing still for up to 15 s costs more than 10 damage.
+
+On casbah, 15 scared caltrop throws produced 2 caltrop hits, down from 16 before hazards were
+registered.
+
 ## bot_break.cpp
 
 Owns the frame while the bot is destroying something, the same way `RunElevatorRide` and

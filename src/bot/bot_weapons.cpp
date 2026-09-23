@@ -58,6 +58,11 @@ void Read(edict_t *player, BotInventory &out)
 	if (g_pGameProfile && g_pGameProfile->ReadInventory(player, out))
 		return;
 
+	ReadItems(player, out);
+}
+
+void ReadItems(edict_t *player, BotInventory &out)
+{
 	void *priv = CBotPrivateData(player);
 
 	out.nextAttack = Peek<float>(priv, g_offsets.mon_flNextAttack);

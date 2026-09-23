@@ -247,8 +247,29 @@ Four properties are deliberate:
 
 Attribution runs launch waypoint → bot → mesh: `Cross` stamps `PlanWaypoint::connIndex` on the air-move
 launch waypoint, `RunAirmoveApproach` latches it into `CBot::airmoveConnIndex`, and `RunAirmoveFlight`
-spends it on landing. The teleport branch stamps it too, but nothing spends it yet: a teleport that
-does not fire is not detected. Walk/door keep `-1` and are the remaining extension points.
+spends it on landing. The teleport branch stamps it too; only a runtime teleporter spends it (the TFC
+`pad` task penalizes its connection after 10 s on the pad). Walk/door keep `-1` and are the remaining
+extension points.
+
+## Runtime teleport connections
+
+`Nav::AddTeleport` / `SetTeleportWait` / `RemoveTeleport` / `IsAddedTeleport` (`nav.cpp`) are the other
+way the runtime writes the mesh: they add one-way `CONN_TELEPORT` connections for things navgen never
+saw, today TFC engineer teleporters (see `doc/games.md`, `tfc_ability.cpp`). An added connection is a
+normal `Connection` + `PlanConnection` pair with `launchPos` = entrance, `landingPos` = exit,
+`travelSeconds` 0.5 and `costSeconds` = the wait, listed on **both** areas' `connIndices` (the reverse
+fields need to find it from the exit side) and flagged `CONN_FLAG_ONE_WAY`. `PlanWalker::Cross`'s
+existing teleport branch turns it into the usual trigger + destination waypoint pair.
+
+- **Indices are stable.** Slots are appended to `conns`/`planConns` and never erased; a removed slot is
+  unlisted from its areas, masked out, and reused by the next add. Nothing keeps a `Connection *`
+  across frames, only indices, so the append is safe. Both lists clear on `LoadForMap`/`Unload`.
+- **A team mask gates it.** `Connection::teamMask` (0 = everyone, which is every baked connection) is
+  checked against `Nav::SetPlanTeamMask` in `BuildGraph` and `AreaCostsImpl`. `ThinkOneBot` sets the
+  mask to the bot's team bit before `Bot_MoveNav`, or to 0 while the bot is an objectives carrier,
+  because TFC refuses to teleport a player carrying a flagged goal item. Plans made outside a bot's
+  think (console dumps, tactics fields computed for another bot) see whatever mask was set last.
+- **navgen never calls any of it**, so offline route sweeps are unchanged.
 
 ## plan_search.cpp
 

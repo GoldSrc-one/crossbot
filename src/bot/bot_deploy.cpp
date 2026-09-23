@@ -15,6 +15,7 @@
 #include "bot_move_nav.h"
 #include "bot_sense.h"
 #include "bot_weapons.h"
+#include "../game/crossplay.h"
 #include "../game/ent_handle.h"
 #include "../game/game_profile.h"
 #include "../nav/nav_math.h"
@@ -53,6 +54,7 @@ namespace
 	constexpr float kDeployMoveDeadzone = 0.01f;
 
 	constexpr float kDeployBeamLength = 2048.f;
+	constexpr float kHazardLift = 2.f;
 	constexpr float kDeployBeamSlack = 24.f;
 	constexpr float kDeployGuardStep = 8.f;
 	constexpr float kDeployGuardPad = 24.f;
@@ -1040,11 +1042,19 @@ void RefreshBeams()
 {
 	g_beams.clear();
 
-	if (!g_pGameProfile)
-		return;
-
-	const char *cls = g_pGameProfile->DeployEntity(DEPLOY_TRIPMINE);
-	if (!cls)
+	const char *mines[XPlay::kMaxGames] = {};
+	const char *hazards[XPlay::kMaxGames] = {};
+	int kinds = 0;
+	for (int g = 0; g < XPlay::NumGames(); ++g)
+	{
+		const IGameProfile *profile = XPlay::ProfileFor(g);
+		if (!profile)
+			continue;
+		mines[g] = profile->DeployEntity(DEPLOY_TRIPMINE);
+		hazards[g] = profile->HazardEntity();
+		kinds += (mines[g] ? 1 : 0) + (hazards[g] ? 1 : 0);
+	}
+	if (!kinds)
 		return;
 
 	for (int i = gpGlobals->maxClients + 1; i < gpGlobals->maxEntities; ++i)
@@ -1052,7 +1062,28 @@ void RefreshBeams()
 		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
 		if (!ent || ent->free || ent->v.classname == 0)
 			continue;
-		if (strcmp(CBotClassOf(ent), cls) != 0)
+
+		const char *cls = CBotClassOf(ent);
+		bool mine = false;
+		bool hazard = false;
+		for (int g = 0; g < XPlay::NumGames(); ++g)
+		{
+			mine = mine || (mines[g] && strcmp(cls, mines[g]) == 0);
+			hazard = hazard || (hazards[g] && strcmp(cls, hazards[g]) == 0);
+		}
+
+		if (hazard && (ent->v.flags & FL_ONGROUND) != 0)
+		{
+			Beam floor;
+			floor.ent = ent;
+			floor.hazard = true;
+			floor.start = Vector(ent->v.origin.x, ent->v.origin.y, ent->v.absmin.z);
+			floor.end = Vector(ent->v.origin.x, ent->v.origin.y, ent->v.absmax.z + kHazardLift);
+			g_beams.push_back(floor);
+			continue;
+		}
+
+		if (!mine || hazard)
 			continue;
 		if (ent->v.solid != SOLID_BBOX && ent->v.solid != SOLID_NOT)
 			continue;
@@ -1112,11 +1143,12 @@ BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead)
 
 	int steps = static_cast<int>(lookahead / kDeployGuardStep) + 1;
 	BeamBlock worst = BEAM_CLEAR;
+	bool walkOver = gpGlobals->time < bot.avoid.walkOverUntil;
 
 	for (size_t i = 0; i < g_beams.size(); ++i)
 	{
 		const Beam &beam = g_beams[i];
-		if (!beam.ent || beam.ent->free)
+		if (!beam.ent || beam.ent->free || (beam.hazard && walkOver))
 			continue;
 
 		float zLo = 0.f, zHi = 0.f;

@@ -289,6 +289,16 @@ namespace
 		ForEachBot([](edict_t *ent) { BotDaze::PrintStatus(*BotManager::FindBot(ent)); return true; });
 	}
 
+	void Cmd_CrossBotAbilityStatus()
+	{
+		ForEachBot([](edict_t *ent) { BotAbility::PrintStatus(*BotManager::FindBot(ent)); return true; });
+	}
+
+	void Cmd_CrossBotGrenadeStatus()
+	{
+		ForEachBot([](edict_t *ent) { BotGrenade::PrintStatus(*BotManager::FindBot(ent)); return true; });
+	}
+
 	void Cmd_CrossBotDazeTest()
 	{
 		if (CMD_ARGC() < 4)
@@ -826,7 +836,12 @@ namespace
 	void Cmd_CrossBotListObjectives()
 	{
 		Objectives::PrintStatus();
-		ForEachBot([](edict_t *ent) { BotStrategic::PrintIntents(*BotManager::FindBot(ent)); return true; });
+		ForEachBot([](edict_t *ent) {
+			CBot *bot = BotManager::FindBot(ent);
+			ScopedGame ctx(bot->gameDll);
+			BotStrategic::PrintIntents(*bot);
+			return true;
+		});
 	}
 
 	void Cmd_CrossBotListGates()
@@ -1003,6 +1018,8 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_combat_status", Cmd_CrossBotCombatStatus);
 	ADD_SERVER_COMMAND("crossbot_usermsgs", Cmd_CrossBotUserMsgs);
 	ADD_SERVER_COMMAND("crossbot_daze_status", Cmd_CrossBotDazeStatus);
+	ADD_SERVER_COMMAND("crossbot_grenade_status", Cmd_CrossBotGrenadeStatus);
+	ADD_SERVER_COMMAND("crossbot_ability_status", Cmd_CrossBotAbilityStatus);
 	ADD_SERVER_COMMAND("crossbot_daze_test", Cmd_CrossBotDazeTest);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);

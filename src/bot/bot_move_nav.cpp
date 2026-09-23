@@ -151,6 +151,10 @@ namespace
 	constexpr float kActivationMemory = 15.f;
 	constexpr float kChargerUseRange = 64.f;
 	constexpr float kChargerNoGainGrace = 0.5f;
+	constexpr float kStationNoGainGrace = 1.5f;
+	constexpr float kStationTouchGap = 2.f;
+	constexpr float kPickupApproachDone = 8.f;
+	constexpr float kPickupApproachTime = 1.5f;
 	constexpr float kChargerTimeout = 15.f;
 	constexpr float kHealNoGainGrace = 1.2f;
 	constexpr float kHealApproachTimeout = 5.f;
@@ -1754,6 +1758,7 @@ namespace
 			return false;
 
 		ItemKind kind = bot.goalItemKind;
+		bool station = kind == ITEM_STATION;
 		float value = g_pGameProfile->ChargerValue(kind, pEdict);
 
 		if (!bot.chargerActive)
@@ -1774,7 +1779,7 @@ namespace
 			bot.chargerLastGainTime = gpGlobals->time;
 		bot.chargerLastValue = value;
 
-		Vector center = BotItems::ItemCenter(ent, kind);
+		Vector center = station ? (ent->v.absmin + ent->v.absmax) * 0.5f : BotItems::ItemCenter(ent, kind);
 		Vector origin = pEdict->v.origin;
 		Vector eye = origin + pEdict->v.view_ofs;
 		Vector los = center - eye;
@@ -1787,20 +1792,29 @@ namespace
 
 		float useDist = (center - origin).Length();
 		bool inRange = useDist <= kChargerUseRange;
+		if (station)
+		{
+			float gapX = std::max(ent->v.absmin.x - pEdict->v.absmax.x, pEdict->v.absmin.x - ent->v.absmax.x);
+			float gapY = std::max(ent->v.absmin.y - pEdict->v.absmax.y, pEdict->v.absmin.y - ent->v.absmax.y);
+			inRange = std::max(gapX, gapY) <= kStationTouchGap;
+		}
 		bool aimed =
 			fabsf(Bot_NormalizeAngle(bot.desiredAngles.y - angles.y)) <= kActivationAimTolerance &&
 			fabsf(Bot_NormalizeAngle(bot.desiredAngles.x - angles.x)) <= kActivationAimTolerance;
 
 		unsigned short buttons = 0;
-		if (inRange && aimed)
+		if (station && inRange)
+			bot.chargerPressed = true;
+		else if (!station && inRange && aimed)
 		{
 			buttons |= IN_USE;
 			bot.chargerPressed = true;
 		}
 
-		if (bot.chargerPressed && gpGlobals->time - bot.chargerLastGainTime > kChargerNoGainGrace)
+		float grace = station ? kStationNoGainGrace : kChargerNoGainGrace;
+		if (bot.chargerPressed && gpGlobals->time - bot.chargerLastGainTime > grace)
 		{
-			if (BotItems::IsChargerEmpty(ent))
+			if (!station && BotItems::IsChargerEmpty(ent))
 				FinishCharger(bot, ent, "drained the charger");
 			else
 			{
@@ -1828,7 +1842,7 @@ namespace
 		Vector moveDir(0.f, 0.f, 0.f);
 		Vector to(center.x - origin.x, center.y - origin.y, 0.f);
 		float dist = sqrtf(to.x * to.x + to.y * to.y);
-		if (!inRange && dist > 1.f)
+		if (!inRange && !(station && bot.chargerPressed) && dist > 1.f)
 		{
 			moveDir = Norm2D(to);
 			drive = Bot_MaxSpeed(pEdict) * PmSim::kDuckingMultiplier;
@@ -1850,6 +1864,61 @@ namespace
 		bot.moveForward = fmove;
 		bot.moveSide = smove;
 
+		if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
+		else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
+		if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
+		else if (smove < -kMoveButtonDeadzone) buttons |= IN_MOVELEFT;
+
+		Bot_RunPlayerMove(bot, angles, fmove, smove, buttons);
+		return true;
+	}
+
+	bool RunPickupApproach(CBot &bot)
+	{
+		edict_t *pEdict = bot.pEdict;
+		edict_t *ent = bot.goalItem.Get();
+		if (!ent || bot.goalItemTouched || BotItems::IsPickupGone(ent))
+			return false;
+
+		Vector center = (ent->v.absmin + ent->v.absmax) * 0.5f;
+		Vector to(center.x - pEdict->v.origin.x, center.y - pEdict->v.origin.y, 0.f);
+		float dist = to.Length2D();
+
+		if (!bot.chargerActive)
+		{
+			bot.chargerActive = true;
+			bot.chargerStartTime = gpGlobals->time;
+			BOT_VLOG("CrossBot: %s steps the last %.0f onto %s\n", bot.name, dist, CBotClassOf(ent));
+		}
+
+		if (dist < kPickupApproachDone || gpGlobals->time - bot.chargerStartTime > kPickupApproachTime)
+		{
+			bot.chargerActive = false;
+			return false;
+		}
+
+		bot.lastProgressTime = gpGlobals->time;
+		BotSense::ApplyLook(bot);
+		Vector angles = Bot_UpdateFacing(bot);
+
+		Vector moveDir = Norm2D(to);
+		float drive = Bot_MaxSpeed(pEdict);
+		NavFollow::Drive solved = NavFollow::SolveDrive(moveDir * drive, pEdict->v.velocity,
+			Bot_DrivePhysics(pEdict));
+		if (solved.wishSpeed > 0.f)
+		{
+			moveDir = solved.wishDir;
+			drive = solved.wishSpeed;
+		}
+		if ((pEdict->v.flags & FL_DUCKING) != 0)
+			drive /= PmSim::kDuckingMultiplier;
+
+		float fmove = 0.f, smove = 0.f;
+		Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+
+		unsigned short buttons = 0;
 		if (fmove > kMoveButtonDeadzone) buttons |= IN_FORWARD;
 		else if (fmove < -kMoveButtonDeadzone) buttons |= IN_BACK;
 		if (smove > kMoveButtonDeadzone) buttons |= IN_MOVERIGHT;
@@ -2455,7 +2524,8 @@ const NavPlan::AirmoveCache &Bot_AirmoveCache()
 bool Bot_ManeuverActive(const CBot &bot)
 {
 	return bot.airmoveActive || bot.ladderActive || bot.rideActive || bot.activationActive ||
-		bot.chargerActive || bot.brk.active || bot.deploy.active || bot.fun.mounted ||
+		bot.chargerActive || bot.brk.active || bot.deploy.active || BotAbility::Active(bot.ability) ||
+		bot.fun.mounted ||
 		bot.fun.aboard || bot.fun.arrival;
 }
 
@@ -2488,7 +2558,7 @@ void Bot_BailManeuver(CBot &bot, const char *why)
 		return;
 	}
 
-	if (bot.chargerActive && ItemKindIsCharger(bot.goalItemKind))
+	if (bot.chargerActive && (ItemKindIsCharger(bot.goalItemKind) || bot.goalItemKind == ITEM_STATION))
 		FinishCharger(bot, bot.goalItem.Get(), why);
 }
 
@@ -2617,6 +2687,9 @@ void Bot_MoveNav(CBot &bot)
 
 	BotCamp::Track(bot);
 	BotStrategic::NoteLife(bot);
+
+	if (g_pGameProfile->AbilityRun(bot, *mesh))
+		return;
 
 	{
 		BOTPERF_SCOPE(ZONE_MEMOS);
@@ -2878,10 +2951,13 @@ void Bot_MoveNav(CBot &bot)
 		}
 		else
 		{
-			if (ItemKindIsCharger(bot.goalItemKind) && RunChargerUse(bot))
+			if ((ItemKindIsCharger(bot.goalItemKind) || bot.goalItemKind == ITEM_STATION) && RunChargerUse(bot))
 				return;
 
 			if (ItemKindIsVolume(bot.goalItemKind) && RunHealVolume(bot))
+				return;
+
+			if (!ItemKindUsesValue(bot.goalItemKind) && bot.goalItemKind != ITEM_NONE && RunPickupApproach(bot))
 				return;
 		}
 

@@ -124,6 +124,14 @@ bool CDMCProfile::FallDamage() const
 	return CVAR_GET_FLOAT("mp_falldamage") != 0.f;
 }
 
+bool CDMCProfile::Disguised(edict_t *pEdict) const
+{
+	constexpr int kInvisibility = 1 << 19;
+	void *priv = CBotPrivateData(pEdict);
+	return priv && g_offsets.plr_iQuakeItems >= 0 &&
+		(GameData::Peek<int>(priv, g_offsets.plr_iQuakeItems) & kInvisibility) != 0;
+}
+
 float CDMCProfile::ItemRespawnDelay(ItemKind kind) const
 {
 	switch (kind)
@@ -269,6 +277,12 @@ bool CDMCProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &el
 {
 	if ((mode.quirks & WPN_Q_THROW_ARC) == 0)
 		return false;
+
+	return DMC_ThrowLaunch(viewPitch, elevation, speed);
+}
+
+bool DMC_ThrowLaunch(float viewPitch, float &elevation, float &speed)
+{
 	if (viewPitch < -kDMCThrowPitchLimit || viewPitch > kDMCThrowPitchLimit)
 		return false;
 

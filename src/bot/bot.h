@@ -9,6 +9,7 @@
 #include "../game/weapon_spec.h"
 #include "../nav/nav_path.h"
 #include "../nav/path_follower.h"
+#include "bot_ability.h"
 #include "bot_aim.h"
 #include "bot_avoid.h"
 #include "bot_break.h"
@@ -19,6 +20,7 @@
 #include "bot_fire.h"
 #include "bot_fun.h"
 #include "bot_goal.h"
+#include "bot_grenade.h"
 #include "bot_sense.h"
 #include "bot_strategic.h"
 #include "bot_weapons.h"
@@ -205,6 +207,8 @@ struct CBot
 	BotDeploy::State deploy;
 	BotSense::State sense;
 	BotFire::State fire;
+	BotGrenade::State grenade;
+	BotAbility::State ability;
 	BotFire::Carry weaponCarry;
 
 	bool fallTelemetryLogged = false;

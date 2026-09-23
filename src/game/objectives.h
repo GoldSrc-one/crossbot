@@ -18,6 +18,7 @@ struct Site
 	Vector point;
 	bool volume = false;
 	bool urgent = false;
+	bool detpack = false;
 	unsigned short buttons = 0;
 	int attackTeams = 0;
 	int defendTeams = 0;
@@ -60,6 +61,7 @@ struct Tables
 	std::vector<Payload> payloads;
 	std::vector<Carrier> carriers;
 	std::vector<Spawn> spawns;
+	bool detpackMap = false;
 };
 
 inline int TeamBit(int team)

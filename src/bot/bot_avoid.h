@@ -43,6 +43,7 @@ struct State
 	float nextSearchTime = 0.f;
 
 	float blockedUntil = 0.f;
+	float walkOverUntil = 0.f;
 
 	Kind lastKind = AVOID_NONE;
 	char lastHit[32] = {};

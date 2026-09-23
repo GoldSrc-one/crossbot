@@ -193,6 +193,19 @@ route again — see "Healing volumes give one entity several candidates" below.
 Area z-space is duck-origin based (navgen builds in hull 3) and an item's `v.origin` is at its base,
 so the probe is `origin + 18` first and the raw origin as a fallback.
 
+**Both probes must also land at the item's height.** `FindAreaExact` only tests the xy half-spaces, so
+an item on a shelf or a ledge resolves to the floor area under it and the bot routes to a point it
+cannot touch. The area is now rejected unless the point clamped into it is within 72 units of the
+item in z — one jump. Without that, four TFC demomen on crossover2 spent a whole five-minute run
+cycling between six spawn-room pickups 110 units over their heads instead of walking to their
+objective; the loop was visible as "reached ... without touching it" once per item per 30 s.
+
+**Arrival does not mean touching.** The follower finishes a leg when the route is done, which can be
+tens of units short of a small entity — on casbah, pickups were being abandoned from 60-120 units
+away. A pickup that has not been touched on arrival gets up to 1.5 s of walking straight at the
+item's centre before the bot gives up on it, which is how a bot finally touches backpacks sitting off
+the nav area.
+
 **Chargers have no origin at all.** They are brush entities: `v.origin` is `(0,0,0)` and the real
 position is `(absmin + absmax) * 0.5`. That centre is inside the wall, so it never resolves to an
 area either. The use spot is found by scanning areas whose bounds come within 96 units of the centre
@@ -545,7 +558,7 @@ A reader fills three tables and decides nothing:
 
 | table | CS | DoD | TFC |
 | --- | --- | --- | --- |
-| **Site**: act on a place | bomb target, rescue zone, VIP safety zone, escape zone, planted C4 | `dod_capture_area`, touchable `dod_control_point`, TNT `func_breakable` | touch `info_tfgoal` that scores |
+| **Site**: act on a place | bomb target, rescue zone, VIP safety zone, escape zone, planted C4 | `dod_capture_area`, touchable `dod_control_point`, TNT `func_breakable` | touch `info_tfgoal` that scores, detpack `info_tfgoal` |
 | **Payload**: a loose thing to carry | dropped C4 (`weaponbox` + `m_bIsBomb`), free hostage | `dod_object` | `item_tfgoal` |
 | **Carrier**: a player bearing one | `m_bHasC4` (hidden from CT), `m_bIsVIP`, the player a hostage follows | `CObject::m_hOwner` | the item's `pev->owner` / `aiment` |
 
@@ -556,6 +569,7 @@ other bot:
 
 | relation | intent | rank |
 | --- | --- | --- |
+| a detpack site I can blow (TFC demoman) | `attack` | 4 |
 | I carry what a site needs, or the site is urgent | `deliver` / `attack` | 3 |
 | a loose payload my team carries, under the shared cap; an urgent site I defend | `fetch` / `defend` | 2 |
 | a site I attack that needs nothing, or whose need is not lying loose | `support` | 1 |
@@ -605,6 +619,24 @@ chasing each other and re-planning at 4 Hz.
   group, and both teams only when no object matches. Reading the team bits alone dropped `dod_escape`'s
   `blow2` (`*178`, spawnflags 64, `axis_obj`), the charge that actually scores through `rebar` ->
   `dod_point_relay` -> `axis_flag`, while keeping the bridge charge beside it (`*204`, spawnflags 96).
+- **A TFC goal's team can hide behind `teamcheck`.** `APMeetsCriteria` compares the activator's team
+  against `GetTeamCheckTeam` (tfc.c:111208), which looks up an `info_tf_teamcheck` by targetname and
+  reads *its* `team_no`; the goal's own `team_no` may be 0. avanti's church-hole detpack goal is
+  `teamcheck "attackers"`, so reading `team_no` alone made every demoman on the map think the goal was
+  theirs. The reader resolves `teamcheck` for sites and `owned_by_teamcheck` for payloads, falling back
+  to the plain fields.
+- **A detpack goal is a site with nowhere to stand.** `goal_activation & 2` goals are usually point
+  entities inside the wall they open, so the ordinary "resolve the entity to a nav area" gives a point
+  on the far side. Their sites are placed instead on every nav area within 1400 units that has a clear
+  line to the goal — the same trace the blast itself does (`DetpackExplode` 22955) — and the cheapest
+  reachable one wins. `Tables::detpackMap` records that the map has such goals at all, which is what
+  stops a scared demoman from wasting the pack elsewhere.
+- **A higher rank only preempts through `Outranked`.** A strategic goal is otherwise sticky until it
+  dies or the hold times out, so a detpack site appearing after the bot took a flag would never be seen.
+  `RefreshStrategic` drops the current goal when an intent at the override rank is available and not on
+  cooldown, at most once every 10 s per bot. The cooldown matters: without it a bot whose override
+  intent is unreachable dropped and re-picked its goal every refresh — 1657 times in one five-minute
+  run before the limiter went in.
 - **TFC `items_allowed` is a goal number, not a mask.** `APMeetsCriteria` (tfc.c:111822) passes only if
   the `item_tfgoal` with that `goal_no` has the activator as `pev->owner`; `has_item_from_group` is the
   same test on `group_no`. A touch goal fires only with `goal_activation & 1` and `goal_state != 1`

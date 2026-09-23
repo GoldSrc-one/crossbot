@@ -44,6 +44,7 @@ constexpr int kTfcStateActive = 1;
 constexpr int kTfcStateInactive = 2;
 constexpr int kTfcStateRemoved = 3;
 constexpr int kTfcActivateTouch = 1;
+constexpr int kTfcActivateDetpack = 2;
 constexpr int kTfcTeams = 4;
 
 Reader g_reader = READER_NONE;
@@ -401,6 +402,17 @@ bool TfcGroupIs(const std::vector<TfcGoal> &goals, int group, int state)
 	return true;
 }
 
+int TfcTeamCheck(const edict_t *ent, int off, int fallback)
+{
+	int name = Int(ent, off);
+	if (!name)
+		return fallback;
+	edict_t *check = FIND_ENTITY_BY_STRING(nullptr, "targetname", STRING(name));
+	if (!check || g_engfuncs.pfnIndexOfEdict(check) == 0 || strcmp(CBotClassOf(check), "info_tf_teamcheck") != 0)
+		return fallback;
+	return Int(check, g_off.tfc_teamNo);
+}
+
 bool TfcCriteria(const std::vector<TfcGoal> &goals, const edict_t *ent)
 {
 	const int goalFields[3] = { g_off.tfc_ifGoalActive, g_off.tfc_ifGoalInactive, g_off.tfc_ifGoalRemoved };
@@ -459,16 +471,27 @@ void ReadTfc()
 		if (Gone(ent) || Int(ent, g_off.tfc_goalState) == kTfcStateRemoved)
 			return;
 
-		int team = Int(ent, g_off.tfc_teamNo);
+		int team = TfcTeamCheck(ent, g_off.tfc_teamcheck, Int(ent, g_off.tfc_teamNo));
 		int carry = team ? TeamBit(team) : allTeams;
-		AddPayload(ent, no, group, carry, TeamBit(Int(ent, g_off.tfc_ownedBy)) & ~carry);
+		int owner = TfcTeamCheck(ent, g_off.tfc_ownedByTeamcheck, Int(ent, g_off.tfc_ownedBy));
+		AddPayload(ent, no, group, carry, TeamBit(owner) & ~carry);
 	};
 	ForEach("item_tfgoal", item);
 
 	for (const TfcGoal &goal : goals)
 	{
 		edict_t *ent = goal.ent;
-		if ((Int(ent, g_off.tfc_goalActivation) & kTfcActivateTouch) == 0)
+		int activation = Int(ent, g_off.tfc_goalActivation);
+		if ((activation & kTfcActivateDetpack) != 0)
+		{
+			g_tables.detpackMap = true;
+			if (goal.state != kTfcStateActive && goal.state != kTfcStateRemoved && TfcCriteria(goals, ent))
+			{
+				int team = TfcTeamCheck(ent, g_off.tfc_teamcheck, Int(ent, g_off.tfc_teamNo));
+				AddSite(ent, team ? TeamBit(team) : allTeams, team ? allTeams & ~TeamBit(team) : 0, 0, 0).detpack = true;
+			}
+		}
+		if ((activation & kTfcActivateTouch) == 0)
 			continue;
 		if (ent->v.solid == SOLID_NOT || goal.state == kTfcStateActive || goal.state == kTfcStateRemoved)
 			continue;
@@ -483,7 +506,7 @@ void ReadTfc()
 		if (!scores || !TfcCriteria(goals, ent))
 			continue;
 
-		int team = Int(ent, g_off.tfc_teamNo);
+		int team = TfcTeamCheck(ent, g_off.tfc_teamcheck, Int(ent, g_off.tfc_teamNo));
 		AddSite(ent, team ? TeamBit(team) : allTeams, 0, Int(ent, g_off.tfc_itemsAllowed),
 			Int(ent, g_off.tfc_hasItemFromGroup));
 	}
@@ -495,6 +518,7 @@ void Rebuild()
 	g_tables.payloads.clear();
 	g_tables.carriers.clear();
 	g_tables.spawns.clear();
+	g_tables.detpackMap = false;
 
 	switch (g_reader)
 	{
@@ -618,10 +642,11 @@ void PrintStatus()
 		TeamList(site.attackTeams, attack, sizeof(attack));
 		TeamList(site.defendTeams, defend, sizeof(defend));
 		snprintf(msg, sizeof(msg),
-			"CrossBot: site %s #%d at (%.0f,%.0f,%.0f)%s attack %s defend %s need id %d group %d players %d%s%s%s\n",
+			"CrossBot: site %s #%d at (%.0f,%.0f,%.0f)%s attack %s defend %s need id %d group %d players %d%s%s%s%s\n",
 			CBotClassOf(ent), g_engfuncs.pfnIndexOfEdict(ent), site.point.x, site.point.y, site.point.z,
 			site.volume ? " volume" : "", attack, defend, site.needId, site.needGroup, site.needPlayers,
-			site.urgent ? " urgent" : "", (site.buttons & IN_USE) ? " USE" : "", (site.buttons & IN_DUCK) ? " DUCK" : "");
+			site.urgent ? " urgent" : "", (site.buttons & IN_USE) ? " USE" : "", (site.buttons & IN_DUCK) ? " DUCK" : "",
+			site.detpack ? " detpack" : "");
 		SERVER_PRINT(msg);
 	}
 

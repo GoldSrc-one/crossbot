@@ -11,6 +11,11 @@
 
 struct CBot;
 
+namespace Objectives
+{
+struct Site;
+}
+
 namespace BotStrategic
 {
 
@@ -25,6 +30,7 @@ enum Kind
 	KIND_SUPPORT,
 	KIND_DEFEND,
 	KIND_ROAM,
+	KIND_HEAL,
 };
 
 struct Intent
@@ -34,6 +40,7 @@ struct Intent
 	Vector point;
 	bool volume = false;
 	bool pulse = false;
+	bool detpack = false;
 	unsigned short buttons = 0;
 	int kind = KIND_MAP;
 	int rank = 0;
@@ -61,6 +68,7 @@ struct State
 
 	float spawnTime = 0.f;
 	bool defender = false;
+	float overrideDrop = 0.f;
 	Vector lastOrigin;
 };
 
@@ -99,6 +107,18 @@ void OnRespawn(CBot &bot);
 void NoteLife(CBot &bot);
 
 int KindOf(int payload);
+
+int TargetKind(const CBot &bot);
+
+bool Outranked(const CBot &bot, int payload);
+
+bool FortifyTarget(const Objectives::Site &site, int teamBit);
+
+bool HasFortifyTarget(const CBot &bot);
+
+const Objectives::Site *DetpackGoal(const CBot &bot);
+
+void LeaveGoal(CBot &bot, float seconds);
 
 edict_t *Leader(const CBot &bot, edict_t *site);
 

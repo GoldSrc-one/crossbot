@@ -2,12 +2,15 @@
 
 #include "../hldm/hldm_profile.h"
 
+bool DMC_ThrowLaunch(float viewPitch, float &elevation, float &speed);
+
 class CDMCProfile : public CHLDMProfile
 {
 public:
 	const char *GetName() const override;
 	bool Detect(const char *gamedir) const override;
 	bool FallDamage() const override;
+	bool Disguised(edict_t *pEdict) const override;
 
 	float ItemRespawnDelay(ItemKind kind) const override;
 	bool ItemPreferred(edict_t *ent, ItemKind kind) const override;

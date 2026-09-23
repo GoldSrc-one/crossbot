@@ -855,6 +855,13 @@ namespace
 		fire.commitSeen = false;
 	}
 
+	bool ChargeExpired(const BotFire::State &fire, const BotWeapon &w)
+	{
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
+		const WeaponMode *m = spec ? BotFire::ModeOf(*spec, fire.mode, fire.zoomed) : nullptr;
+		return m && m->chargeMax > 0.f && gpGlobals->time - fire.commitStart >= m->chargeMax - kChargeSafety;
+	}
+
 	unsigned short ChargeButtons(BotFire::State &fire, const WeaponMode &m, bool onTarget)
 	{
 		unsigned short button = AttackButton(fire.mode);
@@ -1031,6 +1038,21 @@ bool Supported(const WeaponMode &mode)
 		reject |= WPN_Q_INHERIT_VEL;
 
 	return (mode.quirks & reject) == 0;
+}
+
+bool SolveOffhand(const WeaponMode &mode, const Vector &src, const Vector &base, const Vector &vel,
+	Vector &look, float &flight)
+{
+	ThrowShot shot;
+	Vector point;
+	if (!g_pGameProfile || !SolveThrowLead(mode, src, base, vel, Vector(0.f, 0.f, 0.f), ArcGravity(mode),
+		shot, point))
+		return false;
+
+	MAKE_VECTORS(Vector(shot.pitch, atan2f(shot.dir.y, shot.dir.x) * (180.f / kPiF), 0.f));
+	look = gpGlobals->v_forward;
+	flight = shot.flight;
+	return true;
 }
 
 const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed)
@@ -1746,6 +1768,20 @@ void Think(CBot &bot)
 		return;
 	}
 
+	if (BotAbility::Active(bot.ability) && !BotAbility::FiresDuring(bot.ability))
+	{
+		fire.idleReloadId = 0;
+		Idle(fire, "ability");
+		return;
+	}
+
+	if (g_pGameProfile->HoldFire(bot))
+	{
+		fire.idleReloadId = 0;
+		Idle(fire, "disguised");
+		return;
+	}
+
 	if (BotDeploy::Active(bot))
 	{
 		fire.idleReloadId = 0;
@@ -1823,6 +1859,9 @@ void Think(CBot &bot)
 
 	if (!haveTarget)
 	{
+		if (holding && fire.commit == COMMIT_CHARGE && ChargeExpired(fire, *active))
+			holding = false;
+
 		if (holding)
 		{
 			if (fire.commit != COMMIT_GUIDE && fire.commit != COMMIT_SPINUP)
@@ -2114,12 +2153,13 @@ bool BraceEnabled()
 	return !cvar || cvar->value != 0.f;
 }
 
-bool Brace(CBot &bot, unsigned short buttons, bool &duck)
+bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly)
 {
 	State &fire = bot.fire;
 	bool was = fire.bracing != 0;
 	fire.bracing = 0;
 	duck = false;
+	stanceOnly = false;
 
 	if (!BraceEnabled() || !Enabled() || !g_pGameProfile)
 		return false;
@@ -2146,6 +2186,18 @@ bool Brace(CBot &bot, unsigned short buttons, bool &duck)
 
 	float timer = (fire.mode == MODE_SECONDARY) ? w.nextSecondaryAttack : w.nextPrimaryAttack;
 	float wait = std::max(timer, inv.nextAttack);
+
+	if (BotDiff::BraceMoving() && strcmp(g_pGameProfile->GetName(), "Gearbox") == 0)
+	{
+		if (wait > 0.f || (buttons & AttackButton(fire.mode)) == 0)
+			return false;
+		stanceOnly = true;
+		duck = true;
+		fire.bracing = 3;
+		if (!was)
+			++fire.braces;
+		return true;
+	}
 
 	PmSim::PmPhysics physics = Bot_DrivePhysics(pEdict);
 	Vector flat(pEdict->v.velocity.x, pEdict->v.velocity.y, 0.f);

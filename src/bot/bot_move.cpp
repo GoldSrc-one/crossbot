@@ -144,17 +144,30 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 
 	buttons |= BotFire::Buttons(bot, angles);
 
+	Vector view = angles;
+	BotGrenade::Run(bot, view);
+
 	bool braceDuck = false;
-	if (BotFire::Brace(bot, buttons, braceDuck))
+	bool stanceOnly = false;
+	if (BotFire::Brace(bot, buttons, braceDuck, stanceOnly))
 	{
-		fmove = 0.f;
-		smove = 0.f;
+		if (!stanceOnly)
+		{
+			fmove = 0.f;
+			smove = 0.f;
+		}
 		buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
 		if (braceDuck)
 			buttons |= IN_DUCK;
 	}
 
 	ApplyBeamGuard(bot, angles, fmove, smove, buttons);
+
+	if (view.y != angles.y)
+	{
+		Vector world = ComposeMove(angles.y, fmove, smove);
+		Bot_DecomposeMove(view.y, world, world.Length(), fmove, smove);
+	}
 
 	if (!allowLongJump && (buttons & (IN_JUMP | IN_DUCK)) == (IN_JUMP | IN_DUCK) &&
 		Bot_HasLongJumpModule(pEdict))
@@ -163,7 +176,7 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 	if ((buttons & IN_JUMP) != 0 && msec > kMaxJumpCommandMsec)
 	{
 		BotTiming::BeginMove(pEdict, kMaxJumpCommandMsec);
-		g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, upmove, buttons, 0,
+		g_engfuncs.pfnRunPlayerMove(pEdict, view, fmove, smove, upmove, buttons, 0,
 			kMaxJumpCommandMsec);
 		BotTiming::EndMove(pEdict);
 		buttons &= ~IN_JUMP;
@@ -171,7 +184,7 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 	}
 
 	BotTiming::BeginMove(pEdict, msec);
-	g_engfuncs.pfnRunPlayerMove(pEdict, angles, fmove, smove, upmove, buttons, 0, msec);
+	g_engfuncs.pfnRunPlayerMove(pEdict, view, fmove, smove, upmove, buttons, 0, msec);
 	BotTiming::EndMove(pEdict);
 }
 

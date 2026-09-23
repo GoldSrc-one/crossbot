@@ -3,6 +3,7 @@
 #include "gearbox/gearbox_profile.h"
 #include "hldm/hldm_profile.h"
 #include "ricochet/ricochet_profile.h"
+#include "tfc/tfc_profile.h"
 
 IGameProfile *GameProfile_Detect(const char *gamedir)
 {
@@ -10,6 +11,7 @@ IGameProfile *GameProfile_Detect(const char *gamedir)
 	static CRicochetProfile ricochetProfile;
 	static CGearboxProfile gearboxProfile;
 	static CDMCProfile dmcProfile;
+	static CTFCProfile tfcProfile;
 
 	if (hldmProfile.Detect(gamedir))
 		return &hldmProfile;
@@ -19,6 +21,8 @@ IGameProfile *GameProfile_Detect(const char *gamedir)
 		return &gearboxProfile;
 	if (dmcProfile.Detect(gamedir))
 		return &dmcProfile;
+	if (tfcProfile.Detect(gamedir))
+		return &tfcProfile;
 
 	return NULL;
 }

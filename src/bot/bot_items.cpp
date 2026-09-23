@@ -24,6 +24,7 @@ namespace
 	using NavMath::BoxesOverlap;
 
 	constexpr float kItemAreaLift = 18.f;
+	constexpr float kItemReachHeight = 72.f;
 	constexpr float kChargerUseRadius = 48.f;
 	constexpr float kChargerSpotSearch = 96.f;
 	constexpr float kGoalItemSeenInterval = 0.25f;
@@ -59,12 +60,19 @@ namespace
 		return out;
 	}
 
+	bool WithinReach(const Nav::Area *area, const Vector &origin)
+	{
+		return area && fabsf(ClampIntoArea(*area, origin).z - origin.z) <= kItemReachHeight;
+	}
+
 	const Nav::Area *ResolvePickupArea(const Nav::NavMesh &mesh, const Vector &origin)
 	{
-		if (const Nav::Area *lifted =
-			Nav::FindAreaExact(mesh, origin + Vector(0.f, 0.f, kItemAreaLift)))
+		const Nav::Area *lifted = Nav::FindAreaExact(mesh, origin + Vector(0.f, 0.f, kItemAreaLift));
+		if (WithinReach(lifted, origin))
 			return lifted;
-		return Nav::FindAreaExact(mesh, origin);
+
+		const Nav::Area *level = Nav::FindAreaExact(mesh, origin);
+		return WithinReach(level, origin) ? level : nullptr;
 	}
 
 	const Nav::Area *ResolveChargerArea(const Nav::NavMesh &mesh, const Vector &center)
@@ -257,7 +265,8 @@ namespace
 
 			if (BotItems::IsUnavailable(ent, kind))
 				cand.reason = SCAN_GONE;
-			else if (ItemKindUsesValue(kind) && Sated(bot, kind))
+			else if ((ItemKindUsesValue(kind) && Sated(bot, kind)) ||
+				!g_pGameProfile->ItemUsable(bot.pEdict, ent))
 				cand.reason = SCAN_SATED;
 			else if (const BotItemMemo *memo = MemoFor(bot, ent))
 			{
@@ -710,8 +719,9 @@ void OnArrived(CBot &bot)
 
 	if (!bot.goalItemTouched)
 	{
-		BOT_VLOG("CrossBot: %s reached %s without touching it, ignoring it for %.0fs\n", bot.name,
-			CBotClassOf(ent), g_pGameProfile->ItemUnreachableTimeout());
+		BOT_VLOG("CrossBot: %s reached %s without touching it (item z %.0f..%.0f, feet %.0f), "
+			"ignoring it for %.0fs\n", bot.name, CBotClassOf(ent), ent->v.absmin.z, ent->v.absmax.z,
+			bot.pEdict->v.absmin.z, g_pGameProfile->ItemUnreachableTimeout());
 		NoteIgnored(bot, ent, g_pGameProfile->ItemUnreachableTimeout());
 	}
 

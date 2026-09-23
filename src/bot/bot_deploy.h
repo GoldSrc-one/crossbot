@@ -134,6 +134,7 @@ struct Beam
 	Vector start;
 	Vector end;
 	bool armed = true;
+	bool hazard = false;
 };
 
 bool Enabled();

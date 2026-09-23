@@ -39,6 +39,8 @@ namespace BotWeapons
 {
 	void Read(edict_t *player, BotInventory &out);
 
+	void ReadItems(edict_t *player, BotInventory &out);
+
 	int ActiveWeaponId(edict_t *player);
 
 	void Refresh(CBot &bot);

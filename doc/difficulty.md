@@ -38,6 +38,9 @@ keep reading `->value` fresh; do not cache values.
 | `pickupPriority` | -- | -- | -- | **yes** |
 | `gaussPolicy` | -- | -- | -- | **yes** |
 | `bunnyHop` | -- | -- | -- | **yes** |
+| `grenadeCook` | -- | -- | **yes** | **yes** |
+| `backstab` | -- | -- | **yes** | **yes** |
+| `braceMoving` | -- | -- | -- | **yes** |
 
 Easy and normal differ only in the two handicap numbers. Everything easy would otherwise "lose" is
 behaviour normal already has, so there is nothing to take away.
@@ -85,6 +88,9 @@ server, so it exists from the first commit rather than being added later.
 | `pickupPriority` | `BotItems::KeepPreferred`, promoting those items into the fun round |
 | `gaussPolicy` | `ChargeTime`, `WeaponScore`, `ModeViable`, `ZoomButtons` and `BotGauss` |
 | `bunnyHop` | `BotOppo::WantBunnyHop` |
+| `grenadeCook` | `BotGrenade`: holding an off-hand grenade for its fuse instead of throwing at once |
+| `backstab` | `TFCAbility` `StartStab`: a TFC spy going for the knife rather than its gun |
+| `braceMoving` | `BotFire::Brace`: in OP4, bracing by clearing the move keys on the firing frame only |
 
 ### The delay is rolled per engagement, not per frame
 
@@ -429,6 +435,11 @@ maxspeed, and the ratio only decides how much of the ramp-up it is willing to ho
 - `crossbot_gauss` — the charge-weapon policy and the opportunistic gauss jump. Default -1 (tier)
 - `crossbot_bunnyhop` — opportunistic bunnyhop. Default -1 (tier)
 - `crossbot_oppo_interval` — opportunistic-jump retry throttle in seconds. Default -1 (tier)
+- `crossbot_grenade_cook` — hold an off-hand grenade for its fuse instead of throwing at once.
+  Default -1 (tier)
+- `crossbot_backstab` — a TFC spy hunts backs with the knife. Default -1 (tier)
+- `crossbot_brace_moving` — in OP4, brace by clearing the move keys only on the firing frame, so the
+  bot keeps moving. Default -1 (tier)
 
 `crossbot_aim_delay`, `crossbot_aim_error`, `crossbot_camp`, `crossbot_oppo_jump` and
 `crossbot_ambush` now default to -1 and follow the tier; any value `>= 0` still pins them exactly as
