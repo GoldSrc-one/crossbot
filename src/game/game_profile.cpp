@@ -1,4 +1,5 @@
 #include "game_profile.h"
+#include "cstrike/cs_profile.h"
 #include "dmc/dmc_profile.h"
 #include "gearbox/gearbox_profile.h"
 #include "hldm/hldm_profile.h"
@@ -12,6 +13,7 @@ IGameProfile *GameProfile_Detect(const char *gamedir)
 	static CGearboxProfile gearboxProfile;
 	static CDMCProfile dmcProfile;
 	static CTFCProfile tfcProfile;
+	static CCSProfile csProfile;
 
 	if (hldmProfile.Detect(gamedir))
 		return &hldmProfile;
@@ -23,6 +25,8 @@ IGameProfile *GameProfile_Detect(const char *gamedir)
 		return &dmcProfile;
 	if (tfcProfile.Detect(gamedir))
 		return &tfcProfile;
+	if (csProfile.Detect(gamedir))
+		return &csProfile;
 
 	return NULL;
 }

@@ -177,10 +177,10 @@ each names a broken rule:
   `ServerActivate` via `GameProfile_Detect(gamedir)`. `g_pGameProfile` is the active one.
 - A game is **playable** (`XPlay::Supported`) only with both. `crossbot_add` refuses anything else and
   `XPlay::PickRandomSupported()` draws only from that set. Today `valve`, `ricochet`, `gearbox`,
-  `dmc` and `tfc` qualify, one profile each.
+  `dmc`, `tfc`, `cstrike` and `czero` qualify, one profile each except CS, which serves both.
 
 The profiles live one directory per game: `src/game/hldm/`, `src/game/ricochet/`, `src/game/gearbox/`,
-`src/game/dmc/`, `src/game/tfc/`.
+`src/game/dmc/`, `src/game/tfc/`, `src/game/cstrike/`.
 `src/game/game_profile.cpp` holds `GameProfile_Detect`, the only file that names them all. Anything
 that is not a profile — teams, objectives, gamedata — stays in `src/game/` itself, because it keys off
 the map's game rather than the bot's.
@@ -378,8 +378,8 @@ to `team=2` on its own — which is the whole reason the team is re-read live in
 
 **The first minute of a round is all-friends, and that is not a bug.** Bots join on one side before the
 mod balances them, and while they are all on one team they will not fight each other — correctly, since
-they *are* teammates. Nothing here joins a team or picks a side. A `tfc` bot is the exception: its
-profile joins with `jointeam 5`, so TFC bots start split (see `tfc_profile.cpp`). `crossbot_teams 0` is the switch for anyone who wants
+they *are* teammates. Nothing here joins a team or picks a side. `tfc` and `cstrike` bots are the
+exception: their profiles join a team themselves (see `tfc_profile.cpp` and `cs_profile.cpp`). `crossbot_teams 0` is the switch for anyone who wants
 the old free-for-all on a team map.
 
 ### Where the gates are
@@ -868,6 +868,104 @@ four pools. The `IN_ATTACK` refusal is not guarded: a bot that touches a box mid
 The `tfc.c` decompile is not the live DLL. Every field it touches sits exactly 16 bytes past the
 offset in `tfc-win.json` (`ammo_shells` 228 vs 212, `team_no` 312 vs 296, `m_flTouchableAt` 1164 vs
 1148). Match its fields by name, never by byte offset.
+
+## cs_profile.cpp
+
+`CCSProfile` is Counter-Strike: one profile for `cstrike` and `czero`, derived from `CHLDMProfile`,
+with no `deathmatch` check. `D:\hlds\cstrike\dlls\mp.dll` is a symlink to the ReGameDLL build, so
+`regamedll/dlls/` is the source to read; `czero` runs the retail DLL. The map side — bomb sites,
+hostages, VIP, the planted C4, carriers — was already `Objectives::ReadCs` (see `doc/goals.md`); the
+profile is what lets a bot *be* a CS player. Out of scope: buying, money, radio.
+
+### Joining answers whichever menu is open
+
+`PreThink` owns the bot until `m_iJoiningState` is `JOINED` (0), and every 1.2 s answers the menu
+`m_iMenu` says is showing: `jointeam <n>` on `Menu_ChooseTeam`/`Menu_IGChooseTeam` (1/2),
+`joinclass <1-4>` on `Menu_ChooseAppearance` (3), nothing otherwise. `READINGLTEXT` (the MOTD) gets
+an `IN_ATTACK` edge. Both commands work with VGUI menus on (client.cpp:3353, 3384).
+
+**Never send `jointeam` before the game asks.** The first version sent it the moment `m_iTeam` was 0.
+It landed while the player was still in `SHOWLTEXT`, set the team and `Menu_ChooseAppearance`, and
+then `JoiningThink` ran `SHOWLTEXT`→`SHOWTEAMSELECT`→`PICKINGTEAM` and put the menu back to
+`Menu_ChooseTeam`. From then on every `joinclass` came back `#Command_Not_Available`: all bots had a
+team and stayed `PICKINGTEAM` forever, never spawned, and every round ended `Terrorists_Win` two seconds
+in. Re-sending `jointeam` for the team the player is already on is allowed ("switch to the same team
+just to choose a new appearance"), which is what makes following the menu safe.
+
+The third `crossbot_add` argument is the team: `t`, `ct`, or `*`/nothing for auto (5). After three
+refused `jointeam`s (team full, `mp_limitteams`) the bot asks for auto instead. The model is
+random 1-4, which is valid on both 1.6 and CZ.
+
+`pev->team` is not written by ReGameDLL at all. CrossPlay's `FixProxyTeam` mirrors `m_iTeam` into it,
+reversed (T 1→2, CT 2→1), for native cstrike players exactly as for `valve` ones, so `Teams::TeamOf`
+and `ReadCs` need nothing new. `crossbot_list_objectives` prints both columns.
+
+`Respawn` is an empty move: CS is round-based, and `IN_ATTACK` would only cycle the spectator camera.
+
+### The table
+
+`cs_weapons.cpp`, 31 rows indexed by `m_iId` (`weapontype.h:31-65`), `ItemSlots` 6. Semi-automatics
+(pistols, scout, awp, g3sg1, sg550) are `FIRE_TAP`; rifles, SMGs and the m249 `FIRE_HOLD` +
+`WPN_Q_STICKY`. Rifles, snipers and the m249 are `RANGE_LONG`, everything else `RANGE_CLOSE`.
+`hegrenade` is a `WPN_Q_THROW_ARC` weapon and the `AMBUSH_GRENADE`; `ThrowLaunch` is the HL formula
+with CS's rate 6 and cap 750 (`wpn_hegrenade.cpp:184-194`), and gravity 0.55 (`ShootTimed2`).
+`flashbang`, `smokegrenade` and `c4` have value 0 and no modes, so combat never picks them.
+
+Scopes are `TOGGLE_ZOOM`, and the zoom test is `fov != 0 && fov < 90`, because CS's unzoomed
+`pev->fov` is 90, not 0. aug and sg552 are one-stage (`zoomFov` 55). awp, scout, g3sg1 and sg550 cycle
+90→40→10→90, so `zoomFov` is the first stage and unzooming costs two presses: the existing loop presses
+again while `fov < 90`, one extra `m_flNextSecondaryAttack` at stage two. That ceiling is deliberate and
+has not been measured live; a real two-stage state is the upgrade if bots are seen crawling at 150 u/s.
+
+### One weapon per slot
+
+CS refuses a second weapon for a filled slot, so `ItemUsable` refuses it first, or a bot with a rifle
+walks to every rifle on the map. The item's weapon id comes from its classname, from
+`CArmoury::m_iItem` (the `ArmouryItemPack` order, `weapons.h:79`) or from the first item in
+`CWeaponBox::m_rgpPlayerItems`, and is vetoed when the bot's `m_rgpPlayerItems[slot]` is occupied
+(primary 1, pistol 2, knife 3). Grenades are capped instead: HE 1, flash 2, smoke 1 against
+`m_rgAmmo`. On `fy_pool_day` an armed bot's scan flips the armoury rifles to `no need` after its first
+pickup. The VIP may take loose pistols only, never a weaponbox or armoury (`weapons.cpp:620`, 2695);
+the bomb weaponbox is vetoed for CT, who would otherwise chase it forever. Only entities the bot's own
+game owns are read.
+
+On objective maps this rarely matters: the strategic tier always wins over gathering, so an unarmed
+CT on de_dust2 defends rather than fetches. Gathering runs on objective-free maps and through the
+`PickupPriority` promotion.
+
+### The shield
+
+A shield blocks primaries (`m_bOwnsShield`), and dual elites block the shield (`CWShield::Touch`).
+Drawn and lowered is `m_bShieldDrawn`, toggled by `IN_ATTACK2` on any shield-capable weapon.
+`IGameProfile::FireToggle(bot, firing)` is called from `BotFire::Buttons` once the player and weapon
+can act, and returns `IN_ATTACK2` whenever the shield state disagrees with "in combat and not
+firing": up while `BotCombat::Active` and no mode is chosen, down the moment one is, and down again
+when combat ends, because a drawn shield caps the walk at 180 u/s instead of 250. Gate it on the *player's* `m_flNextAttack` too — a freshly deployed
+pistol holds it at 0.75 s, and the first version pressed ~70 times into that window. Seen live on
+`fy_iceworld`: no press until `entered combat`, then raise, lower to shoot, raise between shots, and
+`lowers` right after every `left combat`.
+
+### Planting
+
+`AbilityRun` starts `BotAbility::TASK_PLANT` when the bot carries C4, is on the ground, has no target
+and `m_signals` state (`CUnifiedSignals`, +4) has `SIGNAL_BOMB`. It selects `weapon_c4`, holds
+`IN_ATTACK|IN_DUCK` with no movement, and stops on success (C4 gone from the inventory, `plants`
+counted in `crossbot_ability_status`), on a target (retry in 3 s), on leaving the zone, or after 5 s.
+Fire idles while the task runs. The generic `KIND_DELIVER` intent is what walks the carrier onto the
+site. Defusing needs no profile code: the planted C4 is an urgent `IN_USE|IN_DUCK` site. Both were seen
+on de_dust2: `Planted_The_Bomb` → `Target_Bombed`, and `Planted_The_Bomb` →
+`Begin_Bomb_Defuse_With_Kit` → `Bomb_Defused`.
+
+Arming and defusing pin `maxspeed` to 1, as does freeze time; see `Bot_Frozen` in `doc/movement.md`.
+
+### Testing notes
+
+- `equip.amxx` hands every spawn a random rifle; `amxx pause equip.amxx` gives empty-handed bots.
+- A hostage killed on cs_assault was crossfire, not targeting: the shooter only ever engaged players.
+- `czero` is not verified live. With the retail DLL CrossPlay aborts at map load with `NULL CS
+  gamerules!` in `CheckWinConditions`, before any bot exists, in every layout tried (valve+czero,
+  valve+cstrike+czero, cstrike on the content path only). `czero` is in `teams.cpp`'s team list, which
+  it was missing.
 
 ## gamedata.cpp
 

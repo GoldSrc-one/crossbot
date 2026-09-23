@@ -268,6 +268,18 @@ cvar_t g_braceMovingCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_wallbangCvar = {
+	"crossbot_wallbang",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_spreadFitCvar = {
+	"crossbot_spread_fit",
+	"-1",
+	FCVAR_SERVER
+};
+
 cvar_t g_aimDelayCvar = {
 	"crossbot_aim_delay",
 	"-1",
@@ -514,6 +526,8 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_grenadeCookCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_backstabCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_braceMovingCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_wallbangCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_spreadFitCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);

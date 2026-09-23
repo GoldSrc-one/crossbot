@@ -12,6 +12,7 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_opportunist.h"
+#include "bot_sense.h"
 #include "../game/game_profile.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
@@ -38,6 +39,7 @@ namespace
 	constexpr float kProbeInterval = 0.1f;
 	constexpr float kProbeWindow = 2.f;
 	constexpr int kProbeDirs = 4;
+	constexpr float kOverchargeSlack = 1.f;
 
 	constexpr float kAimTolerance = 6.f;
 	constexpr float kMinGainSeconds = 0.35f;
@@ -51,32 +53,27 @@ namespace
 		return BotAim::RandomRoll(bot);
 	}
 
-	float ChargeDamage(const CBot &bot)
-	{
-		float held = gpGlobals->time - bot.fire.commitStart;
-		float damage = kMaxDamage * (held / kFullChargeSeconds);
-		if (damage < 0.f)
-			damage = 0.f;
-		else if (damage > kMaxDamage)
-			damage = kMaxDamage;
-		return damage;
-	}
-
-	bool HoldingCharge(const CBot &bot)
+	const WeaponMode *HeldCharge(const CBot &bot)
 	{
 		const BotInventory &inv = bot.inventory;
 		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
-			return false;
+			return nullptr;
 
 		const BotWeapon &w = inv.weapons[inv.activeIndex];
 		if (!g_pGameProfile)
-			return false;
+			return nullptr;
 
 		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
 		if (!spec || spec->secondary.fire != FIRE_CHARGE)
-			return false;
+			return nullptr;
 
-		return bot.fire.commit == BotFire::COMMIT_CHARGE;
+		return bot.fire.commit == BotFire::COMMIT_CHARGE ? &spec->secondary : nullptr;
+	}
+
+	bool NearOvercharge(const CBot &bot, const WeaponMode &m)
+	{
+		return m.chargeMax > 0.f &&
+			gpGlobals->time - bot.fire.commitStart >= m.chargeMax - kProbeWindow - kOverchargeSlack;
 	}
 
 	void CheckLanding(CBot &bot)
@@ -164,6 +161,24 @@ bool Enabled()
 	return BotDiff::GaussPolicy();
 }
 
+float ChargeDamage(const CBot &bot)
+{
+	float held = gpGlobals->time - bot.fire.commitStart;
+	float damage = kMaxDamage * (held / kFullChargeSeconds);
+	if (damage < 0.f)
+		damage = 0.f;
+	else if (damage > kMaxDamage)
+		damage = kMaxDamage;
+	return damage;
+}
+
+bool Scared(const CBot &bot)
+{
+	int counts[BotSense::KIND_COUNT];
+	BotSense::LiveCounts(bot, counts);
+	return counts[BotSense::KIND_PLAYER] + counts[BotSense::KIND_MONSTER] > 0;
+}
+
 void Reset(CBot &bot)
 {
 	bot.gaussAiming = false;
@@ -187,14 +202,15 @@ void Update(CBot &bot, const Nav::NavMesh &mesh)
 
 	CheckLanding(bot);
 
-	if (!Enabled() || !HoldingCharge(bot) || !bot.hasGoal || bot.currentAreaId < 0)
+	const WeaponMode *charge = HeldCharge(bot);
+	if (!Enabled() || !charge || !bot.hasGoal || bot.currentAreaId < 0)
 	{
 		Reset(bot);
 		return;
 	}
 
 	Vector point;
-	if (BotFire::AimPoint(bot, point))
+	if (BotFire::AimPoint(bot, point) || (Scared(bot) && !NearOvercharge(bot, *charge)))
 	{
 		Reset(bot);
 		return;

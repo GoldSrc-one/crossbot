@@ -2765,7 +2765,7 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	if (bot.trackState.progressS > bot.lastProgressS + kProgressEpsilon)
+	if (Bot_Frozen(pEdict) || bot.trackState.progressS > bot.lastProgressS + kProgressEpsilon)
 	{
 		bot.lastProgressS = bot.trackState.progressS;
 		bot.lastProgressTime = gpGlobals->time;

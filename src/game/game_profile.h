@@ -131,6 +131,12 @@ public:
 
 	virtual bool HoldFire(const CBot &) const { return false; }
 
+	virtual unsigned short FireToggle(const CBot &, bool) const { return 0; }
+
+	virtual bool SpreadWide(edict_t *, int, void *, float, float &) const { return false; }
+
+	virtual bool Penetrates(const CBot &, int, const Vector &, const Vector &, float) const { return false; }
+
 	virtual bool ItemUsable(edict_t *, edict_t *) const { return true; }
 
 	virtual bool Fortifies(edict_t *) const { return false; }

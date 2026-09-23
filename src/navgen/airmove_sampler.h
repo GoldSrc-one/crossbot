@@ -32,6 +32,7 @@ struct AirmoveSampleParams
 	float edgeProbe = 8.0f;
 	float stepHeight = 18.0f;
 	float maxJumpHeight = 64.0f;
+	float minLandClearance = 2.0f;
 	float yawSpread = 90.0f;
 
 	float jumpBackMax = 32.0f;

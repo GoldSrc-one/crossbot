@@ -6,8 +6,10 @@
 
 #if defined(_WIN32)
 #define CB_STRICMP _stricmp
+#define CB_STRNICMP _strnicmp
 #else
 #define CB_STRICMP strcasecmp
+#define CB_STRNICMP strncasecmp
 #endif
 
 class IGameProfile;

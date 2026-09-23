@@ -81,6 +81,8 @@ struct State
 	bool pressedLead = false;
 	bool pressedArc = false;
 	bool pressedSticky = false;
+	bool pressedWall = false;
+	bool rayWall = false;
 	const char *lastReason = "-";
 	int shots = 0;
 	int leadShots = 0;
@@ -93,6 +95,9 @@ struct State
 	int uphillVetoes = 0;
 	int selfVetoes = 0;
 	int aimVetoes = 0;
+	int spreadWaits = 0;
+	float spreadUntil = 0.f;
+	int spreadClip = -1;
 	int targetAims = 0;
 	int switches = 0;
 	int reloads = 0;
@@ -102,6 +107,7 @@ struct State
 	int duels = 0;
 	int idleReloads = 0;
 	int gaussJumps = 0;
+	int wallbangs = 0;
 	int spinups = 0;
 	int lasers = 0;
 	int braces = 0;

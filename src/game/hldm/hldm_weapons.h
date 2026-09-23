@@ -8,6 +8,7 @@ constexpr int kHLDMItemSlots = 6;
 
 constexpr int kHLDMMelee = 1;
 
+constexpr int kHLDMGauss = 9;
 constexpr int kHLDMGrenade = 12;
 constexpr int kHLDMTripmine = 13;
 constexpr int kHLDMSatchel = 14;

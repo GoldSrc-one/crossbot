@@ -7,12 +7,15 @@ param(
     [switch]$StrategicDebug,
     [switch]$Plugin,
     [int]$Tactics = 1,
-    [string]$HLDSDir = "D:\hlds"
+    [string]$HLDSDir = "D:\hlds",
+    [string]$BotGame = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
 $repoRoot = Split-Path $scriptDir -Parent
+
+if (-not $BotGame) { $BotGame = if ($Game -in 'cstrike', 'czero') { $Game } else { 'valve' } }
 
 if ($Port -eq 0) { $Port = 29015 + (Get-Random -Maximum 85) }
 
@@ -36,7 +39,10 @@ try {
     Write-Host "`n=== crossbot_list_objectives ==="
     Invoke-CbRcon $Port "crossbot_list_objectives"
 
-    for ($i = 1; $i -le $Bots; $i++) { Invoke-CbRconQuiet $Port "crossbot_add valve Player$i" }
+    for ($i = 1; $i -le $Bots; $i++) {
+        $side = if ($BotGame -in 'cstrike', 'czero') { @('t', 'ct')[$i % 2] } else { '' }
+        Invoke-CbRconQuiet $Port "crossbot_add $BotGame Player$i $side"
+    }
 
     Start-Sleep -Seconds $Seconds
 
@@ -48,7 +54,7 @@ finally {
     Write-Host "`n=== objective decisions ==="
     if (Test-Path $logFile) {
         Get-Content $logFile |
-            Select-String -Pattern 'objectives:|wants strategic|holding the|held the|works |strategic goal' |
+            Select-String -Pattern 'objectives:|wants strategic|holding the|held the|works |strategic goal|the bomb|Bomb|Hostage|_Win"' |
             Select-Object -Last 60
     }
 }

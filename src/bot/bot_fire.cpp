@@ -12,6 +12,7 @@
 #include "bot_break.h"
 #include "bot_deploy.h"
 #include "bot_fun.h"
+#include "bot_gauss.h"
 #include "bot_weapons.h"
 #include "../game/game_profile.h"
 #include "../game/give_item.h"
@@ -25,6 +26,11 @@ namespace
 	using NavMath::kPiF;
 
 	constexpr float kHitscanRange = 8192.f;
+
+	bool Zoomed(const edict_t *pEdict)
+	{
+		return pEdict->v.fov != 0.f && pEdict->v.fov < 90.f;
+	}
 
 	constexpr float kSelectInterval = 0.5f;
 	constexpr float kIdleSelectInterval = 3.f;
@@ -76,6 +82,8 @@ namespace
 	constexpr float kGuideMax = 6.f;
 
 	constexpr float kSpinupSlack = 0.2f;
+
+	constexpr float kSpreadMaxWait = 1.5f;
 
 	constexpr float kFeetLift = 2.f;
 
@@ -597,10 +605,12 @@ namespace
 		bool pressedLead = fire.pressedLead;
 		bool pressedArc = fire.pressedArc;
 		bool pressedSticky = fire.pressedSticky;
+		bool pressedWall = fire.pressedWall;
 		fire.pressed = false;
 		fire.pressedLead = false;
 		fire.pressedArc = false;
 		fire.pressedSticky = false;
+		fire.pressedWall = false;
 
 		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
 		{
@@ -612,11 +622,14 @@ namespace
 
 		if (fire.lastTimerId == w.id)
 		{
+			bool fired = (fire.lastPrimaryTimer <= 0.f && w.nextPrimaryAttack > 0.f) ||
+				(fire.lastSecondaryTimer <= 0.f && w.nextSecondaryAttack > 0.f);
+
+			if (pressedWall && (fired || (fire.lastChargeState != 0 && w.chargeState == 0)))
+				++fire.wallbangs;
+
 			if (pressed)
 			{
-				bool fired = (fire.lastPrimaryTimer <= 0.f && w.nextPrimaryAttack > 0.f) ||
-					(fire.lastSecondaryTimer <= 0.f && w.nextSecondaryAttack > 0.f);
-
 				if (fired)
 				{
 					++fire.shots;
@@ -695,6 +708,7 @@ namespace
 	{
 		BotFire::State &fire = bot.fire;
 		edict_t *pEdict = bot.pEdict;
+		fire.rayWall = false;
 
 		MAKE_VECTORS(angles + pEdict->v.punchangle);
 		Vector dir = gpGlobals->v_forward;
@@ -745,8 +759,13 @@ namespace
 		float reach = tr.flFraction * range;
 		if (reach < entry)
 		{
-			fire.lastReason = "blocked";
-			return RAY_BLOCKED;
+			if (!BotDiff::Wallbang() || !g_pGameProfile->Penetrates(bot, fire.weaponId, eye, dir, entry))
+			{
+				fire.lastReason = "blocked";
+				return RAY_BLOCKED;
+			}
+			fire.lastReason = "wallbang";
+			fire.rayWall = true;
 		}
 
 		if (m.splash > 0.f && !SplashSafe(fire, eye, eye + dir * entry))
@@ -900,7 +919,7 @@ namespace
 
 		fire.commit = BotFire::COMMIT_NONE;
 		fire.releaseCharge = false;
-		fire.lastReason = onTarget ? "firing" : "gauss-jump";
+		fire.lastReason = !onTarget ? "gauss-jump" : fire.pressedWall ? "wallbang" : "firing";
 		return 0;
 	}
 
@@ -931,8 +950,36 @@ namespace
 			fire.commitFor = m.chargeFull + kSpinupSlack;
 			++fire.spinups;
 		}
-		fire.lastReason = "firing";
+		fire.lastReason = fire.pressedWall ? "wallbang" : "firing";
 		return AttackButton(fire.mode);
+	}
+
+	bool SpreadHold(CBot &bot, const BotWeapon &w, const Vector &eye, bool onTarget)
+	{
+		BotFire::State &fire = bot.fire;
+		float now = gpGlobals->time;
+		if (fire.spreadUntil > now && fire.spreadUntil - now < kSpreadMaxWait)
+			return true;
+
+		float fit = BotDiff::SpreadFit();
+		if (!onTarget || fit <= 0.f || !fire.haveSize || w.clip == fire.spreadClip)
+			return false;
+
+		float dist = (fire.aimPoint - eye).Length();
+		if (dist < 1.f)
+			return false;
+
+		float half = std::min(fire.targetSize.x, fire.targetSize.y) * 0.5f;
+		float ready = 0.f;
+		if (!g_pGameProfile->SpreadWide(bot.pEdict, w.id, w.priv, fit * half / dist, ready))
+			return false;
+
+		float lo = 0.f, hi = 0.f;
+		BotDiff::SpreadWait(lo, hi);
+		fire.spreadUntil = ready + lo + (hi - lo) * RandomUnit(fire);
+		fire.spreadClip = w.clip;
+		++fire.spreadWaits;
+		return fire.spreadUntil > now;
 	}
 }
 
@@ -1218,7 +1265,7 @@ static void PinEquip(CBot &bot)
 		tries = 1;
 	}
 
-	bool zoomed = bot.pEdict->v.fov != 0.f;
+	bool zoomed = Zoomed(bot.pEdict);
 
 	for (int i = 0; i < tries; ++i)
 	{
@@ -1727,7 +1774,7 @@ static void IdleSelect(CBot &bot)
 
 static bool IdleCharge(CBot &bot, const BotWeapon *active)
 {
-	if (!active || !g_pGameProfile)
+	if (!active || !g_pGameProfile || !BotGauss::Scared(bot))
 		return false;
 
 	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active->id);
@@ -1811,7 +1858,7 @@ void Think(CBot &bot)
 	const BotWeapon *active = (inv.activeIndex >= 0 && inv.activeIndex < inv.count)
 		? &inv.weapons[inv.activeIndex] : nullptr;
 
-	fire.zoomed = bot.pEdict->v.fov != 0.f;
+	fire.zoomed = Zoomed(bot.pEdict);
 
 	bool holding = fire.commit != COMMIT_NONE && active && active->id == fire.weaponId;
 	if (!holding)
@@ -2013,7 +2060,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	const BotWeapon &w = inv.weapons[inv.activeIndex];
 
-	fire.zoomed = bot.pEdict->v.fov != 0.f;
+	fire.zoomed = Zoomed(bot.pEdict);
 
 	if (fire.zoomed)
 	{
@@ -2039,6 +2086,16 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 			++fire.lasers;
 			fire.lastReason = "laser-on";
 			return IN_ATTACK2;
+		}
+	}
+
+	if (!w.reloading && inv.nextAttack <= 0.f && w.nextSecondaryAttack <= 0.f)
+	{
+		unsigned short toggle = g_pGameProfile->FireToggle(bot, fire.mode != MODE_NONE && w.id == fire.weaponId);
+		if (toggle != 0)
+		{
+			fire.lastReason = "toggle";
+			return toggle;
 		}
 	}
 
@@ -2110,8 +2167,16 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 			RayVeto veto = RayOnTarget(bot, angles, *m, eye);
 			onTarget = veto == RAY_HIT;
 			stickyable = veto == RAY_WIDE;
+			if (!charge && SpreadHold(bot, w, eye, onTarget))
+			{
+				onTarget = false;
+				stickyable = false;
+				fire.lastReason = "spread";
+			}
 		}
 	}
+
+	fire.pressedWall = onTarget && fire.rayWall;
 
 	if (charge)
 	{
@@ -2140,7 +2205,7 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 		++fire.guides;
 	}
 
-	fire.lastReason = "firing";
+	fire.lastReason = fire.pressedWall ? "wallbang" : "firing";
 	fire.pressed = true;
 	fire.pressedLead = fire.aimLead;
 	fire.pressedArc = fire.aimArc;

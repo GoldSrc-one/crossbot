@@ -39,6 +39,8 @@ struct AirmoveSample
 	AirmoveTrajectory traj;
 	uint64_t itemId = 0;
 	uint32_t seq = 0;
+	int worldIndex = 0;
+	int modeIndex = 0;
 };
 
 bool SampleOrderLess(const AirmoveSample &a, const AirmoveSample &b)
@@ -124,6 +126,17 @@ constexpr double kMadScale = 1.4826;
 constexpr double kMinFitScale = 1.0;
 constexpr double kGateSigmas = 1.0;
 constexpr double kMinGateSigma = 1.0;
+constexpr int kGateProbes = 9;
+
+double LerpYaw(double a, double b, double t)
+{
+	double d = b - a;
+	while (d > 180.0)
+		d -= 360.0;
+	while (d < -180.0)
+		d += 360.0;
+	return a + d * t;
+}
 
 SampleGate FitGate(const std::vector<GatePoint> &points)
 {
@@ -776,6 +789,8 @@ AirmoveTrajectory PM_MoveSimulator::SimulateAirborne(const Vec3 &launchPos, cons
 AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajectory &result, bool airborne,
 	const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust) const
 {
+	double peakZ = sim.Origin().z;
+
 	while (sim.Time() < m_params.maxSimulationTime)
 	{
 		if (!sim.Step())
@@ -786,6 +801,7 @@ AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajecto
 		if (!sim.OnGround())
 		{
 			airborne = true;
+			peakZ = std::max(peakZ, static_cast<double>(pos.z));
 			if (OnLadder(Vec3(pos.x, pos.y, pos.z)))
 			{
 				result.grabbedLadder = true;
@@ -802,6 +818,9 @@ AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajecto
 			if (area != sourceArea)
 			{
 				if (area < 0)
+					return result;
+
+				if (peakZ - pos.z < m_params.minLandClearance)
 					return result;
 
 				result.landingPos = landing;
@@ -1208,6 +1227,8 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 						record.traj = traj;
 						record.itemId = item.id;
 						record.seq = static_cast<uint32_t>(s) * 2u + static_cast<uint32_t>(variant);
+						record.worldIndex = item.worldIndex;
+						record.modeIndex = item.modeIndex;
 
 						local.bins[BinFor(mode.duckHull, jump)][key].samples.push_back(record);
 						local.sourceAreas.insert(area.id);
@@ -1366,8 +1387,79 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		}
 	}
 
+	auto gateLandsAt = [&](const AirmoveSample &ref, const MergedConnection &conn, double t)
+	{
+		const SweepMode &mode = modes[ref.modeIndex];
+		Vec3 launch = conn.gateALeft + (conn.gateARight - conn.gateALeft) * t;
+		launch.z += mode.launchZ - mode.probeZ - mode.navZAdjust;
+
+		double yaw = LerpYaw(conn.gateAYaw[0], conn.gateAYaw[1], t);
+		double speed = conn.gateASpeed[0] + (conn.gateASpeed[1] - conn.gateASpeed[0]) * t;
+		if (speed <= 0.0)
+			speed = ref.traj.exitSpeed;
+		speed = std::min(speed, static_cast<double>(physics.maxSpeed));
+
+		int landing = -1;
+		AirmoveTrajectory traj = simFor(ref.worldIndex, ref.modeIndex).Simulate(launch,
+			static_cast<float>(yaw), static_cast<float>(speed), ref.traj.jumped, areas, conn.areaA,
+			landing, mode.navZAdjust);
+		return traj.landed && landing == conn.areaB;
+	};
+
+	auto verifyGate = [&](const AirmoveSample &ref, MergedConnection &conn, bool &shrunk)
+	{
+		bool lands[kGateProbes];
+		for (int i = 0; i < kGateProbes; ++i)
+			lands[i] = gateLandsAt(ref, conn, static_cast<double>(i) / (kGateProbes - 1));
+
+		int bestLo = 0, bestLen = 0;
+		for (int i = 0; i < kGateProbes;)
+		{
+			if (!lands[i])
+			{
+				++i;
+				continue;
+			}
+			int j = i;
+			while (j < kGateProbes && lands[j])
+				++j;
+			if (j - i > bestLen)
+			{
+				bestLo = i;
+				bestLen = j - i;
+			}
+			i = j;
+		}
+
+		shrunk = false;
+		if (bestLen == kGateProbes)
+			return true;
+		if (bestLen < 2)
+			return false;
+
+		double tLo = static_cast<double>(bestLo) / (kGateProbes - 1);
+		double tHi = static_cast<double>(bestLo + bestLen - 1) / (kGateProbes - 1);
+		Vec3 span = conn.gateARight - conn.gateALeft;
+		double yaw[2] = {LerpYaw(conn.gateAYaw[0], conn.gateAYaw[1], tLo),
+			LerpYaw(conn.gateAYaw[0], conn.gateAYaw[1], tHi)};
+		double speed[2] = {conn.gateASpeed[0] + (conn.gateASpeed[1] - conn.gateASpeed[0]) * tLo,
+			conn.gateASpeed[0] + (conn.gateASpeed[1] - conn.gateASpeed[0]) * tHi};
+
+		conn.gateARight = conn.gateALeft + span * tHi;
+		conn.gateALeft = conn.gateALeft + span * tLo;
+		for (int k = 0; k < 2; ++k)
+		{
+			conn.gateAYaw[k] = yaw[k];
+			conn.gateASpeed[k] = speed[k];
+		}
+		shrunk = true;
+		return true;
+	};
+
 	std::map<long long, bool> emitted;
 	size_t unfitted = 0;
+	size_t gateDropped = 0;
+	size_t gateShrunk = 0;
 	for (int bin = 0; bin < kBinCount; ++bin)
 	{
 		for (const std::pair<const long long, BinEntry> &entry : out.bins[bin])
@@ -1387,6 +1479,15 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 				++unfitted;
 				continue;
 			}
+
+			bool shrunk = false;
+			if (!verifyGate(entry.second.samples.front(), conn, shrunk))
+			{
+				++gateDropped;
+				continue;
+			}
+			if (shrunk)
+				++gateShrunk;
 
 			emitted.emplace(entry.first, traj.duckHull);
 			conn.connType = crossbot_nav::CONN_AIRMOVE;
@@ -1416,14 +1517,15 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		"(%zu launched), "
 		"%zu pairs [stand drop %zu, stand jump %zu, duck drop %zu, duck jump %zu] -> %zu connections "
 		"(%zu crouch-only, %zu drops seeded a climb back under %.0f units, "
-		"%zu dropped for too few samples to fit a gate)\n",
+		"%zu dropped for too few samples to fit a gate, %zu dropped and %zu shrunk by gate "
+		"re-simulation)\n",
 		physics.gravityMultiplier,
 		out.simulated, params.samplesPerUnit, areas.size(), out.sourceAreas.size(),
 		out.bins[kBinStandDrop].size() + out.bins[kBinStandJump].size() +
 			out.bins[kBinDuckDrop].size() + out.bins[kBinDuckJump].size(),
 		out.bins[kBinStandDrop].size(), out.bins[kBinStandJump].size(),
 		out.bins[kBinDuckDrop].size(), out.bins[kBinDuckJump].size(), emitted.size(), crouchOnly,
-		reverseSeeds, maxJumpHeight, unfitted);
+		reverseSeeds, maxJumpHeight, unfitted, gateDropped, gateShrunk);
 
 	std::printf("  air move sampling on %zu threads: %.1fs launch-edge scan + %.1fs simulation "
 		"(slowest bin %.1fs, fastest %.1fs)\n",

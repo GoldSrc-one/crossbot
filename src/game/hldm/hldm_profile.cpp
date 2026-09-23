@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../../bot/bot.h"
 #include "../../bot/bot_fire.h"
+#include "../../bot/bot_gauss.h"
 #include "../../bot/bot_move.h"
 #include "../../bot/bot_timing.h"
 #include "../../bot/bot_weapons.h"
@@ -22,6 +24,12 @@
 namespace
 {
 	constexpr int kEnvExplosionNoDamage = 1;
+
+	constexpr float kGaussPunchDot = 0.5f;
+	constexpr float kGaussPunchStep = 8.f;
+	constexpr float kGaussRange = 8192.f;
+	constexpr float kGaussMinDamage = 10.f;
+	constexpr float kGaussBlastScale = 1.75f;
 
 	constexpr float kHLDMWeaponRespawn = 20.f;
 	constexpr float kHLDMAmmoRespawn = 20.f;
@@ -403,6 +411,12 @@ const char *CHLDMProfile::AmmoEntity(int weaponId, WeaponAmmo pool) const
 bool CHLDMProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 	float &speed) const
 {
+	return ThrowArc(mode, viewPitch, kHLDMThrowRate, kHLDMThrowSpeedMax, elevation, speed);
+}
+
+bool CHLDMProfile::ThrowArc(const WeaponMode &mode, float viewPitch, float rate, float speedMax,
+	float &elevation, float &speed) const
+{
 	if ((mode.quirks & WPN_Q_THROW_ARC) == 0)
 		return false;
 	if (viewPitch < -kHLDMThrowPitchLimit || viewPitch > kHLDMThrowPitchLimit)
@@ -411,9 +425,9 @@ bool CHLDMProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &e
 	float slope = (viewPitch < 0.f) ? (90.f - kHLDMThrowTilt) : (90.f + kHLDMThrowTilt);
 	float pitch = -kHLDMThrowTilt + viewPitch * slope / 90.f;
 
-	float v = (90.f - pitch) * kHLDMThrowRate;
-	if (v > kHLDMThrowSpeedMax)
-		v = kHLDMThrowSpeedMax;
+	float v = (90.f - pitch) * rate;
+	if (v > speedMax)
+		v = speedMax;
 	if (v <= 0.f)
 		return false;
 
@@ -452,3 +466,41 @@ bool CHLDMProfile::IsFunTerminal(edict_t *ent) const
 	return false;
 }
 
+
+bool CHLDMProfile::Penetrates(const CBot &bot, int id, const Vector &eye, const Vector &dir,
+	float entry) const
+{
+	if (id != kHLDMGauss || bot.fire.mode != BotFire::MODE_SECONDARY)
+		return false;
+
+	Vector target = eye + dir * entry;
+	float damage = BotGauss::ChargeDamage(bot);
+
+	TraceResult tr;
+	TRACE_LINE(eye, target, ignore_monsters, bot.pEdict, &tr);
+	if (tr.fAllSolid || tr.flFraction >= 1.f)
+		return false;
+	if (-DotProduct(tr.vecPlaneNormal, dir) < kGaussPunchDot)
+		return false;
+
+	Vector hit = tr.vecEndPos;
+	TRACE_LINE(hit + dir * kGaussPunchStep, eye + dir * kGaussRange, ignore_monsters, bot.pEdict, &tr);
+	if (tr.fAllSolid)
+		return false;
+	TRACE_LINE(tr.vecEndPos, hit, ignore_monsters, bot.pEdict, &tr);
+
+	Vector exit = tr.vecEndPos;
+	float thickness = std::max((exit - hit).Length(), 1.f);
+	if (thickness >= damage)
+		return false;
+
+	float left = damage - thickness;
+	if (left <= kGaussMinDamage)
+		return false;
+
+	if ((target - (exit + dir * kGaussPunchStep)).Length() < left * kGaussBlastScale)
+		return true;
+
+	TRACE_LINE(exit + dir, target, ignore_monsters, bot.pEdict, &tr);
+	return tr.flFraction >= 1.f;
+}

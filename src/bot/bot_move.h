@@ -44,6 +44,8 @@ void Bot_ForgetMoveMaxSpeed(edict_t *pEdict);
 
 bool Bot_MoveMaxSpeedKnown(edict_t *pEdict);
 
+bool Bot_Frozen(const edict_t *pEdict);
+
 float Bot_MaxSpeed(edict_t *pEdict);
 
 PmSim::PmPhysics Bot_Physics(edict_t *pEdict);

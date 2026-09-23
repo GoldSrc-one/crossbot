@@ -12,6 +12,10 @@ namespace BotGauss
 
 bool Enabled();
 
+float ChargeDamage(const CBot &bot);
+
+bool Scared(const CBot &bot);
+
 void Update(CBot &bot, const Nav::NavMesh &mesh);
 
 bool Facing(const CBot &bot, float &yawOut, float &pitchOut);

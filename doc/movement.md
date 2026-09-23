@@ -200,6 +200,11 @@ landing that arms it would otherwise spend a frame driving on a plan the bot has
   The count is displacement, not `progressS`. Every repath rebases arclength to zero, and a bot pinned
   against a wall slides 18 units sideways along it, which reads as progress. A first version reset the
   count on progress and escalated once in a dozen stalls.
+- A frozen bot is never stalled. `Bot_Frozen` is `0 < pev->maxspeed < 10`, which is how the engine
+  pins a player the mod has deliberately stopped: CS freeze time, and the 3 s arming and 5-10 s
+  defusing, all set maxspeed 1. While frozen `Bot_MoveNav` stamps `lastProgressTime` every frame, and
+  the strategic hold limit (`kHoldLimit`) is not checked, so a CT defusing a bomb it arrived at 25 s
+  into the hold is not moved on. Buttons still go through `RunPlayerMove`; only the bookkeeping pauses.
 - `Bot_MaxSpeed` returns the cap the *engine* will actually enforce on this bot, which is not any cvar.
   `PM_CheckParamters` computes it as `min(clientmaxspeed, maxspeed)` and writes it back to
   `pmove->maxspeed`, so `PM_Move_Post` reads the finished value out of the `playermove_t` and

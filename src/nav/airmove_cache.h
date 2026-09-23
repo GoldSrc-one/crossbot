@@ -10,7 +10,7 @@
 namespace NavPlan
 {
 
-constexpr size_t kAirmoveCacheSlots = 4096;
+constexpr size_t kAirmoveCacheSlots = 65536;
 constexpr size_t kAirmoveCacheMask = kAirmoveCacheSlots - 1;
 constexpr size_t kAirmoveCacheProbe = 8;
 

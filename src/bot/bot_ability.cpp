@@ -23,6 +23,7 @@ const char *TaskName(Task task)
 	case TASK_DISARM:  return "disarm";
 	case TASK_DETPACK: return "detpack";
 	case TASK_DISCARD: return "discard";
+	case TASK_PLANT:   return "plant";
 	default:           return "none";
 	}
 }
@@ -48,6 +49,7 @@ void Reset(CBot &bot)
 	fresh.detpacks = st.detpacks;
 	fresh.calls = st.calls;
 	fresh.discards = st.discards;
+	fresh.plants = st.plants;
 	for (int i = 0; i < kTouchSlots; ++i)
 		fresh.touchNext[i] = st.touchNext[i];
 	st = fresh;
@@ -60,11 +62,11 @@ void PrintStatus(const CBot &bot)
 	snprintf(line, sizeof(line),
 		"CrossBot: %s ability task=%s why=%s class=%d heals=%u repairs=%u builds=%u buildfails=%u "
 		"disguises=%u feigns=%u stabs=%u pipes=%u dets=%u pads=%u padfails=%u touches=%u uncovers=%u "
-		"disarms=%u detpacks=%u calls=%u discards=%u\n",
+		"disarms=%u detpacks=%u calls=%u discards=%u plants=%u\n",
 		bot.name, TaskName(st.task), st.why, bot.pEdict ? bot.pEdict->v.playerclass : 0, st.heals,
 		st.repairs, st.builds, st.buildFails, st.disguises, st.feigns, st.stabs, st.pipeBursts,
 		st.detonations, st.pads, st.padFails, st.touches, st.uncovers, st.disarms, st.detpacks, st.calls,
-		st.discards);
+		st.discards, st.plants);
 	SERVER_PRINT(line);
 }
 

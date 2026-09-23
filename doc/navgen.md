@@ -503,6 +503,31 @@ If you are comparing two navgen builds, compare reachable-area counts, not air-m
 - Gate endpoints = mean ± 1σ (min 1.0), clamped to sample range
 - Returns invalid if cloud too thin/tight
 
+### Gate re-simulation
+A fitted gate is a regression, not a sample: its endpoints and the yaw/speed interpolated along it were
+never flown. The runtime planner launches from wherever the funnel crosses the gate, with exactly that
+interpolated yaw and speed (clamped to `maxSpeed`), and re-simulates it. So on a move with no margin the
+kept sample lands and the gate does not.
+
+After `BuildSampledGates`, each air move is flown at `kGateProbes` (9) evenly spaced points along its
+exit gate, launched the way the runtime does it and placed with the sampler's own z convention
+(`launchZ - probeZ - navZAdjust`), using the world and mode of the pair's samples. The gate shrinks to the
+longest contiguous run of points that land in the destination area, with yaw and speed re-interpolated
+at the new ends. Fewer than two landing points drops the connection. A gate that passes at every point is
+left exactly as fitted, so a map with no marginal moves bakes byte-identical. The summary line reports
+`dropped and shrunk by gate re-simulation`.
+
+Found on `dm_centralcore_v2_one`: a battery on a 64-unit ledge whose only ways up were crouch-jumps.
+navgen's kept sample scraped over; the runtime launched from the gate end 3 units nearer, met the ledge
+face 0.14 units low, and every bot that picked the battery ran a whole-mesh search (~1500 air-move sims,
+400-850ms) that failed.
+
+### Landing clearance
+`Fly` rejects a landing whose flight never rose `minLandClearance` (2 units) above the landing origin.
+The model launches 1 unit above the floor (`lift`), so a crouch-jump that clears a 64-unit ledge by
+exactly its apex is a unit higher than a real player gets, and in float at runtime it is a coin toss.
+Drops and jumps across gaps clear by tens of units and are untouched.
+
 ### Gravity
 `trigger_gravity` copies its own `pev->gravity` onto whoever touches it, and that sticks until the player
 respawns. So a bot is only ever running at one of a small, statically known set of multipliers:

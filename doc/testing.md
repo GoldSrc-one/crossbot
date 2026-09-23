@@ -368,7 +368,9 @@ again and tails the strategic decisions out of `nav_debug/logs/<map>_objectives.
     pwsh -File scripts/test_objectives.ps1 -Map dod_escape -Game dod -Bots 6 -Seconds 120
 
 `-StrategicDebug` sets `crossbot_strategic_debug 1`. `-Plugin` sets `crossbot_objectives 0`, which is
-the same run on the AMXX plugin's goals, the A/B control.
+the same run on the AMXX plugin's goals, the A/B control. `-BotGame` picks the bots' game: on a
+`cstrike`/`czero` map it defaults to that game, native CS bots alternating `t`/`ct`; elsewhere to
+`valve`. `-BotGame valve` is the old valve-bots-on-a-CS-map run.
 
 **Read the first listing before the behaviour.** It runs before any bot joins, so it is a pure map
 assertion:
@@ -392,7 +394,10 @@ Healthy runs, measured:
 - dod_escape: carriers appear by t+50, allies carrying `allies_obj` list `deliver rank 3` for both
   capture areas, and the axis carrier lists `deliver rank 3` for the breakable.
 - de_dust2: holders cycle, `is holding the defend goal` followed about 30 s later by `has held the
-  defend goal ... moving on` and a different site.
+  defend goal ... moving on` and a different site. With native CS bots a T carrier logs `is planting
+  the bomb` / `planted the bomb` next to the mod's `Planted_The_Bomb`, and rounds end in
+  `Target_Bombed` or `Bomb_Defused`. Nobody spawning and `Terrorists_Win` every two seconds means the
+  join stalled; see `doc/games.md`, `cs_profile.cpp`.
 
 Two signatures worth recognising:
 

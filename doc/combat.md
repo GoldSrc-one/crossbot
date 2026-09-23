@@ -161,6 +161,8 @@ enough. Getting it wrong costs one badly chosen opening weapon, not a broken sta
 `pfnAngleVectors`, not `MAKE_VECTORS`, for the reason `bot_sense.cpp` gives at its own gaze term: the
 macro writes `gpGlobals->v_forward`, which a caller above may still be holding. A nonzero `v.fov`
 means the player is **zoomed**, so it is a narrower cone than the 90 degree default, not a wider one.
+Counter-Strike is the exception: its unzoomed `v.fov` is 90, so `BotFire`'s zoom test is
+`fov != 0 && fov < 90`, and every cone that falls back to 90 for a zero fov is already right for it.
 
 **The flag latches on.** It is evaluated at entry and re-tested every frame it is still false, and
 once true it stays true -- nobody unsees someone. Four sites set it, and the third is the one that is
@@ -315,7 +317,9 @@ Two entry points, and the split between them is the design:
   side effects — it can issue a weapon-select command — so it needs a single known slot in the frame.
 - `BotFire::Buttons` is the **trigger**. It is pure, it runs inside `Bot_RunPlayerMove`, and it
   answers one question: given the angles about to be sent to the engine this instant, does the shot
-  hit?
+  hit? Before it asks, `IGameProfile::FireToggle(bot, firing)` may claim the frame for an
+  `IN_ATTACK2` of the game's own, gated on the player and the weapon both being able to act — the CS
+  shield, raised while idle and lowered to shoot (see `doc/games.md`, `cs_profile.cpp`).
 
 ### Running dry has to release the trigger
 
@@ -352,6 +356,61 @@ behaviour by accident and should not be "fixed" without replacing it with someth
 `IN_ATTACK2` short-circuits `IN_ATTACK` in the dispatcher — the secondary test is an `if` and the
 primary is its `else if` — so `Buttons` returns one bit or the other and never both.
 
+### The CS spread gate
+
+Recoil is covered by the punchangle ray above. CS also has spread that grows with every shot, and
+`SpreadHold` covers that. When `RayOnTarget` returns `RAY_HIT`, the bot asks
+`GameProfile::SpreadWide` whether the next shot's cone fits: `limit = spreadFit * half / dist`, where
+`half` is half the target's smaller horizontal size. If the cone is too wide, the bot holds fire until
+`ready + U(spreadEarly, spreadLate)`. The hold also turns off sticky fire, because the cone only
+recovers while the button is up. Only the CS profile implements the hook; every other game returns
+false.
+
+What the gate relies on, from ReGameDLL (`wpn_shared/*.cpp`, `weapons.cpp`, `cbase.cpp`):
+
+- Each axis is offset by `t * spread`, with `t` the sum of two uniform draws on [-0.5, 0.5], so shots
+  follow a triangle and bunch in the middle. At a cone K times the target, the chance of landing inside
+  on one axis is `1 - (1 - 1/K)^2`: 100 % at K=1, 89 % at 1.5, 75 % at 2.
+- A shot fires with the `m_flAccuracy` the previous shot left, and the new value is only stored
+  afterwards.
+- **Rifles and SMGs** (`spread = a + b * acc`): `acc` is set from `m_iShotsFired` at each shot. With the
+  button up, `ItemPostFrame` caps the count at 15, waits 0.4 s, then takes one shot off every 22.5 ms.
+  At zero, `REGAMEDLL_FIXES` puts `acc` back to base. So the cone snaps back all at once:
+  `ready = now + 0.4 + 0.0225 * min(shots, 15)`. Waiting part of that time gains nothing.
+- **Pistols** (`spread = a + b * (1 - acc)`): each shot changes `acc` by `-(T - gap) * r`, clamped to
+  [floor, base]. Any gap shorter than T drains `acc` toward the floor, and a gap of T or more keeps it
+  at base, so no speed in between holds steady. The gate never holds while the floor cone fits (fire
+  as fast as possible). Otherwise it holds each shot until `m_flLastFire + T`, and T is 0.275-0.4 s
+  depending on the pistol.
+- There is nowhere to shrink when even the resting cone is too wide: rifles running faster than their
+  move threshold, or anything in the air. The gate then stays open and the bot sprays.
+
+The coefficients live in `kSpreads` (`cs_weapons.cpp`) and come from each weapon's `PrimaryAttack`
+branches. The standing, moving and ducking branches are chosen in the same order the weapon uses. USP
+and M4A1 use their unsilenced numbers and the Glock uses semi-auto, because the bot never toggles
+them. Scoped rifles, shotguns and the knife have no entry, so they have no gate.
+
+Once a hold ends, the bot fires no matter what the cone is. The gate can close again only after the
+clip has dropped (`spreadClip`). That way a bot that stopped waiting early (easy does 37.5 % of the
+time, normal 25 %) fires one sloppy shot and does not get locked back into waiting. A `spreadUntil` more than `kSpreadMaxWait` in the future counts as left over
+from an earlier map's clock and is ignored.
+
+Shots per burst at 1024 u against a 32 u wide target, standing:
+
+| weapon | expert K=1 | hard K=1.25 | normal K=1.5 | easy K=2 |
+|---|---|---|---|---|
+| AK-47 | 4 | 5 | 5 | 6 |
+| M4A1 | 5 | 5 | 6 | whole mag |
+| Galil | 3 | 4 | 4 | 5 |
+| FAMAS / AUG / SG552 | 5 | 6 | whole mag | whole mag |
+| M249 | 3 | 4 | 5 | whole mag |
+| MP5 | 1 | 3 | 6 | whole mag |
+| P90 | 1 | 1 | 4 | 7 |
+
+How the reference bots do it: ZBot (`cs_bot_weapon.cpp`) uses fixed random pauses (sprays under 400 u,
+waits 0.15-0.5 s beyond, 0.3-0.7 s past 800 u). YaPB (`needToPauseFiring`) pauses 0.38-0.55 s when the
+recoil, measured at the target's distance, goes past a few units. Neither reads `m_flAccuracy`.
+
 ### The box is centred on the served aim point, not on the enemy
 
 `Buttons` builds a box the size of the target's own `maxs - mins` around **the point `Think` published
@@ -384,6 +443,40 @@ stops the ray before the box entry. Without it a bot happily fires through a wal
 still hear.
 
 None of this applies to an arcing mode, which has no straight ray to test. That path is below.
+
+### Wall-banging
+
+Under `crossbot_wallbang` (expert), the blocked verdict above has one appeal:
+`IGameProfile::Penetrates(bot, id, eye, dir, entry)`. If it says the round still does damage at the
+box entry, the ray counts as a hit, `why=wallbang`, and a shot that actually leaves the weapon counts
+in `wallbangs=`. The base answers no, so every game without an override is unchanged.
+
+**The target is the prediction, never the enemy.** Nothing new picks what to shoot at: after line of
+sight breaks, `BotAim::ReadPredicted` keeps serving the dead-reckoned point for up to 1s on an
+engagement that rolled `predictLatched`, and that point is what the ray is tested against. YaPB
+(`combat.cpp`, `isPenetrableObstacle`) tests and aims at the enemy's live `v.origin`, which is x-ray;
+here an enemy who stops or doubles back behind the wall is missed, the way a player would miss him.
+Shooting at a heard enemy never seen is not done.
+
+**Both overrides replay the game's own loop with the same engine traces instead of modelling a
+thickness.** Every heuristic that was tried elsewhere (YaPB has three, all walking `PointContents`)
+says yes to concrete CS stops and no to three thin boards it does not.
+
+- **CS** (`CCSProfile::Penetrates`) replays ReGameDLL `FireBullets3`: per hit, the texture's material
+  scales the penetration power -- cumulatively, so a second concrete wall is far harder than the
+  first -- and sets the damage modifier; the next segment starts `power` units past the hit, is half as
+  long, and costs one penetration; damage falls off by `rangeMod^(d/500)` on each segment's own length.
+  A trace that starts inside a thick wall just hits again at once and burns another penetration, which
+  is why a replay is exact and a formula is not. Material comes from `TRACE_TEXTURE` and
+  `sound/materials.txt`, loaded the way CrossPlay serves it to the game (`crossplay/` first, then the
+  game dir), 16 characters, unknown textures concrete. `CS_Bullet` carries count, power, distance,
+  damage, falloff and range; only the rifles, snipers, M249 and deagle have a count of 2 or more, the
+  rest stop at the first wall and are not listed. The shot needs `kWallbangMinDamage` (10) left: a rifle through one concrete wall keeps half, AK 36 -> 18, and a floor of 20 refused every rifle wallbang on fy_snow.
+- **HLDM gauss** (`CHLDMProfile::Penetrates`, secondary only) replays `CGauss::Fire`: the first wall
+  must be hit at `n >= 0.5` or the beam reflects instead; the exit is found the SDK's way, a forward
+  trace from 8 units in and a trace back; the wall must be thinner than the charge damage and leave more
+  than 10. The shot counts if the exit blast (`left * 1.75`, multiplayer) reaches the box entry or the
+  beam continues to it unobstructed. Damage is `BotGauss::ChargeDamage`, the same number the jump uses.
 
 ### Supported is the incremental frontier
 

@@ -1061,6 +1061,67 @@ void PrintVantageStatus(const Vector *at)
 		SERVER_PRINT("CrossBot: no bots; pass \"x y z\" to sample a point\n");
 }
 
+void PrintWallbangProbe()
+{
+	int blocked = 0;
+	int through = 0;
+	for (auto &bot : g_bots)
+	{
+		if (!bot.inUse)
+			continue;
+
+		ScopedGame ctx(bot.gameDll);
+		if (!g_pGameProfile || g_pGameProfile->IsDead(bot.pEdict))
+			continue;
+
+		const BotInventory &inv = bot.inventory;
+		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
+			continue;
+		int id = inv.weapons[inv.activeIndex].id;
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(id);
+
+		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+		for (auto &other : g_bots)
+		{
+			if (!other.inUse || &other == &bot || other.gameDll != bot.gameDll ||
+				g_pGameProfile->IsDead(other.pEdict))
+				continue;
+
+			Vector los = other.pEdict->v.origin - eye;
+			float dist = los.Length();
+			if (dist < 1.f)
+				continue;
+			Vector dir = los * (1.f / dist);
+			float entry = dist - other.pEdict->v.maxs.x;
+
+			TraceResult tr;
+			TRACE_LINE(eye, eye + dir * entry, ignore_monsters, bot.pEdict, &tr);
+			if (tr.flFraction >= 1.f)
+				continue;
+
+			++blocked;
+			bool ok = g_pGameProfile->Penetrates(bot, id, eye, dir, entry);
+			if (ok)
+				++through;
+
+			edict_t *hit = tr.pHit ? tr.pHit : INDEXENT(0);
+			Vector end = eye + dir * entry;
+			const char *tex = TRACE_TEXTURE(hit, eye, end);
+
+			char line[256];
+			snprintf(line, sizeof(line), "CrossBot: %s -> %s %s dist=%.0f wall@%.0f tex=%s %s\n",
+				bot.name, other.name, spec && spec->classname ? spec->classname : "?", dist,
+				tr.flFraction * entry, tex ? tex : "-", ok ? "THROUGH" : "stopped");
+			SERVER_PRINT(line);
+		}
+	}
+
+	char summary[96];
+	snprintf(summary, sizeof(summary), "CrossBot: wallbang probe %d blocked, %d through\n", blocked,
+		through);
+	SERVER_PRINT(summary);
+}
+
 void PrintFireStatus()
 {
 	int shown = 0;
@@ -1114,18 +1175,18 @@ void PrintFireStatus()
 		snprintf(line, sizeof(line),
 			"CrossBot: %s held=%s zoom=%d mode=%s why=%s %s %s commit=%s for=%.2f shots=%d "
 			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d "
-			"stickyshots=%d uphill=%d selfveto=%d aimveto=%d targetaims=%d "
+			"stickyshots=%d uphill=%d selfveto=%d aimveto=%d spreadwaits=%d targetaims=%d "
 			"switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
 			"idlereload=%d ambush=%d duel=%d spinups=%d lasers=%d braces=%d bracing=%d "
-			"target=%s\n",
+			"gaussjumps=%d wallbangs=%d target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
 			fire.leadShots, fire.chargeShots, fire.arcShots, fire.throwShots, fire.guides,
 			fire.commitCaps, fire.stickyShots,
-			fire.uphillVetoes, fire.selfVetoes, fire.aimVetoes, fire.targetAims,
+			fire.uphillVetoes, fire.selfVetoes, fire.aimVetoes, fire.spreadWaits, fire.targetAims,
 			fire.switches, fire.reloads,
 			fire.emptySwitches, fire.idleSwitches, fire.idleReloads, fire.ambushes, fire.duels,
-			fire.spinups, fire.lasers, fire.braces, fire.bracing,
+			fire.spinups, fire.lasers, fire.braces, fire.bracing, fire.gaussJumps, fire.wallbangs,
 			target ? CBotTargetNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}

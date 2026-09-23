@@ -11,10 +11,10 @@ namespace BotDiff
 namespace
 {
 	const Row kTable[DIFF_COUNT] = {
-		{ "easy",   0.40f, 2.00f, 0.85f, 0.50f, 0.000f,  0,  0, true,  true,  true,  false, false, false, false, false, false },
-		{ "normal", 0.30f, 1.00f, 1.00f, 0.25f, 0.000f,  0,  0, true,  true,  true,  false, false, false, false, false, false },
-		{ "hard",   0.25f, 0.60f, 1.10f, 0.25f, 1.500f, 60, 70, true,  true,  true,  false, false, false, true,  true,  false },
-		{ "expert", 0.20f, 0.35f, 1.20f, 0.25f, 1.125f, 90, 90, false, false, false, true,  true,  true,  true,  true,  true  },
+		{ "easy",   0.40f, 2.00f, 0.85f, 0.50f, 0.000f,  0,  0, true,  true,  true,  false, false, false, false, false, false, false, 2.00f, -0.15f, 0.25f },
+		{ "normal", 0.30f, 1.00f, 1.00f, 0.25f, 0.000f,  0,  0, true,  true,  true,  false, false, false, false, false, false, false, 1.50f, -0.05f, 0.15f },
+		{ "hard",   0.25f, 0.60f, 1.10f, 0.25f, 1.500f, 60, 70, true,  true,  true,  false, false, false, true,  true,  false, false, 1.25f,  0.00f, 0.10f },
+		{ "expert", 0.20f, 0.35f, 1.20f, 0.25f, 1.125f, 90, 90, false, false, false, true,  true,  true,  true,  true,  true,  true,  1.00f,  0.00f, 0.05f },
 	};
 
 	bool Boolean(const char *name, bool tiered)
@@ -162,6 +162,23 @@ bool BraceMoving()
 	return Boolean("crossbot_brace_moving", Table(Current()).braceMoving);
 }
 
+bool Wallbang()
+{
+	return Boolean("crossbot_wallbang", Table(Current()).wallbang);
+}
+
+float SpreadFit()
+{
+	return Scalar("crossbot_spread_fit", Table(Current()).spreadFit);
+}
+
+void SpreadWait(float &loOut, float &hiOut)
+{
+	const Row &row = Table(Current());
+	loOut = row.spreadEarly;
+	hiOut = row.spreadLate;
+}
+
 void PrintStatus()
 {
 	Tier tier = Current();
@@ -204,15 +221,22 @@ void PrintStatus()
 		Pin("crossbot_predict_pct") >= 0.f ? "pinned" : "tier");
 	SERVER_PRINT(msg);
 
+	SpreadWait(lo, hi);
+	snprintf(msg, sizeof(msg), "  %-18s %-12.2f %s\n", "spread_fit", SpreadFit(),
+		Pin("crossbot_spread_fit") >= 0.f ? "pinned" : "tier");
+	SERVER_PRINT(msg);
+	snprintf(msg, sizeof(msg), "  %-18s %+.3f..%+.3f  tier\n", "spread_wait", lo, hi);
+	SERVER_PRINT(msg);
+
 	static const char *kFlagNames[] = {
 		"combat_interrupt", "camp", "ambush_override", "pickup_priority", "gauss", "bunnyhop",
-		"grenade_cook", "backstab", "brace_moving" };
+		"grenade_cook", "backstab", "brace_moving", "wallbang" };
 	static const char *kFlagCvars[] = {
 		"crossbot_combat_interrupt", "crossbot_camp", "crossbot_ambush",
 		"crossbot_pickup_priority", "crossbot_gauss", "crossbot_bunnyhop",
-		"crossbot_grenade_cook", "crossbot_backstab", "crossbot_brace_moving" };
+		"crossbot_grenade_cook", "crossbot_backstab", "crossbot_brace_moving", "crossbot_wallbang" };
 	const bool flags[] = { CombatInterrupt(), Camp(), AmbushOverride(),
-		PickupPriority(), GaussPolicy(), BunnyHop(), GrenadeCook(), Backstab(), BraceMoving() };
+		PickupPriority(), GaussPolicy(), BunnyHop(), GrenadeCook(), Backstab(), BraceMoving(), Wallbang() };
 
 	for (int i = 0; i < static_cast<int>(ARRAYSIZE(flags)); ++i)
 	{

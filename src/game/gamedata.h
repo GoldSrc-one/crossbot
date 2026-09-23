@@ -41,6 +41,10 @@ struct GameOffsets
 	int ent_increaseTeam;
 
 	int box_flTouchableAt;
+	int box_rgpPlayerItems;
+	int box_bIsBomb;
+
+	int arm_iItem;
 
 	int item_pPlayer;
 	int item_pNext;
@@ -53,6 +57,9 @@ struct GameOffsets
 	int wpn_flNextPrimaryAttack;
 	int wpn_flNextSecondaryAttack;
 	int wpn_flTimeWeaponIdle;
+	int wpn_flAccuracy;
+	int wpn_flLastFire;
+	int wpn_iShotsFired;
 
 	int rpg_cActiveRockets;
 	int eagle_iLaserActive;
@@ -71,6 +78,13 @@ struct GameOffsets
 	int plr_iAmmoNails;
 	int plr_iAmmoRockets;
 	int plr_iAmmoCells;
+	int plr_iTeam;
+	int plr_iJoiningState;
+	int plr_iMenu;
+	int plr_signals;
+	int plr_bIsVIP;
+	int plr_bShieldDrawn;
+	int plr_bOwnsShield;
 
 	int tog_toggleState;
 	int tog_flWait;

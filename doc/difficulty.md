@@ -41,6 +41,9 @@ keep reading `->value` fresh; do not cache values.
 | `grenadeCook` | -- | -- | **yes** | **yes** |
 | `backstab` | -- | -- | **yes** | **yes** |
 | `braceMoving` | -- | -- | -- | **yes** |
+| `wallbang` | -- | -- | -- | **yes** |
+| `spreadFit` (CS) | 2.00 | 1.50 | 1.25 | 1.00 |
+| `spreadEarly..Late` (CS) | -.15..+.25 | -.05..+.15 | 0..+.10 | 0..+.05 |
 
 Easy and normal differ only in the two handicap numbers. Everything easy would otherwise "lose" is
 behaviour normal already has, so there is nothing to take away.
@@ -91,6 +94,7 @@ server, so it exists from the first commit rather than being added later.
 | `grenadeCook` | `BotGrenade`: holding an off-hand grenade for its fuse instead of throwing at once |
 | `backstab` | `TFCAbility` `StartStab`: a TFC spy going for the knife rather than its gun |
 | `braceMoving` | `BotFire::Brace`: in OP4, bracing by clearing the move keys on the firing frame only |
+| `wallbang` | `RayOnTarget`: a blocked ray may fire if `IGameProfile::Penetrates` says the round gets through |
 
 ### The delay is rolled per engagement, not per frame
 
@@ -270,6 +274,20 @@ chosen direction is published through `BotSense::ApplyLook` as `LOOK_GAUSS` rath
 directly, so it arrives through the normal aim ladder and the hand model still has to get there. If
 nothing pays within `kProbeWindow`, it blasts it anywhere.
 
+#### The charge is for enemies first; the jump gets what is left
+
+`IdleCharge` only starts while `BotGauss::Scared` holds: a live player or monster suspicion. A bot that
+senses nobody carries the gauss uncharged. While the suspicion stays live, `BotGauss::Update` does not
+probe -- the charge is being kept for a shot, and holding a full charge costs nothing. Three ways out:
+
+- The enemy shows up: the ordinary on-target release.
+- The enemy was seen and broke line of sight: the prediction keeps serving an aim point, and the
+  release happens through the wall if `Penetrates` proves the punch (`doc/combat.md`, "Wall-banging").
+  A wall that does not punch leaves the charge held.
+- The suspicion decays, or the hold reaches `chargeMax - kProbeWindow - kOverchargeSlack` (7s of the
+  gauss's 10): the probes run and the charge becomes a jump, well before `charge-timeout` would spend it
+  blind.
+
 #### The probe is a forecast; the shot is re-proved
 
 Committing to a direction and firing when the view arrives is not the same event. The bot keeps
@@ -440,6 +458,10 @@ maxspeed, and the ratio only decides how much of the ramp-up it is willing to ho
 - `crossbot_backstab` — a TFC spy hunts backs with the knife. Default -1 (tier)
 - `crossbot_brace_moving` — in OP4, brace by clearing the move keys only on the firing frame, so the
   bot keeps moving. Default -1 (tier)
+- `crossbot_wallbang` — fire through a wall when the round provably gets through (CS bullets, the
+  charged gauss). Default -1 (tier). See `doc/combat.md`, "Wall-banging"
+- `crossbot_spread_fit` — in CS, the largest spread cone allowed, as a multiple of the target's half
+  width; 0 turns the spread gate off. Default -1 (tier). See `doc/combat.md`, "The CS spread gate"
 
 `crossbot_aim_delay`, `crossbot_aim_error`, `crossbot_camp`, `crossbot_oppo_jump` and
 `crossbot_ambush` now default to -1 and follow the tier; any value `>= 0` still pins them exactly as

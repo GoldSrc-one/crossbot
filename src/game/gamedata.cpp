@@ -69,6 +69,9 @@ const Request kRequests[] = {
 	{ "CBaseEntity",       "increase_team",           CB_OFF(ent_increaseTeam), true },
 
 	{ "CWeaponBox",        "m_flTouchableAt",         CB_OFF(box_flTouchableAt), true },
+	{ "CWeaponBox",        "m_rgpPlayerItems",        CB_OFF(box_rgpPlayerItems), true },
+	{ "CWeaponBox",        "m_bIsBomb",               CB_OFF(box_bIsBomb), true },
+	{ "CArmoury",          "m_iItem",                 CB_OFF(arm_iItem), true },
 
 	{ "CBasePlayerItem",   "m_pPlayer",               CB_OFF(item_pPlayer) },
 	{ "CBasePlayerItem",   "m_pNext",                 CB_OFF(item_pNext) },
@@ -81,6 +84,9 @@ const Request kRequests[] = {
 	{ "CBasePlayerWeapon", "m_flNextPrimaryAttack",   CB_OFF(wpn_flNextPrimaryAttack) },
 	{ "CBasePlayerWeapon", "m_flNextSecondaryAttack", CB_OFF(wpn_flNextSecondaryAttack) },
 	{ "CBasePlayerWeapon", "m_flTimeWeaponIdle",      CB_OFF(wpn_flTimeWeaponIdle) },
+	{ "CBasePlayerWeapon", "m_flAccuracy",            CB_OFF(wpn_flAccuracy), true },
+	{ "CBasePlayerWeapon", "m_flLastFire",            CB_OFF(wpn_flLastFire), true },
+	{ "CBasePlayerWeapon", "m_iShotsFired",           CB_OFF(wpn_iShotsFired), true },
 
 	{ "CRpg",              "m_cActiveRockets",        CB_OFF(rpg_cActiveRockets), true },
 	{ "CEagle",            "m_iLaserActive",          CB_OFF(eagle_iLaserActive), true },
@@ -99,6 +105,13 @@ const Request kRequests[] = {
 	{ "CBasePlayer",       "m_iAmmoNails",            CB_OFF(plr_iAmmoNails), true },
 	{ "CBasePlayer",       "m_iAmmoRockets",          CB_OFF(plr_iAmmoRockets), true },
 	{ "CBasePlayer",       "m_iAmmoCells",            CB_OFF(plr_iAmmoCells), true },
+	{ "CBasePlayer",       "m_iTeam",                 CB_OFF(plr_iTeam), true },
+	{ "CBasePlayer",       "m_iJoiningState",         CB_OFF(plr_iJoiningState), true },
+	{ "CBasePlayer",       "m_iMenu",                 CB_OFF(plr_iMenu), true },
+	{ "CBasePlayer",       "m_signals",               CB_OFF(plr_signals), true },
+	{ "CBasePlayer",       "m_bIsVIP",                CB_OFF(plr_bIsVIP), true },
+	{ "CBasePlayer",       "m_bShieldDrawn",          CB_OFF(plr_bShieldDrawn), true },
+	{ "CBasePlayer",       "m_bOwnsShield",           CB_OFF(plr_bOwnsShield), true },
 
 	{ "CBaseToggle",       "m_toggle_state",          CB_OFF(tog_toggleState) },
 	{ "CBaseToggle",       "m_flWait",                CB_OFF(tog_flWait) },

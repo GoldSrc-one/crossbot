@@ -15,6 +15,7 @@
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
+#include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_sense.h"
 #include "bot_strategic.h"
@@ -664,7 +665,7 @@ bool RunArrival(CBot &bot)
 		return false;
 	}
 
-	if (HoldLimited(kind) && gpGlobals->time - st.startTime > kHoldLimit)
+	if (HoldLimited(kind) && !Bot_Frozen(pEdict) && gpGlobals->time - st.startTime > kHoldLimit)
 	{
 		BOT_VLOG("CrossBot: %s has held the %s goal %s for %.0fs, moving on\n", bot.name, KindName(kind),
 			CBotTargetNameOf(ent), kHoldLimit);

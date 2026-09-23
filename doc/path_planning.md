@@ -781,10 +781,10 @@ near a mover; both buy freshness by giving back hit rate.
 
 ### Structure and eviction
 
-Fixed 4096-slot table, `kAirmoveCacheSlots` in `airmove_cache.h`. It is a **compile-time constant, not a
-cvar** — the table is a plain member array, so there is no allocation, no resize path, and the whole thing
-is about 210 KB and stays in L2. A larger table wins a few points of hit rate but pays for it in locality
-on every probe.
+Fixed 65536-slot table, `kAirmoveCacheSlots` in `airmove_cache.h`. It is a **compile-time constant, not a
+cvar** — the table is a plain member array, so there is no allocation and no resize path. It is about 3.3 MB,
+so it no longer fits in L2; it was 4096 slots (210 KB) until dm_centralcore_v2_one showed 37k of 41k
+inserts evicted with 10 bots, a failed whole-mesh search inserting 1-2k one-off sims per attempt.
 
 Lookup is a hash, never a scan: FNV-1a-style mix over the five float bit patterns, the physics hash and the
 jump/crouch byte, masked to the table. Open addressing with a linear probe of up to `kAirmoveCacheProbe`

@@ -345,6 +345,11 @@ namespace
 		BotManager::PrintFireStatus();
 	}
 
+	void Cmd_CrossBotWallbangProbe()
+	{
+		BotManager::PrintWallbangProbe();
+	}
+
 	void Cmd_CrossBotWeaponCarry()
 	{
 		BotManager::PrintWeaponCarry();
@@ -1022,6 +1027,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_ability_status", Cmd_CrossBotAbilityStatus);
 	ADD_SERVER_COMMAND("crossbot_daze_test", Cmd_CrossBotDazeTest);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
+	ADD_SERVER_COMMAND("crossbot_wallbang_probe", Cmd_CrossBotWallbangProbe);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
 	ADD_SERVER_COMMAND("crossbot_weapon_carry", Cmd_CrossBotWeaponCarry);
 }

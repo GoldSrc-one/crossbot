@@ -7,8 +7,8 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   always the game directory; `*` or nothing picks a random playable one, and an unknown name lists
   what is loaded. A game is playable only with both gamedata and a game profile — see
   `doc/games.md`. The third argument belongs to that game's profile rather than to this command:
-  in deathmatch it is a player model, and for `tfc` it is a class (`scout` .. `engineer`,
-  `civilian`, `randompc`). `*` or nothing means the profile chooses — a random installed model in
+  in deathmatch it is a player model, for `tfc` it is a class (`scout` .. `engineer`,
+  `civilian`, `randompc`), and for `cstrike`/`czero` it is a team (`t`, `ct`, `*` for auto). `*` or nothing means the profile chooses — a random installed model in
   deathmatch, `randompc` in TFC, which rolls a new class on every spawn. A model the scan did not find is a
   warning rather than a refusal: it prints the installed list and uses the name anyway, because
   models living inside a `.pak` are invisible to the scan. See `doc/games.md`, `player_models.cpp`,
@@ -337,6 +337,15 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   `doc/combat.md`, "Brace"
 - `crossbot_grenade_cook`, `crossbot_backstab`, `crossbot_brace_moving` — tier flags, default -1.
   See `doc/difficulty.md`
+- `crossbot_wallbang` — tier flag, default -1: shoot a lost target through a wall the round gets
+  through. `wallbangs=` in `crossbot_fire_status` counts the shots and `why=wallbang` shows one lined
+  up; `gaussjumps=` sits beside it. See `doc/combat.md`, "Wall-banging"
+- `crossbot_wallbang_probe` — runs `Penetrates` from every live bot's held weapon at every other bot
+  of the same game that a wall hides, printing the first texture and `THROUGH` or `stopped`. The
+  live wallbang is rare (it needs a predicted target behind a wall); this checks the replay directly
+- `crossbot_spread_fit` — CS spread gate: the largest cone allowed, as a multiple of the target's half
+  width. Default -1 (tier: 2 / 1.5 / 1.25 / 1); 0 turns the gate off for A/B runs. `spreadwaits=` in
+  `crossbot_fire_status` counts the holds. See `doc/combat.md`, "The CS spread gate"
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/goals.md`

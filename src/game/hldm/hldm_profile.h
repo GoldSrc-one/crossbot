@@ -50,10 +50,16 @@ public:
 
 	bool IsFunTerminal(edict_t *ent) const override;
 
+	bool Penetrates(const CBot &bot, int id, const Vector &eye, const Vector &dir,
+		float entry) const override;
+
 	void ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
 		unsigned int size) const override;
 
 protected:
 	bool PreferredWeaponOrAmmo(const char *classname, const char *const *weapons,
 		size_t count) const;
+
+	bool ThrowArc(const WeaponMode &mode, float viewPitch, float rate, float speedMax,
+		float &elevation, float &speed) const;
 };

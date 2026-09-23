@@ -1,6 +1,7 @@
 param(
     [string]$Map = "crossfire",
     [int]$Bots = 32,
+    [string[]]$Games = @("valve"),
     [int]$Port = 29020,
     [int]$WarmupSeconds = 25,
     [int]$ProfileSeconds = 60,
@@ -42,7 +43,10 @@ $errFile = "$logFile.err"
 $launchArgs = @("-console")
 if (-not $NoConDebug) { $launchArgs += "-condebug" }
 $launchArgs += @(
-    "-insecure", "-game", "crossplay", "-xgame1", "valve", "-sgame1", "valve",
+    "-insecure", "-game", "crossplay"
+)
+for ($g = 0; $g -lt $Games.Count; $g++) { $launchArgs += @("-xgame$($g + 1)", $Games[$g], "-sgame$($g + 1)", $Games[$g]) }
+$launchArgs += @(
     "+sv_lan", "1", "+deathmatch", "1", "+developer", "1",
     "+maxplayers", "32",
     "+rcon_password", "crossbot_test", "+port", "$Port",
@@ -89,7 +93,7 @@ Invoke-CbRconQuiet $Port "crossbot_perf 0"
 foreach ($c in $ExtraCommands) { Invoke-CbRconQuiet $Port $c }
 
 for ($i = 1; $i -le $Bots; $i++) {
-    Invoke-CbRconQuiet $Port "crossbot_add valve PerfBot$i"
+    Invoke-CbRconQuiet $Port "crossbot_add $($Games[-1]) PerfBot$i"
 }
 Write-Host "profile_hlds: requested $Bots bots, warming up ${WarmupSeconds}s"
 Start-Sleep -Seconds $WarmupSeconds

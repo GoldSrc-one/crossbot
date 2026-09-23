@@ -442,6 +442,11 @@ bool Bot_MoveMaxSpeedKnown(edict_t *pEdict)
 	return idx >= 1 && idx < kMaxPlayers && g_moveMaxSpeed[idx] > 1.f;
 }
 
+bool Bot_Frozen(const edict_t *pEdict)
+{
+	return pEdict->v.maxspeed > 0.f && pEdict->v.maxspeed < 10.f;
+}
+
 float Bot_MaxSpeed(edict_t *pEdict)
 {
 	int idx = g_engfuncs.pfnIndexOfEdict(pEdict);

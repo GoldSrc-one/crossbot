@@ -24,6 +24,7 @@ enum Task : unsigned char
 	TASK_DISARM,
 	TASK_DETPACK,
 	TASK_DISCARD,
+	TASK_PLANT,
 };
 
 constexpr int kTouchSlots = 33;
@@ -74,6 +75,7 @@ struct State
 	unsigned int detpacks = 0;
 	unsigned int calls = 0;
 	unsigned int discards = 0;
+	unsigned int plants = 0;
 };
 
 inline bool Active(const State &st)

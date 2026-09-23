@@ -31,6 +31,10 @@ struct Row
 	bool grenadeCook;
 	bool backstab;
 	bool braceMoving;
+	bool wallbang;
+	float spreadFit;
+	float spreadEarly;
+	float spreadLate;
 };
 
 constexpr float kDelaySpread = 0.2f;
@@ -75,6 +79,12 @@ bool GrenadeCook();
 bool Backstab();
 
 bool BraceMoving();
+
+bool Wallbang();
+
+float SpreadFit();
+
+void SpreadWait(float &loOut, float &hiOut);
 
 void PrintStatus();
 

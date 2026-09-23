@@ -595,6 +595,9 @@ it with no special case. `attack`, `deliver`, `fetch` and `defend` also give up 
 entity for 20 s. That rotates defenders between sites and stops an attacker waiting forever on a numcap-2
 area it cannot take alone. `roam` memos its spawn for 60 s on arrival. Hostage `+USE` is pulsed at 0.2 s,
 because a hostage wants a press edge; the planted C4 is held, because defusing is continuous use.
+None of the 30 s limit runs while the bot is frozen (`Bot_Frozen`, `doc/movement.md`), which is
+what a defuse is. Planting is not a hold at all: `deliver` only walks the carrier onto the bomb site,
+and the CS profile's `AbilityRun` does the arming once `SIGNAL_BOMB` is set (`doc/games.md`).
 
 A point goal that is itself solid is placed short of it: 40 units toward the bot for a `+USE` fetch,
 inside the 64-unit use range, and 96 for `defend` and `escort`, falling back to the entity's own point when

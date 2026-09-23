@@ -10,7 +10,7 @@
 namespace
 {
 
-const char *const kTeamGameDirs[] = { "cstrike", "tfc", "dod" };
+const char *const kTeamGameDirs[] = { "cstrike", "czero", "tfc", "dod" };
 
 char g_mapGameDir[64] = "?";
 bool g_mapTeamplay = false;
