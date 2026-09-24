@@ -128,6 +128,7 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
 	Nav::LoadForMap(mapName);
 	BspTrace::LoadForMap(mapName);
+	BotCamp::AddSandbags();
 
 	g_driftSpeedCount = 0;
 	g_driftScanned = false;

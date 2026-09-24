@@ -16,6 +16,13 @@ struct CampSpot;
 namespace BotCamp
 {
 
+enum Bipod : unsigned char
+{
+	BIPOD_NONE = 0,
+	BIPOD_SANDBAG,
+	BIPOD_PRONE,
+};
+
 struct RouteSpot
 {
 	int campIndex = -1;
@@ -27,6 +34,8 @@ struct RouteSpot
 	uint32_t flags = 0;
 	bool duck = false;
 	bool zoom = false;
+	Bipod bipod = BIPOD_NONE;
+	float arc = 0.f;
 	bool timed = false;
 	float holdFor = 0.f;
 	float raceRunner = 0.f;
@@ -50,6 +59,7 @@ struct State
 
 	bool scared = false;
 	float scareDist = 0.f;
+	Vector scarePos;
 	float scareTime = 0.f;
 	bool friendInView = false;
 	float nextFriendCheck = 0.f;
@@ -112,5 +122,13 @@ void NoteSpot(CBot &bot, int campIndex, float seconds);
 bool SpotReady(const CBot &bot, int campIndex);
 
 float SpotDist(const Nav::CampSpot &camp);
+
+void AddSandbags();
+
+bool SpotAllowed(const CBot &bot, const Nav::CampSpot &camp);
+
+bool FacesThreat(const Nav::CampSpot &camp, const Vector &threat);
+
+Bipod HeldBipod(const CBot &bot);
 
 }

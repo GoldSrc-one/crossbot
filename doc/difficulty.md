@@ -92,7 +92,7 @@ server, so it exists from the first commit rather than being added later.
 | `gaussPolicy` | `ChargeTime`, `WeaponScore`, `ModeViable`, `ZoomButtons` and `BotGauss` |
 | `bunnyHop` | `BotOppo::WantBunnyHop` |
 | `grenadeCook` | `BotGrenade`: holding an off-hand grenade for its fuse instead of throwing at once |
-| `backstab` | `TFCAbility` `StartStab`: a TFC spy going for the knife rather than its gun |
+| `backstab` | `TFCAbility` `StartStab`: a TFC spy going for the knife rather than its gun; DoD `StartStab`: a rifleman sprinting at a back with the bayonet or rifle butt |
 | `braceMoving` | `BotFire::Brace`: in OP4, bracing by clearing the move keys on the firing frame only |
 | `wallbang` | `RayOnTarget`: a blocked ray may fire if `IGameProfile::Penetrates` says the round gets through |
 
@@ -455,7 +455,8 @@ maxspeed, and the ratio only decides how much of the ramp-up it is willing to ho
 - `crossbot_oppo_interval` — opportunistic-jump retry throttle in seconds. Default -1 (tier)
 - `crossbot_grenade_cook` — hold an off-hand grenade for its fuse instead of throwing at once.
   Default -1 (tier)
-- `crossbot_backstab` — a TFC spy hunts backs with the knife. Default -1 (tier)
+- `crossbot_backstab` — a TFC spy hunts backs with the knife, a DoD rifleman with the bayonet or
+  rifle butt. Default -1 (tier)
 - `crossbot_brace_moving` — in OP4, brace by clearing the move keys only on the firing frame, so the
   bot keeps moving. Default -1 (tier)
 - `crossbot_wallbang` — fire through a wall when the round provably gets through (CS bullets, the

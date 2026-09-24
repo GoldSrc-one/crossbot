@@ -1188,7 +1188,11 @@ alpha does blind bots; the screen really is covered.
 Blindness lasts `crossbot_blind_scale * duration`, default 0.33: ReGameDLL's `PlayerBlind` calls
 `Blind(fadeTime * 0.33, ...)` for its own bots, so a bot is blind for a third of the time a human's
 screen stays white. Point blank and facing the grenade that is 12s of fade and 4s of blindness. A
-second flash extends to whichever ends later.
+second flash extends to whichever ends later. That formula is `IGameProfile::BlindSeconds`'s default,
+and it is looked up on the *bot's* game (`XPlay::ProfileFor(bot.gameDll)`), because the handler runs
+outside any game context. DoD overrides it to `hold + scale * duration`. Its only full-alpha fade is a
+headshot's (alpha 200, dark red, 3 s fade after a 2 s hold, dod.c:86590), and the hold is time the
+screen really is covered, so a headshot victim stays blind for about 3 s.
 
 While blind, `BotSense::Update` skips `UpdateVision` and clears `target`, `targetBone`, `visionCands`
 and `visionKeep`, emptying the delay queue if a target was held -- the same cleanup as

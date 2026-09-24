@@ -173,18 +173,24 @@ quietly return suboptimal routes. Every edge is scaled by at least this bound `(
 search drifts toward Dijkstra — on crossfire one leg goes 45 expansions / 7ms at `careful 0` to 107
 expansions / 21ms at `careful 1`. Bounded, but it is the number to watch.
 
-### Fall damage is a refund, not a rebuild
+### Falls are priced per game
 
-navgen prices a fall into the connection: `ConnectionCostSeconds` adds
-`PmSim::FallPenaltySeconds(fallDamage)` — half a second per point of damage, `1e4` for a lethal drop —
-to `costSeconds` for airmove, ladder and teleport connections. The .nav is shared by every game, and
-some games do not hurt on landing (Ricochet), so the penalty cannot simply be left out of the file.
+The .nav is shared by every game, and each game hurts on landing differently: HL from 580 u/s, CS and
+DoD from 500, TFC from 650, Ricochet never (`doc/games.md`, `FallDamage()`). So navgen stores the fall
+itself, not its price: `fallHeight` on airmove, ladder and teleport connections is the drop from the
+apex to the landing, and the `costSeconds` it writes carries no fall term
+(`ConnectionCostSeconds(c, false)`). A height, not a speed, so the file does not assume `sv_gravity`.
 
-`nav_loader.cpp` keeps the raw `fallDamage` on `Connection`, and `PlanPath`, `AreaCosts` and
-`AreaCostsToGoal` take `fallDamage` (default true). When it is false, `BuildGraph` and
-`AreaCostsImpl` subtract the same `FallPenaltySeconds` from the same three connection types, so a
-lethal drop becomes just its flight time. Both sides call the one shared function, so the refund
-cannot drift from what was baked in. Costs only fall, which keeps the heuristic admissible.
+`PlanPath`, `AreaCosts` and `AreaCostsToGoal` take a `PmSim::FallRule` (default `kHlFall`), and
+`FallCost` in `BuildGraph` and `AreaCostsImpl` adds `FallPenaltySeconds` of the damage that rule gives
+the landing speed `sqrt(2 · 800 · gravity · fallHeight)` — half a second per point, `1e4` for a lethal
+drop. Stored costs have no fall in them, so the runtime only ever adds, which keeps the heuristic
+admissible.
+
+navgen's own decisions still use HL's damage: it ranks trajectories and dismounts by it and
+`airmove_prune.cpp` and `plan_model.cpp` price connections with it (`ConnectionCostSeconds` with its
+default `withFall`). Only the file lost the term, which is why the v23 regeneration left every
+`--dump-path` route unchanged.
 
 ### Range bias: routing to ground the weapon can use
 

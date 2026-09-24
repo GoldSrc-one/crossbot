@@ -9,7 +9,7 @@ class CDMCProfile : public CHLDMProfile
 public:
 	const char *GetName() const override;
 	bool Detect(const char *gamedir) const override;
-	bool FallDamage() const override;
+	PmSim::FallRule FallDamage() const override;
 	bool Disguised(edict_t *pEdict) const override;
 
 	float ItemRespawnDelay(ItemKind kind) const override;

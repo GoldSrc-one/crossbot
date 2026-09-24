@@ -4,7 +4,9 @@
 #include <math.h>
 #include <string.h>
 
+#include "../game/crossplay.h"
 #include "../game/ent_handle.h"
+#include "../game/game_profile.h"
 #include "bot.h"
 #include "bot_daze.h"
 #include "bot_log.h"
@@ -85,7 +87,9 @@ void BotDaze::OnScreenFade(CBot &bot, int duration, int hold, int flags, int r, 
 	}
 	else
 	{
-		float until = now + CvarValue("crossbot_blind_scale", kDefaultBlindScale) * fadeSec;
+		float scale = CvarValue("crossbot_blind_scale", kDefaultBlindScale);
+		IGameProfile *profile = XPlay::ProfileFor(bot.gameDll);
+		float until = now + (profile ? profile->BlindSeconds(fadeSec, holdSec, scale) : scale * fadeSec);
 		if (st.blindUntil <= now)
 			st.blindStart = now;
 		if (until > st.blindUntil)

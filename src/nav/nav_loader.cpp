@@ -152,7 +152,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		conn.exitAngle = rec.exitAngle;
 		conn.jumpBackDist = rec.jumpBackDist;
 		conn.flightTime = rec.flightTime;
-		conn.fallDamage = rec.fallDamage;
+		conn.fallHeight = rec.fallHeight;
 		conn.launchPos = Vector(rec.launchPos[0], rec.launchPos[1], rec.launchPos[2]);
 		conn.landingPos = Vector(rec.landingPos[0], rec.landingPos[1], rec.landingPos[2]);
 		conn.rideSeconds = rec.rideSeconds;

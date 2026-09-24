@@ -27,9 +27,9 @@ namespace
 
 	constexpr float kHitscanRange = 8192.f;
 
-	bool Zoomed(const edict_t *pEdict)
+	bool Zoomed(edict_t *pEdict)
 	{
-		return pEdict->v.fov != 0.f && pEdict->v.fov < 90.f;
+		return g_pGameProfile ? g_pGameProfile->Zoomed(pEdict) : false;
 	}
 
 	constexpr float kSelectInterval = 0.5f;
@@ -949,6 +949,12 @@ namespace
 			StartCommit(fire, BotFire::COMMIT_SPINUP);
 			fire.commitFor = m.chargeFull + kSpinupSlack;
 			++fire.spinups;
+		}
+		if (!thrown)
+		{
+			fire.pressed = true;
+			fire.pressedLead = fire.aimLead;
+			fire.pressedArc = fire.aimArc;
 		}
 		fire.lastReason = fire.pressedWall ? "wallbang" : "firing";
 		return AttackButton(fire.mode);

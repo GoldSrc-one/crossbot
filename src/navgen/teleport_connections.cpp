@@ -211,6 +211,7 @@ TeleportStats BuildTeleportConnections(const BspFile &bsp, int standHeadnode,
 			mc.pointA = sp.point;
 			mc.pointB = destPoint;
 			mc.fallDamage = fallDamage;
+			mc.fallHeight = drop;
 			mc.flightTime = flightTime;
 
 			long long key = DirectedPairKey(mc.areaA, mc.areaB);

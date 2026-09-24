@@ -48,11 +48,21 @@ inline float VectorNormalize(float *v)
 
 }
 
-float FallDamageFor(float fallSpeed)
+float FallDamageFor(float fallSpeed, const FallRule &rule)
 {
-	if (fallSpeed <= kPlayerMaxSafeFallSpeed)
+	if (rule.perSpeed <= 0.f || fallSpeed <= rule.safeSpeed)
 		return 0.f;
-	return (fallSpeed - kPlayerMaxSafeFallSpeed) * kDamageForFallSpeed;
+	return (fallSpeed - rule.safeSpeed) * rule.perSpeed;
+}
+
+float FallHeight(float fallSpeed, float gravity)
+{
+	return gravity > 0.f ? fallSpeed * fallSpeed / (2.f * gravity) : 0.f;
+}
+
+float FallSpeed(float fallHeight, float gravity)
+{
+	return (fallHeight > 0.f && gravity > 0.f) ? sqrtf(2.f * gravity * fallHeight) : 0.f;
 }
 
 float FallPenaltySeconds(float damage)

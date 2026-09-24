@@ -161,6 +161,9 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 			buttons |= IN_DUCK;
 	}
 
+	if (g_pGameProfile)
+		g_pGameProfile->MoveAdjust(bot, fmove, smove, buttons);
+
 	ApplyBeamGuard(bot, angles, fmove, smove, buttons);
 
 	if (view.y != angles.y)
@@ -348,9 +351,9 @@ float Bot_Carefulness(const CBot &bot)
 	return (1.f - readiness) * scale;
 }
 
-bool Bot_FallDamage(const CBot &)
+PmSim::FallRule Bot_FallDamage(const CBot &)
 {
-	return !g_pGameProfile || g_pGameProfile->FallDamage();
+	return g_pGameProfile ? g_pGameProfile->FallDamage() : PmSim::kHlFall;
 }
 
 WeaponRangeClass Bot_RangeClass(const CBot &bot)
@@ -450,15 +453,18 @@ bool Bot_Frozen(const edict_t *pEdict)
 float Bot_MaxSpeed(edict_t *pEdict)
 {
 	int idx = g_engfuncs.pfnIndexOfEdict(pEdict);
+	float maxspeed = 0.f;
 	if (idx >= 1 && idx < kMaxPlayers && g_moveMaxSpeed[idx] > 1.f)
-		return g_moveMaxSpeed[idx];
-
-	float maxspeed = pEdict->v.maxspeed;
-	if (maxspeed <= 1.f)
-		maxspeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");
-	if (maxspeed <= 1.f)
-		maxspeed = kMoveSpeed;
-	return maxspeed;
+		maxspeed = g_moveMaxSpeed[idx];
+	else
+	{
+		maxspeed = pEdict->v.maxspeed;
+		if (maxspeed <= 1.f)
+			maxspeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");
+		if (maxspeed <= 1.f)
+			maxspeed = kMoveSpeed;
+	}
+	return g_pGameProfile ? g_pGameProfile->MaxSpeed(pEdict, maxspeed) : maxspeed;
 }
 
 PmSim::PmPhysics Bot_Physics(edict_t *pEdict)

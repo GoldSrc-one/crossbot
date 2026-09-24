@@ -55,12 +55,22 @@ struct Spawn
 	int team = 0;
 };
 
+struct Sandbag
+{
+	CBotEntHandle ent;
+	Vector point;
+	float yaw = 0.f;
+	float range = 0.f;
+	bool open = true;
+};
+
 struct Tables
 {
 	std::vector<Site> sites;
 	std::vector<Payload> payloads;
 	std::vector<Carrier> carriers;
 	std::vector<Spawn> spawns;
+	std::vector<Sandbag> sandbags;
 	bool detpackMap = false;
 };
 
@@ -80,6 +90,8 @@ bool Active();
 void Refresh(bool force = false);
 
 const Tables &Get();
+
+const Sandbag *FindSandbag(int entIndex);
 
 void PrintStatus();
 

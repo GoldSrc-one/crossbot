@@ -297,15 +297,39 @@ counting as armed on the strength of its zoom toggle.
 Three methods exist because Ricochet broke an HLDM assumption, and `CHLDMProfile` answers each with
 the old behaviour:
 
-- `FallDamage()` is whether landing hurts. When false, `Bot_FallDamage` tells the planners to refund
-  the fall penalty navgen baked into `costSeconds` (`doc/path_planning.md`, "Fall damage is a refund")
-  and switches off the runtime `FallDamageFor` vetoes in `bot_opportunist.cpp`, `bot_gauss.cpp` and
-  the ladder bail.
+- `FallDamage()` is how landing hurts, as a `PmSim::FallRule`: the safe speed and the damage per u/s
+  above it. `kHlFall` is HL's 580 and 100/444; `kNoFall` never hurts. `Bot_FallDamage` hands the rule to
+  the planners, which price each fall from the height the `.nav` stores (`doc/path_planning.md`,
+  "Falls are priced per game"), and to the runtime `FallDamageFor` vetoes in `bot_opportunist.cpp`,
+  `bot_gauss.cpp` and the ladder bail. The rules, from each game's `FlPlayerFallDamage`:
+
+  | game | safe u/s | damage per u/s | 100 hp lethal at |
+  |---|---|---|---|
+  | HL, OP4 (`mp_falldamage 1`, which CrossPlay's `server.cfg` sets) | 580 | 0.225 | 1024 |
+  | CS (ReGameDLL; `mp_falldamage 0` is none) | 500 | 0.208 | 980 |
+  | DoD (dod.c 35803) | 500 | 0.25 | 900 |
+  | TFC (tfc.c 38681) | 650 | 0.267 | 1024 |
+  | Ricochet; DMC under `mp_falldamage 0` | none | | |
+
+  HL's own `mp_falldamage 0` is a flat 10 per landing and is not modelled.
 - `AllowsGoalTier(tier)` is which goal tiers this game's bots pursue at all (`doc/goals.md`,
   `bot_goal.cpp`).
 - `ModeAvailable(player, spec, mode)` is a per-player veto on a firing mode that no `WeaponSpec` field
   can express, because it depends on state the table does not describe. `BotFire::ModeViable` asks it
   right before `AmmoReady`, so a refused mode is never selected and never pressed.
+
+Six hooks exist because DoD moves into the client what other mods do on the server. All of them
+default to the old behaviour:
+- `Zoomed(edict)` defaults to `0 < pev->fov < 90`. DoD reads `m_iFOV` instead.
+- `AdjustView(bot, dt, pitch, yaw)` edits the angles `Bot_UpdateFacing` is about to write, for
+  recoil, scope sway and the deploy clamp.
+- `MoveAdjust(bot, fmove, smove, buttons)` runs inside `Bot_RunPlayerMove` after the brace, for
+  sprint and the bipod.
+- `MaxSpeed(edict, engineMax)` is applied at the end of `Bot_MaxSpeed`.
+- `CanDeploy(edict)` decides who may take a sandbag or prone camp.
+- `BlindSeconds(fade, hold, scale)` turns a blinding ScreenFade into blind time.
+
+See `dod_profile.cpp` below.
 
 ### ItemKind
 The classification the gather goals key off. `ITEM_WEAPON`/`ITEM_AMMO`/`ITEM_PICKUP` are touched to
@@ -469,7 +493,8 @@ waiting to respawn is `EF_NODRAW`, which the item scan already skips.
 
 ### No fall damage
 
-Ricochet's `CBasePlayer::PostThink` has the fall-damage call commented out, so `FallDamage()` is false.
+Ricochet's `CBasePlayer::PostThink` has the fall-damage call commented out, so `FallDamage()` is
+`kNoFall`.
 
 ## gearbox_profile.cpp
 
@@ -583,8 +608,8 @@ ignores those 18-odd units.
 
 ### Fall damage follows mp_falldamage
 
-DMC's default `mp_falldamage 0` is a flat 5 per landing, so `FallDamage()` is false (refund the baked
-penalty) unless the cvar is non-zero, where DMC uses the HL formula `PmSim::FallDamageFor` models.
+DMC's default `mp_falldamage 0` is a flat 5 per landing, so `FallDamage()` is `kNoFall` unless the cvar
+is non-zero, where DMC uses the HL formula, `kHlFall`.
 
 ### CrossPlay hangs a dmc-only server
 
@@ -966,6 +991,163 @@ Arming and defusing pin `maxspeed` to 1, as does freeze time; see `Bot_Frozen` i
   gamerules!` in `CheckWinConditions`, before any bot exists, in every layout tried (valve+czero,
   valve+cstrike+czero, cstrike on the content path only). `czero` is in `teams.cpp`'s team list, which
   it was missing.
+
+## dod_profile.cpp
+
+`CDODProfile` is Day of Defeat, derived from `CHLDMProfile`. The server source is the decompiled Linux
+`dod.so` (v1.2f) at `D:\projects\libs\dod.c`; the client, which holds recoil, scope sway and the
+deploy clamp, is `client-dod.c`. The map side (capture areas, TNT, spawns) was already
+`Objectives::ReadDod`. Line numbers below are into `dod.c` unless marked client.
+
+The gamedata needed three `CFuncTank` members made optional: CrossPlay runs DoD as `noTank` and never
+writes them to `dod-win.json`, so the whole game was unsupported. `bot_fun.cpp` already skipped a
+negative tank offset.
+
+### Joining, and waiting for the wave
+
+The third `crossbot_add` argument is the class: `garand carbine tommy grease spring bar 30cal bazooka
+enfield sten enfields bren piat` (Allies), `k98 k43 mp40 mp44 k98s fg42 fg42_s mg34 mg42 pschreck`
+(Axis), or `random` (the default). The class names the team, so `PreThink` sends `jointeam 1|2` and
+then `cls_<name>`. `random` sends `jointeam 5` and `cls_random`. Commands are resent every 1.2 s until
+`pev->team` is 1 or 2 and `m_iNextClass != -1`, which is the same gate CrossPlay's `joinTeam` uses to
+hold the spawn. After three tries the class becomes `cls_random`. That covers a British class on a US
+map, a para class on a non-para map, and class limits, without parsing `info_doddetect`.
+
+Respawn is automatic and in waves (`RespawnAllies`/`RespawnAxis` 39629). Between death and the wave
+the player is an observer (`iuser1 > 0`), so `IsDead` counts that as dead and `Respawn` is an empty
+move.
+
+`ApplyAddArg` also sets `cl_autoreload 0` in the userinfo. A missing key means on (93072), and the
+bot's own reload is then the only one.
+
+### The table
+
+`dod_weapons.cpp` has 34 rows. Ids 1-31 are `m_iId`. 32 and 33 are synthetic: the scoped Enfield and
+the scoped FG42 are the plain weapon with `m_iWeaponState & 1` (39409), so `ReadInventory` remaps
+them and the rows keep the real classname for selection.
+
+- **Semi-automatics and bolt rifles are `FIRE_TAP`.** DoD latches `m_fInAttack` until the button is
+  released.
+- **Rifles carry `WPN_Q_BRACE`.** Every `PrimaryAttack` adds `accuracy_penalty` to the cone whenever
+  the 3-D speed is over 45. There is no stance term, and nothing grows per shot, so the CS spread
+  gate does not apply. Crouch-walking (73) and prone crawling (50) are both over 45, so bracing has
+  to stop the bot, not just duck it.
+- **The .30cal, MG34 and MG42 are refused by `ModeAvailable` unless deployed**, or unless a camp is
+  about to deploy them. Undeployed they spread 0.2 and cost 15 stamina a shot. An MG gunner on the
+  move therefore fights with its pistol.
+- **Rockets are a hitscan-free lead at 1300 u/s with no gravity.** The real 0.1 made the arc solver
+  refuse every shot. `FireToggle` shoulders the launcher (`IN_ATTACK2`, `m_iWeaponState & 1`) while
+  the bot is firing it, and lowers it otherwise. Firing unshouldered costs a 3 s penalty, and
+  shouldered movement is capped at 50.
+- **Grenades are a `WPN_Q_THROW_ARC` tap**, thrown on release with a fixed 5 s fuse. `ThrowLaunch`
+  is the HL formula with cap 600. The hand grenade is `AMBUSH_GRENADE` and the stick grenade is
+  `AMBUSH_SNARK`: the kinds are only a list of thrown ambush ids.
+- **`chargeState` is forced to 0.** DoD's `m_fInAttack` is the semi-auto latch and would count as
+  charge shots. `throwStart` is read from `CDoDGrenade::m_flStartThrow`, because the `CBaseEntity`
+  field of the same name is shadowed.
+
+`MeleeWeapon` is the American knife. Axis carry a spade or a German knife, so `bot_break.cpp` falls
+back to any carried `IsMeleeWeapon` id.
+
+Items are map `ammo_*` and dropped `ammo_generic_*` only. `ItemUsable` refuses the other team's
+ammo and your own dropped box. Weapons are never gather goals, because a player holds one primary
+and must drop it to take another.
+
+### Recoil, sway and the deploy clamp are client-side
+
+The server never kicks the view. Bullets go along `v_angle + punchangle`, and firing leaves
+punchangle alone. The client moves the real view angles instead, so the profile does the same
+through `IGameProfile::AdjustView`, which runs in `Bot_UpdateFacing` just before `v_angle` is
+written:
+
+- **Kick** (client `CHud::GetWeaponRecoilAmount` 40317, `PopRecoil` 40474):
+  - A shot is a drop in the active weapon's clip, seen in `ReadInventory`. That ignores zoom and
+    bipod toggles, which also move the timers.
+  - Each shot replaces the pending kick; it is not added to it.
+  - The kick is spread over 0.1 s: pitch goes up by the table value, and yaw moves by a quarter of it
+    (1.3 for the BAR and Bren) × U(0.8, 1.1) with a random sign.
+  - The multiplier is 0 while a bipod gun is deployed. It is ×0.25 prone, except for the three MGs,
+    and ×0.5 ducking.
+  - Nothing recovers the kick automatically. The aim controller pulls back at the bot's own hand
+    speed, and the fire-ray gate releases the trigger while the muzzle is off the target.
+- **Scope sway** (client `CL_AdjustAngles` 64017): while `m_iFOV` is below 90, pitch changes by
+  2·dt·cos(2t)·A and yaw by dt·cos(t)·A, with A = 0.5 standing, 0.2 ducking and 0.1 prone.
+- **Deploy clamp** (client `IN_MouseMove` 37776): once deployed, yaw stays within ±45° and pitch
+  within ±20° of the angles at deploy time, and the deploy pitch is no higher than −10. The server
+  enforces neither, so without this a deployed bot would swivel freely.
+
+`Zoomed` reads `m_iFOV`. DoD only mirrors it into `pev->fov` inside `UpdateClientData`.
+
+A headshot that does not kill sends the victim a ScreenFade: alpha 200, 3 s fade after a 2 s hold
+(`TraceAttack` hitgroup 1, 86590). It uses the same engine message id as every other game's
+ScreenFade, so `BotDaze` blinds the bot as it would for a CS flash. `BlindSeconds` adds the hold to
+the usual third of the fade, which comes to about 3 s without a target and so without firing; see
+`doc/perception.md`. A deterministic check is `crossbot_daze_test <bot> flash 200 3 2`. A real
+headshot fade has not been caught live yet, because bots aim at the body.
+
+### Walking and sprinting
+
+The server clamps speed only to `maxspeed` (600 × stamina factor, and 310 as seen live). The *client*
+chooses the forward speed: `min(stamina, 100) + 120` walking and `+ 230` with `IN_RUN` (client
+`DoDGetSpeed` 63489). Without `IGameProfile::MaxSpeed` a bot would run at 310 all the time.
+`MoveAdjust` sprints (`IN_RUN`) when nothing is engaged, the bot is moving forward on the ground, and
+stamina (`pev->fuser4`) has reached 90. It stops below 70. Sprinting drains 30 a second and walking
+regains 10, and jump height falls once stamina is under 60.
+
+### Deploying
+
+`MoveAdjust` also owns the bipod, because it runs inside every `Bot_RunPlayerMove` and the camp's
+own timers keep running meanwhile. While `BotCamp::HeldBipod` says the held camp spot wants a
+deploy:
+
+1. Stop moving and select the MG.
+2. On a sandbag spot, press `IN_ATTACK2` once the zone is armed (`vuser1.x == 1`).
+3. On a prone spot, send `sprone`, then press `IN_ATTACK2` once `iuser3 == 1` and the view is within
+   20° of the spot's yaw (or an enemy is in sight).
+4. Give up after 5 s.
+
+When nothing wants it deployed any more, it presses `IN_ATTACK2` until folded and sends `sprone`
+until standing, holding the bot still throughout. A deployed MG never auto-reloads (134306), so the
+bot's own `wantReload` is its only reload. marine_bot says undeployed MGs cannot reload at all, but
+`CBipodWeapon::Reload` (139260) has no such gate, and it has not been tested live. How the camp spots are chosen is in
+`doc/goals.md`, "Sandbags and prone camps".
+
+### Gathering: one primary, like CS
+
+`CDoDTeamPlay::CanHavePlayerItem` (36940) refuses a second weapon of the same group, and every primary
+is in one group, so the rifle slot holds exactly one gun. The pistol cannot be dropped at all.
+`CWeaponBox::Touch` (134576) takes only what fits and all the ammo. So `ClassifyItem` keeps HLDM's
+`weapon_*`/`weaponbox` (`ITEM_WEAPON`) and `ammo_*` (`ITEM_AMMO`) and drops everything else, and
+`ItemUsable` accepts a weapon only for a bot with no primary (`DOD_IsPrimary` against `pev->weapons`).
+`ItemPreferred` is every weapon, so a bot that lost its primary re-arms ahead of other goals. Ammo must
+match the bot's team (`CBasePlayerAmmo::DefaultTouch` 134668) and not be the bot's own drop.
+
+### Dropping ammo
+
+Every soldier spawns with one generic ammo box (`m_nGenericAmmoCount = 1`, 87086), and `dropammo`
+(`DropGenericAmmo` 90619) throws it 200 u/s along `pev->angles`. It spawns as `ammo_generic_american`,
+`_british` or `_german` with `pev->team` set and the dropper as `owner`, so teammates gather it and the
+dropper ignores it. Every half second a calm bot on the ground looks for the nearest live friendly DoD
+player standing in its own nav area (`AbilityRun`, `TASK_DISCARD`), turns to them with a level view,
+and sends `dropammo` once the view is within 4°. That sets `nextDiscard` a million seconds out, and
+`BotAbility::Reset` clears it at respawn, so it happens once per life. An attempt that times out after
+1.5 s can retry after 10 s.
+
+### Bayonet and rifle butt
+
+`RifleMeleeAttack` (31963) is `IN_ATTACK2` on the Garand (5, butt), K98 (10, bayonet), K43 (24, butt)
+and Enfield (25, butt, only unscoped). It does 60 damage along a 64 u trace from the eye. It is used
+the way the TFC spy uses its knife, behind the same `backstab` tier flag (`doc/difficulty.md`): when
+the bot's target is an enemy within 300 u whose view faces away from it (dot ≤ −0.3) and one of those
+rifles is out, `TASK_STAB` sprints at the target's centre (`MoveAdjust` keeps `sprint` on for the
+task) and presses `IN_ATTACK2` inside 56 u once aimed within 4°. It stops when the victim dies, turns
+round (dot > 0.3), gets 400 u away or the weapon changes, or after 4 s. The fire code idles while the
+task runs. SMG and MG classes do not switch to their knife for it.
+
+### Known gaps
+
+Grenade pickup and throw-back (`+use` on a live `grenade`, 59525), prone for riflemen, the
+BAR/Bren/FG42 prone bipod outside camps, MG42 heat. Grenade throws have not been seen live yet.
 
 ## gamedata.cpp
 

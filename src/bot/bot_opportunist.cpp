@@ -150,7 +150,7 @@ bool WantBunnyHop(CBot &bot, const Nav::NavMesh &mesh)
 
 	if (!bot.probeArc.landed)
 		return Refuse(bot, 3);
-	if (Bot_FallDamage(bot) && PmSim::FallDamageFor(bot.probeArc.fallSpeed) > 0.f)
+	if (PmSim::FallDamageFor(bot.probeArc.fallSpeed, Bot_FallDamage(bot)) > 0.f)
 		return Refuse(bot, 3);
 
 	const Vector &landing = bot.probeArc.points.back();
@@ -251,7 +251,7 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 
 	if (!bot.airmoveArc.landed)
 		return false;
-	if (Bot_FallDamage(bot) && PmSim::FallDamageFor(bot.airmoveArc.fallSpeed) > 0.f)
+	if (PmSim::FallDamageFor(bot.airmoveArc.fallSpeed, Bot_FallDamage(bot)) > 0.f)
 		return false;
 
 	const Vector &simLanding = bot.airmoveArc.points.back();

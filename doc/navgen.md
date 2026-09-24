@@ -449,7 +449,7 @@ For each connection:
 6. **Bin by hull and jump** - four bins: stand/duck hull × drop/jump
 7. **Select best per bin** - prefer: jump > drop; shorter flight time; less fall damage
 8. **Fit gates** - `FitGate` on launch/landing clouds (robust Tukey-weighted PCA segment, local yaw/speed regression at ends)
-9. **Store on connection** - gates, exitSpeed/Yaw, jumpBackDist, fallDamage, flightTime, launchPos/landingPos
+9. **Store on connection** - gates, exitSpeed/Yaw, jumpBackDist, fallHeight, flightTime, launchPos/landingPos
 
 ### Threading
 The sampler is split into an enumerate pass and a sample pass, both binned by `work_pool.cpp`, with the
@@ -792,7 +792,7 @@ pit instead of taking a 256-unit fall for 10.5 damage.
 
 ### What the connection carries
 No new record fields. `launchPos` is the mount, `landingPos` the dismount, `exitAngle` the yaw the bot holds
-to climb, `exitSpeed` the climb speed, `flightTime`/`fallDamage` come from the winning dismount, and the
+to climb, `exitSpeed` the climb speed, `flightTime`/`fallHeight` come from the winning dismount, and the
 climb length is `|landingPos - launchPos|`. Gates are degenerate points: gate A at the mount, gate B at the
 descent entry (above), which is why `CONN_LADDER` is exempt from both `BuildConnectionGates` and the
 missing-gate counter. Gate B is the only place the descent entry lives, so the planner reads its point
@@ -1961,8 +1961,8 @@ the search state.
 ## nav_file.cpp
 
 ### WriteNavFile
-Serializes MergeResult to crossbot_nav format (v22):
-- Header: magic "CBNV", version 22, mapName[64], bspChecksum, counts (including `detourCount`,
+Serializes MergeResult to crossbot_nav format (v23):
+- Header: magic "CBNV", version 23, mapName[64], bspChecksum, counts (including `detourCount`,
   `detourPointCount` and `vantageCount`), `designMaxSpeed`, `vantageSpacing` and `maxExposure`
 - Vantage records (96 B): `pos[3]`, `exposure`, and four `NavWatchDir{yaw, pitch, spread,
   amount, dist}`. Unused watch slots are all-zero and the loader drops them on `amount == 0`, so the
@@ -1994,19 +1994,24 @@ Serializes MergeResult to crossbot_nav format (v22):
 - Every record is `fwrite`n raw, so each has explicit padding and a `static_assert` on its size — a new field
   that shifts the layout fails the build instead of silently corrupting nav files
 - Area planes come from `boundPlanes`, not `polytope.faces` — see "Area geometry vs exported region"
-- Connection records: areaA/B, connType/Flags, gateValid, costSeconds, travelSeconds, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallDamage, flightTime, launchPos/landingPos[3]
+- Connection records: areaA/B, connType/Flags, gateValid, costSeconds, travelSeconds, gates[2][2][3], gateAYaw/Speed[2], exitSpeed/Angle, jumpBackDist, fallHeight, flightTime, launchPos/landingPos[3]
 - Area-connection index (uint32 per connection per area)
 - Area planes (normal[3], dist)
 
 ## nav_format.h
 
-### Nav File Format (version 22)
+### Nav File Format (version 23)
 - Magic: "CBNV"
 - Header (128 B): magic, version, mapName[64], bspChecksum, flags, counts (areas, conns, areaConnIndex,
   areaPlanes, detours, detourPoints), designMaxSpeed, vantageCount, vantageSpacing, maxExposure,
   waterVolumeCount, campCount
 - AreaRecord: id, mins[3], maxs[3], centroid[3], areaFlags, connOffset, connCount, planeOffset, planeCount, activation, pad0[3], openSeconds, detourOffset, detourCount, waterVolume, pad1[3], submergeZ, driftVelocity[3]
-- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallDamage, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity, waterVolume, pad2[3], submergeZ, drift
+- ConnectionRecord: areaA, areaB, connType, connFlags, gateValid, pad, costSeconds, travelSeconds, gateA[2][3], gateB[2][3], gateAYaw[2], gateASpeed[2], exitSpeed, exitAngle, jumpBackDist, fallHeight, flightTime, launchPos[3], landingPos[3], rideSeconds, rideSecondsMax, rideWaitSeconds, gravity, waterVolume, pad2[3], submergeZ, drift
+- `fallHeight` is the drop from the apex to the landing (airmove from the sim's landing speed and its
+  gravity, teleport the drop to the floor, ladder the dismount hop's). `costSeconds` holds no fall
+  term: each game prices the fall at runtime (`doc/path_planning.md`, "Falls are priced per game").
+  Inside navgen, `MergedConnection` also keeps HL's `fallDamage`, which still ranks trajectories and
+  dismounts and prices the prune
 - `gravity` is the `pev->gravity` multiplier the air move was sampled at (1.0 for every other
   connection type). A map with `trigger_gravity` carries one air move set per distinct multiplier, and
   the runtime uses only the set matching the bot's current gravity — see "Planning with gravity multipliers" in `doc/path_planning.md`
@@ -2041,7 +2046,7 @@ plus a z-slab rather than its true faces.
 - AreaFlags: CROUCH(1), LADDER_TOP(2), WATER(4), DOOR(128), BREAKABLE(256), ELEVATOR(512)
 - ConnType: WALK(0), TELEPORT(1), AIRMOVE(2), LADDER(3), ELEVATOR(4) - a ladder reuses the air-move fields
   rather than adding its own: launchPos is the mount, landingPos the dismount, exitAngle the climbing yaw,
-  exitSpeed the climb speed, and flightTime/fallDamage belong to the dismount hop. An elevator ride uses
+  exitSpeed the climb speed, and flightTime/fallHeight belong to the dismount hop. An elevator ride uses
   launchPos as the boarding point and landingPos as the arrival point, and carries its own rideSeconds /
   rideWaitSeconds; rideSecondsMax equals rideSeconds today and is the hook for a swept-interval sampler
 - ConnFlags: ONE_WAY(1), NEEDS_CROUCH(2), JUMP(4), WATERJUMP(8) - jump means left ground under impulse, not derivable from jumpBackDist. There is no reverse one-way bit: a drift field blocks a direction only for a given max speed, so that answer is computed per search by `NavDrift::EvalDrift` and never stored

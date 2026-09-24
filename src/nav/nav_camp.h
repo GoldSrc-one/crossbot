@@ -21,6 +21,8 @@ struct CampSpot
 	float crouchDist = 0.f;
 	int areaId = -1;
 	uint32_t flags = 0;
+	float arc = 0.f;
+	int entIndex = 0;
 };
 
 }

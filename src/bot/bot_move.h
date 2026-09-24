@@ -32,7 +32,7 @@ float Bot_GravityMultiplier(edict_t *pEdict);
 
 float Bot_Carefulness(const CBot &bot);
 
-bool Bot_FallDamage(const CBot &bot);
+PmSim::FallRule Bot_FallDamage(const CBot &bot);
 
 WeaponRangeClass Bot_RangeClass(const CBot &bot);
 

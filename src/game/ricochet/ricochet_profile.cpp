@@ -48,9 +48,9 @@ float CRicochetProfile::EvaluateCombat(edict_t *, const BotInventory &) const
 	return 0.f;
 }
 
-bool CRicochetProfile::FallDamage() const
+PmSim::FallRule CRicochetProfile::FallDamage() const
 {
-	return false;
+	return PmSim::kNoFall;
 }
 
 bool CRicochetProfile::AllowsGoalTier(BotGoal::Tier tier) const

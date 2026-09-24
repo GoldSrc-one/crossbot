@@ -7,6 +7,7 @@ class CCSProfile : public CHLDMProfile
 public:
 	const char *GetName() const override;
 	bool Detect(const char *gamedir) const override;
+	PmSim::FallRule FallDamage() const override;
 
 	void Respawn(edict_t *pEdict) const override;
 	bool PreThink(edict_t *pEdict) const override;

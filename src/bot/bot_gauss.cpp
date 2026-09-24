@@ -127,7 +127,7 @@ namespace
 
 		if (!bot.probeArc.landed)
 			return false;
-		if (Bot_FallDamage(bot) && PmSim::FallDamageFor(bot.probeArc.fallSpeed) > 0.f)
+		if (PmSim::FallDamageFor(bot.probeArc.fallSpeed, Bot_FallDamage(bot)) > 0.f)
 			return false;
 
 		const Vector &landing = bot.probeArc.points.back();

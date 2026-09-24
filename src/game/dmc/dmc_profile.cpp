@@ -119,9 +119,9 @@ bool CDMCProfile::Detect(const char *gamedir) const
 	return gamedir && CB_STRICMP(gamedir, "dmc") == 0;
 }
 
-bool CDMCProfile::FallDamage() const
+PmSim::FallRule CDMCProfile::FallDamage() const
 {
-	return CVAR_GET_FLOAT("mp_falldamage") != 0.f;
+	return CVAR_GET_FLOAT("mp_falldamage") != 0.f ? PmSim::kHlFall : PmSim::kNoFall;
 }
 
 bool CDMCProfile::Disguised(edict_t *pEdict) const

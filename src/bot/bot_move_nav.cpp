@@ -2542,9 +2542,10 @@ void Bot_BailManeuver(CBot &bot, const char *why)
 			? bot.ladderMountPoint.z - (bot.ladderCrouch ? 0.f : NavPlan::kPlanStandHeight)
 			: bot.ladderDismountZ;
 		float drop = std::max(0.f, BotNavZ(pEdict) - floorZ);
-		float damage = PmSim::FallDamageFor(sqrtf(2.f * Bot_DrivePhysics(pEdict).gravity * drop));
+		float damage = PmSim::FallDamageFor(sqrtf(2.f * Bot_DrivePhysics(pEdict).gravity * drop),
+			Bot_FallDamage(bot));
 
-		if (Bot_FallDamage(bot) && damage >= pEdict->v.health)
+		if (damage >= pEdict->v.health)
 		{
 			BOT_VLOG("CrossBot: %s %s, but stays on the ladder: a %.0f drop costs %.0f of %.0f health\n",
 				bot.name, why, drop, damage, pEdict->v.health);

@@ -536,6 +536,53 @@ fill), `crossbot_camp_zoom_dist` (768, the range below which a scope buys nothin
 `crossbot_camp_debug` (0, gates the per-retarget route line and the scare transitions; the commit,
 arrival and leave lines are plain `BOT_VLOG`).
 
+### Sandbags and prone camps
+
+A DoD machine gunner fights best deployed, and a camp is where a bot stands still long enough to
+deploy. So deploying rides on the camp rather than being a goal of its own. `IGameProfile::CanDeploy`
+is the only game-specific question the camp code asks. DoD answers yes for anyone carrying a
+`Classify() == 0x100` gun: the .30cal, BAR, Bren, MG34 and MG42.
+
+**Sandbags become camp spots at map load.** `Objectives::ReadDod` lists each `dod_trigger_sandbag`
+with the following:
+- `CSandBag::m_nYaw`, which is the brush `angles`. `InitTrigger` zeroes those, so `pev` cannot supply
+  it.
+- `m_nRange`, the `sandbag_range` key, default 15°.
+- Whether its master is open. Stock masters are `env_state` entities (charlie, kalt, zalec), which are
+  on when `m_iState == 2`. A `~` prefix inverts that, as in `UTIL_IsMasterTriggered`. Any other master
+  class counts as open.
+
+`BotCamp::AddSandbags`, right after the nav loads, appends one `Nav::CampSpot` per sandbag:
+- at the nearest floor point inside the trigger (`BotItems::VolumeAreas`), facing `m_nYaw`,
+- with `standScore` 1 and `crouchScore` 0, because the trigger refuses a ducking player,
+- with the runtime-only flag `CAMP_DEPLOY`, which is never written to a `.nav`,
+- with `arc = m_nRange + 45°` (the deployed traverse) and the trigger's `entIndex`.
+
+On dod_avalanche that is all 12 of 12. Every stock map has 6 to 46 sandbags.
+
+**Only a gunner may pick one, and only facing the threat.** `SpotAllowed` drops `CAMP_DEPLOY` spots
+for anyone who cannot deploy, and drops sandbags whose master is shut. It is checked in `BuildRoute`
+and in `BotTactics`' `Usable`. The facing rule is `|m_nYaw − threatYaw| ≤ arc`, and the threat
+direction depends on the picker:
+- **Tactics `defend`:** walk downhill in the enemy spawn's cost field from the spot's area, up to 16
+  areas or 512 u, and aim at where that walk ends. That is where the enemy arrives from.
+- **Tactics `support`:** the same walk down `toTargetCosts`, because the enemy is at the site.
+- **The near-target defend fallback:** uses the spawn field when there is one, and skips sandbags
+  otherwise.
+- **Scare camps:** use the position of the contact that frightened the bot (`State::scarePos`). The
+  route set is built before any contact exists, so this check waits until the trigger fires.
+
+**At an ordinary spot a gunner deploys prone**, but only where standing sees no more than crouching
+(`standScore <= crouchScore`). Prone eyes are lower still, so only a spot that already favours a low
+stance earns it. Elsewhere the gunner camps as anyone else would.
+
+The deploy kind travels on `RouteSpot::bipod` (`BIPOD_SANDBAG` / `BIPOD_PRONE`). A deploying spot
+never ducks or zooms, and its hold time is unchanged: the timed 0-10 s / 5-15 s, or the stale-scare
+rule. The pressing itself is `CDODProfile::MoveAdjust`; see `doc/games.md`, `dod_profile.cpp`. Seen
+live on dod_avalanche: `settles into its camp ... deploying on sandbags`, then `deploys its gun on
+sandbags, facing yaw 168`, then `leaves its camp after 2.3s`, then `folds its gun`, and the same for
+prone.
+
 
 ## objectives.cpp
 

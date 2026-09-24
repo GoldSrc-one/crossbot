@@ -189,7 +189,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 			rec.gateASpeed[k] = static_cast<float>(c.gateASpeed[k]);
 		}
 
-		rec.costSeconds = ConnectionCostSeconds(c);
+		rec.costSeconds = ConnectionCostSeconds(c, false);
 		rec.travelSeconds = ConnectionTravelSeconds(areas, c);
 		rec.drift = c.drift;
 		rec.waterVolume = c.waterVolume;
@@ -199,7 +199,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.exitSpeed = static_cast<float>(c.exitSpeed);
 		rec.exitAngle = static_cast<float>(c.exitAngle);
 		rec.jumpBackDist = static_cast<float>(c.jumpBackDist);
-		rec.fallDamage = static_cast<float>(c.fallDamage);
+		rec.fallHeight = static_cast<float>(c.fallHeight);
 		rec.flightTime = static_cast<float>(c.flightTime);
 		rec.launchPos[0] = static_cast<float>(c.pointA.x);
 		rec.launchPos[1] = static_cast<float>(c.pointA.y);

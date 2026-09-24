@@ -8,7 +8,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 22;
+constexpr uint32_t kNavVersion = 23;
 
 constexpr size_t kNavWatchDirs = 4;
 
@@ -215,7 +215,7 @@ struct NavConnectionRecord
 	float exitSpeed;
 	float exitAngle;
 	float jumpBackDist;
-	float fallDamage;
+	float fallHeight;
 	float flightTime;
 	float launchPos[3];
 	float landingPos[3];
@@ -258,6 +258,7 @@ enum CampFlags : uint32_t
 {
 	CAMP_NONE = 0,
 	CAMP_NO_STAND = 1,
+	CAMP_DEPLOY = 1u << 31,
 };
 
 struct NavCampRecord

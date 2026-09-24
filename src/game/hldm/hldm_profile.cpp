@@ -167,9 +167,9 @@ float CHLDMProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) con
 	return survive * std::clamp(arms, 0.f, 1.f);
 }
 
-bool CHLDMProfile::FallDamage() const
+PmSim::FallRule CHLDMProfile::FallDamage() const
 {
-	return true;
+	return PmSim::kHlFall;
 }
 
 bool CHLDMProfile::AllowsGoalTier(BotGoal::Tier) const

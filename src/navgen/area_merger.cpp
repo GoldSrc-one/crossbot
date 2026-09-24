@@ -21,7 +21,7 @@ constexpr float kWaterJumpCommitSeconds = 1.0f;
 
 constexpr double kMinDriftLegLength = 1e-3;
 
-float ConnectionCostSeconds(const MergedConnection &conn)
+float ConnectionCostSeconds(const MergedConnection &conn, bool withFall)
 {
 	float seconds = 0.0f;
 
@@ -30,7 +30,8 @@ float ConnectionCostSeconds(const MergedConnection &conn)
 	{
 		float damage = static_cast<float>(conn.fallDamage);
 		seconds += static_cast<float>(conn.flightTime);
-		seconds += PmSim::FallPenaltySeconds(damage);
+		if (withFall)
+			seconds += PmSim::FallPenaltySeconds(damage);
 	}
 
 	if (conn.connType == crossbot_nav::CONN_LADDER)

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../bot/bot_goal.h"
+#include "../nav/pm_sim.h"
 #include "weapon_spec.h"
 
 enum GameFlags : unsigned int
@@ -107,7 +108,7 @@ public:
 
 	virtual float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const = 0;
 
-	virtual bool FallDamage() const = 0;
+	virtual PmSim::FallRule FallDamage() const = 0;
 
 	virtual bool AllowsGoalTier(BotGoal::Tier tier) const = 0;
 
@@ -136,6 +137,18 @@ public:
 	virtual bool SpreadWide(edict_t *, int, void *, float, float &) const { return false; }
 
 	virtual bool Penetrates(const CBot &, int, const Vector &, const Vector &, float) const { return false; }
+
+	virtual bool Zoomed(edict_t *pEdict) const { return pEdict->v.fov != 0.f && pEdict->v.fov < 90.f; }
+
+	virtual void AdjustView(CBot &, float, float &, float &) const {}
+
+	virtual void MoveAdjust(CBot &, float &, float &, unsigned short &) const {}
+
+	virtual float MaxSpeed(edict_t *, float engineMax) const { return engineMax; }
+
+	virtual bool CanDeploy(edict_t *) const { return false; }
+
+	virtual float BlindSeconds(float fadeSec, float, float scale) const { return scale * fadeSec; }
 
 	virtual bool ItemUsable(edict_t *, edict_t *) const { return true; }
 

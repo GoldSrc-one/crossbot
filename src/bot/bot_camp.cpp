@@ -2,9 +2,10 @@
 #include <meta_api.h>
 
 #include <math.h>
+#include <stdio.h>
 
 #include "../game/game_profile.h"
-#include "../game/game_profile.h"
+#include "../game/objectives.h"
 #include "../game/teams.h"
 #include "../nav/nav.h"
 #include "../nav/nav_camp.h"
@@ -17,6 +18,7 @@
 #include "bot_camp.h"
 #include "bot_difficulty.h"
 #include "bot_goal.h"
+#include "bot_items.h"
 #include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
@@ -39,6 +41,25 @@ namespace
 	constexpr float kFriendFallbackCone = 90.f;
 	constexpr float kSpotForever = 1.0e9f;
 	constexpr float kSpotReuse = 30.f;
+	constexpr float kDeployTraverse = 45.f;
+
+	BotCamp::Bipod ChooseBipod(const CBot &bot, const Nav::CampSpot &camp)
+	{
+		if (!g_pGameProfile || !g_pGameProfile->CanDeploy(bot.pEdict))
+			return BotCamp::BIPOD_NONE;
+		if ((camp.flags & crossbot_nav::CAMP_DEPLOY) != 0)
+			return BotCamp::BIPOD_SANDBAG;
+		return camp.standScore <= camp.crouchScore ? BotCamp::BIPOD_PRONE : BotCamp::BIPOD_NONE;
+	}
+
+	bool Faces(const Vector &pos, float yaw, float arc, const Vector &threat)
+	{
+		Vector d = threat - pos;
+		if (d.x == 0.f && d.y == 0.f)
+			return true;
+		float toward = atan2f(d.y, d.x) * 180.f / NavMath::kPiF;
+		return fabsf(Bot_NormalizeAngle(toward - yaw)) <= arc;
+	}
 
 	bool ChooseDuck(const Nav::CampSpot &camp)
 	{
@@ -69,6 +90,15 @@ namespace
 
 		const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(inv.weapons[inv.activeIndex].id) : nullptr;
 		return spec ? spec->zoomFov : 0.f;
+	}
+
+	void FillSpot(const CBot &bot, const Nav::CampSpot &camp, BotCamp::RouteSpot &spot, float zoomFov)
+	{
+		spot.flags = camp.flags;
+		spot.arc = camp.arc;
+		spot.bipod = ChooseBipod(bot, camp);
+		spot.duck = spot.bipod == BotCamp::BIPOD_NONE && ChooseDuck(camp);
+		spot.zoom = spot.bipod == BotCamp::BIPOD_NONE && ChooseZoom(camp, spot.duck, zoomFov);
 	}
 
 	float CvarValue(const char *name, float fallback)
@@ -202,7 +232,7 @@ void BuildRoute(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &f
 	for (size_t i = 0; i < mesh.camps.size(); ++i)
 	{
 		const Nav::CampSpot &camp = mesh.camps[i];
-		if (camp.areaId < 0)
+		if (camp.areaId < 0 || !SpotAllowed(bot, camp))
 			continue;
 
 		size_t area = static_cast<size_t>(camp.areaId);
@@ -225,9 +255,7 @@ void BuildRoute(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &f
 		spot.yaw = camp.yaw;
 		spot.pitch = camp.pitch;
 		spot.toGoal = in;
-		spot.flags = camp.flags;
-		spot.duck = ChooseDuck(camp);
-		spot.zoom = ChooseZoom(camp, spot.duck, zoomFov);
+		FillSpot(bot, camp, spot, zoomFov);
 		st.route.push_back(spot);
 	}
 
@@ -276,6 +304,7 @@ void Track(CBot &bot)
 		{
 			st.scared = true;
 			st.scareDist = dist;
+			st.scarePos = contact->pos;
 			st.scareTime = gpGlobals->time;
 		}
 	}
@@ -337,6 +366,8 @@ bool Consider(CBot &bot)
 	{
 		if (spot.toGoal >= here)
 			continue;
+		if ((spot.flags & crossbot_nav::CAMP_DEPLOY) != 0 && !Faces(spot.pos, spot.yaw, spot.arc, st.scarePos))
+			continue;
 
 		float d = (spot.pos - bot.pEdict->v.origin).Length();
 		if (d > reach)
@@ -385,8 +416,9 @@ bool OnArrived(CBot &bot)
 	st.scareTime = gpGlobals->time;
 
 	BOT_VLOG("CrossBot: %s settles into its camp at (%.1f,%.1f,%.1f), watching yaw %.0f pitch %.0f, "
-		"%s%s\n", bot.name, st.spot.pos.x, st.spot.pos.y, st.spot.pos.z, st.spot.yaw, st.spot.pitch,
-		st.spot.duck ? "crouched" : "standing", st.spot.zoom ? ", zoomed in" : "");
+		"%s%s%s\n", bot.name, st.spot.pos.x, st.spot.pos.y, st.spot.pos.z, st.spot.yaw, st.spot.pitch,
+		st.spot.bipod == BIPOD_SANDBAG ? "deploying on sandbags" : st.spot.bipod == BIPOD_PRONE ? "deploying prone" :
+		st.spot.duck ? "crouched" : "standing", st.spot.zoom ? ", zoomed in" : "", "");
 	return true;
 }
 
@@ -550,9 +582,7 @@ void CommitTimed(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdF
 	spot.pitch = camp.pitch;
 	spot.toGoal = (camp.areaId >= 0 && static_cast<size_t>(camp.areaId) < toGoal.size())
 		? toGoal[camp.areaId] : Nav::kUnreachableSeconds;
-	spot.flags = camp.flags;
-	spot.duck = ChooseDuck(camp);
-	spot.zoom = ChooseZoom(camp, spot.duck, HeldZoomFov(bot));
+	FillSpot(bot, camp, spot, HeldZoomFov(bot));
 	spot.timed = true;
 	spot.holdFor = holdFor;
 	spot.raceRunner = runner;
@@ -612,6 +642,77 @@ void OnRespawn(CBot &bot)
 	st.nextFriendCheck = 0.f;
 	st.unzoom = false;
 	st.nextCampTime = 0.f;
+}
+
+bool SpotAllowed(const CBot &bot, const Nav::CampSpot &camp)
+{
+	if ((camp.flags & crossbot_nav::CAMP_DEPLOY) == 0)
+		return true;
+	if (!g_pGameProfile || !g_pGameProfile->CanDeploy(bot.pEdict))
+		return false;
+
+	const Objectives::Sandbag *bag = Objectives::FindSandbag(camp.entIndex);
+	return bag && bag->open;
+}
+
+bool FacesThreat(const Nav::CampSpot &camp, const Vector &threat)
+{
+	if ((camp.flags & crossbot_nav::CAMP_DEPLOY) == 0)
+		return true;
+	return Faces(camp.pos, camp.yaw, camp.arc, threat);
+}
+
+Bipod HeldBipod(const CBot &bot)
+{
+	return bot.camp.holding ? bot.camp.spot.bipod : BIPOD_NONE;
+}
+
+void AddSandbags()
+{
+	const Nav::NavMesh *mesh = Nav::Get();
+	if (!mesh)
+		return;
+
+	int added = 0;
+	const std::vector<Objectives::Sandbag> &bags = Objectives::Get().sandbags;
+	for (const Objectives::Sandbag &bag : bags)
+	{
+		edict_t *ent = bag.ent.Get();
+		if (!ent)
+			continue;
+
+		std::vector<BotItems::Placement> places;
+		BotItems::VolumeAreas(*mesh, ent, bag.point, places);
+
+		const BotItems::Placement *best = nullptr;
+		for (const BotItems::Placement &place : places)
+		{
+			if (!best || (place.point - bag.point).LengthSquared() < (best->point - bag.point).LengthSquared())
+				best = &place;
+		}
+		if (!best)
+			continue;
+
+		Nav::CampSpot spot;
+		spot.pos = best->point;
+		spot.yaw = bag.yaw;
+		spot.score = 1.f;
+		spot.standScore = 1.f;
+		spot.areaId = static_cast<int>(best->areaId);
+		spot.flags = crossbot_nav::CAMP_DEPLOY;
+		spot.arc = bag.range + kDeployTraverse;
+		spot.entIndex = g_engfuncs.pfnIndexOfEdict(ent);
+		Nav::AddCamp(spot);
+		++added;
+	}
+
+	if (!bags.empty())
+	{
+		char msg[128];
+		snprintf(msg, sizeof(msg), "CrossBot: %d of %d sandbags became camp spots.\n", added,
+			static_cast<int>(bags.size()));
+		SERVER_PRINT(msg);
+	}
 }
 
 }

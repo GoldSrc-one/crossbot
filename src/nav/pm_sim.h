@@ -57,7 +57,18 @@ constexpr float kPlayerFatalFallSpeed = 1024.f;
 constexpr float kPlayerMaxSafeFallSpeed = 580.f;
 constexpr float kDamageForFallSpeed = 100.f / (kPlayerFatalFallSpeed - kPlayerMaxSafeFallSpeed);
 
-float FallDamageFor(float fallSpeed);
+struct FallRule
+{
+	float safeSpeed;
+	float perSpeed;
+};
+
+constexpr FallRule kHlFall = { kPlayerMaxSafeFallSpeed, kDamageForFallSpeed };
+constexpr FallRule kNoFall = { 0.f, 0.f };
+
+float FallDamageFor(float fallSpeed, const FallRule &rule = kHlFall);
+float FallHeight(float fallSpeed, float gravity);
+float FallSpeed(float fallHeight, float gravity);
 float FallPenaltySeconds(float damage);
 float PlainJumpHeight(float gravity);
 

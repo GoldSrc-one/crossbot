@@ -827,6 +827,7 @@ AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajecto
 				result.flightTime = sim.Time();
 				result.landed = true;
 				result.fallDamage = PmSim::FallDamageFor(sim.FallSpeed());
+				result.fallHeight = PmSim::FallHeight(sim.FallSpeed(), m_pmPhysics.gravity);
 				landingArea = area;
 				return result;
 			}
@@ -1500,6 +1501,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			conn.exitAngle = traj.exitYaw;
 			conn.jumpBackDist = traj.jumpBackDist;
 			conn.fallDamage = traj.fallDamage;
+			conn.fallHeight = traj.fallHeight;
 			conn.flightTime = traj.flightTime;
 			conn.gravity = physics.gravityMultiplier;
 			conns.push_back(conn);

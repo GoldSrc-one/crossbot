@@ -82,6 +82,7 @@ struct MergedConnection
 
 	double jumpBackDist = 0.0;
 	double fallDamage = 0.0;
+	double fallHeight = 0.0;
 	double flightTime = 0.0;
 
 	crossbot_nav::DriftTerm drift;
@@ -102,7 +103,7 @@ struct MergeResult
 	std::vector<MergedConnection> conns;
 };
 
-float ConnectionCostSeconds(const MergedConnection &conn);
+float ConnectionCostSeconds(const MergedConnection &conn, bool withFall = true);
 
 float ConnectionTravelSeconds(const std::vector<Area> &areas, const MergedConnection &conn);
 

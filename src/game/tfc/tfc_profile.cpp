@@ -29,6 +29,9 @@ namespace
 	constexpr float kCaltropPrime = 0.5f;
 	constexpr float kGrenadeMaxRange = 650.f;
 
+	constexpr float kFallSafeSpeed = 650.f;
+	constexpr float kFallDamage = 100.f / 374.f;
+
 	enum TFCGrenade
 	{
 		TFC_GREN_NORMAL     = 1,
@@ -86,6 +89,11 @@ const char *CTFCProfile::GetName() const
 bool CTFCProfile::Detect(const char *gamedir) const
 {
 	return gamedir && CB_STRICMP(gamedir, "tfc") == 0;
+}
+
+PmSim::FallRule CTFCProfile::FallDamage() const
+{
+	return { kFallSafeSpeed, kFallDamage };
 }
 
 void CTFCProfile::ApplyAddArg(int, edict_t *pEdict, const char *arg, char *out,

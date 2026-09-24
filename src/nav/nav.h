@@ -20,5 +20,7 @@ void RemoveTeleport(int connIndex);
 void SetTeleportWait(int connIndex, float waitSeconds);
 bool IsAddedTeleport(int connIndex);
 
+void AddCamp(const CampSpot &spot);
+
 }
 

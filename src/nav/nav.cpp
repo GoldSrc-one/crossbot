@@ -158,5 +158,11 @@ bool IsAddedTeleport(int connIndex)
 	return std::find(g_addedUsed.begin(), g_addedUsed.end(), connIndex) != g_addedUsed.end();
 }
 
+void AddCamp(const CampSpot &spot)
+{
+	if (g_mesh)
+		g_mesh->camps.push_back(spot);
+}
+
 }
 

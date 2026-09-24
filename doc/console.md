@@ -8,7 +8,9 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   what is loaded. A game is playable only with both gamedata and a game profile — see
   `doc/games.md`. The third argument belongs to that game's profile rather than to this command:
   in deathmatch it is a player model, for `tfc` it is a class (`scout` .. `engineer`,
-  `civilian`, `randompc`), and for `cstrike`/`czero` it is a team (`t`, `ct`, `*` for auto). `*` or nothing means the profile chooses — a random installed model in
+  `civilian`, `randompc`), for `cstrike`/`czero` it is a team (`t`, `ct`, `*` for auto), and for
+  `dod` it is a class (`garand` .. `piat` for the Allies, `k98` .. `pschreck` for the Axis, `random`),
+  which also picks the team. `*` or nothing means the profile chooses — a random installed model in
   deathmatch, `randompc` in TFC, which rolls a new class on every spawn. A model the scan did not find is a
   warning rather than a refusal: it prints the installed list and uses the name anyway, because
   models living inside a `.pak` are invisible to the scan. See `doc/games.md`, `player_models.cpp`,

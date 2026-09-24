@@ -60,6 +60,8 @@ struct GameOffsets
 	int wpn_flAccuracy;
 	int wpn_flLastFire;
 	int wpn_iShotsFired;
+	int wpn_iWeaponState;
+	int gren_flStartThrow;
 
 	int rpg_cActiveRockets;
 	int eagle_iLaserActive;
@@ -85,6 +87,8 @@ struct GameOffsets
 	int plr_bIsVIP;
 	int plr_bShieldDrawn;
 	int plr_bOwnsShield;
+	int plr_iNextClass;
+	int plr_iFOV;
 
 	int tog_toggleState;
 	int tog_flWait;
@@ -134,6 +138,10 @@ struct MapOffsets
 	int dod_objGroup;
 	int dod_objOwner;
 	int dod_brkGroup;
+	int dod_sbYaw;
+	int dod_sbRange;
+	int dod_sbMaster;
+	int dod_esState;
 
 	int tfc_teamNo;
 	int tfc_goalNo;

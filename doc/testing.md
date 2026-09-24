@@ -370,7 +370,9 @@ again and tails the strategic decisions out of `nav_debug/logs/<map>_objectives.
 `-StrategicDebug` sets `crossbot_strategic_debug 1`. `-Plugin` sets `crossbot_objectives 0`, which is
 the same run on the AMXX plugin's goals, the A/B control. `-BotGame` picks the bots' game: on a
 `cstrike`/`czero` map it defaults to that game, native CS bots alternating `t`/`ct`; elsewhere to
-`valve`. `-BotGame valve` is the old valve-bots-on-a-CS-map run.
+`valve`. `-BotGame valve` is the old valve-bots-on-a-CS-map run. `-BotGame dod` adds native DoD bots
+with random classes; see `doc/games.md`, `dod_profile.cpp`. With `crossbot_verbose 1`, a DoD run shows
+`N of N sandbags became camp spots` at map load, and gunners log `deploys its gun` and `folds its gun`.
 
 **Read the first listing before the behaviour.** It runs before any bot joins, so it is a pure map
 assertion:

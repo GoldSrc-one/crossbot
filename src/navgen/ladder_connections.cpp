@@ -49,6 +49,7 @@ struct Dismount
 	Vec3 exit;
 	float exitYaw = 0.0f;
 	double fallDamage = 0.0;
+	double fallHeight = 0.0;
 	double flightTime = 0.0;
 	double height = 0.0;
 	const char *direction = "";
@@ -519,6 +520,7 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 					d.exit = exitPos;
 					d.exitYaw = exitYaw;
 					d.fallDamage = traj.fallDamage;
+					d.fallHeight = traj.fallHeight;
 					d.flightTime = traj.flightTime;
 					d.height = height;
 					d.direction = direction;
@@ -645,6 +647,7 @@ LadderStats BuildLadderConnections(const BspFile &bsp, const std::vector<Entity>
 						: kLadderClimbSpeed;
 					conn.exitAngle = climbYaw;
 					conn.fallDamage = d.fallDamage;
+					conn.fallHeight = d.fallHeight;
 					conn.flightTime = d.flightTime;
 
 					if (crouch)

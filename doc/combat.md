@@ -1206,6 +1206,10 @@ and `GetNextBestWeapon`'s empty-weapon switch both arm `m_flNextPrimaryAttack` t
 without it reads several shots per weapon pickup with firing disabled entirely. The observation is
 still the game's own timer — the gate only decides attribution.
 
+`TapButtons` sets the press flag too, except for throws (below). It used not to, so no semi-automatic
+shot was ever counted and `lastShotTime`, which the duel back-off reads, never moved for them. DoD,
+where nearly every gun is a tap, is what showed it: a Garand emptied its clip and read `shots=0`.
+
 `leadShots` is the same observation gated on the press having been a *solved-lead* one, carried on the
 press flag rather than read back afterwards — by the time the timer moves, selection may already have
 chosen something else. It is separate from `shots` because a bot keeps its spawn glock throughout a

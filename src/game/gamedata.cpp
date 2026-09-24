@@ -87,6 +87,8 @@ const Request kRequests[] = {
 	{ "CBasePlayerWeapon", "m_flAccuracy",            CB_OFF(wpn_flAccuracy), true },
 	{ "CBasePlayerWeapon", "m_flLastFire",            CB_OFF(wpn_flLastFire), true },
 	{ "CBasePlayerWeapon", "m_iShotsFired",           CB_OFF(wpn_iShotsFired), true },
+	{ "CBasePlayerWeapon", "m_iWeaponState",          CB_OFF(wpn_iWeaponState), true },
+	{ "CDoDGrenade",       "m_flStartThrow",          CB_OFF(gren_flStartThrow), true },
 
 	{ "CRpg",              "m_cActiveRockets",        CB_OFF(rpg_cActiveRockets), true },
 	{ "CEagle",            "m_iLaserActive",          CB_OFF(eagle_iLaserActive), true },
@@ -112,14 +114,16 @@ const Request kRequests[] = {
 	{ "CBasePlayer",       "m_bIsVIP",                CB_OFF(plr_bIsVIP), true },
 	{ "CBasePlayer",       "m_bShieldDrawn",          CB_OFF(plr_bShieldDrawn), true },
 	{ "CBasePlayer",       "m_bOwnsShield",           CB_OFF(plr_bOwnsShield), true },
+	{ "CBasePlayer",       "m_iNextClass",            CB_OFF(plr_iNextClass), true },
+	{ "CBasePlayer",       "m_iFOV",                  CB_OFF(plr_iFOV), true },
 
 	{ "CBaseToggle",       "m_toggle_state",          CB_OFF(tog_toggleState) },
 	{ "CBaseToggle",       "m_flWait",                CB_OFF(tog_flWait) },
 
 	{ "CBaseButton",       "m_fStayPushed",           CB_OFF(btn_fStayPushed) },
 
-	{ "CFuncTank",         "m_pController",           CB_OFF(tank_pController) },
-	{ "CFuncTank",         "m_vecControllerUsePos",   CB_OFF(tank_vecControllerUsePos) },
+	{ "CFuncTank",         "m_pController",           CB_OFF(tank_pController), true },
+	{ "CFuncTank",         "m_vecControllerUsePos",   CB_OFF(tank_vecControllerUsePos), true },
 	{ "CFuncTank",         "m_yawCenter",             CB_OFF(tank_yawCenter) },
 	{ "CFuncTank",         "m_yawRange",              CB_OFF(tank_yawRange) },
 	{ "CFuncTank",         "m_yawRate",               CB_OFF(tank_yawRate) },
@@ -129,7 +133,7 @@ const Request kRequests[] = {
 	{ "CFuncTank",         "m_fireRate",              CB_OFF(tank_fireRate) },
 	{ "CFuncTank",         "m_iszMaster",             CB_OFF(tank_iszMaster), true },
 
-	{ "CFuncTankControls", "m_pTank",                 CB_OFF(tankctl_pTank) },
+	{ "CFuncTankControls", "m_pTank",                 CB_OFF(tankctl_pTank), true },
 
 	{ "CMultiManager",     "m_cTargets",              CB_OFF(mm_cTargets) },
 	{ "CMultiManager",     "m_iTargetName",           CB_OFF(mm_iTargetName) },
@@ -166,6 +170,10 @@ const Request kDodRequests[] = {
 	{ "CObject",       "sz_Group",                CB_MAP(dod_objGroup) },
 	{ "CObject",       "m_hOwner",                CB_MAP(dod_objOwner) },
 	{ "CBreakable",    "sz_Group",                CB_MAP(dod_brkGroup) },
+	{ "CSandBag",      "m_nYaw",                  CB_MAP(dod_sbYaw), true },
+	{ "CSandBag",      "m_nRange",                CB_MAP(dod_sbRange), true },
+	{ "CSandBag",      "m_sMaster",               CB_MAP(dod_sbMaster), true },
+	{ "CEnvState",     "m_iState",                CB_MAP(dod_esState), true },
 };
 
 const Request kTfcRequests[] = {

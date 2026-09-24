@@ -125,6 +125,13 @@ namespace
 
 		if (melee != 0 && Carries(bot, melee))
 			return melee;
+
+		const BotInventory &inv = bot.inventory;
+		for (int i = 0; i < inv.count; ++i)
+		{
+			if (inv.weapons[i].id != 0 && g_pGameProfile->IsMeleeWeapon(inv.weapons[i].id))
+				return inv.weapons[i].id;
+		}
 		return ActiveWeaponId(bot);
 	}
 

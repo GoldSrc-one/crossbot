@@ -51,6 +51,7 @@ struct AirmoveTrajectory
 	float exitYaw = 0.0f;
 	float jumpBackDist = 0.0f;
 	float fallDamage = 0.0f;
+	float fallHeight = 0.0f;
 	float flightTime = 0.0f;
 	bool jumped = false;
 	bool landed = false;

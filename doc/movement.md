@@ -638,7 +638,8 @@ shot in the back is a free kill. So `Bot_MoveNav` calls `Bot_BailManeuver` right
 `BotCombat::DamageSource` names an attacker this frame — world damage, falls and the bot's own rockets
 resolve to nothing there, so they never cause a bail. The bail estimates the drop the eject implies —
 back down to the mount on a climb, down to `ladderDismountZ` on a descent — prices it with
-`PmSim::FallDamageFor`, and refuses only when that damage would be at least the bot's health. A fall
+`PmSim::FallDamageFor` under the game's rule (`Bot_FallDamage`), and refuses only when that damage
+would be at least the bot's health. A fall
 that hurts is still cheaper than hanging on a ladder under fire.
 
 It does not clear `ladderActive`. It sets `ladderBail`, and `RunLadderMove` drives the existing

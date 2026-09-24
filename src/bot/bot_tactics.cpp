@@ -33,6 +33,8 @@ namespace
 	constexpr float kDefendHoldMin = 5.f;
 	constexpr float kDefendHoldMax = 15.f;
 	constexpr float kFitFloor = 0.1f;
+	constexpr int kThreatSteps = 16;
+	constexpr float kThreatReach = 512.f;
 
 	std::unordered_map<uint32_t, std::vector<float>> g_spawnFields;
 
@@ -153,9 +155,45 @@ namespace
 		return std::max(kFitFloor, 1.f - range.Weight() * range.Mismatch(BotCamp::SpotDist(camp)));
 	}
 
-	bool Usable(const CBot &bot, const Nav::CampSpot &camp, size_t index)
+	Vector Downhill(const Nav::NavMesh &mesh, const std::vector<float> &field, int areaId, const Vector &from)
 	{
-		return BotCamp::SpotReady(bot, static_cast<int>(index)) && !FriendNear(bot, camp.pos);
+		int current = areaId;
+		for (int step = 0; step < kThreatSteps && current >= 0; ++step)
+		{
+			const Nav::Area &area = mesh.areas[current];
+			Vector d = area.centroid - from;
+			if (step > 0 && d.x * d.x + d.y * d.y >= kThreatReach * kThreatReach)
+				break;
+
+			int best = -1;
+			float bestCost = At(field, current);
+			for (uint32_t ci : area.connIndices)
+			{
+				const Nav::Connection &c = mesh.conns[ci];
+				int other = static_cast<int>(c.areaA == area.id ? c.areaB : c.areaA);
+				float cost = At(field, other);
+				if (cost < bestCost)
+				{
+					best = other;
+					bestCost = cost;
+				}
+			}
+			if (best < 0)
+				break;
+			current = best;
+		}
+		return current >= 0 ? mesh.areas[current].centroid : from;
+	}
+
+	bool Usable(const CBot &bot, const Nav::NavMesh &mesh, const Nav::CampSpot &camp, size_t index,
+		const std::vector<float> *threat)
+	{
+		if (!BotCamp::SpotReady(bot, static_cast<int>(index)) || FriendNear(bot, camp.pos) ||
+			!BotCamp::SpotAllowed(bot, camp))
+			return false;
+		if ((camp.flags & crossbot_nav::CAMP_DEPLOY) == 0)
+			return true;
+		return threat && BotCamp::FacesThreat(camp, Downhill(mesh, *threat, camp.areaId, camp.pos));
 	}
 }
 
@@ -255,7 +293,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 				continue;
 			if (clock + out + margin >= r)
 				continue;
-			if (!Usable(bot, camp, i))
+			if (!Usable(bot, mesh, camp, i, defend ? from : &toTarget))
 				continue;
 
 			Choice c;
@@ -301,7 +339,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 		const Nav::CampSpot &camp = mesh.camps[i];
 		float in = At(toTarget, camp.areaId);
 		float out = At(fromBot, camp.areaId);
-		if (in > kNearTarget || out >= Nav::kUnreachableSeconds || !Usable(bot, camp, i))
+		if (in > kNearTarget || out >= Nav::kUnreachableSeconds || !Usable(bot, mesh, camp, i, from))
 			continue;
 
 		Choice c;

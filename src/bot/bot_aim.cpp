@@ -489,6 +489,12 @@ Vector Bot_UpdateFacing(CBot &bot)
 		aim.pitchPending = 0.f;
 	}
 
+	if (g_pGameProfile)
+	{
+		g_pGameProfile->AdjustView(bot, dt, pitch, yaw);
+		yaw = Bot_NormalizeAngle(yaw);
+	}
+
 	Vector smoothed(pitch, yaw, 0.f);
 
 	pEdict->v.v_angle = smoothed;

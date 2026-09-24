@@ -39,6 +39,9 @@ constexpr int kCsVip = 3;
 constexpr int kDodAllies = 1;
 constexpr int kDodAxis = 2;
 constexpr int kDodSfTnt = 64;
+constexpr int kDodStateOn = 2;
+constexpr float kDodSandbagRange = 15.f;
+constexpr float kPlayerHalfHeight = 36.f;
 
 constexpr int kTfcStateActive = 1;
 constexpr int kTfcStateInactive = 2;
@@ -270,6 +273,24 @@ void ReadCs()
 	ForEach("info_player_start", [](edict_t *ent) { AddSpawn(ent, kCsCT); });
 }
 
+bool DodMasterOpen(int master)
+{
+	if (master == 0 || !gpGlobals->pStringBase)
+		return true;
+
+	const char *name = gpGlobals->pStringBase + static_cast<unsigned int>(master);
+	bool invert = name[0] == '~';
+	if (invert)
+		++name;
+
+	edict_t *ent = FIND_ENTITY_BY_STRING(nullptr, "targetname", name);
+	if (!ent || g_engfuncs.pfnIndexOfEdict(ent) == 0 || strcmp(CBotClassOf(ent), "env_state") != 0)
+		return true;
+
+	bool on = Int(ent, g_off.dod_esState) == kDodStateOn;
+	return on != invert;
+}
+
 void ReadDod()
 {
 	const int teams[2] = { kDodAllies, kDodAxis };
@@ -372,6 +393,21 @@ void ReadDod()
 
 	ForEach("info_player_allies", [](edict_t *ent) { AddSpawn(ent, kDodAllies); });
 	ForEach("info_player_axis", [](edict_t *ent) { AddSpawn(ent, kDodAxis); });
+
+	ForEach("dod_trigger_sandbag", [](edict_t *ent) {
+		if (g_off.dod_sbYaw <= 0)
+			return;
+
+		Objectives::Sandbag bag;
+		bag.ent.Set(ent);
+		bag.point = CenterOf(ent);
+		bag.point.z = ent->v.absmin.z + kPlayerHalfHeight;
+		bag.yaw = static_cast<float>(Int(ent, g_off.dod_sbYaw));
+		int range = Int(ent, g_off.dod_sbRange);
+		bag.range = range > 0 ? static_cast<float>(range) : kDodSandbagRange;
+		bag.open = DodMasterOpen(Int(ent, g_off.dod_sbMaster));
+		g_tables.sandbags.push_back(bag);
+	});
 }
 
 struct TfcGoal
@@ -518,6 +554,7 @@ void Rebuild()
 	g_tables.payloads.clear();
 	g_tables.carriers.clear();
 	g_tables.spawns.clear();
+	g_tables.sandbags.clear();
 	g_tables.detpackMap = false;
 
 	switch (g_reader)
@@ -619,6 +656,18 @@ void Refresh(bool force)
 const Tables &Get()
 {
 	return g_tables;
+}
+
+const Sandbag *FindSandbag(int entIndex)
+{
+	Refresh();
+	for (const Sandbag &bag : g_tables.sandbags)
+	{
+		edict_t *ent = bag.ent.Get();
+		if (ent && g_engfuncs.pfnIndexOfEdict(ent) == entIndex)
+			return &bag;
+	}
+	return nullptr;
 }
 
 void PrintStatus()

@@ -50,6 +50,9 @@ namespace
 	constexpr float kCSThrowRate = 6.f;
 	constexpr float kCSThrowSpeedMax = 750.f;
 
+	constexpr float kFallSafeSpeed = 500.f;
+	constexpr float kFallDamage = 100.f / 600.f * 1.25f;
+
 	constexpr int kMaxPlayers = 32;
 
 	constexpr int kShotsCap = 15;
@@ -178,6 +181,13 @@ const char *CCSProfile::GetName() const
 bool CCSProfile::Detect(const char *gamedir) const
 {
 	return gamedir && (CB_STRICMP(gamedir, "cstrike") == 0 || CB_STRICMP(gamedir, "czero") == 0);
+}
+
+PmSim::FallRule CCSProfile::FallDamage() const
+{
+	if (CVAR_GET_FLOAT("mp_falldamage") == 0.f)
+		return PmSim::kNoFall;
+	return { kFallSafeSpeed, kFallDamage };
 }
 
 void CCSProfile::ApplyAddArg(int, edict_t *pEdict, const char *arg, char *out, unsigned int size) const
