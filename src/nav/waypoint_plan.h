@@ -63,6 +63,7 @@ struct PlanDetour
 	float waitSeconds = 0.f;
 	float detourSeconds = 0.f;
 	bool blocked = false;
+	uint32_t teamMask = 0;
 };
 
 struct PlanArea
@@ -85,6 +86,8 @@ struct PlanArea
 
 	std::vector<PlanGate> edgeGates;
 };
+
+void SetDetourTeamMask(uint32_t mask);
 
 const PlanDetour *FindDetour(const PlanArea &area, uint32_t fromId);
 
@@ -220,6 +223,7 @@ struct PendingGate
 	NavFunnel::Gate gate;
 
 	uint32_t insideArea = 0;
+	uint32_t fromArea = 0;
 	uint32_t toArea = 0;
 	bool crouch = false;
 	float clearance = kPlanClearance;
@@ -245,13 +249,15 @@ class PlanWalker
 public:
 	PlanWalker() = default;
 	PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces,
-		const std::vector<std::vector<uint32_t>> *walkPredecessors = nullptr);
+		const std::vector<std::vector<uint32_t>> *walkPredecessors = nullptr,
+		const std::vector<std::vector<uint32_t>> *walkSuccessors = nullptr);
 
 	void Reset(const Vector &startPoint);
 	bool Cross(const PlanConnection &conn, uint32_t connIndex, uint32_t fromId, uint32_t toId);
 	void Finish(const Vector &goalPoint, int lastAreaId);
 	void Retract();
 	void Respeed();
+	void Relax(uint32_t startArea);
 
 	void AddCost(float seconds) { m_extraTime += seconds; }
 
@@ -283,9 +289,15 @@ private:
 	float RunupDistance(const Vector &launchPoint, const Vector &back, float want, uint32_t fromId,
 		uint32_t &runupAreaOut, size_t &gatesKeptOut) const;
 
-	float ReachBack(const Vector &from, const Vector &back, float want, uint32_t fromId) const;
+	float ReachBack(const Vector &from, const Vector &back, float want, uint32_t fromId,
+		const std::vector<std::vector<uint32_t>> *adjacency = nullptr,
+		std::vector<uint32_t> *crossed = nullptr) const;
 
 	bool LegIsWalkable(const Vector &from, const Vector &to, uint32_t fromId) const;
+
+	int AreaOfWaypoint(size_t index, uint32_t startArea) const;
+
+	bool LegIsClear(size_t from, size_t to, uint32_t fromArea) const;
 
 	bool AreaUnderWater(int areaId) const;
 
@@ -293,6 +305,7 @@ private:
 
 	const std::vector<PlanArea> *m_areas = nullptr;
 	const std::vector<std::vector<uint32_t>> *m_walkPreds = nullptr;
+	const std::vector<std::vector<uint32_t>> *m_walkSuccs = nullptr;
 	const PlanTraceContext *m_traces = nullptr;
 	PlanStats m_stats;
 

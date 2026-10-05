@@ -5,8 +5,10 @@ param(
     [int]$Bots = 6,
     [int]$Seconds = 120,
     [switch]$StrategicDebug,
+    [switch]$TacticsDebug,
     [switch]$Plugin,
     [int]$Tactics = 1,
+    [int]$Snipe = 1,
     [string]$HLDSDir = "D:\hlds",
     [string]$BotGame = ''
 )
@@ -27,6 +29,8 @@ $commands = @('mp_timelimit 0')
 if ($StrategicDebug) { $commands += 'crossbot_strategic_debug 1' }
 if ($Plugin) { $commands += 'crossbot_objectives 0' }
 $commands += "crossbot_tactics $Tactics"
+$commands += "crossbot_snipe $Snipe"
+if ($TacticsDebug) { $commands += 'crossbot_tactics_debug 1' }
 
 Write-Host "Starting HLDS on port $Port..."
 $startResult = & "$scriptDir\test_server_start.ps1" -Map $Map -Port $Port -Games @('valve', $Game) -WaitSeconds 90 `

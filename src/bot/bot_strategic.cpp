@@ -771,16 +771,17 @@ void NoteLife(CBot &bot)
 
 bool Outranked(const CBot &bot, int payload)
 {
-	if (KindOf(payload) == KIND_MAP || RankOf(payload) >= kRankOverride)
+	if (KindOf(payload) == KIND_MAP)
 		return false;
 	float since = gpGlobals->time - bot.strat.overrideDrop;
 	if (since >= 0.f && since < kOverrideRetry)
 		return false;
+	int rank = RankOf(payload);
 	std::vector<Intent> intents;
 	Intents(bot, intents);
 	for (const Intent &intent : intents)
 	{
-		if (intent.rank >= kRankOverride && MemoReady(bot, intent.ent) <= gpGlobals->time)
+		if (intent.rank > rank && MemoReady(bot, intent.ent) <= gpGlobals->time)
 			return true;
 	}
 	return false;
@@ -790,6 +791,12 @@ int TargetKind(const CBot &bot)
 {
 	const BotGoal::Stop &target = bot.goal.target;
 	return target.tier == BotGoal::GOAL_STRATEGIC ? KindOf(target.payload) : -1;
+}
+
+bool Urgent(const CBot &bot)
+{
+	const BotGoal::Stop &target = bot.goal.target;
+	return target.tier == BotGoal::GOAL_STRATEGIC && RankOf(target.payload) >= kRankDeliver;
 }
 
 bool FortifyTarget(const Objectives::Site &site, int teamBit)

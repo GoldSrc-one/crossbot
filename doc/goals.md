@@ -80,10 +80,9 @@ distort the cost values.
 a timid route finishes that route; carefulness only refreshes on the repaths that already happen.
 
 `crossbot_careful 0` disables the whole thing and restores pure fastest-route planning.
-`crossbot_careful_pin` exists because readiness on a live bot does not reach the ends of its range --
-a fresh spawn with a crowbar and a glock at full health sits around `0.35`, so the derived carefulness
-never leaves the middle. Set it to a value in `[0,1]` to force one and sweep the range; `-1` (the
-default) leaves it off. The `Repath` line reports `careful=`, `route=` (true seconds) and `score=`
+Readiness on a live bot does not reach the ends of its range -- a fresh spawn with a crowbar and a
+glock at full health sits around `0.35`, so the derived carefulness never leaves the middle. The
+`Repath` line reports `careful=`, `route=` (true seconds) and `score=`
 (exposure-weighted) side by side, which is how you tell the factor actually reached the planner: at
 `careful 0` the two are equal by construction.
 
@@ -91,7 +90,7 @@ default) leaves it off. The `Repath` line reports `careful=`, `route=` (true sec
 
 Carefulness has a mirror. Every weapon is annotated `RANGE_CLOSE` or `RANGE_LONG` in `WeaponSpec`
 (`doc/games.md`), and `Bot_RangeBias` turns the held weapon's class into a `NavPlan::RangeBias` whose
-weight is `readiness` scaled by `crossbot_range_pref` -- the complement of carefulness, which scales
+weight is `readiness` scaled by `kRangePref` (0.5) -- the complement of carefulness, which scales
 by `(1 - readiness)`. The two multiply, so neither is lost: a hurt, badly armed bot ignores weapon
 range and just avoids exposed ground, while a healthy, well armed one shapes its route to suit what it
 is holding. It goes to the same two searches, `Nav::PlanPath` from `Repath` and `Nav::AreaCosts` from
@@ -100,8 +99,8 @@ carefulness at 0.
 
 What the route is weighed against is the connection's mean open sight distance in the direction it is
 crossed (`doc/path_planning.md`, "Range bias: routing to ground the weapon can use"). A shotgun is happy below
-`crossbot_range_short` (512), a crossbow wants above `crossbot_range_long` (1024), and in between the
-penalty ramps. Both are cvars because the right numbers are per map: on crossfire the per-connection
+`RangeBias::shortDist` (512), a crossbow wants above `RangeBias::longDist` (1024), and in between the
+penalty ramps. Both live in `plan_search.h`, but the right numbers are per map: on crossfire the per-connection
 open distance runs a mean of 530 and a max of 1584, so measure with `crossbot_vantage_status` before
 trusting the defaults.
 
@@ -110,10 +109,6 @@ the wrong route once the crossbow comes out, so the nav update forces a repath w
 class differs from `bot.plannedRangeClass`. Comparing the class rather than the weapon id means
 swapping between two close-range guns costs nothing. The stamp happens only once the plan stands,
 so a failed search does not consume the retry trigger.
-
-`crossbot_range_pin` (-1) forces the weight the way `crossbot_careful_pin` does, and
-`crossbot_range_force` (-1, else 1 = close / 2 = long) forces the class without holding the weapon.
-Together they make an A/B of the same start and goal deterministic.
 
 ## Gathering: memos, outcomes, chargers and volumes
 
@@ -200,6 +195,13 @@ item in z — one jump. Without that, four TFC demomen on crossover2 spent a who
 cycling between six spawn-room pickups 110 units over their heads instead of walking to their
 objective; the loop was visible as "reached ... without touching it" once per item per 30 s.
 
+**The goal point is the item's origin clamped into that area**, not the raw origin. Only the point
+reaches the planner — `Repath` re-resolves it with `FindAreaNearest`, and an origin at the item's base
+sits 18 units under its area in z, so the exact test misses and the fallback takes whichever area's
+box it falls in. For a pickup on a low ledge that is the floor area beside it: on fy_snow the CS bots
+routed `[..., 6]` instead of `[..., 6, 5]` and walked into the 32-unit lip of the HE-grenade ledges
+forever, never taking the jump the mesh has.
+
 **Arrival does not mean touching.** The follower finishes a leg when the route is done, which can be
 tens of units short of a small entity — on casbah, pickups were being abandoned from 60-120 units
 away. A pickup that has not been touched on arrival gets up to 1.5 s of walking straight at the
@@ -271,8 +273,49 @@ the map. `BotItems::Sated` compares `ChargerValue` against `ChargerFullValue` du
 marks the candidate `SCAN_SATED`, printed as `no need`. It applies to chargers as well as pools;
 this is the one place the change alters behaviour that already existed.
 
-It is not health-need weighting. A hurt bot still has no extra pull toward health — a pool competes
-with a shotgun on seconds of travel and nothing else.
+Need weighting is separate, and so far only TFC packs have it (see "Worth: need pulls" below). Every
+other item still competes with a shotgun on seconds of travel and nothing else.
+
+### Every item is judged by the game that owns it
+
+`ScanItems` walks every edict, and each one is classified, tested with `ItemUsable`, priced with
+`ItemWorth` and sated-checked inside `XPlay::ScopedGame(JudgeGame(ent))`. That is the owner game's
+profile and offsets, falling back to the bot's own when the owner has no profile. `Classify`,
+`ChargerValue`, `ChargerFull` and the respawn delay go through the same switch, so a valve bot sees an
+`info_tfgoal` as TFC sees it, and a TFC bot sees a `func_healthcharger` as valve sees it. The bot's own
+fields are then read from its object in that game. For a foreign player, that is the copy CrossPlay
+keeps (`FixProxyTeam` fills `team_no` there).
+
+Nothing models what actually crosses games. CrossPlay's Touch filter blocks some foreign touches, and
+the pickups AMXX plugin (`goldsrc.one/scripting/pickups.sma`) translates foreign weapons, items, ammo
+and TFC pack ammo and grenades into the toucher's game. The bot simply goes and touches the item, and
+`OnTouch` learns the result: if the item vanished it was picked up; if it stayed, `NoteFull` applies.
+Measured on casbah with four valve bots for four minutes: 24 detours to TFC packs, 19 pickups, and
+zero "full of" lines.
+
+`XPlay::EnterGame` returns early when asked for the game that is already current, since the scan
+enters a game once per edict.
+
+### Worth: need pulls
+
+`IGameProfile::ItemWorth(player, item, ammoNeed)` is how many seconds of extra travel the item is
+worth to this player right now. It is 0 for everything except TFC packs (`doc/games.md`). The worth is
+used in two places in `bot_goal.cpp`:
+
+- **Detour**: the per-candidate budget is `kDetourBudget + worth` (6s, `bot_goal.cpp`). The monotone
+  `toGoal[c] < here` rule still holds.
+- **Override**: in `Select`, any gather candidate whose worth beats its `CandCost` becomes the target
+  before the strategic tier, cheapest first, logged as `wants gather (needed)`. It is skipped while the
+  bot is an `Objectives` carrier. It cannot loop: after the pickup, need has dropped and the item is
+  memoed as respawning.
+
+`ammoNeed` is computed once per scan, in the bot's own game: the fraction of its non-melee weapons
+that `BotFire::WeaponArmed` calls dry. It is coarse, because a weapon with two rounds left counts as
+armed. No game exposes per-weapon maximum ammo generically. Add that when a profile needs finer
+ammo pull than "out".
+
+`IGameProfile::ItemRespawnIn(item, kind)` defaults to `ItemRespawnDelay(kind)`. TFC returns the
+pack's own `wait`, which ranges from 1 to 60 s.
 
 ### Why the nav sweep disables it
 
@@ -302,6 +345,10 @@ Owns *what the bot wants*, in three tiers: `GOAL_STRATEGIC` (`bot_strategic.cpp`
 first tier with a surviving candidate wins outright — a bot with a tank to mount does not weigh it
 against a shotgun, it goes to the tank.
 
+The one exception to tier order is a needed gather item, whose worth beats its cost (see "Worth: need
+pulls" above). It goes ahead of every tier. The gather scan runs once per `Select`, and the promoted,
+needed and gather-tier lists are all cut from that one scan.
+
 `Select` still runs only where `Bot_MoveNav` finds `hasGoal == false`, so no tier preempts a goal in
 flight. Re-tiering happens at arrival, not continuously; a higher tier appearing mid-route waits.
 
@@ -311,17 +358,18 @@ one" above, unchanged and non-negotiable: `travelSeconds + costSeconds`, plus th
 `|point − reference| / kNavRunSpeed` refinement so ties inside the bot's own area break sensibly.
 
 **Gather picks the cheapest; fun and strategic pick at random, weighted toward closer.** The weight
-is `1 / (cost + 2)^crossbot_goal_bias`. Nearest-first is right for items — the point of a battery is
+is `1 / (cost + 2)^kBias`, `kBias` 2. Nearest-first is right for items — the point of a battery is
 that it is on the way — and wrong for gimmicks, because four bots that all deterministically pick the
 nearest tank produce three bots queueing behind one. The `+ 2` floor keeps a goal the bot is standing
 on from taking the entire weight.
 
-**A profile can switch tiers off.** `CollectTier` returns nothing for a tier the bot's profile refuses
-(`IGameProfile::AllowsGoalTier`, `doc/games.md`). That one gate covers the tier loop and the
-pickup-priority promotion both. Nothing downstream needs its own check: fun behaviour only runs after a
-fun goal mounted or boarded something, and camping needs a camp route, which `Select` only builds for
-tiers above gather. Combat is a state, not a goal, and is unaffected. Ricochet admits `GOAL_GATHER`
-alone.
+**`roam` sits between fun and gather.** When the strategic tier's only surviving candidates are `roam`
+(an objective map with nothing to do, which is every fy_ map), `Select` holds them back, tries fun with
+its promoted pickups, and roams only if that is empty; gather comes after roam. Without this a bot on
+fy_snow never gathered again after its first pick, and never mounted anything.
+
+Every game's bots pursue every tier. Camping needs a camp route, which `Select` only builds for tiers
+above gather.
 
 ### The distant target is sticky; only the leg is re-decided
 
@@ -335,7 +383,7 @@ answers one question — where does *this* leg stop?
 ```
 here = toGoal[botArea]
 accept candidate c when   toGoal[c] < here                      strictly closer in
-                    and   fromBot[c] + toGoal[c] - here <= crossbot_detour_budget
+                    and   fromBot[c] + toGoal[c] - here <= kDetourBudget + worth[c]
 minimise fromBot[c]
 ```
 
@@ -389,6 +437,7 @@ target itself goes through the owning tier's `OnRepathFailed` and kills the goal
 `BotCombat` clears the goal outright (`BotGoal::Clear`), target and cached reverse field included.
 That is inherited behaviour — the gather tier did the same before there were tiers — and it means
 that on a small map with several bots, fun goals get re-selected often. Fighting is not a goal.
+The one exception is a tank between the bot and its enemy — see "Taking a tank mid-fight" below.
 
 ## bot_camp.cpp
 
@@ -420,7 +469,11 @@ property of the target, so the trigger can re-test "still on the way" against
 reason the set is prepared rather than searched for.
 
 Gather targets get no route set, matching the rule that a gather target is its own stop and is never
-detoured from. A bot sprinting for a health kit does not stop to camp.
+detoured from. A bot sprinting for a health kit does not stop to camp. Neither do urgent strategic
+targets (`BotStrategic::Urgent`, rank deliver and above: a planted bomb, a carried flag, a detpack
+run): on de_dust2 a CT two seconds from a ticking bomb heard a T, crept toward the noise on `+speed`,
+then camped, while the clock ran out. No route set means no scare reaction at all -- the charge
+below is gated on it too, so it also stopped firing on gather targets, which it did before.
 
 ### One tracker, two rules
 
@@ -428,21 +481,37 @@ detoured from. A bot sprinting for a health kit does not stop to camp.
 there is one running minimum rather than two mechanisms:
 
 ```
-contact = BotSense::NearestLive(origin, crossbot_camp_radius, livingOnly)
-if (contact && (!scared || dist < scareDist - 16))   scared = true, scareDist = dist, scareTime = now
+contact = BotSense::NearestLive(origin, kScareRadius, livingOnly)
+if (contact && (!scared || (contact.time > scareTime && dist < scareDist - 16)))
+                                                     scared = true, scareDist = dist, scareTime = now
 if (scared && now - scareTime > 1.0)                 scared = false        // and stop camping
 ```
 
 `NearestLive` has already applied the sense decay, so anything it returns is a contact the bot still
-believes in, and **nothing further gates this on the slot's own age.** An age test was tried and
-removed: footsteps arrive in bursts, and a window tight enough to mean anything flickered the tracker
-on and off between them, several times a second. The cost of dropping it is that walking toward a
-remembered position also reads as closing in -- which is the right answer for somewhere the bot heard
-something a moment ago, and the 5s decay is what stops it being the answer forever.
+believes in, and **nothing gates the start of a scare on the slot's own age.** An age window was tried
+and removed: footsteps arrive in bursts, and a window tight enough to mean anything flickered the
+tracker on and off between them, several times a second.
+
+**The refresh does need new evidence, though** -- `contact.time > scareTime`, the slot updated since
+the last refresh. Without it the bot's own walk counted as closing in: a bot heading toward a sound
+up to 5s old shrank the distance itself and stayed scared until it got there. The charge below runs
+until the scare lapses, so every charge crept the full way to `scarePos` at walk speed, staring at
+the noise -- up to 1024 units, about eight seconds -- and a bot routing past an old noise re-camped
+on every 5s cooldown. Seen live on de_dust2, including CTs headed for a planted bomb. Now a scare
+outlives its last closer sound by one second, whoever moved.
 
 Because the minimum resets with the scare, a contact that approaches, stops, and approaches again
 frightens the bot twice. Because it is a minimum and not a last-known distance, an enemy that closes
 and then retreats keeps the bot camped for exactly one second past its closest approach.
+
+Once per scare, before looking for cover, the bot flips a coin weighted by combat readiness
+(`EvaluateCombat`, 0..1). A win makes it charge `scarePos` as a camp stop that never holds, creeping
+with the profile's `CreepButtons()` (DOD `+duck`) or under its `CreepSpeed()` (CS 130: footsteps go
+silent below 150); profiles offering neither never charge. CS used to press `IN_RUN` here, which
+does nothing for a bot: `+speed` walking is the client scaling its own `forwardmove` by
+`cl_movespeedkey`, and ReGameDLL's server-side `IN_RUN` only ever *speeds up* (when `fuser3 > 0`).
+So the move is scaled down to the cap in `Bot_RunPlayerMove`, the same place the buttons are added.
+A loss falls through to cover. The charge ends on arrival or when the scare lapses.
 
 A visible teammate overrides the scare entirely:
 
@@ -465,7 +534,7 @@ handed control back.
 
 ### Committing, and the walk
 
-The trigger picks the **nearest** qualifying spot within `crossbot_camp_reach`, which mirrors the
+The trigger picks the **nearest** qualifying spot within `kReachRadius` (512), which mirrors the
 gather detour's `min out`. It is committed through `BotGoal::CommitCampStop` as an ordinary detour
 stop carrying `Stop::camp` -- so the target survives it, the A* plans to it, `follow.done` detects the
 arrival, and `OnRepathFailed`/`OnBlocked` already know to go straight on. The only new arrival case is
@@ -502,8 +571,8 @@ the extra 34 units of eye height gets the bot to stand up.
 
 **Zoom is a property of the spot, not of the moment.** The spot's `spread` is the RMS angle its
 visible targets sit off the measured facing, so twice it is the arc the camper actually has to sweep.
-Zoom when that sweep fits inside the scope -- `spread * 2 <= zoomFov * crossbot_camp_zoom` -- and the
-targets are far enough away for magnification to buy anything (`dist >= crossbot_camp_zoom_dist`).
+Zoom when that sweep fits inside the scope -- `spread * 2 <= zoomFov * kZoomShare` -- and the
+targets are far enough away for magnification to buy anything (`dist >= kZoomDist`).
 `zoomFov` is `WeaponSpec::zoomFov` of whatever the bot holds when `BuildRoute` runs, so a bot with no
 scope never plans to zoom. `BotFire::ZoomButtons` still owns the toggle -- it used to bail on
 `!fire.aimValid`, which is precisely the camping case, and now asks `BotCamp::WantZoom` instead. The
@@ -529,12 +598,12 @@ committed, 22 abandoned by the travel check, 26 reached and held, 21 ended by th
 
 ### cvars
 
-`crossbot_camp` (1), `crossbot_camp_budget` (3s, the detour budget in `BuildRoute` -- tighter than
-`crossbot_detour_budget`'s 6s because camping is a sidestep), `crossbot_camp_radius` (1024),
-`crossbot_camp_reach` (512), `crossbot_camp_zoom` (0.85, the share of the zoomed FOV the sweep may
-fill), `crossbot_camp_zoom_dist` (768, the range below which a scope buys nothing),
-`crossbot_camp_debug` (0, gates the per-retarget route line and the scare transitions; the commit,
-arrival and leave lines are plain `BOT_VLOG`).
+`crossbot_camp` (-1, the difficulty tier; on below expert), `crossbot_camp_debug` (0, gates the
+per-retarget route line and the scare transitions; the commit, arrival and leave lines are plain
+`BOT_VLOG`). The tuning is constants in `bot_camp.cpp`: `kBudget` (3s, the detour budget in
+`BuildRoute` -- tighter than `kDetourBudget`'s 6s because camping is a sidestep), `kScareRadius` (1024),
+`kReachRadius` (512), `kZoomShare` (0.85, the share of the zoomed FOV the sweep may fill),
+`kZoomDist` (768, the range below which a scope buys nothing).
 
 ### Sandbags and prone camps
 
@@ -681,12 +750,13 @@ chasing each other and re-planning at 4 Hz.
   line to the goal — the same trace the blast itself does (`DetpackExplode` 22955) — and the cheapest
   reachable one wins. `Tables::detpackMap` records that the map has such goals at all, which is what
   stops a scared demoman from wasting the pack elsewhere.
-- **A higher rank only preempts through `Outranked`.** A strategic goal is otherwise sticky until it
-  dies or the hold times out, so a detpack site appearing after the bot took a flag would never be seen.
-  `RefreshStrategic` drops the current goal when an intent at the override rank is available and not on
-  cooldown, at most once every 10 s per bot. The cooldown matters: without it a bot whose override
-  intent is unreachable dropped and re-picked its goal every refresh — 1657 times in one five-minute
-  run before the limiter went in.
+- **A higher rank only preempts through `Outranked`.** An event that removes the current intent ends
+  the goal through `ValidFor`; one that only adds a better intent leaves the old goal valid. A strategic
+  goal is otherwise sticky until it dies or the hold times out, so a CT holding a bomb site never saw
+  the planted C4 (rank 3 over rank 0) and spent the C4 timer at the wrong site. `RefreshStrategic` drops
+  the current goal when any intent ranked above it is available and not on cooldown, at most once every
+  10 s per bot. The cooldown matters: without it a bot whose better intent is unreachable dropped and
+  re-picked its goal every refresh — 1657 times in one five-minute run before the limiter went in.
 - **TFC `items_allowed` is a goal number, not a mask.** `APMeetsCriteria` (tfc.c:111822) passes only if
   the `item_tfgoal` with that `goal_no` has the activator as `pev->owner`; `has_item_from_group` is the
   same test on `group_no`. A touch goal fires only with `goal_activation & 1` and `goal_state != 1`
@@ -782,12 +852,16 @@ toTarget[c] < toTarget[runner]                                   ahead of the ru
 fromRunner[c] + toTarget[c] - toTarget[runner] <= budget          on a near-ideal runner -> target path
 clock + fromBot[c] + margin < fromRunner[c]                       the bot arrives first
 not in the bot's spot memo, no friend within 96 units
-weighted fit/(fromBot + 2)^crossbot_goal_bias
+weighted fit/(fromBot + 2)^kBias                    support
+weighted fit/(fromRunner + 2)^kBias                 defend: meet the enemy as far out as the race allows
 ```
+
+A defender weighted by its own walk took the spot it was standing on: de_dust2's CT spawn is within the 3s
+budget of the A site, so 8 of 14 guard picks were spots 50 to 81 units from `info_player_start`.
 
 `fit` makes the spot suit the held weapon: `max(0.1, 1 - w * mismatch(dist))`, where `dist` is the camp's
 `standDist` or `crouchDist` for the stance it will hold, and `w` and `mismatch` come from the routing range
-bias (`Bot_RangeBias`, `crossbot_range_short/long/pref/pin/force`) without its readiness factor. A long
+bias (`Bot_RangeBias`: `kRangePref`, `RangeBias::shortDist/longDist`) without its readiness factor. A long
 weapon favours far-seeing spots, a close one near ones; a weapon with no range class leaves `fit` at 1.
 
 That is the gather detour's acceptance test with the runner in place of the bot. Nothing stores anyone's
@@ -819,10 +893,17 @@ the bot moved more than 128 units in one frame and landed within 64 of one of it
 
 ### Fields
 
-`toTarget` is `bot.goal.toTargetCosts`, already computed for the target. `fromBot` is the forward field
-`Select` or `Advance` just ran. A friend runner costs one `Nav::AreaCosts` per pick; an enemy spawn's field is
-cached per spawn area until `BotTactics::ForgetMap` at map change. Runner fields use default planner parameters:
-the runner is assumed generic.
+Every field `Pick` compares uses default planner parameters, so all of them are in plain seconds: `toTarget`
+and `fromBot` are two `Nav::AreaCosts` runs of their own per pick, not the bot's `toTargetCosts` and forward
+field. A friend runner costs one more; an enemy spawn's field is cached per spawn area until
+`BotTactics::ForgetMap` at map change.
+
+**The bot's own fields are not seconds.** Carefulness scales each edge by `1 - careful + careful * exposure` and
+the range bias scales it again, so on de_dust2 `toTargetCosts` put the enemy spawn 10.9 to 16.4s from a site
+that its raw spawn field put 18.8 to 21.5s away. Mixed into `r + in - toTarget[runner] <= budget`, that 5 to 9s
+gap beat the 3s budget for every spot on the enemy's path: 0 of 116 spots passed in 36 of 36 calm defender
+picks, and each one fell back to a spot near the site, which on de_dust2 is the CT spawn. Sniper posts compare
+`fromBot` with `toTarget[bot]` only, both the bot's own, and keep the bot's fields.
 
 ### Holding, re-picking, failing
 
@@ -850,11 +931,46 @@ Log lines: `supports X toward Y, camps at spot N (...)`, `guards Y against spawn
 `falls back to spot N near Y`, `lost the race to spot N ... not trying it again this life`, and
 `starts a life as an attacker|a defender`.
 
+### Sniper posts
+
+A post is a camp spot that overlooks the target itself. Unlike every other camp it does not have to be on the
+way: a dead end is fine, because the bot is there to shoot at the target, not to get closer to it. `Pick` tries a
+post first, for any strategic kind except `deliver` and `heal`, and falls through to the rules above when
+nothing qualifies.
+
+```
+BotFire::SnipeWeapon > 0                  best-valued RANGE_LONG weapon that still has ammo
+!BotTactics::Closest                      a live friend is closer to the target, by toTarget
+fromBot[c] <= toTarget[bot]               never walk further to the post than to the target
+SpotDist(c) >= snipe_dist                 the spot looks far
+snipe_dist <= d, d/2 <= SpotDist(c) <= 2d  d = eye to target point + 12; range matches the spot
+angle(facing(c), eye -> target) <= 45     the target is inside the spot's measured 90-degree view
+Usable (memo, no friend on it, sandbag rules), then Roll weighted by nearness
+```
+
+**The closest teammate never snipes.** That is the whole guard against a team of snipers watching an objective
+nobody takes. It is re-checked every 0.5s on the walk and in the hold (`BotCamp` `NowClosest`): a sniper that
+becomes the closest abandons or leaves, and `Advance` re-runs `PickStop`, which now refuses the post, so it heads
+for the target. A lone bot is always the closest, so the one-bot nav sweep never snipes.
+
+`BotCamp::CommitSnipe` is `CommitTimed` with no race, holding 5 to 15s, and then faces the target rather than
+the spot's measured axis, zooms whenever the weapon has a scope, and records the weapon. While the stop is a
+post, `IdleSelect` switches to that weapon and will not switch away from it. There is no line-of-sight trace:
+the facing and range match is the whole test.
+
+**`kSnipeDist` is 512, not `kZoomDist`'s 768.** `SpotDist` is a mean over everything visible and
+reads low (de_dust2: median 595, p90 847). At 768 each bombsite had 1 to 3 posts; at 512 it has 7 to 9.
+
+Measured, 180s, six bots: de_dust2 14 posts, 6 of them ended by `now the closest`; casbah (ten TFC bots) 22.
+Log lines: `snipes X from spot N (... away, ... deg off its facing, ...s walk, ...s from the target), holding
+...s with <weapon>`, `... (it is now the closest to the target)`, and with debug `finds no sniping post over X`.
+
 ### cvars
 
 `crossbot_tactics` (1; 0 keeps the intents but never picks a spot, so `support` walks to the site and `defend`
-guards it -- the A/B lever), `crossbot_tactics_budget` (3s of path slack), `crossbot_tactics_margin` (1s the
-bot must beat the runner by), `crossbot_tactics_debug` (0, adds the no-spot line).
+guards it -- the A/B lever), `crossbot_tactics_debug` (0, adds the no-spot and no-post lines),
+`crossbot_snipe` (1, the posts' A/B lever). Constants in `bot_tactics.cpp`: `kBudget` (3s of path slack),
+`kMargin` (1s the bot must beat the runner by), `kSnipeDist` (512).
 
 ## bot_fun.cpp
 
@@ -1043,6 +1159,29 @@ on that tank, purely so a bot being spawn-camped from behind cannot loop mount �
 Damage from *inside* the cone is not a dismount at all — that is what the gun is for.
 
 **The tank died, or the bot did.**
+
+### Taking a tank mid-fight
+
+`BotCombat::Run` asks `BotFun::CombatTank` before it drops the goal to fight. Every 0.5 s it scans
+the `FUN_TANK` entries and keeps a use point from `CollectUsePoints` only when all three hold:
+
+- it is closer to the bot than the enemy is (straight-line),
+- it lies toward the enemy: 2-D `dot(bot→point, bot→enemy) >= kCombatTankDot` (0.7, about 45°),
+- the enemy's eye is inside the tank's traversable cone — a gun that cannot bear on the enemy
+  would only sit aiming at its cone centre and get the bot shot.
+
+The nearest survivor is committed straight as the target with `BotGoal::Commit` (no detours, no camp
+route), `combatTank` is set, and combat returns false with `driving` cleared, so `Bot_MoveNav` walks the
+ordinary path and `RunArrival` / `Run` mount and fire exactly as for a chosen fun goal.
+
+Once committed the pursuit is held, not re-tested, until the target turns invalid or `Forget` runs;
+re-testing every frame flipped it on and off as the bot's angle to the enemy changed. Failure needs no
+new code: a repath failure, a block or the arrival timeout puts the usual cooldown on that controls
+entity, `combatTank` clears with `Forget`, and since `driving` is false the next `Run` drops the goal
+and fights on foot. Reachability is deliberately not searched for at scan time — that is a Dijkstra on
+the frame a fight starts, and the repath failure already answers it.
+
+The log line is `X goes for the tank func_tank mid-fight, N out, <enemy> M out`.
 
 ### What is deliberately not here
 

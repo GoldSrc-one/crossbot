@@ -194,8 +194,12 @@ bool CTFCProfile::OffhandRead(edict_t *pEdict, int slot, OffhandInfo &out) const
 		out.minRange = 250.f;
 		break;
 	case TFC_GREN_CONCUSSION:
-	case TFC_GREN_NAIL:
 	case TFC_GREN_GAS:
+		out.mode.quirks |= WPN_Q_TEAM_UNSAFE;
+		out.use = OFFHAND_ATTACK;
+		out.minRange = 300.f;
+		break;
+	case TFC_GREN_NAIL:
 	case TFC_GREN_EMP:
 		out.use = OFFHAND_ATTACK;
 		out.minRange = 300.f;
@@ -256,6 +260,17 @@ bool CTFCProfile::HoldFire(const CBot &bot) const
 bool CTFCProfile::ItemUsable(edict_t *player, edict_t *item) const
 {
 	return TFCAbility::ItemUsable(player, item);
+}
+
+float CTFCProfile::ItemWorth(edict_t *player, edict_t *item, float ammoNeed) const
+{
+	return TFCAbility::ItemWorth(player, item, ammoNeed);
+}
+
+float CTFCProfile::ItemRespawnIn(edict_t *item, ItemKind kind) const
+{
+	float wait = TFCAbility::PackWait(item);
+	return wait > 0.f ? wait : ItemRespawnDelay(kind);
 }
 
 bool CTFCProfile::Fortifies(edict_t *pEdict) const

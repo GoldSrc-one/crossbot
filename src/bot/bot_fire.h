@@ -53,6 +53,8 @@ struct State
 	bool aimArc = false;
 
 	bool zoomed = false;
+	bool cycling = false;
+	bool cycleEnd = false;
 
 	Commit commit = COMMIT_NONE;
 	float commitStart = 0.f;
@@ -105,6 +107,21 @@ struct State
 	int idleSwitches = 0;
 	int ambushes = 0;
 	int duels = 0;
+	bool heard = false;
+	bool friendCloser = false;
+	Vector heardPoint;
+	Vector heardVel;
+	float nextHeardTime = 0.f;
+	int heardThrows = 0;
+	int harmVetoes = 0;
+	int throwId = 0;
+	Vector throwPoint;
+	Vector throwVel;
+	bool throwReady = false;
+	bool throwHeard = false;
+	int throwDrops = 0;
+	bool throwBan = false;
+	float throwBanCombat = 0.f;
 	int idleReloads = 0;
 	int gaussJumps = 0;
 	int wallbangs = 0;
@@ -134,7 +151,11 @@ bool Supported(const WeaponMode &mode);
 const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed);
 
 bool SolveOffhand(const WeaponMode &mode, const Vector &src, const Vector &base, const Vector &vel,
-	Vector &look, float &flight);
+	Vector &look, float &flight, edict_t *thrower = nullptr, Vector *impact = nullptr);
+
+bool FriendCloser(edict_t *self, const Vector &point);
+
+bool HarmFavors(edict_t *self, const Vector &impact, const Vector &enemy, float radius);
 
 bool WeaponArmed(const BotInventory &inv, const BotWeapon &w);
 
@@ -145,6 +166,8 @@ bool ModeUsable(CBot &bot, const BotWeapon &w, const WeaponMode &m, float dist, 
 
 float CarryOf(const CBot &bot, int weaponId);
 
+int SnipeWeapon(CBot &bot);
+
 void AccrueCarry(CBot &bot);
 
 void Reset(CBot &bot);
@@ -153,9 +176,9 @@ void Think(CBot &bot);
 
 bool AimPoint(const CBot &bot, Vector &point);
 
-unsigned short Buttons(CBot &bot, const Vector &angles);
+bool ThrowBanned(const CBot &bot);
 
-bool BraceEnabled();
+unsigned short Buttons(CBot &bot, const Vector &angles);
 
 bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly);
 

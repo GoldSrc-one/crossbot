@@ -53,17 +53,12 @@ PmSim::FallRule CRicochetProfile::FallDamage() const
 	return PmSim::kNoFall;
 }
 
-bool CRicochetProfile::AllowsGoalTier(BotGoal::Tier tier) const
-{
-	return tier == BotGoal::GOAL_GATHER;
-}
-
 ItemKind CRicochetProfile::ClassifyItem(edict_t *ent) const
 {
 	if (!ent || ent->free)
 		return ITEM_NONE;
 
-	return strncmp(CBotClassOf(ent), "item_", 5) == 0 ? ITEM_PICKUP : ITEM_NONE;
+	return strncmp(CBotClassOf(ent), "item_", 5) == 0 || IsArmouryArmor(ent) ? ITEM_PICKUP : ITEM_NONE;
 }
 
 float CRicochetProfile::ItemRespawnDelay(ItemKind) const

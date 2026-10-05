@@ -11,10 +11,10 @@ namespace BotDiff
 namespace
 {
 	const Row kTable[DIFF_COUNT] = {
-		{ "easy",   0.40f, 2.00f, 0.85f, 0.50f, 0.000f,  0,  0, true,  true,  true,  false, false, false, false, false, false, false, 2.00f, -0.15f, 0.25f },
-		{ "normal", 0.30f, 1.00f, 1.00f, 0.25f, 0.000f,  0,  0, true,  true,  true,  false, false, false, false, false, false, false, 1.50f, -0.05f, 0.15f },
-		{ "hard",   0.25f, 0.60f, 1.10f, 0.25f, 1.500f, 60, 70, true,  true,  true,  false, false, false, true,  true,  false, false, 1.25f,  0.00f, 0.10f },
-		{ "expert", 0.20f, 0.35f, 1.20f, 0.25f, 1.125f, 90, 90, false, false, false, true,  true,  true,  true,  true,  true,  true,  1.00f,  0.00f, 0.05f },
+		{ "easy",   0.40f, 0.85f, 0.25f, 0.50f, 0.000f, 10,  0, true,  true,  true,  false, false, false, false, false, false, false, 2.00f, -0.15f, 0.25f },
+		{ "normal", 0.30f, 1.00f, 0.15f, 0.25f, 2.000f, 40,  0, true,  true,  true,  false, false, false, false, false, false, false, 1.50f, -0.05f, 0.15f },
+		{ "hard",   0.25f, 1.10f, 0.10f, 0.25f, 1.500f, 60, 70, true,  true,  true,  false, false, false, true,  true,  false, false, 1.25f,  0.00f, 0.10f },
+		{ "expert", 0.20f, 1.20f, 0.05f, 0.25f, 1.125f, 90, 90, false, false, false, true,  true,  true,  true,  true,  true,  true,  1.00f,  0.00f, 0.05f },
 	};
 
 	bool Boolean(const char *name, bool tiered)
@@ -79,14 +79,14 @@ void AimDelay(float &loOut, float &hiOut)
 	hiOut = mid * (1.f + kDelaySpread);
 }
 
-float AimError()
-{
-	return Scalar("crossbot_aim_error", Table(Current()).aimError);
-}
-
 float TurnScale()
 {
 	return Scalar("crossbot_turn_scale", Table(Current()).turnScale);
+}
+
+float AimGain()
+{
+	return Scalar("crossbot_aim_gain", Table(Current()).aimGain);
 }
 
 float OppoInterval()
@@ -193,12 +193,12 @@ void PrintStatus()
 		Pin("crossbot_aim_delay") >= 0.f ? "pinned" : "tier");
 	SERVER_PRINT(msg);
 
-	snprintf(msg, sizeof(msg), "  %-18s %-12.2f %s\n", "aim_error", AimError(),
-		Pin("crossbot_aim_error") >= 0.f ? "pinned" : "tier");
-	SERVER_PRINT(msg);
-
 	snprintf(msg, sizeof(msg), "  %-18s %-12.2f %s\n", "turn_scale", TurnScale(),
 		Pin("crossbot_turn_scale") >= 0.f ? "pinned" : "tier");
+	SERVER_PRINT(msg);
+
+	snprintf(msg, sizeof(msg), "  %-18s %-12.2f %s\n", "aim_gain", AimGain(),
+		Pin("crossbot_aim_gain") >= 0.f ? "pinned" : "tier");
 	SERVER_PRINT(msg);
 
 	snprintf(msg, sizeof(msg), "  %-18s %-12.2f %s\n", "oppo_interval", OppoInterval(),

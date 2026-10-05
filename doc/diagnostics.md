@@ -135,6 +135,10 @@ On by default is the deliberate choice: these lines are how nav work gets debugg
 `doc/path_planning.md`, `doc/movement.md` and this file quote them. The flag exists so a profiling or saturated-server run can drop
 them, not so the normal build goes quiet. Pair it with `-DCROSSBOT_PERF=ON` for a profiling build.
 
+### And the cvar defaults off
+ a verbose build `BOT_VLOG` is `if (BotLog::Enabled()) Verbosef(...)`, so each site is one branch on
+`crossbot_verbose` and neither the arguments nor the `snprintf` run while it is 0 -- the per-site guard paragraph above asks for, done once in the macro. The cvar defaults to 0 because a normal server not scroll a repath dump per bot per goal; `test_server_start.ps1` sets it to 1 for every test. `#if BOT_VLOG_ON` blocks (trace accumulation, the `penalizedOnRoute` count) stay compile-time.
+
 Two cvars follow the flag rather than surviving it: `crossbot_gather_debug` (both the item scan dump
 and the touch dump) reports disabled in a non-verbose build instead of doing the work and printing
 nothing.

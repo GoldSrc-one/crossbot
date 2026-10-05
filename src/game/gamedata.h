@@ -39,6 +39,10 @@ struct GameOffsets
 	int ent_goalState;
 	int ent_itemsAllowed;
 	int ent_increaseTeam;
+	int ent_goalEffects;
+	int ent_goalResult;
+	int ent_wait;
+	int ent_goalCriteria[12];
 
 	int box_flTouchableAt;
 	int box_rgpPlayerItems;

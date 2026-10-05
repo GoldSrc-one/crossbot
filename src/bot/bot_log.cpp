@@ -11,6 +11,14 @@
 namespace BotLog
 {
 
+bool Enabled()
+{
+	static cvar_t *cvar = nullptr;
+	if (!cvar)
+		cvar = g_engfuncs.pfnCVarGetPointer("crossbot_verbose");
+	return cvar && cvar->value != 0.f;
+}
+
 void Verbosef(const char *fmt, ...)
 {
 	char msg[1024];

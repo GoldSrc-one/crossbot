@@ -13,9 +13,12 @@
 #include "bot_deploy.h"
 #include "bot_fun.h"
 #include "bot_gauss.h"
+#include "bot_grenade.h"
+#include "bot_sense.h"
 #include "bot_weapons.h"
 #include "../game/game_profile.h"
 #include "../game/give_item.h"
+#include "../game/teams.h"
 #include "../nav/nav_math.h"
 #include "../nav/pm_sim.h"
 #include "../nav/path_profile.h"
@@ -92,6 +95,12 @@ namespace
 	constexpr float kDuckEyeDrop = 34.f;
 
 	constexpr int kMaxChoices = 64;
+
+	constexpr float kHeardCooldownMin = 4.f;
+
+	constexpr float kHeardCooldownMax = 9.f;
+
+	constexpr float kHarmLift = 1.f;
 
 	char g_pin[32] = "";
 
@@ -564,6 +573,20 @@ namespace
 		return d.Length();
 	}
 
+	float Harm(const Vector &blast, const Vector &body, float radius, edict_t *ignore)
+	{
+		float d = (body - blast).Length();
+		if (radius <= 0.f || d >= radius)
+			return 0.f;
+
+		TraceResult tr;
+		TRACE_LINE(blast, body, ignore_monsters, ignore, &tr);
+		if (tr.flFraction < 1.f)
+			return 0.f;
+
+		return 1.f - d / radius;
+	}
+
 	bool SplashSafe(BotFire::State &fire, const Vector &eye, const Vector &impact)
 	{
 		if ((impact - fire.targetPoint).Length() < (impact - eye).Length())
@@ -600,6 +623,8 @@ namespace
 	{
 		BotFire::State &fire = bot.fire;
 		const BotInventory &inv = bot.inventory;
+		int before = fire.shots;
+		bool heard = fire.heard;
 
 		bool pressed = fire.pressed;
 		bool pressedLead = fire.pressedLead;
@@ -655,7 +680,18 @@ namespace
 				++fire.shots;
 				fire.lastShotTime = gpGlobals->time;
 				++fire.throwShots;
+				if (w.id == fire.throwId)
+				{
+					heard = heard || fire.throwHeard;
+					fire.throwId = 0;
+				}
 			}
+		}
+
+		if (heard && fire.shots != before)
+		{
+			++fire.heardThrows;
+			fire.nextHeardTime = gpGlobals->time + RANDOM_FLOAT(kHeardCooldownMin, kHeardCooldownMax);
 		}
 
 		fire.lastTimerId = w.id;
@@ -671,8 +707,19 @@ namespace
 		fire.weaponId = 0;
 		fire.wantReload = false;
 		fire.commit = BotFire::COMMIT_NONE;
+		fire.heard = false;
+		fire.throwId = 0;
 		ClearAim(fire);
 		fire.lastReason = reason;
+	}
+
+	void Intend(BotFire::State &fire, int id, const Vector &point, const Vector &vel, bool heard)
+	{
+		fire.throwId = id;
+		fire.throwPoint = point;
+		fire.throwVel = vel;
+		fire.throwReady = false;
+		fire.throwHeard = heard;
 	}
 
 	bool StickyHold(CBot &bot)
@@ -710,7 +757,7 @@ namespace
 		edict_t *pEdict = bot.pEdict;
 		fire.rayWall = false;
 
-		MAKE_VECTORS(angles + pEdict->v.punchangle);
+		MAKE_VECTORS(angles + bot.aim.perceivedPunch);
 		Vector dir = gpGlobals->v_forward;
 
 		Vector centre = fire.aimPoint;
@@ -801,12 +848,19 @@ namespace
 			return false;
 		}
 
+		if (fire.heard && !BotFire::HarmFavors(bot.pEdict, impact, fire.targetPoint, m.splash))
+		{
+			++fire.harmVetoes;
+			fire.lastReason = "arc-harm";
+			return false;
+		}
+
 		return true;
 	}
 
 	bool ArcOnTarget(CBot &bot, const Vector &angles, const WeaponMode &m, const Vector &eye)
 	{
-		Vector view = angles + bot.pEdict->v.punchangle;
+		Vector view = angles + bot.aim.perceivedPunch;
 		float speed = ModeSpeed(bot, m);
 		Vector drift = InheritedVelocity(bot, m);
 
@@ -832,13 +886,12 @@ namespace
 		return ArcImpactHits(bot, m, eye, impact, hit);
 	}
 
-	unsigned short ZoomButtons(CBot &bot, const WeaponSpec &spec, const BotWeapon &w, const Vector &eye)
+	unsigned short ZoomButtons(CBot &bot, const WeaponSpec &spec, const BotWeapon &w, const Vector &eye,
+		bool *blocked = nullptr)
 	{
 		BotFire::State &fire = bot.fire;
 
 		if (spec.primaryZoomed.fire == FIRE_NONE || spec.secondary.toggle != TOGGLE_ZOOM)
-			return 0;
-		if (w.nextSecondaryAttack > 0.f)
 			return 0;
 
 		bool want = false;
@@ -858,6 +911,12 @@ namespace
 			want = (g_pinZoom != 0);
 		if (want == fire.zoomed)
 			return 0;
+		if (w.nextSecondaryAttack > 0.f || fire.cycleEnd)
+		{
+			if (blocked)
+				*blocked = true;
+			return 0;
+		}
 
 		return IN_ATTACK2;
 	}
@@ -1094,7 +1153,7 @@ bool Supported(const WeaponMode &mode)
 }
 
 bool SolveOffhand(const WeaponMode &mode, const Vector &src, const Vector &base, const Vector &vel,
-	Vector &look, float &flight)
+	Vector &look, float &flight, edict_t *thrower, Vector *impact)
 {
 	ThrowShot shot;
 	Vector point;
@@ -1105,7 +1164,37 @@ bool SolveOffhand(const WeaponMode &mode, const Vector &src, const Vector &base,
 	MAKE_VECTORS(Vector(shot.pitch, atan2f(shot.dir.y, shot.dir.x) * (180.f / kPiF), 0.f));
 	look = gpGlobals->v_forward;
 	flight = shot.flight;
+
+	if (impact)
+	{
+		bool hit = false;
+		*impact = SimulateArc(thrower, src + shot.dir * kArcMuzzleFwd, shot.dir * shot.speed,
+			ArcGravity(mode), hit);
+	}
 	return true;
+}
+
+bool FriendCloser(edict_t *self, const Vector &point)
+{
+	float mine = (self->v.origin - point).Length();
+	for (int i = 1; i <= gpGlobals->maxClients; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!ent || ent == self || !CBotIsLivePlayer(ent) || g_pGameProfile->IsDead(ent))
+			continue;
+		if (Teams::Of(self, ent) != Teams::REL_FRIEND)
+			continue;
+		if ((ent->v.origin - point).Length() < mine)
+			return true;
+	}
+	return false;
+}
+
+bool HarmFavors(edict_t *self, const Vector &impact, const Vector &enemy, float radius)
+{
+	Vector blast = impact + Vector(0.f, 0.f, kHarmLift);
+	float theirs = Harm(blast, enemy, radius, self);
+	return theirs > 0.f && theirs > Harm(blast, self->v.origin, radius, self);
 }
 
 const WeaponMode *ModeOf(const WeaponSpec &spec, Mode mode, bool zoomed)
@@ -1308,6 +1397,29 @@ static bool WeaponViable(CBot &bot, const BotWeapon &w)
 	return ModeViable(bot, w, spec->primary, false) || ModeViable(bot, w, spec->secondary, false);
 }
 
+int SnipeWeapon(CBot &bot)
+{
+	const BotInventory &inv = bot.inventory;
+	int bestId = 0;
+	float bestScore = 0.f;
+
+	for (int i = 0; i < inv.count; ++i)
+	{
+		const BotWeapon &w = inv.weapons[i];
+		const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(w.id) : nullptr;
+		if (!spec || spec->rangeClass != RANGE_LONG || !WeaponViable(bot, w))
+			continue;
+
+		float score = WeaponScore(w.id);
+		if (bestId == 0 || score > bestScore)
+		{
+			bestId = w.id;
+			bestScore = score;
+		}
+	}
+	return bestId;
+}
+
 static int ReloadDeficit(CBot &bot, const BotWeapon &w)
 {
 	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(w.id);
@@ -1394,6 +1506,11 @@ static bool ChoiceEligible(const CBot &bot, const Choice &choice, Pass pass, flo
 
 	const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(id) : nullptr;
 	const WeaponMode *m = spec ? ModeOf(*spec, choice.mode, bot.fire.zoomed) : nullptr;
+
+	if (m && bot.fire.friendCloser && (m->quirks & WPN_Q_TEAM_UNSAFE) != 0)
+		return false;
+	if (m && IsThrow(*m) && ThrowBanned(bot))
+		return false;
 
 	switch (pass)
 	{
@@ -1525,13 +1642,31 @@ static int PickAmbush(CBot &bot, const Choice *choices, int count, float dist)
 	return pick;
 }
 
-static bool SelectWeapon(CBot &bot, const Choice &choice, const char *reason)
+static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
+	const Vector &baseVel, const Vector &eye, float dist, float rise, bool holding, bool strict,
+	bool &triedBoth);
+
+static bool SelectWeapon(CBot &bot, const Choice &choice, const char *reason,
+	const Vector *point = nullptr, const Vector &vel = Vector(0.f, 0.f, 0.f), bool heard = false)
 {
 	State &fire = bot.fire;
 	const BotWeapon &want = bot.inventory.weapons[choice.index];
 	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(want.id);
 
+	const WeaponMode *m = (spec && point) ? ModeOf(*spec, choice.mode, false) : nullptr;
+	bool intend = false;
+	if (m && IsThrow(*m))
+	{
+		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+		bool triedBoth = false;
+		intend = TryKeep(bot, want, *point, vel, eye, (*point - eye).Length(), point->z - eye.z, false, true,
+			triedBoth);
+	}
+
 	fire.nextSelectTime = gpGlobals->time + kSelectInterval;
+	if (m && IsThrow(*m) && !intend)
+		return false;
+
 	fire.pendingId = want.id;
 	fire.pendingMode = choice.mode;
 
@@ -1539,6 +1674,9 @@ static bool SelectWeapon(CBot &bot, const Choice &choice, const char *reason)
 
 	if (!spec || !spec->classname || !g_pGameProfile->SelectWeapon(bot.pEdict, *spec))
 		return false;
+
+	if (intend)
+		Intend(fire, want.id, *point, vel, heard);
 
 	++fire.switches;
 	return true;
@@ -1580,6 +1718,10 @@ static bool TryKeep(CBot &bot, const BotWeapon &active, const Vector &basePoint,
 	{
 		const WeaponMode *m = ModeOf(*spec, order[i], EffectiveZoom(bot, *spec));
 		if (!m)
+			continue;
+		if (!holding && fire.friendCloser && (m->quirks & WPN_Q_TEAM_UNSAFE) != 0)
+			continue;
+		if (!holding && IsThrow(*m) && ThrowBanned(bot))
 			continue;
 		if (!holding && !ModeUsable(bot, active, *m, dist, rise, strict))
 			continue;
@@ -1745,6 +1887,26 @@ static void IdleSelect(CBot &bot)
 
 	fire.idleReloadId = 0;
 
+	int snipeId = BotCamp::SnipeId(bot);
+	if (snipeId > 0)
+	{
+		if (active && active->id == snipeId)
+			return;
+
+		for (int i = 0; i < inv.count; ++i)
+		{
+			if (inv.weapons[i].id != snipeId)
+				continue;
+
+			Choice choice;
+			choice.index = i;
+			choice.mode = MODE_PRIMARY;
+			if (SelectWeapon(bot, choice, "snipe"))
+				++fire.idleSwitches;
+			return;
+		}
+	}
+
 	Choice choices[kMaxChoices];
 	int count = BuildChoices(bot, true, false, 0.f, 0.f, 0, choices, kMaxChoices);
 
@@ -1799,12 +1961,143 @@ static bool IdleCharge(CBot &bot, const BotWeapon *active)
 	return true;
 }
 
+static bool HeardThrow(CBot &bot, const BotWeapon *active, bool holding)
+{
+	State &fire = bot.fire;
+	Vector point;
+	Vector vel;
+	edict_t *ent = nullptr;
+	bool ready = holding ? fire.heard : gpGlobals->time >= fire.nextHeardTime;
+
+	if (ready && BotGrenade::Enabled() && BotSense::HeardEnemy(bot, point, vel, &ent))
+	{
+		fire.targetSize = ent->v.maxs - ent->v.mins;
+		fire.haveSize = true;
+		fire.heardPoint = point;
+		fire.heardVel = vel;
+	}
+	else if (holding && fire.heard)
+	{
+		point = fire.heardPoint;
+		vel = fire.heardVel;
+	}
+	else
+	{
+		fire.heard = false;
+		return false;
+	}
+
+	fire.heard = true;
+	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+	float dist = (point - eye).Length();
+	float rise = point.z - eye.z;
+	fire.lastRange = dist;
+	fire.friendCloser = FriendCloser(bot.pEdict, point);
+	bool triedBoth = false;
+
+	if (active && IsAmbushWeapon(active->id) && active->id != g_pGameProfile->AmbushWeapon(AMBUSH_GRAPPLE))
+	{
+		if (TryKeep(bot, *active, point, vel, eye, dist, rise, holding, true, triedBoth))
+		{
+			const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active->id);
+			const WeaponMode *m = spec ? ModeOf(*spec, fire.mode, false) : nullptr;
+			if (!holding && m && IsThrow(*m))
+				Intend(fire, active->id, point, vel, true);
+			return true;
+		}
+	}
+	else if (!holding && gpGlobals->time >= fire.nextSelectTime)
+	{
+		Choice choices[kMaxChoices];
+		int count = BuildChoices(bot, true, true, dist, rise, 0, choices, kMaxChoices);
+		int pick = PickBest(bot, choices, count, PASS_THROWN, dist);
+		if (pick >= 0 && TryKeep(bot, bot.inventory.weapons[choices[pick].index], point, vel, eye, dist,
+			rise, false, true, triedBoth) && SelectWeapon(bot, choices[pick], "heard", &point, vel, true))
+			return true;
+	}
+
+	fire.heard = holding;
+	return false;
+}
+
+static bool DropIntent(CBot &bot)
+{
+	State &fire = bot.fire;
+	int dropped = fire.throwId;
+	fire.throwId = 0;
+	++fire.throwDrops;
+	fire.nextHeardTime = gpGlobals->time + RANDOM_FLOAT(kHeardCooldownMin, kHeardCooldownMax);
+	if (bot.combat.active)
+	{
+		fire.throwBan = true;
+		fire.throwBanCombat = bot.combat.startTime;
+	}
+
+	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+	float dist = (fire.throwPoint - eye).Length();
+	float rise = fire.throwPoint.z - eye.z;
+	Choice choices[kMaxChoices];
+	int count = BuildChoices(bot, true, true, dist, rise, dropped, choices, kMaxChoices);
+	int pick = PickChoice(bot, choices, count, dist);
+	if (pick < 0)
+	{
+		count = BuildChoices(bot, false, true, dist, rise, dropped, choices, kMaxChoices);
+		pick = PickChoice(bot, choices, count, dist);
+	}
+	return pick >= 0 && SelectWeapon(bot, choices[pick], "throw-dropped");
+}
+
+static bool ThrowIntent(CBot &bot, const BotWeapon *active, bool holding, bool haveTarget,
+	const Vector &basePoint, const Vector &baseVel)
+{
+	State &fire = bot.fire;
+	const BotInventory &inv = bot.inventory;
+
+	const BotWeapon *grenade = nullptr;
+	for (int i = 0; i < inv.count && !grenade; ++i)
+		if (inv.weapons[i].id == fire.throwId)
+			grenade = &inv.weapons[i];
+
+	if (!grenade)
+	{
+		fire.throwId = 0;
+		return false;
+	}
+
+	if (!holding && (!active || active->id != fire.throwId))
+		return DropIntent(bot);
+
+	bool ready = inv.nextAttack <= 0.f && grenade->nextPrimaryAttack <= 0.f;
+	if (!holding && ready && fire.throwReady && fire.commit != COMMIT_THROW && grenade->throwStart == 0.f)
+		return DropIntent(bot);
+	fire.throwReady = ready;
+
+	fire.heard = false;
+	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+	bool triedBoth = false;
+
+	bool solved = (haveTarget && TryKeep(bot, *grenade, basePoint, baseVel, eye, (basePoint - eye).Length(),
+		basePoint.z - eye.z, holding, false, triedBoth)) ||
+		TryKeep(bot, *grenade, fire.throwPoint, fire.throwVel, eye, (fire.throwPoint - eye).Length(),
+		fire.throwPoint.z - eye.z, holding, false, triedBoth);
+
+	if (!solved && !holding)
+		return DropIntent(bot);
+
+	if (!ready && !holding)
+		fire.lastReason = "drawing";
+	else if (!solved)
+		fire.lastReason = "throw-blocked";
+	return true;
+}
+
 void Think(CBot &bot)
 {
 	State &fire = bot.fire;
 
 	fire.lastMiss = -1.f;
 	fire.lastTol = -1.f;
+	fire.friendCloser = false;
 
 	CountShots(bot);
 
@@ -1910,8 +2203,14 @@ void Think(CBot &bot)
 	bool haveTarget = fire.haveSize &&
 		BotAim::ReadPredicted(bot, BotAim::Delay(bot), basePoint, &baseVel);
 
+	if (fire.throwId != 0 && ThrowIntent(bot, active, holding, haveTarget, basePoint, baseVel))
+		return;
+
 	if (!haveTarget)
 	{
+		if (HeardThrow(bot, active, holding))
+			return;
+
 		if (holding && fire.commit == COMMIT_CHARGE && ChargeExpired(fire, *active))
 			holding = false;
 
@@ -1943,10 +2242,12 @@ void Think(CBot &bot)
 	}
 
 	fire.idleReloadId = 0;
+	fire.heard = false;
 
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
 	float dist = (basePoint - eye).Length();
 	fire.lastRange = dist;
+	fire.friendCloser = FriendCloser(bot.pEdict, basePoint);
 	float rise = basePoint.z - eye.z;
 
 	bool triedBoth = false;
@@ -1961,7 +2262,7 @@ void Think(CBot &bot)
 		int count = BuildChoices(bot, true, true, dist, rise, 0, choices, kMaxChoices);
 		int pick = PickAmbush(bot, choices, count, dist);
 
-		if (pick >= 0 && SelectWeapon(bot, choices[pick], "ambush"))
+		if (pick >= 0 && SelectWeapon(bot, choices[pick], "ambush", &basePoint, baseVel))
 		{
 			++fire.ambushes;
 			return;
@@ -1996,7 +2297,7 @@ void Think(CBot &bot)
 
 		if (pick >= 0)
 		{
-			if (SelectWeapon(bot, choices[pick], dry ? "empty-switch" : "select") && dry)
+			if (SelectWeapon(bot, choices[pick], dry ? "empty-switch" : "select", &basePoint, baseVel) && dry)
 				++fire.emptySwitches;
 			return;
 		}
@@ -2014,7 +2315,7 @@ void Think(CBot &bot)
 
 		if (pick >= 0)
 		{
-			SelectWeapon(bot, choices[pick], "select");
+			SelectWeapon(bot, choices[pick], "select", &basePoint, baseVel);
 			return;
 		}
 	}
@@ -2030,6 +2331,12 @@ bool AimPoint(const CBot &bot, Vector &point)
 
 	point = fire.aimPoint;
 	return true;
+}
+
+bool ThrowBanned(const CBot &bot)
+{
+	const State &fire = bot.fire;
+	return fire.throwBan && bot.combat.active && bot.combat.startTime == fire.throwBanCombat;
 }
 
 static unsigned short IdleReloadButton(CBot &bot, const BotWeapon &w)
@@ -2067,6 +2374,8 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	const BotWeapon &w = inv.weapons[inv.activeIndex];
 
 	fire.zoomed = Zoomed(bot.pEdict);
+	fire.cycleEnd = fire.cycling && w.nextPrimaryAttack <= 0.f;
+	fire.cycling = w.nextPrimaryAttack > 0.f;
 
 	if (fire.zoomed)
 	{
@@ -2145,11 +2454,17 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 
 	if (!charge)
 	{
-		unsigned short toggle = ZoomButtons(bot, *spec, w, eye);
+		bool blocked = false;
+		unsigned short toggle = ZoomButtons(bot, *spec, w, eye, &blocked);
 		if (toggle != 0)
 		{
 			fire.lastReason = "zooming";
 			return toggle;
+		}
+		if (blocked && !fire.zoomed)
+		{
+			fire.lastReason = "zoom-wait";
+			return 0;
 		}
 	}
 
@@ -2218,12 +2533,6 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	return AttackButton(fire.mode);
 }
 
-bool BraceEnabled()
-{
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_brace");
-	return !cvar || cvar->value != 0.f;
-}
-
 bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly)
 {
 	State &fire = bot.fire;
@@ -2232,7 +2541,10 @@ bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly)
 	duck = false;
 	stanceOnly = false;
 
-	if (!BraceEnabled() || !Enabled() || !g_pGameProfile)
+	if (fire.throwId != 0 && (buttons & IN_JUMP) == 0)
+		return true;
+
+	if (!Enabled() || !g_pGameProfile)
 		return false;
 	if (fire.mode == MODE_NONE || !fire.aimValid || (buttons & IN_JUMP) != 0)
 		return false;

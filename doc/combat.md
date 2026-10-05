@@ -218,7 +218,7 @@ selection -- which is exactly "blast him with whatever is in hand", written by n
 **Three passes, in order: reach, thrown, last.** `PASS_REACH` is melee with a finite `range`, which is
 the old contact pass; it had to stop being "any melee" once the grapple joined the melee set, because
 its range is 0 and `BuildChoices` offers it at every distance -- the ambush would have opened with it
-every time. `PASS_THROWN` is the grenade, snark and penguin. `PASS_LAST` is `AMBUSH_GRAPPLE` alone,
+every time. `PASS_THROWN` is the grenade, snark and penguin, and on CS the HE, flashbang and smoke. `PASS_LAST` is `AMBUSH_GRAPPLE` alone,
 with no distance or splash gate: out of grenades but holding a grapple, the bot draws it at any range
 and fires the tongue.
 
@@ -335,6 +335,11 @@ would change the weapon out from under the choice `Think` just made.
 `wantReload` is set in `Think` and consumed in `Buttons` ahead of every other test. It is deliberately
 cleared while `m_fInReload` is set, so the sequence is one frame of `IN_RELOAD`, then nothing at all
 until the reload completes — which is exactly what a released trigger looks like to `ItemPostFrame`.
+
+`Bot_RunPlayerMove` strips `IN_RELOAD` from `Buttons` on any frame that already holds `IN_USE`, so a bot
+never reloads while defusing C4 (or working any other use goal). `wantReload` and `idleReloadId` stay
+set, so the reload goes out on the first frame after the use ends. This only covers bot-initiated
+reloads: an active weapon at exactly 0 rounds still gets the engine's auto-reload from the idle branch.
 
 ### Ready means <= 0
 
@@ -985,18 +990,13 @@ zooming does not sharpen the same shot, it swaps `AIM_LEAD` for `AIM_TARGET`. `M
 `zoomed` argument and the `(zoomed && spec->primaryZoomed.fire) ? ... : spec->primary` one-liner from
 `doc/games.md` is finally reachable instead of aspirational.
 
-**Zooming costs turn rate and buys precision, and `FovScale` prices both.** It divides hand speed by
-`fov / 90`, so at the crossbow's fov 20 the bot's peak turn rate falls from roughly 450°/s to 100°/s —
-and it divides the hand quantum by the same factor, so the bot places the crosshair 4.5x finer. See
-"The hand has a resolution" in `doc/perception.md` for the measurements. That is a genuine trade rather than a pure
-cost, so it gets a real rule: zoom above `kZoomIn` (500 units), unzoom below `kZoomOut` (300). A 320
-u/s target crossing at 500 units sweeps about 37°/s and is comfortably trackable zoomed; at 200 units
-it is not. The band rather than a single threshold matters because each toggle costs a frame and 1.0s
-of `m_flNextSecondaryAttack`.
-
-The thresholds predate the quantum and were set purely on the tracking cost. They are now pricing a
-benefit as well, and have not been retuned for it — if a bot should be zooming further out than 500
-units, that is the number to move.
+**Zooming costs turn rate, and `FovScale` prices it.** It divides hand speed by `fov / 90`, so at the
+crossbow's fov 20 the bot's peak turn rate falls from roughly 450°/s to 100°/s. The bot's hand has no
+resolution limit, so zoom buys it no placement precision; what it buys is the game's: the zoomed mode
+(the crossbow's hitscan bolt) or a scoped weapon's own accuracy. So the rule is set on the tracking cost
+alone: zoom above `kZoomIn` (500 units), unzoom below `kZoomOut` (300). A 320 u/s target crossing at 500
+units sweeps about 37°/s and is comfortably trackable zoomed; at 200 units it is not. The band rather than
+a single threshold matters because each toggle costs a frame and 1.0s of `m_flNextSecondaryAttack`.
 
 Which weapons zoom is decided **by data, not by name**: only those with a populated `primaryZoomed`.
 That admits the crossbow and excludes the python, whose zoom changes no mode and would cost a bot a
@@ -1008,6 +1008,17 @@ that, holding the button would flip the zoom every 1.0s forever. Toggles are nev
 `Supported` still rejects them, and the press is a step before the fire decision that returns
 `IN_ATTACK2` alone and shoots nothing that frame. `IN_ATTACK2` short-circuits `IN_ATTACK` in
 `ItemPostFrame` anyway, so there was never a frame to share.
+
+**Counter-Strike's AWP and Scout unzoom for the bolt cycle and rezoom on their own.** A zoomed shot
+sets `m_iFOV` to 90 and `m_bResumeZoom`; the top of `ItemPostFrame` restores the old zoom once
+`m_flNextPrimaryAttack` runs out, *before* it reads the buttons. The AWP also expires its secondary
+timer on that same frame, so the bot still sees fov 90, presses `IN_ATTACK2`, and the game applies it
+on top of the restored zoom -- 10 goes to 90, the toggle is cooling for 0.3s while the bolt is ready,
+and the next shot leaves unscoped. Two rules close it, both fov-only: `ZoomButtons` never presses on
+`cycleEnd`, the first frame the primary timer reads ready after being busy, so the restored fov is
+visible before anything is decided; and `Buttons` holds fire as `zoom-wait` whenever it wants in but
+the toggle cannot be pressed yet. Wanting out while zoomed still fires -- a zoomed shot up close is
+slow to aim, not wrong.
 
 ### Selection takes the best gun it has, and the rarest of those
 
@@ -1181,8 +1192,7 @@ cycle keeps it braced through a burst; its 3.78 s reload lets it move.
 **Ducking needs a clear line from the ducked eye.** A trace from the eye 34 units lower (or the current
 eye, if already ducked) to `fire.targetPoint` decides it, cached for 0.1 s. Blocked means the bot still
 stops but stays standing, so waist-high cover does not blind it. `crossbot_fire_status` reports
-`bracing=1` (ducked) or `2` (standing) and a per-life `braces=` count; `crossbot_brace 0` turns it off
-for A/B runs.
+`bracing=1` (ducked) or `2` (standing) and a per-life `braces=` count.
 
 ### Aiming at the feet, and throwing from a moving frame
 
@@ -1282,7 +1292,7 @@ next think — never before +0.8 s — from the player's **origin**, along `v_an
 primed with a 35% chance per try (a failed roll waits 1 s; a finished throw waits 4-9 s):
 
 - `OFFHAND_ATTACK` (frag, conc, nail, MIRV, napalm, gas, EMP): the sense target seen in the last
-  0.3 s, its feet (origin + mins.z + 8) and velocity, within [minRange, 650] and with no teammate
+  0.3 s, or failing that a heard enemy (see "Throwing at a heard enemy"), its feet (origin + mins.z + 8) and velocity, within [minRange, 650] and with no teammate
   within 300 of it. minRange is 250 for frag/napalm, 300 for conc/nail/gas/EMP, 350 for MIRV. 650 is
   about the arc's reach; 2fort's sightings are 1800-2200 out, so grenades there are rare, while
   casbah's are not.
@@ -1304,6 +1314,119 @@ was going instead of lurching sideways for up to 0.8 s.
 
 Measured on casbah, 12 bots, 5 minutes: 55 throws, 37 of them forced, 10 grenade kills, no grenade
 suicides. The forced share is high because targets rarely stay in sight for a 3-second cook.
+
+### Throwing at a heard enemy
+
+A bot that hears an enemy it cannot see throws a grenade at where that enemy will be, if the throw
+would hurt them more than it hurts the bot. Both throw paths do it: `BotFire` for thrown weapons and
+`BotGrenade` for TFC off-hands. Both are switched off by `crossbot_grenade 0`.
+
+**The target is `BotSense::HeardEnemy`.** It takes the freshest suspicion whose latest source is a
+sound or a playback event, at most 1 s old. The entity must be a player or a monster hunting us, and it
+must be `Attackable`. There is one suspicion slot per entity and a sighting overwrites the source, so an
+enemy we saw last is never treated as heard. The prediction is the heard position moved along the
+enemy's horizontal velocity by the age of the sound, and the existing lead solve then adds the flight
+time. Z is dropped, so a jump does not send the grenade into the ceiling. Reading the velocity is a
+small cheat, since hearing footsteps gives only a rough heading.
+
+**"Hurts them more" is `BotFire::HarmFavors`.** It uses HL's `RadiusDamage` shape. Each side takes
+`1 - d/splash`, and gets zero when the trace from the blast (lifted 1 unit, as in HL) is blocked. The
+enemy's harm must be above zero and above the bot's own. The blast point is the simulated arc's first
+impact: `SimulateArc` in `ArcImpactHits` for weapons, and `SolveOffhand(..., &impact)` for TFC. The
+enemy point is the predicted one, not the live origin. The weapon path runs this test when the
+candidate is picked and again when the button is pressed. A failure counts in `harmveto=` and
+reports `arc-harm`. Homing throwables (snark, penguin) have `splash` 0, so this test does not apply to
+them. They take the non-arc `RayOnTarget` path, and a clear line to the heard spot is their test. The
+flashbang is checked against the body centre like everything else, not against the eyes. If flashes
+turn out to be misjudged, that is the place to change.
+
+**Weapons: thrown ambush weapons only, and no blind gunfire.** `HeardThrow` runs first inside
+`Think`'s no-target branch. If a thrown ambush weapon is in hand (not the grapple), it goes through
+`TryKeep`. If not, `PickBest(PASS_THROWN)` picks a candidate. The candidate must pass `TryKeep` as a
+dry run before `SelectWeapon("heard")`. A pass is the decision to throw and starts a throw intent (next
+section). When nothing works, `HeardThrow` returns false and the ordinary no-target code runs: idle
+reload, idle rotation.
+
+### The throw intent: deciding to throw is the commitment
+
+Once a bot decides to throw, it switches, aims at what it decided on, and throws. If it cannot, it
+switches back to a gun and does not try again in that fight.
+
+**Why it exists.** A heard throw used to be re-checked on every frame against a fresh `HeardEnemy`
+point. That point jumps with every footstep and drifts in between. The `Harm` LOS test flipped from
+frame to frame, so `harmveto=` climbed by 10-40 a second. The aim never settled on one point, so the
+press-time `ArcOnTarget` never passed. The bot held the grenade until `IdleSelect` took it away after
+`kCombatMemory` plus up to one `kIdleSelectInterval`, which is 3-6 s. In a 3v3 on fy_iceworld, holds
+where the enemy was never seen ended in a throw 2 times out of 11. Holds with the enemy in sight threw
+within about half a second of the deploy delay.
+
+**The decision.** `SelectWeapon` is given the target point by the callers that have one: `heard`,
+`ambush`, `select` and `empty-switch`. For a `WPN_Q_THROW_ARC` mode it runs a `TryKeep` dry run on that
+point.
+- **Pass:** it switches and latches `throwId`, `throwPoint`, `throwVel` and `throwHeard`.
+- **Fail:** it refuses the switch, keeping the select throttle. A bot never draws a grenade it has not
+  decided to throw.
+
+A dry run that passes on a grenade already in hand (the first branch of `HeardThrow`) latches the same
+intent. Deciding is a single passing check, made once.
+
+**The execution.** `ThrowIntent` runs in `Think` before the no-target branch. While it is live, nothing
+else selects a weapon: not `HeardThrow`, not the ambush or duel picks, not `PickChoice`, not
+`IdleSelect`.
+- Every frame, including the deploy (`why=drawing`), it runs `TryKeep` on the carried grenade. It
+  tries the live target if one is visible, then the latched point. Running it during the deploy also
+  publishes the aim early, so the view has the whole deploy to turn toward the throw.
+- The harm test is not re-run, because it was made at the decision. `fire.heard` is false during the
+  intent. The arc gap test and `SplashSafe` still apply.
+- If both fail and no pin is pulled, the throw is known to be impossible from here, so the intent drops
+  on that frame (below). With a pin already pulled it cannot be undone, so the bot keeps the grenade
+  with `why=throw-blocked` and the game throws it.
+
+With the point fixed, the view settles, `ArcOnTarget` passes and the existing `COMMIT_THROW` handles
+the pin. `Brace` holds the bot in place for the whole intent. Before
+that, a bot kept walking its path during the 0.75 s CS deploy, into a spot where the latched arc was
+blocked.
+
+**The end.** The throw itself clears the intent: `CountShots` sees `throwStart` fall to 0. A heard
+intent also gets the `heard=` count and the `nextHeardTime` cooldown there.
+
+**No clock.** The only wait is the grenade's own deploy (`inv.nextAttack` and `nextPrimaryAttack`).
+`DropIntent` runs on the first frame where any of these holds, as long as no pin is pulled:
+- The grenade is not the active weapon. The switch is synchronous, so the frame after the decision
+  already holds the grenade. If it does not, the switch did not happen.
+- `TryKeep` finds no solution.
+- The grenade was ready on the previous frame (`throwReady`), `Buttons` had that frame to pull the pin,
+  and it did not, so no `COMMIT_THROW`. Whatever stopped the press, typically a view that has not
+  settled, the bot does not wait for it.
+
+A drop does three things:
+- `dropped=` counts it, and `nextHeardTime` starts.
+- The bot selects the best weapon for that range, skipping the grenade (`why=throw-dropped`).
+- If `BotCombat` is active, grenades are banned until that combat ends. `ThrowBanned` compares the
+  stored `combat.startTime`, so the ban lifts on `Exit` or on a fresh `Enter`. While it holds,
+  `ChoiceEligible` rejects every throw mode and `TryKeep` skips them unless a pin is already pulled.
+
+Outside combat (a purely heard enemy) there is nothing to end, so the 4-9 s heard cooldown alone stops
+the next draw. `Idle` clears the intent, so a break, deploy, ability or tank still takes the frame.
+
+
+**One throw, then 4-9 s of silence.** Each shot counted while `fire.heard` is set adds one to `heard=`
+and starts `nextHeardTime`. Otherwise a stream of footsteps would use up the whole stack. `Idle`
+clears `heard`, so a shot fired while breaking or deploying is not charged to it.
+
+**Team-unfriendly throwables** carry `WPN_Q_TEAM_UNSAFE`: the CS flashbang and smoke grenade, the
+snark, the penguin, and TFC concussion and gas. On TFC the quirk is added to the off-hand mode in
+`OffhandRead`. `BotFire::FriendCloser` asks whether any live `REL_FRIEND` player is nearer the target
+than the bot is. If one is, those modes are rejected. The check covers every target, seen or heard: it
+sits in `ChoiceEligible` for all passes, in `TryKeep` when not already committed, and in
+`AttackClear` on the TFC side. `Teams::Of` never returns `REL_FRIEND` outside teamplay, so in
+deathmatch the rule has no effect. Caltrops need no exception, because they are `OFFHAND_SCARED` and
+never reach the attack path.
+
+**CS flash and smoke are throwable everywhere now.** They were `kNoMode`. They now copy the HE
+grenade's arc with ReGameDLL's gravity of 0.5 (the HE is 0.55; the speed is the same), splash 350, and
+are `AMBUSH_FLASH`/`AMBUSH_SMOKE`. Their value is 0, so selection only picks them when there is no gun.
+The 350 is a harm radius, not the game's flash radius, and it doubles as the minimum throw range.
 
 ### What is not here
 

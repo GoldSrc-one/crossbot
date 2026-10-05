@@ -20,6 +20,8 @@ void RemoveTeleport(int connIndex);
 void SetTeleportWait(int connIndex, float waitSeconds);
 bool IsAddedTeleport(int connIndex);
 
+void SetDetourTeams(const Vector &actCenter, uint32_t teamMask);
+
 void AddCamp(const CampSpot &spot);
 
 }

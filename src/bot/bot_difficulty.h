@@ -16,8 +16,8 @@ struct Row
 {
 	const char *name;
 	float aimDelay;
-	float aimError;
 	float turnScale;
+	float aimGain;
 	float oppoInterval;
 	float backPeriod;
 	int headPct;
@@ -50,9 +50,9 @@ float Pin(const char *name);
 
 void AimDelay(float &loOut, float &hiOut);
 
-float AimError();
-
 float TurnScale();
+
+float AimGain();
 
 float OppoInterval();
 

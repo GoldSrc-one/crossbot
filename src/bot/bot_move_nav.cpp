@@ -25,7 +25,6 @@
 #include "bot_perf.h"
 #include "bot_strategic.h"
 #include "../game/game_profile.h"
-#include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
@@ -125,8 +124,8 @@ namespace
 	{
 		BOTPERF_SCOPE(ZONE_PLANTRACES);
 		NavPlan::PlanTraceContext traces;
-		traces.standTrace = BSPTRACE_WRAP(Bot_EngineTraceFn(pEdict, kHullHuman), kHullHuman);
-		traces.duckTrace = BSPTRACE_WRAP(Bot_EngineTraceFn(pEdict, kHullDuck), kHullDuck);
+		traces.standTrace = Bot_EngineTraceFn(pEdict, kHullHuman);
+		traces.duckTrace = Bot_EngineTraceFn(pEdict, kHullDuck);
 		{
 			BOTPERF_SCOPE(ZONE_PUSHFIELDS);
 			traces.standPush = Bot_PushFields(kHullHuman);
@@ -504,7 +503,7 @@ namespace
 			++bot.waypointIndex;
 
 			bot.airmoveArc.Clear();
-			if (wp.launchSimulated && Bot_AirmoveCorrectEnabled())
+			if (wp.launchSimulated)
 			{
 				Bot_SimulateAirmoveArc(pEdict, origin, nullptr, wp.launchYaw, drive,
 					wp.requiresJump, wp.requiresCrouch ? kHullDuck : kHullHuman,
@@ -559,7 +558,7 @@ namespace
 
 	edict_t *AirmovePlug(CBot &bot, const Nav::NavMesh &mesh)
 	{
-		if (!BotBreak::Enabled() || bot.airmoveTargetArea < 0)
+		if (bot.airmoveTargetArea < 0)
 			return NULL;
 
 		const Nav::Area *area = Nav::FindAreaById(mesh, static_cast<uint32_t>(bot.airmoveTargetArea));
@@ -1484,7 +1483,24 @@ namespace
 		}
 
 		if (failed || !decided)
+		{
 			bot.nextRepathTime = gpGlobals->time;
+
+			for (size_t i = std::min(bot.rideWpIndex, bot.waypoints.size()); i-- > 0;)
+			{
+				const Nav::Waypoint &gate = bot.waypoints[i];
+				if (gate.requiresElevatorRide || gate.requiresLadder || gate.airmoveLaunch)
+					break;
+				if (!gate.requiresButtonUse && !gate.requiresTriggerTouch)
+					continue;
+
+				Vector key = gate.activatorCenter;
+				bot.activationMemo.erase(std::remove_if(bot.activationMemo.begin(), bot.activationMemo.end(),
+					[&key](const BotActivation &a) { return (a.center - key).Length() <= kActivationSameRadius; }),
+					bot.activationMemo.end());
+				break;
+			}
+		}
 
 		return false;
 	}
@@ -1759,7 +1775,7 @@ namespace
 
 		ItemKind kind = bot.goalItemKind;
 		bool station = kind == ITEM_STATION;
-		float value = g_pGameProfile->ChargerValue(kind, pEdict);
+		float value = BotItems::ChargerValue(ent, kind, pEdict);
 
 		if (!bot.chargerActive)
 		{
@@ -1824,7 +1840,7 @@ namespace
 			return false;
 		}
 
-		if (value >= g_pGameProfile->ChargerFullValue(kind))
+		if (value >= BotItems::ChargerFull(ent, kind))
 		{
 			BotItems::NoteFull(bot, CBotClassOf(ent));
 			FinishCharger(bot, ent, "topped up");
@@ -1936,7 +1952,7 @@ namespace
 			return false;
 
 		ItemKind kind = bot.goalItemKind;
-		float value = g_pGameProfile->ChargerValue(kind, pEdict);
+		float value = BotItems::ChargerValue(ent, kind, pEdict);
 
 		if (!bot.chargerActive)
 		{
@@ -1982,7 +1998,7 @@ namespace
 			return false;
 		}
 
-		if (value >= g_pGameProfile->ChargerFullValue(kind))
+		if (value >= BotItems::ChargerFull(ent, kind))
 		{
 			BotItems::NoteFull(bot, CBotClassOf(ent));
 			FinishCharger(bot, ent, "topped up");
@@ -2078,8 +2094,7 @@ namespace
 	{
 		if (bot.traceLog.empty())
 			return;
-		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_trace_path");
-		const char *path = (cvar && cvar->string && cvar->string[0]) ? cvar->string : "crossplay/addons/crossbot/trace/nav_trace.txt";
+		const char *path = CVAR_GET_STRING("crossbot_trace_path");
 		FILE *f = fopen(path, "w");
 		if (f)
 		{
@@ -2412,11 +2427,6 @@ PmSim::PmPhysics Bot_DrivePhysics(edict_t *pEdict)
 	if (AtFrictionEdge(pEdict))
 		physics.groundFriction *= physics.edgeFriction;
 	return physics;
-}
-
-bool Bot_AirmoveCorrectEnabled()
-{
-	return g_engfuncs.pfnCVarGetFloat("crossbot_airmove_correct") > 0.f;
 }
 
 bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector *velocity, float yaw,
@@ -2838,7 +2848,7 @@ void Bot_MoveNav(CBot &bot)
 #if BOT_VLOG_ON
 	{
 		BOTPERF_SCOPE(ZONE_TRACELOG);
-		if (bot.traceLog.size() < 100000)
+		if (bot.traceLog.size() < 100000 && CVAR_GET_STRING("crossbot_trace_path")[0])
 			bot.traceLog.push_back(pEdict->v.origin);
 	}
 #endif
@@ -2916,7 +2926,9 @@ void Bot_MoveNav(CBot &bot)
 
 		if (gate && i < activationWp)
 		{
-			followCfg.sFloor = NavPlan::ProfileWaypointS(bot.followProfile, i);
+			float gx = step.point.x - pEdict->v.origin.x, gy = step.point.y - pEdict->v.origin.y;
+			if (i < bot.waypointIndex || gx * gx + gy * gy <= kActivationEngageRadius * kActivationEngageRadius)
+				followCfg.sFloor = NavPlan::ProfileWaypointS(bot.followProfile, i);
 			continue;
 		}
 

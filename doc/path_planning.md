@@ -17,7 +17,7 @@ Activation data lives only on `planAreas`, loaded straight from the area records
 `doorActivation`/`doorActivatorPos`/`doorWaitTime`, which nothing outside the loader ever read.
 
 ### Connection struct
-- `gateA`, `gateB` - funnel gates on each side, baked by navgen with player radius already applied (inset at both ends and pushed that far into the owning area). Zero-length gate means opening was too narrow to inset; midpoint is the only way through. `gateValid` says which sides carry one; teleport carries neither.
+- `gateA`, `gateB` - funnel gates on each side, baked by navgen with player radius already applied (inset at both ends and pushed up to that far into the owning area, see `GateFromEdge`). Zero-length gate means opening was too narrow to inset; midpoint is the only way through. `gateValid` says which sides carry one; teleport carries neither.
 
 ## nav_query.cpp
 
@@ -210,7 +210,7 @@ a route that fights on the right ground may take twice as long in seconds and st
 
 `weight = 0` reproduces the planner exactly as it was, which is what every caller that does not opt in
 gets from the default-constructed `RangeBias`. `Repath` feeds it `Bot_RangeBias`, which is the mirror
-of carefulness: `combat readiness` scaled by `crossbot_range_pref`, zero for a weapon with no opinion
+of carefulness: `combat readiness` scaled by `kRangePref`, zero for a weapon with no opinion
 (`doc/goals.md`, "Range bias"). An unready bot avoids exposure; a ready one picks its terrain.
 
 **Open distance is cached on the connection, per direction.** The same load pass that resolves
@@ -271,10 +271,16 @@ existing teleport branch turns it into the usual trigger + destination waypoint 
   unlisted from its areas, masked out, and reused by the next add. Nothing keeps a `Connection *`
   across frames, only indices, so the append is safe. Both lists clear on `LoadForMap`/`Unload`.
 - **A team mask gates it.** `Connection::teamMask` (0 = everyone, which is every baked connection) is
-  checked against `Nav::SetPlanTeamMask` in `BuildGraph` and `AreaCostsImpl`. `ThinkOneBot` sets the
-  mask to the bot's team bit before `Bot_MoveNav`, or to 0 while the bot is an objectives carrier,
+  checked in `BuildGraph` and `AreaCostsImpl`. `ThinkOneBot` calls `Nav::SetPlanTeam(teamBit, carrier)`
+  before `Bot_MoveNav`. Teleports get the team bit, or 0 while the bot is an objectives carrier,
   because TFC refuses to teleport a player carrying a flagged goal item. Plans made outside a bot's
   think (console dumps, tactics fields computed for another bot) see whatever mask was set last.
+- **Activation detours carry one too.** `PlanDetour::teamMask` is runtime-only: never in the file, 0 on
+  load, stamped by `Nav::SetDetourTeams` from live TFC entities (see `doc/games.md`, team-only doors).
+  `FindDetour` skips a detour whose mask misses `NavPlan::SetDetourTeamMask`, so both `GateAllowsCrossing`
+  and `PushActivationDetour` refuse the edge as if no detour existed. `SetPlanTeam` passes the team bit
+  here **even for a carrier**, because carrying a flag does not stop a TFC player opening their own
+  doors. The mask defaults to `~0u` and navgen never sets it, so offline planning admits every detour.
 - **navgen never calls any of it**, so offline route sweeps are unchanged.
 
 ## plan_search.cpp
@@ -849,6 +855,7 @@ expanding an edge means copying the parent's and stepping it forward.
   simulated into the destination. The search treats that as "this edge does not exist".
 - `Finish(goalPoint, lastAreaId)` — flush the funnel to the goal and append the goal waypoint.
 - `Respeed()` — the profile pass, see "Re-speeding a launch".
+- `Relax(startArea)` — the shortcut pass, see "Relaxing over walk-connected areas".
 - `Time()` — committed corners plus the pull to the current frontier, over `kNavRunSpeed`, plus
   `AddCost` contributions. This is the search's `g`.
 - `Frontier()` — the last pending gate's midpoint, or the anchor when the funnel is empty. This is what
@@ -856,6 +863,45 @@ expanding an edge means copying the parent's and stepping it forward.
 
 There is no batch `BuildWaypointPlan` any more; `PlanRoute` drives the walker directly and the goal
 node's walker is the finished plan.
+
+### Relaxing over walk-connected areas
+The funnel only pulls through gates on the A* area chain, and every gate is inset `kPlanClearance` from
+both ends of its seam whether that end is a wall or just another seam. On a fragmented floor many seams
+are shorter than 32 u, collapse to a clamped point gate, and pin the path to their midpoints; the result
+is a chain of small jogs (and collinear duplicate corners in corridors). The per-node walker also makes
+A* path-dependent, so an area D that the straight line would cross can lose the search.
+
+`Relax` fixes this after the search: if the route goes a -> b -> c and the line a -> c is clear, b is
+dropped, even when the line crosses areas that are not on the A* chain. From each waypoint it tries the
+farthest plain waypoint first and steps back until a line is clear. Extending forward and stopping at the
+first failure is not enough: on dust2's S-door the short hops between the door's tight corners fail the
+side-line test, while the long line from the last door corner to the goal across the open area north of
+it is clear.
+
+- **Only plain runs.** A waypoint is plain when it has no `connIndex` and none of the door, break,
+  button, trigger, teleport, ladder, elevator, launch or jump flags (crouch is allowed). Both ends and
+  everything dropped must be plain, so special waypoints are never removed and the corner before one
+  (the run-up node, the door approach) always survives as a run end.
+- **Clear** means three `ReachBack` walks over the walk-successor graph all reach the end: the centre
+  line, and two parallel lines `kPlanRelaxClearance` (12) to either side, each started by a
+  perpendicular walk out of a. `ReachBack` already crosses seams only where `FloorsMeetAt` holds, so
+  ledges stop it. Every area crossed must be plain floor (no door, breakable, elevator, crouch,
+  activation, drift or water), and the centre walk must end on a floor within `kPlanRunupSeamStep` of
+  c's height, so a storey overlapping in 2D does not count. The offset is just under `kPlanClearance`
+  because a funnel corner sits exactly that far from its wall corner and `ReachBack` keeps a 2 u inset.
+- **Start area of a waypoint.** A corner's `targetAreaId` is its gate's to-area but the point may lie in
+  the from-area, so `AreaOfWaypoint` takes the target if its column holds the point and otherwise the
+  walk neighbour that does with the nearest floor.
+- **Runs last**, after `Respeed`, because `Retract` and `Respeed` address waypoints by index through
+  `m_launches`; erasing earlier would shift them. Relax never touches launch, landing or run-up
+  waypoints, so the order changes nothing else.
+- `areaPath`/`connPath` stay the A* chain. A bot standing in a relaxed-in area finds no planned
+  connection to penalise after a blocked detour (`bot_move_nav.cpp`); that is accepted. The bot's ETA
+  comes from the profile over the final waypoints, so it is consistent without extra work.
+
+What it cannot fix: on test14_terrain's hill the seams between neighbouring slope areas differ by 24-33 u
+except in a few-unit window (`ClipLineByStep`), so the straight line really would cross a ledge and the
+small jogs there stay. That is a mesh problem.
 
 **Barriers.** Air moves, teleports, doors, buttons and triggers all flush the funnel and re-anchor it at
 the waypoint they emit. So the string pull never crosses one of them, which is why a forward search can
@@ -1027,6 +1073,13 @@ have a floor plane at all; the heights themselves come from `AreaFloorZ`.
 **ForEachImpliedWall** - an area's footprint is not fixed by its vertical planes alone. A floor rising one way and a ceiling falling the other pinch the column shut where they meet, and that closure is a vertical half-plane no bound plane records: a wedge under a ramp is capped by the ramp itself, and the sliver between two faces of a pyramid is bounded that way at both ends. Eliminating z from the half-space system recovers those bounds exactly - for a floor f and a ceiling c, "the floor stays under the ceiling" is one linear constraint in x and y, and it is implied by the two planes, so it can only trim overreach, never cut into the area. The function iterates all floor/ceiling pairs; parallel in plan pairs (they never converge, so they bound nothing here) are skipped. Each implied wall is emitted as an inward-facing half-plane in x/y.
 
 **GateFromEdge** - builds gate from edge line: insets ends, pushes inward by kPlanClearance (16), clamps if too narrow
+- The push is capped at half the area's depth along `inward`, measured from each inset end to the far
+  wall with `ClipLineByWalls`. A full 16 into an area thinner than 32 lands the gate past the area's
+  middle, so the gates of two opposite connections cross and the funnel has to walk forward, back and
+  forward again to thread them in order. de_dust2's mid double door had exactly this: the 16-deep sliver
+  208 between seams x=-392 and x=-376 got its 209-side gate at x=-376 and its 103-side gate at x=-392,
+  and every bot through it drove into the jamb, stopped and reversed. Capped, both sit at x=-384 and the
+  string-pull goes straight. An unbounded depth keeps the full push.
 
 **BuildAreaGates** - builds edgeGates for all bound planes
 
@@ -1067,7 +1120,7 @@ Samples the walkable floor of one area at a 2D point. Returns false where the ar
   decides for itself whether the entity is breakable at all, from `takedamage` and `health`. See `doc/movement.md`
 
 ### Constants
-- `kPlanClearance = 16` - player hull radius; gates inset by this at ends and pushed this far off connection plane
+- `kPlanClearance = 16` - player hull radius; gates inset by this at ends and pushed this far off connection plane (at most half the area's depth)
 - `kPlanClampedClearance = 6.63` - corner-cut budget at a clamped gate, `16*(sqrt(2)-1)`: the diagonal
   slack at a right-angle corner of a minimum-width corridor
 - `kPlanStandHeight = 18` - duck hull origin to stand origin
@@ -1081,8 +1134,18 @@ to `PlanGate` is silently dropped on load.
 Gate width is not the budget. `GateFromEdge` already insets endpoints `kPlanClearance` from the wall,
 so a surviving endpoint is 16 units off geometry by construction and the remaining width is *extra*
 freedom: `clearance = min(16 + halfWidth, 32)`. A clamped gate collapsed to a point, so it gets
-`kPlanClampedClearance`. Over-estimating here is safe — the hull trace in `BuildPathProfile` shrinks
-any arc that does not actually fit — whereas under-estimating stops the bot at every tight gate.
+`kPlanClampedClearance`. Under-estimating stops the bot at every tight gate.
+
+**That extra width is on the wrong side.** A funnel corner sits on a gate endpoint and the arc bulges
+toward the inside of the turn, along `norm(w - u)` — the side the funnel wrapped around, where the room
+is the 16 unit inset, not the half-width. `CornerClearance` in `FlushFunnelTo` therefore clamps the gate
+value: it tries `GateClearance`, then `kPlanClearance`, then `kPlanClampedClearance`, and keeps the
+first whose apex `p + bis * c` is inside the corner's own area or the gate's other area. Pure column
+tests, no traces. The hull trace in `BuildPathProfile` was supposed to catch an over-estimate, and does
+next to a wall, but over a ledge a horizontal hull trace hits nothing and the arc was kept — bots
+rounded 2fort's catwalk corners into the pit. An apex that lands in a *third* area (a fragmented open
+floor) is refused too, which only costs a slightly tighter arc. On the test maps this changes the
+clearance at 77 corners, the actual radius at 3 (by 1-3 units), and no route time.
 
 ### PlanTraceContext
 - `duckTrace`, `standTrace` - trace functions for re-simulation

@@ -22,26 +22,36 @@ struct DelaySlot
 	Vector vel;
 };
 
+struct ViewSlot
+{
+	float time = 0.f;
+	Vector off;
+	Vector punch;
+};
+
 struct State
 {
 	float yawVel = 0.f;
 	float pitchVel = 0.f;
 
-	float yawPending = 0.f;
-	float pitchPending = 0.f;
-
-	float brakeYaw = 1.f;
-	float brakePitch = 1.f;
 	float flickMag = 0.f;
+
+	float gainYaw = 1.f;
+	float gainPitch = 1.f;
 
 	bool rngSeeded = false;
 	unsigned int rngState = 0;
-	float driftPhaseYaw = 0.f;
-	float driftPhasePitch = 0.f;
 
 	DelaySlot delaySlots[kDelaySlots];
 	size_t delayHead = 0;
 	size_t delayCount = 0;
+
+	ViewSlot viewSlots[kDelaySlots];
+	size_t viewHead = 0;
+	size_t viewCount = 0;
+	Vector own;
+	Vector perceived;
+	Vector perceivedPunch;
 
 	float servedDelay = 0.f;
 
@@ -68,15 +78,11 @@ float Delay(const CBot &bot);
 
 void RollDelay(CBot &bot);
 
-float ErrorScale();
-
-float DriftAmplitude();
-
-float Quantum();
-
-float Impulse();
+float GainSpread();
 
 void ClearDelayQueue(CBot &bot);
+
+void ClearViewQueue(CBot &bot);
 
 void PushDelaySlot(CBot &bot, const Vector &point, const Vector &vel);
 

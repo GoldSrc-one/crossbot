@@ -26,12 +26,13 @@
 #include "../game/objectives.h"
 #include "../game/player_models.h"
 #include "../game/teams.h"
-#include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_path.h"
 
 #include <cmath>
+#include <fstream>
+#include <vector>
 #include <string>
 
 IGameProfile *g_pGameProfile = nullptr;
@@ -54,6 +55,42 @@ namespace
 
 	CBot g_bots[kMaxBots];
 	int g_botSerial = 0;
+
+	bool PickRandomName(char *out, size_t size)
+	{
+		static std::vector<std::string> names;
+		static bool loaded = false;
+		if (!loaded)
+		{
+			loaded = true;
+			char path[260];
+			snprintf(path, sizeof(path), "%s/addons/crossbot/names.txt", XPlay::HyperDir());
+			std::ifstream file(path);
+			std::string line;
+			while (std::getline(file, line))
+			{
+				while (!line.empty() && isspace((unsigned char)line.back()))
+					line.pop_back();
+				if (!line.empty())
+					names.push_back(line);
+			}
+		}
+		if (names.empty())
+			return false;
+		for (int tries = 0; tries < 8; tries++)
+		{
+			const std::string &pick = names[(size_t)g_engfuncs.pfnRandomLong(0, (int)names.size() - 1)];
+			bool taken = false;
+			for (const auto &bot : g_bots)
+				taken |= bot.inUse && pick == bot.name;
+			if (!taken || tries == 7)
+			{
+				snprintf(out, size, "%s", pick.c_str());
+				return true;
+			}
+		}
+		return false;
+	}
 
 	CBot *FindFreeSlot()
 	{
@@ -118,6 +155,9 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 	Bot_ResetAirmoveCache();
 	BotFun::ResetMap();
 
+	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
+	Nav::LoadForMap(mapName);
+
 	XPlay::DetectProfiles();
 	Teams::DetectMap();
 	Objectives::DetectMap();
@@ -125,9 +165,6 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 	if (XPlay::PickRandomSupported() < 0)
 		SERVER_PRINT("CrossBot: no loaded game is playable; bots disabled.\n");
 
-	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
-	Nav::LoadForMap(mapName);
-	BspTrace::LoadForMap(mapName);
 	BotCamp::AddSandbags();
 
 	g_driftSpeedCount = 0;
@@ -229,8 +266,7 @@ namespace
 			BotFire::AccrueCarry(bot);
 		}
 
-		Nav::SetPlanTeamMask(IsCarrier(bot.pEdict) ? 0u
-			: static_cast<uint32_t>(Objectives::TeamBit(bot.pEdict->v.team)));
+		Nav::SetPlanTeam(static_cast<uint32_t>(Objectives::TeamBit(bot.pEdict->v.team)), IsCarrier(bot.pEdict));
 
 		{
 			BOTPERF_SCOPE(ZONE_MOVENAV);
@@ -338,7 +374,7 @@ void StartFrame()
 	{
 		int mapOwner = XPlay::MapOwner();
 		XPlay::EnterGame(mapOwner);
-		XPlay::InGame(mapOwner, [] { BotSense::RefreshMonsters(); });
+		XPlay::InGame(mapOwner, [] { BotSense::RefreshMonsters(); BotSense::RefreshAllies(); });
 	}
 
 	if (anyBot)
@@ -445,7 +481,7 @@ bool AddBot(int iGame, const char *name, const char *arg)
 	char botName[32];
 	if (name && name[0])
 		snprintf(botName, sizeof(botName), "%s", name);
-	else
+	else if (!PickRandomName(botName, sizeof(botName)))
 		snprintf(botName, sizeof(botName), "CrossBot%d", ++g_botSerial);
 
 	edict_t *pEdict = nullptr;
@@ -472,7 +508,7 @@ bool AddBot(int iGame, const char *name, const char *arg)
 	}
 
 	MDLL_ClientPutInServer(pEdict);
-	pEdict->v.flags |= FL_CLIENT | FL_FAKECLIENT;
+	pEdict->v.flags |= FL_CLIENT;
 
 	pSlot->inUse = true;
 	pSlot->gameDll = iGame;
@@ -531,9 +567,8 @@ bool TeleportAllBots(const Vector &point)
 		bot.pEdict->v.angles = Vector(0.f, 0.f, 0.f);
 		bot.aim.yawVel = 0.f;
 		bot.aim.pitchVel = 0.f;
-		bot.aim.yawPending = 0.f;
-		bot.aim.pitchPending = 0.f;
 		BotAim::ClearDelayQueue(bot);
+		BotAim::ClearViewQueue(bot);
 		Bot_ResetNavPath(bot);
 		any = true;
 	}
@@ -624,16 +659,22 @@ void PrintAimStatus()
 		if (fov <= 0.f)
 			fov = 90.f;
 
-		char line[512];
+		const Vector &punch = bot.pEdict->v.punchangle;
+		const Vector &seen = bot.aim.perceived;
+		const Vector &seenPunch = bot.aim.perceivedPunch;
+		float pYaw = Bot_NormalizeAngle(seen.y + seenPunch.y - view.y - punch.y);
+		float pPitch = Bot_NormalizeAngle(seen.x + seenPunch.x - view.x - punch.x);
+
+		char line[640];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s target=%s bone=%d leadblk=%d queue=%zu/%zu hist=%.2fs delay=%.3fs "
-			"pred=%u served=%.3fs hand=%.0f deg/s brake=(%.3f,%.3f) fov=%.0f quant=%.4f "
-			"view=(%.1f,%.1f) err=%s\n",
+			"pred=%u served=%.3fs hand=%.0f deg/s gain=(%.3f,%.3f) fov=%.0f "
+			"view=(%.1f,%.1f) seen=(%.1f,%.1f) perr=%.2f err=%s\n",
 			bot.name, target ? CBotTargetNameOf(target) : "-", bot.sense.targetBone,
 			bot.sense.leadVetoes, bot.aim.delayCount, BotAim::kDelaySlots, BotAim::QueueAge(bot),
-			BotAim::Delay(bot), bot.aim.predicts, bot.aim.servedDelay, BotAim::ViewSpeed(bot), bot.aim.brakeYaw,
-			bot.aim.brakePitch,
-			fov, BotAim::Quantum() * fov / 90.f, view.x, view.y, errBuf);
+			BotAim::Delay(bot), bot.aim.predicts, bot.aim.servedDelay, BotAim::ViewSpeed(bot),
+			bot.aim.gainYaw, bot.aim.gainPitch, fov, view.x, view.y, seen.x, seen.y,
+			sqrtf(pYaw * pYaw + pPitch * pPitch), errBuf);
 		SERVER_PRINT(line);
 	}
 
@@ -642,10 +683,9 @@ void PrintAimStatus()
 
 	char summary[256];
 	snprintf(summary, sizeof(summary),
-		"CrossBot: %d bot(s), sense=%d difficulty=%s aim_delay=%.3f-%.3f aim_error=%.2f "
-		"aim_drift=%.2f aim_quantum=%.4f aim_impulse=%.1f\n", shown,
+		"CrossBot: %d bot(s), sense=%d difficulty=%s aim_delay=%.3f-%.3f aim_gain=%.2f\n", shown,
 		BotSense::Enabled() ? 1 : 0, BotDiff::Name(BotDiff::Current()), delayLo, delayHi,
-		BotAim::ErrorScale(), BotAim::DriftAmplitude(), BotAim::Quantum(), BotAim::Impulse());
+		BotAim::GainSpread());
 	SERVER_PRINT(summary);
 }
 
@@ -690,7 +730,7 @@ void PrintSenseStatus()
 			"cands=%d keep=%s keeps=inc:%u,new:%u susp=%d/%zu "
 			"kinds=p:%d,m:%d,o:%d hunt=%d "
 			"mon=list:%d,seen:%u,mine:%u,trc:%u,hit:%u "
-			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u\n",
+			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u,ally:%u\n",
 			bot.name, Teams::TeamOf(bot.pEdict), target ? CBotTargetNameOf(target) : "-",
 			enemy ? CBotTargetNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f, bot.sense.targetBone,
@@ -704,7 +744,8 @@ void PrintSenseStatus()
 			bot.sense.monTraces, bot.sense.monHits,
 			bot.sense.lookValid ? BotSense::KindName(bot.sense.lookKind) : "-", freshBuf, lookBuf,
 			pushes[BotSense::SUSP_SIGHT], pushes[BotSense::SUSP_SOUND],
-			pushes[BotSense::SUSP_EVENT], pushes[BotSense::SUSP_DAMAGE]);
+			pushes[BotSense::SUSP_EVENT], pushes[BotSense::SUSP_DAMAGE],
+				pushes[BotSense::SUSP_ALLY]);
 		SERVER_PRINT(line);
 	}
 
@@ -829,10 +870,9 @@ void PrintCombatStatus()
 {
 	char head[128];
 	snprintf(head, sizeof(head),
-		"CrossBot: crossbot_combat=%d crossbot_combat_debug=%d crossbot_ambush=%d "
-		"crossbot_duel=%d\n",
+		"CrossBot: crossbot_combat=%d crossbot_combat_debug=%d crossbot_ambush=%d\n",
 		BotCombat::Enabled() ? 1 : 0, BotCombat::DebugEnabled() ? 1 : 0,
-		BotCombat::AmbushEnabled() ? 1 : 0, BotCombat::DuelEnabled() ? 1 : 0);
+		BotCombat::AmbushEnabled() ? 1 : 0);
 	SERVER_PRINT(head);
 
 	for (auto &bot : g_bots)
@@ -1062,67 +1102,6 @@ void PrintVantageStatus(const Vector *at)
 		SERVER_PRINT("CrossBot: no bots; pass \"x y z\" to sample a point\n");
 }
 
-void PrintWallbangProbe()
-{
-	int blocked = 0;
-	int through = 0;
-	for (auto &bot : g_bots)
-	{
-		if (!bot.inUse)
-			continue;
-
-		ScopedGame ctx(bot.gameDll);
-		if (!g_pGameProfile || g_pGameProfile->IsDead(bot.pEdict))
-			continue;
-
-		const BotInventory &inv = bot.inventory;
-		if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
-			continue;
-		int id = inv.weapons[inv.activeIndex].id;
-		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(id);
-
-		Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
-		for (auto &other : g_bots)
-		{
-			if (!other.inUse || &other == &bot || other.gameDll != bot.gameDll ||
-				g_pGameProfile->IsDead(other.pEdict))
-				continue;
-
-			Vector los = other.pEdict->v.origin - eye;
-			float dist = los.Length();
-			if (dist < 1.f)
-				continue;
-			Vector dir = los * (1.f / dist);
-			float entry = dist - other.pEdict->v.maxs.x;
-
-			TraceResult tr;
-			TRACE_LINE(eye, eye + dir * entry, ignore_monsters, bot.pEdict, &tr);
-			if (tr.flFraction >= 1.f)
-				continue;
-
-			++blocked;
-			bool ok = g_pGameProfile->Penetrates(bot, id, eye, dir, entry);
-			if (ok)
-				++through;
-
-			edict_t *hit = tr.pHit ? tr.pHit : INDEXENT(0);
-			Vector end = eye + dir * entry;
-			const char *tex = TRACE_TEXTURE(hit, eye, end);
-
-			char line[256];
-			snprintf(line, sizeof(line), "CrossBot: %s -> %s %s dist=%.0f wall@%.0f tex=%s %s\n",
-				bot.name, other.name, spec && spec->classname ? spec->classname : "?", dist,
-				tr.flFraction * entry, tex ? tex : "-", ok ? "THROUGH" : "stopped");
-			SERVER_PRINT(line);
-		}
-	}
-
-	char summary[96];
-	snprintf(summary, sizeof(summary), "CrossBot: wallbang probe %d blocked, %d through\n", blocked,
-		through);
-	SERVER_PRINT(summary);
-}
-
 void PrintFireStatus()
 {
 	int shown = 0;
@@ -1178,7 +1157,8 @@ void PrintFireStatus()
 			"leadshots=%d chargeshots=%d arcshots=%d throwshots=%d guides=%d capped=%d "
 			"stickyshots=%d uphill=%d selfveto=%d aimveto=%d spreadwaits=%d targetaims=%d "
 			"switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
-			"idlereload=%d ambush=%d duel=%d spinups=%d lasers=%d braces=%d bracing=%d "
+			"idlereload=%d ambush=%d duel=%d heard=%d harmveto=%d intent=%d dropped=%d banned=%d "
+			"spinups=%d lasers=%d braces=%d bracing=%d "
 			"gaussjumps=%d wallbangs=%d target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
@@ -1187,6 +1167,7 @@ void PrintFireStatus()
 			fire.uphillVetoes, fire.selfVetoes, fire.aimVetoes, fire.spreadWaits, fire.targetAims,
 			fire.switches, fire.reloads,
 			fire.emptySwitches, fire.idleSwitches, fire.idleReloads, fire.ambushes, fire.duels,
+			fire.heardThrows, fire.harmVetoes, fire.throwId, fire.throwDrops, BotFire::ThrowBanned(bot) ? 1 : 0,
 			fire.spinups, fire.lasers, fire.braces, fire.bracing, fire.gaussJumps, fire.wallbangs,
 			target ? CBotTargetNameOf(target) : "-");
 		SERVER_PRINT(line);

@@ -20,6 +20,8 @@ public:
 	bool Disguised(edict_t *pEdict) const override;
 	bool HoldFire(const CBot &bot) const override;
 	bool ItemUsable(edict_t *player, edict_t *item) const override;
+	float ItemWorth(edict_t *player, edict_t *item, float ammoNeed) const override;
+	float ItemRespawnIn(edict_t *item, ItemKind kind) const override;
 	bool Fortifies(edict_t *pEdict) const override;
 	bool CanDetpack(edict_t *pEdict) const override;
 	void NoteSound(edict_t *src, const char *sample) const override;

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <string.h>
 
+#include "../game/crossplay.h"
 #include "../game/game_profile.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
@@ -11,6 +12,7 @@
 #include "../nav/nav_path.h"
 #include "../nav/nav_query.h"
 #include "bot.h"
+#include "bot_fire.h"
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
@@ -170,8 +172,8 @@ namespace
 		}
 		else
 		{
-			point = ent->v.origin;
 			area = ResolvePickupArea(mesh, ent->v.origin);
+			point = area ? ClampIntoArea(*area, ent->v.origin) : ent->v.origin;
 		}
 
 		if (area)
@@ -206,7 +208,30 @@ namespace
 		Vector point;
 		ScanReason reason = SCAN_OK;
 		float seconds = 0.f;
+		float worth = 0.f;
 	};
+
+	int JudgeGame(const edict_t *ent)
+	{
+		int owner = XPlay::OwnerOf(ent);
+		return XPlay::Supported(owner) ? owner : XPlay::Current();
+	}
+
+	float AmmoNeed(const CBot &bot)
+	{
+		int guns = 0;
+		int dry = 0;
+		for (int i = 0; i < bot.inventory.count; ++i)
+		{
+			const BotWeapon &w = bot.inventory.weapons[i];
+			if (w.id == 0 || g_pGameProfile->IsMeleeWeapon(w.id))
+				continue;
+			++guns;
+			if (!BotFire::WeaponArmed(bot.inventory, w))
+				++dry;
+		}
+		return guns ? static_cast<float>(dry) / static_cast<float>(guns) : 0.f;
+	}
 
 	const BotItemMemo *MemoFor(const CBot &bot, edict_t *ent)
 	{
@@ -244,6 +269,8 @@ namespace
 
 	void ScanItems(const CBot &bot, const Nav::NavMesh &mesh, std::vector<Candidate> &out)
 	{
+		float ammoNeed = AmmoNeed(bot);
+
 		for (int i = gpGlobals->maxClients + 1; i < gpGlobals->maxEntities; ++i)
 		{
 			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
@@ -251,22 +278,34 @@ namespace
 				continue;
 
 			const char *classname = CBotClassOf(ent);
-			ItemKind kind = g_pGameProfile->ClassifyItem(ent);
-			if (kind == ITEM_NONE)
-				continue;
+			ItemKind kind = ITEM_NONE;
+			bool sated = false;
+			float worth = 0.f;
+			{
+				XPlay::ScopedGame scope(JudgeGame(ent));
+				if (!g_pGameProfile)
+					continue;
+				kind = g_pGameProfile->ClassifyItem(ent);
+				if (kind == ITEM_NONE)
+					continue;
+				sated = (ItemKindUsesValue(kind) && Sated(bot, kind)) ||
+					!g_pGameProfile->ItemUsable(bot.pEdict, ent);
+				if (!sated)
+					worth = g_pGameProfile->ItemWorth(bot.pEdict, ent, ammoNeed);
+			}
 
 			Candidate cand;
 			cand.ent = ent;
 			cand.index = i;
 			cand.kind = kind;
+			cand.worth = worth;
 
 			std::vector<Placement> places;
 			cand.point = ResolveItemPlacements(mesh, ent, kind, bot.pEdict->v.origin, places);
 
 			if (BotItems::IsUnavailable(ent, kind))
 				cand.reason = SCAN_GONE;
-			else if ((ItemKindUsesValue(kind) && Sated(bot, kind)) ||
-				!g_pGameProfile->ItemUsable(bot.pEdict, ent))
+			else if (sated)
 				cand.reason = SCAN_SATED;
 			else if (const BotItemMemo *memo = MemoFor(bot, ent))
 			{
@@ -379,7 +418,7 @@ namespace
 				if (cost >= Nav::kUnreachableSeconds)
 					snprintf(why, sizeof(why), "no route");
 				else
-					snprintf(why, sizeof(why), "%.1fs away%s", cost,
+					snprintf(why, sizeof(why), "%.1fs away, worth %.1fs%s", cost, cand.worth,
 						picked && picked->ent == cand.ent ? " PICKED" : "");
 				break;
 			}
@@ -440,6 +479,30 @@ Vector ItemCenter(edict_t *ent, ItemKind kind)
 	return (ent->v.absmin + ent->v.absmax) * 0.5f;
 }
 
+ItemKind Classify(edict_t *ent)
+{
+	XPlay::ScopedGame scope(JudgeGame(ent));
+	return g_pGameProfile ? g_pGameProfile->ClassifyItem(ent) : ITEM_NONE;
+}
+
+float ChargerValue(edict_t *ent, ItemKind kind, edict_t *player)
+{
+	XPlay::ScopedGame scope(JudgeGame(ent));
+	return g_pGameProfile ? g_pGameProfile->ChargerValue(kind, player) : 0.f;
+}
+
+float ChargerFull(edict_t *ent, ItemKind kind)
+{
+	XPlay::ScopedGame scope(JudgeGame(ent));
+	return g_pGameProfile ? g_pGameProfile->ChargerFullValue(kind) : 0.f;
+}
+
+float RespawnIn(edict_t *ent, ItemKind kind)
+{
+	XPlay::ScopedGame scope(JudgeGame(ent));
+	return g_pGameProfile ? g_pGameProfile->ItemRespawnIn(ent, kind) : 0.f;
+}
+
 void NoteMemo(CBot &bot, edict_t *ent, float seconds, bool respawning)
 {
 	if (!ent || ent->free)
@@ -458,7 +521,7 @@ void NoteMemo(CBot &bot, edict_t *ent, float seconds, bool respawning)
 
 	BotItemMemo memo;
 	memo.ent.Set(ent);
-	memo.kind = bot.goalItem.Is(ent) ? bot.goalItemKind : g_pGameProfile->ClassifyItem(ent);
+	memo.kind = bot.goalItem.Is(ent) ? bot.goalItemKind : Classify(ent);
 	memo.areaId = bot.goalItem.Is(ent) ? bot.goalItemArea : bot.currentAreaId;
 	memo.readyTime = ready;
 	memo.respawning = respawning;
@@ -472,7 +535,7 @@ void NoteIgnored(CBot &bot, edict_t *ent, float seconds)
 
 void NoteRespawning(CBot &bot, edict_t *ent, ItemKind kind)
 {
-	NoteMemo(bot, ent, g_pGameProfile->ItemRespawnDelay(kind), true);
+	NoteMemo(bot, ent, RespawnIn(ent, kind), true);
 }
 
 void RefreshMemos(CBot &bot)
@@ -584,6 +647,7 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float>
 		one.areaId = cand.areaId;
 		one.point = cand.point;
 		one.payload = static_cast<int>(cand.kind);
+		one.worth = cand.worth;
 		out.push_back(one);
 	}
 }
@@ -598,6 +662,7 @@ void KeepPreferred(std::vector<BotGoal::Candidate> &cands)
 
 	cands.erase(std::remove_if(cands.begin(), cands.end(),
 		[](const BotGoal::Candidate &cand) {
+			XPlay::ScopedGame scope(JudgeGame(cand.ent));
 			return !g_pGameProfile->ItemPreferred(cand.ent, static_cast<ItemKind>(cand.payload));
 		}), cands.end());
 }
@@ -644,7 +709,7 @@ bool UpdateGoalItem(CBot &bot)
 	{
 		BOT_VLOG("CrossBot: %s %s %s, now at %.0f\n", bot.name,
 			ItemKindIsVolume(bot.goalItemKind) ? "found switched off" : "drained",
-			CBotClassOf(ent), g_pGameProfile->ChargerValue(bot.goalItemKind, bot.pEdict));
+			CBotClassOf(ent), ChargerValue(ent, bot.goalItemKind, bot.pEdict));
 		DropGoalItem(bot);
 		return true;
 	}
@@ -685,7 +750,7 @@ void OnTouch(CBot &bot, edict_t *ent)
 	if (IsPickupGone(ent))
 	{
 		BOT_VLOG("CrossBot: %s picked up %s, back in %.0fs\n", bot.name,
-			CBotClassOf(ent), g_pGameProfile->ItemRespawnDelay(bot.goalItemKind));
+			CBotClassOf(ent), RespawnIn(ent, bot.goalItemKind));
 		NoteRespawning(bot, ent, bot.goalItemKind);
 	}
 	else
@@ -711,7 +776,7 @@ void OnArrived(CBot &bot)
 	if (IsPickupGone(ent))
 	{
 		BOT_VLOG("CrossBot: %s arrived to find %s taken, back in %.0fs\n", bot.name,
-			CBotClassOf(ent), g_pGameProfile->ItemRespawnDelay(bot.goalItemKind));
+			CBotClassOf(ent), RespawnIn(ent, bot.goalItemKind));
 		NoteRespawning(bot, ent, bot.goalItemKind);
 		ForgetGoalItem(bot);
 		return;
@@ -779,7 +844,7 @@ void PrintCandidates(const Nav::NavMesh &mesh)
 			continue;
 
 		const char *classname = CBotClassOf(ent);
-		ItemKind kind = g_pGameProfile->ClassifyItem(ent);
+		ItemKind kind = Classify(ent);
 		if (kind == ITEM_NONE)
 			continue;
 

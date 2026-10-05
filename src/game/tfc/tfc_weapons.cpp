@@ -60,7 +60,7 @@ namespace
 			kNoMode },
 		{},
 		{},
-		{ TFC_TRANQ, "tf_weapon_tranq", -1, 0.2f, RANGE_LONG, 0.f,
+		{ TFC_TRANQ, "tf_weapon_tranq", -1, 0.2f, RANGE_NONE, 0.f,
 			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 1500.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_NONE },
 			kNoMode,
 			kNoMode },

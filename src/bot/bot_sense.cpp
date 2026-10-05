@@ -40,6 +40,11 @@ namespace
 
 	constexpr float kSoundClipDist = 1000.f;
 
+	constexpr float kFalloffHalfLives = 4.f;
+	constexpr float kFalloffFloor = 1.f / 16.f;
+
+	constexpr float kHeardFresh = 1.f;
+
 	constexpr size_t kGateLookahead = 3;
 
 	constexpr size_t kMaxBoneSets = 64;
@@ -70,6 +75,12 @@ namespace
 
 	edict_t *g_monsters[kMaxMonsters];
 	size_t g_monsterCount = 0;
+
+	constexpr int kMaxClients = 33;
+
+	float g_lastHealth[kMaxClients] = {};
+	edict_t *g_hurt[kMaxClients];
+	int g_hurtCount = 0;
 
 	float RandomUnit(BotSense::State &sense)
 	{
@@ -347,14 +358,24 @@ namespace
 		return false;
 	}
 
-	float Weight(const BotSense::Suspicion &entry, float decay)
+	float Falloff(float age, float decay)
 	{
-		float age = gpGlobals->time - entry.time;
 		if (age < 0.f)
 			age = 0.f;
 		if (age >= decay)
 			return 0.f;
-		return (decay - age) / decay;
+		float halfLife = decay / kFalloffHalfLives;
+		return (exp2f(-age / halfLife) - kFalloffFloor) / (1.f - kFalloffFloor);
+	}
+
+	float Weight(const BotSense::Suspicion &entry, float decay)
+	{
+		return Falloff(gpGlobals->time - entry.time, decay);
+	}
+
+	bool Coned(BotSense::SuspicionSource source)
+	{
+		return source != BotSense::SUSP_DAMAGE && source != BotSense::SUSP_SIGHT;
 	}
 
 	BotSense::SuspicionKind KindOf(const edict_t *ent)
@@ -396,6 +417,20 @@ namespace
 		BotSense::Push(bot, BotSense::EntitySoundOrigin(inflictor), BotSense::SUSP_DAMAGE, inflictor);
 	}
 
+	void UpdateAllyHurt(CBot &bot)
+	{
+		for (int i = 0; i < g_hurtCount; ++i)
+		{
+			edict_t *victim = g_hurt[i];
+			if (victim == bot.pEdict || Teams::Of(bot.pEdict, victim) != Teams::REL_FRIEND)
+				continue;
+
+			edict_t *attacker = BotCombat::Attacker(victim);
+			if (attacker)
+				BotSense::Push(bot, BotSense::EntitySoundOrigin(victim), BotSense::SUSP_ALLY, attacker);
+		}
+	}
+
 	bool TraceVisible(CBot &bot, const Vector &eye, edict_t *ent, Vector &pointOut, int &boneOut)
 	{
 		bool monster = (ent->v.flags & FL_CLIENT) == 0;
@@ -420,9 +455,9 @@ namespace
 			}
 			if (tr.flFraction < 1.f && tr.pHit != ent)
 			{
-				if (head)
+				if (!monster && attempt == 0)
 				{
-					head = false;
+					head = !head;
 					continue;
 				}
 				return false;
@@ -728,8 +763,7 @@ namespace
 			if (Tier(entry) != tier)
 				continue;
 
-			float w = LiveWeight(entry, decay);
-			if (w <= 0.f)
+			if (LiveWeight(entry, decay) <= 0.f)
 				continue;
 
 			Vector los = entry.pos - eye;
@@ -740,13 +774,22 @@ namespace
 			++live;
 
 			Vector dir = los * (1.f / dist);
-			float score = w * BotSense::ConeWeight(sense.vantage, dir);
-			if (score <= bestScore)
-				continue;
+			float cone = BotSense::ConeWeight(sense.vantage, dir);
 
-			bestScore = score;
-			bestWeight = w;
-			bestDir = dir;
+			for (int s = 0; s < BotSense::SUSP_COUNT; ++s)
+			{
+				if (entry.sourceTime[s] <= 0.f)
+					continue;
+
+				float w = Falloff(gpGlobals->time - entry.sourceTime[s], decay);
+				float score = Coned(static_cast<BotSense::SuspicionSource>(s)) ? w * cone : w;
+				if (score <= bestScore)
+					continue;
+
+				bestScore = score;
+				bestWeight = w;
+				bestDir = dir;
+			}
 		}
 
 		if (live == 0 || bestScore <= 0.f)
@@ -855,6 +898,26 @@ void BotSense::RefreshMonsters()
 	}
 }
 
+void BotSense::RefreshAllies()
+{
+	g_hurtCount = 0;
+
+	int maxClients = gpGlobals->maxClients;
+	if (maxClients >= kMaxClients)
+		maxClients = kMaxClients - 1;
+
+	for (int i = 1; i <= maxClients; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		float health = (ent && CBotIsLivePlayer(ent)) ? ent->v.health : 0.f;
+
+		if (health < g_lastHealth[i] && g_lastHealth[i] > 0.f)
+			g_hurt[g_hurtCount++] = ent;
+
+		g_lastHealth[i] = health;
+	}
+}
+
 int BotSense::MonsterCount()
 {
 	return static_cast<int>(g_monsterCount);
@@ -868,6 +931,7 @@ const char *BotSense::SourceName(SuspicionSource source)
 	case SUSP_EVENT: return "EVENT";
 	case SUSP_DAMAGE: return "DAMAGE";
 	case SUSP_SIGHT: return "SIGHT";
+	case SUSP_ALLY: return "ALLY";
 	case SUSP_COUNT: break;
 	}
 	return "?";
@@ -900,6 +964,8 @@ void BotSense::Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_
 {
 	if (!ent || ent->free || NoTarget(ent))
 		return;
+	if (Teams::Of(bot.pEdict, ent) == Teams::REL_FRIEND)
+		return;
 
 	State &sense = bot.sense;
 
@@ -931,11 +997,16 @@ void BotSense::Push(CBot &bot, const Vector &pos, SuspicionSource source, edict_
 					slot = i;
 			}
 		}
+
+		for (float &t : sense.slots[slot].sourceTime)
+			t = 0.f;
 	}
 
 	Suspicion &entry = sense.slots[slot];
 	entry.pos = pos;
 	entry.time = gpGlobals->time;
+	if (source < SUSP_COUNT)
+		entry.sourceTime[source] = gpGlobals->time;
 	entry.ent.Set(ent);
 	entry.source = source;
 	entry.kind = KindOf(ent);
@@ -1060,6 +1131,39 @@ const BotSense::Suspicion *BotSense::NearestLive(const CBot &bot, const Vector &
 	return best;
 }
 
+bool BotSense::HeardEnemy(const CBot &bot, Vector &pos, Vector &vel, edict_t **entOut)
+{
+	const State &sense = bot.sense;
+	float decay = Decay();
+	float now = gpGlobals->time;
+
+	const Suspicion *best = nullptr;
+	for (size_t i = 0; i < sense.count; ++i)
+	{
+		const Suspicion &entry = sense.slots[i];
+		if (entry.source != SUSP_SOUND && entry.source != SUSP_EVENT)
+			continue;
+		if (now - entry.time > kHeardFresh || LiveWeight(entry, decay) <= 0.f)
+			continue;
+		if (entry.kind != KIND_PLAYER && !entry.hunting)
+			continue;
+		if (!Teams::Attackable(bot.pEdict, entry.ent.Get()))
+			continue;
+		if (!best || entry.time > best->time)
+			best = &entry;
+	}
+
+	if (!best)
+		return false;
+
+	edict_t *ent = best->ent.Get();
+	vel = Vector(ent->v.velocity.x, ent->v.velocity.y, 0.f);
+	pos = best->pos + vel * std::max(now - best->time, 0.f);
+	if (entOut)
+		*entOut = ent;
+	return true;
+}
+
 bool BotSense::Senses(const CBot &bot, const edict_t *ent)
 {
 	if (!ent)
@@ -1110,13 +1214,13 @@ void BotSense::Update(CBot &bot)
 	{
 		BOTPERF_SCOPE(ZONE_SN_DAMAGE);
 		UpdateDamage(bot);
+		UpdateAllyHurt(bot);
 	}
 	{
 		BOTPERF_SCOPE(ZONE_SN_VISION);
 		if (BotDaze::Blind(bot))
 		{
-			if (sense.target.Get())
-				BotAim::ClearDelayQueue(bot);
+			BotAim::ClearDelayQueue(bot);
 			sense.target.Clear();
 			sense.targetBone = -1;
 			sense.visionCands = 0;

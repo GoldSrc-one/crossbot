@@ -840,7 +840,7 @@ Same run, three separate mechanisms, and they need different levers.
 `m_pActiveItem` offset is wrong and every duel verdict below is noise. Check this first; a healthy run
 matches on all bots across several different weapon ids.
 
-**`crossbot_duel` needs the pin, and here the pin is the right lever.** Left alone, HLDM bots
+**Duels need the pin, and here the pin is the right lever.** Left alone, HLDM bots
 essentially never hold the crowbar -- it is worth 0.1 and loses to everything they pick up -- so
 `melee=` in `crossbot_combat_status` stays 0 and no duel ever forms. `crossbot_fire_pin weapon_crowbar`
 makes every other weapon unusable *in combat*, so bots switch to the crowbar as soon as they fight,
@@ -967,73 +967,30 @@ reported 14 is not.
 
 ## scripts/test_aim_error.ps1
 
-Measures the intentional aim error by firing the same flick many times through `crossbot_aim_test` and
-reporting the spread of settle times at each `crossbot_aim_error` scale, plus the resting error left by the
-hand quantum at each `-Fovs` value.
+Measures the intentional aim error -- the `crossbot_aim_gain` motor gain mismatch, see "The efference copy
+is wrong on purpose" in `doc/perception.md` -- by firing the same flick many times through
+`crossbot_aim_test` and reporting the spread of settle times and the resting error at each `-Gains` value
+(default `0, 0.15`), optionally across `-Fovs`.
 
-The point is the spread, not any single row. `brake` is sampled once per flick, so one flick is one draw
+The point is the spread, not any single row. The gain is drawn once per flick, so one flick is one draw
 from a distribution and proves nothing on its own — the same argument as the `~3s` poll grid under
 `test_nav_goal.ps1`, for a different reason.
 
 Two things to read off it:
 
-- **At `crossbot_aim_error 0` the spread must collapse** onto the phase 1 controller numbers (about 0.37s
-  at 900 deg/s for a 180, 0.28s at 557 for 90 of pitch). Brake is forced to exactly 1 there, so anything
-  else means the error model leaked outside its cvar. This is the regression check.
-- **At scale 1 the distribution must open up asymmetrically** — the maximum should move much further than
-  the mean. That long tail is the overshoot-and-correct case. A symmetric widening would mean the flick
-  detector is resampling mid-movement instead of once per flick.
-
-The script leaves `crossbot_aim_drift` at its default on purpose: micro-drift is suppressed while a test is
-active, and a run that produces settle lines at all is what proves that suppression works. If drift ever
-leaks into a test, no flick settles and the log is empty rather than wrong.
+- **At gain 0 the spread must collapse** onto the controller's own numbers (normal tier, `crossfire`:
+  about 0.485s for a 180, 0.34s for 90 of yaw) and rest error must read **0.000**. With no motor error the
+  controller is exact, so anything else means the error model leaked outside its cvar. This is the
+  regression check.
+- **At 0.15 the mean must move up by about one reaction time** (normal's 0.30s), which is the correction
+  submovement, while rest error stays 0. A flick that never settles means the correction loop diverged.
 
 Settle is gated on hand speed as well as angle, so a view flying through the target on its way to an
 overshoot cannot report a false early settle. It is a threshold and not a proof: a small enough overshoot
 crosses slowly enough to slip under it, which is another reason to read the spread rather than a row.
 
-### The rest error row, and what zoom is supposed to do to it
-
-Each flick also reports a **rest error**: the miss still standing two seconds in, once everything has
-stopped. Settle time measures the motor model; rest error measures the hand's *resolution*, and they move
-independently — a change can leave settle untouched and still triple the resting miss.
-
-`-Quantum 0 -Impulse 0` is the regression form. With the hand resolution off the controller is exact again,
-so rest error must read **0.000 on both axes** and the settle rows must land back on the numbers above.
-Anything non-zero there means a quantum leaked outside its cvar.
-
-At the defaults the yaw rest error should spread across roughly zero to one quantum (0.448 degrees), because
-the hand dithers across the count it is nearest rather than parking. A row where every sample reads the same
-value means it *is* parking, which is the failure the speed floor exists to prevent.
-
-**The `-Fovs` sweep is the one that shows what zoom buys**, and it is the reason the whole hand-resolution
-model exists. Use a small flick with it — 40 degrees at fov 20 is the same 180 degrees of hand travel as a
-180 at fov 90, so anything larger runs past the two second rest sample:
-
-```powershell
-& .\scripts\test_aim_error.ps1 -Scales 1.0 -Fovs 90,20 -Shapes "40 0" -Flicks 10
-```
-
-Mean rest error should fall by roughly the FOV ratio: measured 0.299 degrees at fov 90 against 0.052 at fov
-20. Read the mean over the group and not a row — a single sample is one point on the tremor cycle. Two
-sanity checks come free in the same output: settle time must *rise* at fov 20 (the trade is real, about
-0.180s to 0.393s), and peak hand speed for a 40 at fov 20 must match peak hand speed for a 180 at fov 90,
-since those are the same physical hand movement.
-
-Read `-Scales 1.0` rather than 0 for this. At scale 0 the flick is deterministic, so every sample lands on
-the same phase of the tremor and the spread collapses to a single repeated number that says nothing.
-
-`test_fire.ps1` carries the same two overrides for the same reason. A DUEL result is only comparable
-against another DUEL run of the same length on the same build, so do not diff it against a number recorded
-before some other change — run the off case yourself:
-
-```powershell
-& .scripts	est_fire.ps1 -Full -Quantum 0 -Impulse 0
-```
-
-What should move is trigger discipline and nothing else. `targets` must hold roughly steady between the two
-(the quantum does not touch acquisition), while `shots` and `deaths` drop — measured about -26% and -29% on
-crossfire. `targets` falling with them would mean the change is suppressing engagements rather than shots.
+`-Fovs` sets `pev->fov` before each flick. Zoom divides hand speed by `fov / 90`, so settle time must rise
+at fov 20; with no hand resolution modelled it buys no precision, and rest error stays 0 at any fov.
 
 **The `0 90` shape cannot report a rest error and never could.** A 90 degree pitch flick from level clamps
 to `kPitchLimit`, and `BeginTest` clamps the target the same way, so the view and the target are both pinned
@@ -1180,27 +1137,13 @@ Two limits worth knowing before trusting a session:
   edicts` leaves a 528-byte `.prd`, an empty database and a server log with no `PERF window` line at
   all.
 
-## `CROSSBOT_BSPTRACE`: the in-process BSP tracer, and why it is not the default
+## Navgen's BSP tracer at runtime: measured, rejected, removed
 
 The planner's airmove sims call `pfnTraceHull` for every simulated frame, and navgen runs the *same*
 `PmSim::PmSimulator` against its own in-process BSP tracer instead. The obvious idea is to use navgen's
-tracer at runtime too, since airmove planning does not care about dynamic entities. It was measured, and
-it does not pay off.
-
-```
-build.bat -DCROSSBOT_BSPTRACE=ON
-```
-
-adds `bsp_file.cpp`, `clipnode_tree.cpp` and `polytope.cpp` to the plugin, registers
-`crossbot_bsptrace` (0 off, 1 compare, 2 BSP only) and `crossbot_bsptrace_blockers`, and the
-`crossbot_bsptrace_stats` command (`crossbot_bsptrace_stats reset` to zero it). In mode 1 every planner
-trace runs through **both** backends on the same ray, timed with `QueryPerformanceCounter`; the engine's
-answer is the one returned, so behaviour is unchanged while measuring.
-
-**Off by default and it costs nothing when off.** `BSPTRACE_WRAP` expands to its first argument, the
-cvars are not declared let alone registered, the command is not added, and CMake does not compile the
-three navgen translation units — verified by checking the ninja link line (only `crc32.cpp.obj` remains)
-and by grepping the stock DLL for the cvar names. Stock is ~100KB smaller.
+tracer at runtime too, since airmove planning does not care about dynamic entities. It was measured with
+a compare-mode harness (both backends on every planner ray, the engine's answer returned) that has since
+been deleted. It does not pay off.
 
 ### The measurement
 
@@ -1241,13 +1184,10 @@ One cvar and one command, both available in a **stock** build (neither is behind
 
 - `crossbot_airmove_verify 1` — re-simulate on every cache hit and compare against the stored result.
   Costs the entire speedup, so this is a correctness harness, not something to leave on. On a mismatch the
-  *fresh* result is the one returned, so verify mode is self-correcting.
-- `crossbot_airmove_correct 0` — disable the in-flight trajectory correction, so the follower re-issues
-  the launch heading unchanged for the whole flight. Default is `1`. This is the A/B switch for the
-  correction: same binary, same nav, one boot command apart. Set it through `-BootCommands`, never
-  `-ServerArgs` — plugin cvars register in `GameDLLInit`, after the engine has parsed the command line.
-  The landing log line carries `peak err` and `corrected` (frames), so a run's correction effort and its
-  miss can be read off together.
+  *fresh* result is the one returned, so verify mode is self-correcting. Set it through `-BootCommands`,
+  never `-ServerArgs` — plugin cvars register in `GameDLLInit`, after the engine has parsed the command
+  line. The landing log line carries `peak err` and `corrected` (frames), so a run's in-flight
+  correction effort and its miss can be read off together.
 - `crossbot_airmove_cache_stats` — occupancy/capacity, hits, misses, hit rate, inserts, evictions,
   uncacheable, and (under verify) verified and MISMATCH counts. `MISMATCH (N ent)` splits out the ones
   where the fresh sim touched an entity, which is the known and accepted divergence — see `doc/path_planning.md`.

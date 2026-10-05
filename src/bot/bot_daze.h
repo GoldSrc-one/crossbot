@@ -26,7 +26,7 @@ bool Blind(const CBot &bot);
 
 void Sway(const CBot &bot, Vector &angles);
 
-void OnScreenFade(CBot &bot, int duration, int hold, int flags, int r, int g, int b, int a);
+void OnScreenFade(CBot &bot, int duration, int hold, int flags, int a);
 
 void OnConcuss(CBot &bot, int scale);
 

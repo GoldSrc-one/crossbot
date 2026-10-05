@@ -15,6 +15,8 @@ namespace NavPlan
 namespace
 {
 
+uint32_t g_detourTeamMask = ~0u;
+
 constexpr float kWallNormalZ = 0.3f;
 
 constexpr float kPlanNoCeiling = 1.0e9f;
@@ -41,6 +43,7 @@ constexpr float kPlanAirmoveRunupTime = 0.1f;
 constexpr float kPlanAirmoveRunupMin = 8.f;
 constexpr float kPlanAirmoveRunupEps = 1.f;
 constexpr float kPlanRunupSeamStep = 18.f;
+constexpr float kPlanRelaxClearance = 12.f;
 constexpr float kPlanAirmoveRespeedEps = 1.f;
 constexpr float kPlanAirmoveRangeEps = 1.f;
 constexpr float kPlanAirmoveFlightEps = 0.01f;
@@ -418,6 +421,17 @@ PlanGate GateFromEdge(const EdgeLine &line, const PlanArea &inside, const Vector
 		return Vector(p.x, p.y, AreaFloorZ(inside, p.x, p.y));
 	};
 
+	auto pushFrom = [&](const Vector &p)
+	{
+		EdgeLine depth;
+		depth.base = p;
+		depth.along = inward;
+		depth.lo = 0.f;
+		if (!ClipLineByWalls(depth, inside, nullptr) || depth.hi > 1e8f)
+			return kPlanClearance;
+		return std::min(kPlanClearance, 0.5f * depth.hi);
+	};
+
 	Vector e1(line.base.x + line.along.x * line.lo, line.base.y + line.along.y * line.lo, 0.f);
 	Vector e2(line.base.x + line.along.x * line.hi, line.base.y + line.along.y * line.hi, 0.f);
 
@@ -432,14 +446,15 @@ PlanGate GateFromEdge(const EdgeLine &line, const PlanArea &inside, const Vector
 	if (!usable)
 	{
 		Vector c((e1.x + e2.x) * 0.5f, (e1.y + e2.y) * 0.5f, 0.f);
-		Vector pushed = shift(c, inward, kPlanClearance);
+		Vector pushed = shift(c, inward, pushFrom(c));
 		gate.left = gate.right = onFloor(InAreaColumn(pushed, inside, kInsideEpsilon) ? pushed : c);
 		gate.clamped = true;
 		return gate;
 	}
 
-	Vector pushedL = shift(l, inward, kPlanClearance);
-	Vector pushedR = shift(r, inward, kPlanClearance);
+	float push = std::min(pushFrom(l), pushFrom(r));
+	Vector pushedL = shift(l, inward, push);
+	Vector pushedR = shift(r, inward, push);
 	bool fits = InAreaColumn(pushedL, inside, kInsideEpsilon) &&
 		InAreaColumn(pushedR, inside, kInsideEpsilon);
 
@@ -531,6 +546,30 @@ float GateClearance(const PlanGate &gate)
 	return std::min(kPlanClearance + half, kPlanClearance * 2.f);
 }
 
+float CornerClearance(const PendingGate &pg, const std::vector<PlanArea> &areas, const Vector &prev,
+	const Vector &p, const Vector &next)
+{
+	Vector bis = NavMath::Norm2D(NavMath::Norm2D(next - p) - NavMath::Norm2D(p - prev));
+	if (bis.x == 0.f && bis.y == 0.f)
+		return pg.clearance;
+
+	uint32_t otherId = (pg.insideArea == pg.toArea) ? pg.fromArea : pg.toArea;
+	const PlanArea *inside = pg.insideArea < areas.size() ? &areas[pg.insideArea] : nullptr;
+	const PlanArea *other = otherId < areas.size() ? &areas[otherId] : nullptr;
+
+	const float candidates[] = { pg.clearance, kPlanClearance, kPlanClampedClearance };
+	for (float c : candidates)
+	{
+		if (c > pg.clearance)
+			continue;
+		Vector apex(p.x + bis.x * c, p.y + bis.y * c, p.z);
+		if ((inside && InAreaColumn(apex, *inside, kInsideEpsilon)) ||
+			(other && InAreaColumn(apex, *other, kInsideEpsilon)))
+			return c;
+	}
+	return std::min(pg.clearance, kPlanClampedClearance);
+}
+
 }
 
 void BuildAreaGates(PlanArea &area)
@@ -593,10 +632,15 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 	}
 }
 
+void SetDetourTeamMask(uint32_t mask)
+{
+	g_detourTeamMask = mask;
+}
+
 const PlanDetour *FindDetour(const PlanArea &area, uint32_t fromId)
 {
 	for (const PlanDetour &d : area.detours)
-		if (d.fromAreaId == fromId)
+		if (d.fromAreaId == fromId && (d.teamMask == 0 || (d.teamMask & g_detourTeamMask) != 0))
 			return &d;
 	return nullptr;
 }
@@ -635,8 +679,9 @@ Vector ConnectionCrossing(const std::vector<PlanArea> &areas, const PlanConnecti
 }
 
 PlanWalker::PlanWalker(const std::vector<PlanArea> &areas, const PlanTraceContext *traces,
-	const std::vector<std::vector<uint32_t>> *walkPredecessors)
-	: m_areas(&areas), m_walkPreds(walkPredecessors), m_traces(traces)
+	const std::vector<std::vector<uint32_t>> *walkPredecessors,
+	const std::vector<std::vector<uint32_t>> *walkSuccessors)
+	: m_areas(&areas), m_walkPreds(walkPredecessors), m_walkSuccs(walkSuccessors), m_traces(traces)
 {
 }
 
@@ -717,6 +762,7 @@ void PlanWalker::PushGateInside(const PlanConnection &conn, uint32_t insideId, u
 
 	PendingGate pg;
 	pg.insideArea = insideId;
+	pg.fromArea = fromId;
 	pg.toArea = toId;
 	pg.crouch = fromArea.crouch || toArea.crouch;
 	pg.clearance = GateClearance(*g);
@@ -797,7 +843,8 @@ bool PlanWalker::FlushFunnelTo(const Vector &target)
 			p.z = GateFloorZ(pg.gate, p);
 			corner.point = AtPlayerHeight(p, pg.insideArea);
 			corner.targetAreaId = static_cast<int>(pg.toArea);
-			corner.clearance = pg.clearance;
+			corner.clearance = CornerClearance(pg, *m_areas, pulled[k - 1].point, pulled[k].point,
+				pulled[k + 1].point);
 		}
 
 		++m_stats.corners;
@@ -1019,12 +1066,16 @@ float PlanWalker::RunupDistance(const Vector &launchPoint, const Vector &back, f
 	return total;
 }
 
-float PlanWalker::ReachBack(const Vector &from, const Vector &back, float want, uint32_t fromId) const
+float PlanWalker::ReachBack(const Vector &from, const Vector &back, float want, uint32_t fromId,
+	const std::vector<std::vector<uint32_t>> *adjacency, std::vector<uint32_t> *crossed) const
 {
-	if (!m_walkPreds || fromId >= m_areas->size() || want <= 0.f)
+	const std::vector<std::vector<uint32_t>> *adj = adjacency ? adjacency : m_walkPreds;
+	if (!adj || fromId >= m_areas->size() || want <= 0.f)
 		return 0.f;
 
-	std::vector<uint32_t> seen;
+	std::vector<uint32_t> local;
+	std::vector<uint32_t> &seen = crossed ? *crossed : local;
+	seen.clear();
 	uint32_t area = fromId;
 	Vector pos = from;
 	float total = 0.f;
@@ -1042,9 +1093,9 @@ float PlanWalker::ReachBack(const Vector &from, const Vector &back, float want, 
 		Vector seamPos = pos + back * toSeam;
 
 		uint32_t next = static_cast<uint32_t>(m_areas->size());
-		if (area < m_walkPreds->size())
+		if (area < adj->size())
 		{
-			for (uint32_t cand : (*m_walkPreds)[area])
+			for (uint32_t cand : (*adj)[area])
 			{
 				if (cand >= m_areas->size() || (*m_areas)[cand].crouch)
 					continue;
@@ -1080,6 +1131,134 @@ bool PlanWalker::LegIsWalkable(const Vector &from, const Vector &to, uint32_t fr
 	dir = dir * (1.f / len);
 
 	return ReachBack(from, dir, len, fromId) >= len - kPlanAirmoveRangeEps;
+}
+
+int PlanWalker::AreaOfWaypoint(size_t index, uint32_t startArea) const
+{
+	if (index == 0)
+		return static_cast<int>(startArea);
+
+	const PlanWaypoint &wp = m_result[index];
+	if (wp.targetAreaId < 0 || static_cast<size_t>(wp.targetAreaId) >= m_areas->size())
+		return -1;
+
+	uint32_t hint = static_cast<uint32_t>(wp.targetAreaId);
+	int best = -1;
+	float bestDz = kPlanRunupSeamStep;
+
+	auto consider = [&](uint32_t id)
+	{
+		if (id >= m_areas->size())
+			return;
+		const PlanArea &area = (*m_areas)[id];
+		if (!InAreaColumn(wp.point, area, -kPlanAirmoveRangeEps))
+			return;
+		Vector floor(wp.point.x, wp.point.y, AreaFloorZ(area, wp.point.x, wp.point.y));
+		float dz = std::fabs(AtPlayerHeight(floor, id).z - wp.point.z);
+		if (dz <= bestDz)
+		{
+			bestDz = dz;
+			best = static_cast<int>(id);
+		}
+	};
+
+	consider(hint);
+	if (best >= 0)
+		return best;
+
+	for (const std::vector<std::vector<uint32_t>> *adj : { m_walkPreds, m_walkSuccs })
+		if (adj && hint < adj->size())
+			for (uint32_t id : (*adj)[hint])
+				consider(id);
+
+	return best;
+}
+
+bool PlanWalker::LegIsClear(size_t from, size_t to, uint32_t fromArea) const
+{
+	const Vector &a = m_result[from].point;
+	const Vector &b = m_result[to].point;
+
+	Vector dir(b.x - a.x, b.y - a.y, 0.f);
+	float len = dir.Length();
+	if (len <= kPlanAirmoveRangeEps)
+		return false;
+
+	dir = dir * (1.f / len);
+	Vector side(-dir.y, dir.x, 0.f);
+
+	std::vector<uint32_t> crossed;
+
+	auto walk = [&](const Vector &p, const Vector &d, float want, uint32_t area)
+	{
+		if (ReachBack(p, d, want, area, m_walkSuccs, &crossed) < want - kPlanAirmoveRangeEps)
+			return false;
+
+		for (uint32_t id : crossed)
+		{
+			const PlanArea &ar = (*m_areas)[id];
+			if (ar.door || ar.breakable || ar.elevator || ar.crouch ||
+				ar.activation != crossbot_nav::ACT_NONE || ar.drift.x != 0.f || ar.drift.y != 0.f ||
+				ar.drift.z != 0.f || AreaUnderWater(static_cast<int>(id)))
+				return false;
+		}
+		return !crossed.empty();
+	};
+
+	if (!walk(a, dir, len, fromArea))
+		return false;
+
+	uint32_t endId = crossed.back();
+	const PlanArea &end = (*m_areas)[endId];
+	Vector endFloor(b.x, b.y, AreaFloorZ(end, b.x, b.y));
+	if (std::fabs(AtPlayerHeight(endFloor, endId).z - b.z) > kPlanRunupSeamStep)
+		return false;
+
+	for (float s : { -1.f, 1.f })
+	{
+		Vector out = side * s;
+		if (!walk(a, out, kPlanRelaxClearance, fromArea))
+			return false;
+		if (!walk(a + out * kPlanRelaxClearance, dir, len, crossed.back()))
+			return false;
+	}
+
+	return true;
+}
+
+void PlanWalker::Relax(uint32_t startArea)
+{
+	if (!m_walkSuccs)
+		return;
+
+	auto plain = [](const PlanWaypoint &wp)
+	{
+		return wp.connIndex < 0 && !wp.requiresElevatorRide && !wp.requiresDoor && !wp.requiresBreak &&
+			!wp.requiresButtonUse && !wp.requiresTriggerTouch && !wp.requiresTeleport &&
+			!wp.requiresLadder && !wp.airmoveLaunch && !wp.requiresJump;
+	};
+
+	for (size_t i = 0; i + 2 < m_result.size(); ++i)
+	{
+		if (!plain(m_result[i]))
+			continue;
+
+		int area = AreaOfWaypoint(i, startArea);
+		if (area < 0)
+			continue;
+
+		size_t runEnd = i + 1;
+		while (runEnd + 1 < m_result.size() && plain(m_result[runEnd]) && plain(m_result[runEnd + 1]))
+			++runEnd;
+
+		size_t k = runEnd;
+		while (k > i + 1 && !LegIsClear(i, k, static_cast<uint32_t>(area)))
+			--k;
+
+		if (k > i + 1)
+			m_result.erase(m_result.begin() + static_cast<std::ptrdiff_t>(i + 1),
+				m_result.begin() + static_cast<std::ptrdiff_t>(k));
+	}
 }
 
 int PlanWalker::AreaContaining(const Vector &point) const

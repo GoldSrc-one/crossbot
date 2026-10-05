@@ -48,8 +48,6 @@ bool DebugEnabled();
 
 bool AmbushEnabled();
 
-bool DuelEnabled();
-
 void Update(CBot &bot);
 
 bool Run(CBot &bot, const Nav::NavMesh &mesh);
@@ -67,5 +65,7 @@ bool Dueling(const CBot &bot);
 edict_t *Enemy(const CBot &bot);
 
 edict_t *DamageSource(edict_t *pEdict);
+
+edict_t *Attacker(edict_t *pEdict);
 
 }

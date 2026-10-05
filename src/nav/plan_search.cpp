@@ -58,7 +58,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 		return (goalPoint - from).Length() / NavAStar::kNavRunSpeed * hScale;
 	};
 
-	std::vector<std::vector<uint32_t>> walkPreds(n);
+	std::vector<std::vector<uint32_t>> walkPreds(n), walkSuccs(n);
 	size_t connCount = std::min(graphConns.size(), planConns.size());
 	for (size_t i = 0; i < connCount; ++i)
 	{
@@ -70,14 +70,18 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 			continue;
 
 		walkPreds[gc.areaB].push_back(gc.areaA);
+		walkSuccs[gc.areaA].push_back(gc.areaB);
 		if (!gc.oneWay)
+		{
 			walkPreds[gc.areaA].push_back(gc.areaB);
+			walkSuccs[gc.areaB].push_back(gc.areaA);
+		}
 	}
 
 	std::vector<SearchNode> state(n);
 	std::vector<bool> closed(n, false);
 
-	state[startArea].walker = PlanWalker(planAreas, traces, &walkPreds);
+	state[startArea].walker = PlanWalker(planAreas, traces, &walkPreds, &walkSuccs);
 	state[startArea].walker.Reset(startPoint);
 	state[startArea].g = 0.f;
 	state[startArea].score = 0.f;
@@ -175,6 +179,7 @@ PlannedRoute PlanRoute(const std::vector<std::vector<uint32_t>> &areaConnIndices
 	walker.Finish(goalPoint, static_cast<int>(goalArea));
 	walker.Retract();
 	walker.Respeed();
+	walker.Relax(startArea);
 
 	result.found = true;
 	result.complete = true;

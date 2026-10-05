@@ -71,96 +71,32 @@ linearises near zero to `2e/dt` -- exactly twice the dead-beat speed -- so a ste
 further. Squaring out `sqrt(2ae + s^2/4) - s/2 <= 2e/dt` with `s = a*dt` reduces to `0 <= 4e^2/dt^2`, which
 holds for every `e > 0`, with equality only in the limit. So there is no limit cycle at all: dropping the
 clamp gives a ring-down that decays quickly at first and stalls around `aMax * dt^2 / 8` -- 0.056 degrees at
-100fps, 0.156 at 60, 1.41 at the `kMaxFrameTime` clamp. That is an order of magnitude finer than the hand
-quantum at normal tick rates and three times coarser at 10 Hz: wrong in both directions, and frame-rate
-coupled in a controller whose entire envelope design exists to not be. Coarseness comes from the quantum
-below instead, and the clamp stays.
+100fps, 0.156 at 60, 1.41 at the `kMaxFrameTime` clamp. That is frame-rate coupled in a controller whose
+entire envelope design exists to not be, so the clamp stays.
 
 `kMaxHandSpeed` is a hand speed ceiling. It is near-inert at the current constants, since the largest
 reachable error is 180 degrees and that only peaks at 720 deg/s, but it is the knob for a bot whose hand
 should be slower than its acceleration allows.
 
-### The hand has a resolution, and that is what zoom buys
-
-A real hand on a real mouse cannot move an arbitrarily small amount, and cannot change speed by an
-arbitrarily small amount. Two quantisations model that, both in hand space, both applied at the bottom of
-`StepAxis`:
-
-    velOut   = round(vel / impulse) * impulse       // commanded speed lives on a grid
-    pending += velOut * dt
-    counts   = trunc(pending / quantum)             // whole mouse counts only
-    pending -= counts * quantum
-    angle   += counts * quantum * s
-
-`crossbot_aim_quantum` is degrees of hand travel per mouse count and `crossbot_aim_impulse` is the smallest
-non-zero hand speed, in hand deg/s. Both cvars hold the value itself rather than a multiplier, and either at
-0 switches its own quantisation off; both at 0 is the exact pre-quantum controller, which is what the
-regression run in `test_aim_error.ps1` uses.
-
-The default quantum is `atan(1/128)` = 0.4476 degrees: one unit of miss per 128 units of range. That is
-deliberately chosen for its consequence at distance. Because both quantisations are in hand space, `s`
-scales them the same way it scales `kMaxAccelYaw`:
-
-| fov | angular quantum | 1 unit per | miss at 4096 units |
-|---|---|---|---|
-| 90 | 0.448 deg | 128u | +/- 32u, and a player is 32 wide |
-| 20 (crossbow) | 0.0995 deg | 576u | +/- 7u |
-
-**This is the reason zoom is worth anything to a bot.** Before it existed, `FovScale` priced zoom as pure
-cost -- see "Zoom is a range decision" in `doc/combat.md` -- and a bot that zoomed simply turned 4.5x slower for a mode
-swap. Now the same 4.5x buys 4.5x finer placement. Measured on a 40 degree flick, ten samples each: mean
-resting error 0.299 degrees at fov 90 against 0.052 at fov 20, for settle times of 0.180s and 0.393s. Peak
-hand speed came out 414 and 891 deg/s -- the fov 20 figure matching the 890 of a 180 at fov 90, because a 40
-degree turn through a 20 degree scope is the same 180 degrees of hand travel.
-
-**Why the speed grid is applied to the output and not to the change in speed.** Quantising `dv` and keeping
-`vel` itself on the grid is the tidier-looking form and it deadlocks. `dv` is clamped to `maxAccel * dt`
-first, so as soon as `maxAccel * dt` drops below half an impulse every `dv` rounds to zero and the velocity
-can never change again -- the view freezes solid. That threshold is `dt < impulse / (2 * maxAccel)`, i.e.
-600fps on yaw and 480 on pitch at the defaults, and `sys_ticrate` goes to 1000. Leaving `vel` continuous and
-snapping only the value that gets integrated has no such threshold.
-
-**Why the commanded speed is floored and not merely snapped.** `round(vel / impulse)` returns zero whenever
-`|vel| < impulse / 2`, and the dead-beat term turns a small error into a small velocity -- so without a
-floor any error under `impulse * dt / 2` is invisible and the hand parks early. Measured, that put the
-resting error at 0.065 degrees at 100fps: three times finer than the quantum intends and frame-rate coupled,
-which is both of the things this design is trying to avoid. So the control law floors `limit` at `impulse`,
-capped at `quantum / dt` so the floor can never demand more than one count per frame at a low tick rate.
-The hand therefore never comes fully to rest: it dithers across the count it is nearest, roughly 20 Hz at
-100fps, which is about where physiological hand tremor sits. `crossbot_aim_status` shows this as a hand
-speed that idles at 21 deg/s rather than 0 -- `sqrt(15^2 + 15^2)`, both axes at the floor.
-
-The tremor is not cosmetic. It is what makes long range *probabilistic*: `RayOnTarget` gates the trigger on
-the ray actually entering the bounding box, so a wandering ray produces intermittent potshots at a distant
-target rather than a clean yes or no that holds for the whole engagement.
-
-**`kMaxQuantum` and `kMaxImpulse` are cvar clamp bounds, not physics.** They belong with `kMaxDrift`,
-`kMaxDelay` and `kMaxErrorScale`, not with `kMaxAccelYaw` in the same block: acceleration keeps its ceiling
-and the impulse adds a floor, opposite ends of one axis and both needed. `kMaxQuantum` is 5 degrees because
-that is under `kLadderAimTolerance`, so no cvar value can leave a nav gate unlatchable; `kMaxImpulse` is 100
-deg/s because past that the slowest possible tracking speed outruns most engagements.
-
-Resting error is bounded by whichever quantisation binds, `max(quantum, impulse * dt) / 2` in hand space:
-0.22 degrees at 100fps, 0.375 at the 20 Hz clamp. Both sit under `kTestSettleTolerance`, and the tremor
-speed sits far under `kTestSettleSpeed`, so `crossbot_aim_test` still reports a settle. The nav gates have
-more than 10x margin, and `crossbot_aim_drift` defaults to a degree of sine, comfortably above the quantum,
-so idle drift still moves the view -- in steps now.
-
 ### Where the constants come from
 
-`kMaxAccelYaw` is derived, not tuned. For a symmetric accelerate-then-decelerate turn covering angle `t` in
-time `T`, `t = a * T^2 / 4`. Requiring a 180 in 0.4s gives `a = 4 * 180 / 0.16 = 4500 deg/s^2`, peaking at
-900 deg/s halfway through. `kMaxAccelPitch` is 80% of that: vertical mouse travel is the awkward direction
-for a human wrist. For reference, the CS zbot uses a hand-tuned 3000 deg/s^2 and peaks around 750 deg/s on
-the same turn, so this bot's hand is somewhat quicker than a zbot's.
+These are the normal tier; `turnScale` multiplies all three. `kMaxAccelYaw` is 3000 deg/s^2, the CS zbot's
+hand-tuned figure, and `kMaxAccelPitch` is 2000: vertical mouse travel is the awkward direction for a human
+wrist. For a symmetric accelerate-then-decelerate turn the peak speed is `sqrt(a * t)`, and `kMaxHandSpeed`
+is set from it: `sqrt(3000 * 90) = 520 deg/s`, so a 90 degree yaw flick just touches the ceiling.
 
-The first cut used 0.5s (2880 deg/s^2). It was raised to 0.4s because 0.5s measurably slowed
-`test10_doorbutton` -- see below. `kMaxHandSpeed` is deliberately above the 900 deg/s peak so it stays a
-ceiling rather than a clip; at exactly 900 it would bind at the top of every 180.
+**The ceiling is now a clip on purpose.** Anything bigger than 90 cruises at 520 in the middle, so a 180
+takes about 0.52s instead of the 0.35s pure acceleration would give, and the time grows linearly rather than
+with the square root past that point. A 90 of yaw is about 0.35s, a 90 of pitch about 0.42s (peak 424, under
+the ceiling). Big turnarounds being slow is the human shape -- a wrist re-centres, it does not spin faster.
+
+History: the first cut was 2880 (180 in 0.5s), raised to 4500 (180 in 0.4s, ceiling 1200 deliberately
+unreached) because 0.5s measurably slowed `test10_doorbutton` -- see below. The present constants put the
+180 back past 0.5s, so that map is the one to watch on the nav sweep.
 
 ### The cost at the aim gates
 
-Below about 80 degrees of error (the crossover, `4 * 300^2 / aMax`) the controller is *slower* than the old
+Below about 80 degrees of error at the old 4500 (120 at today's 3000; the crossover is `4 * 300^2 / aMax`) the controller is *slower* than the old
 flat 300 deg/s rate, because it spends the start of the turn accelerating. A 6 degree correction goes from
 20ms to 73ms. The places that care are the two that **zero drive until the view has converged**: the ladder
 gate (`kLadderAimTolerance`, 6 degrees) and the activation gate (`kActivationAimTolerance`, 8 degrees).
@@ -214,11 +150,12 @@ The test angles are an **override**, not a write to `desiredAngles`: navigation 
 every frame, so a plain write would be stomped before the next frame. The override releases itself after 3
 seconds and the bot goes back to whatever it was looking at.
 
-Expected, from an offline simulation of the same step function at the shipped constants: `180 0` settles to
-within 0.5 degrees in 0.37-0.38s at a peak of 900 deg/s hand speed, and `0 90` in about 0.30s at a peak near
-540-560. The spread is the frame rate -- lower fps settles slower. Peak hand speed is the more stable number
-and the better thing to check: it is set by the constants, not the sampling, and 900 for a 180 is the
-derivation above closing on itself.
+Expected at the normal tier with `crossbot_aim_gain 0`: `180 0` settles in about 0.5s at a peak of 520 deg/s
+(the ceiling), `90 0` in about 0.35s peaking just under 520, and `0 90` in about 0.42s at a peak near 424. The
+spread is the frame rate -- lower fps settles slower. Peak hand speed is the more stable number and the
+better thing to check: it is set by the constants, not the sampling. With the gain mismatch on, the test
+is one of the two places it applies, so settle times grow a reaction-time tail; pin it to 0 to check the
+controller alone.
 
 ### The reaction delay queue
 
@@ -322,11 +259,121 @@ consequence is that `LosAngles` can now fail at *read* time, when the recalled p
 eye. `ApplyLook` falls through to the suspicion blend there and leaves `servedDelay` at zero rather than
 claiming a serve it did not make.
 
+### The bot sees its own view late
+
+The target queue makes the bot see the *enemy* a reaction time late. It still read its own `v_angle` live,
+so the hand was surgical about where it was pointing. The view queue fixes the other half: the controller
+and the trigger both act on what the bot saw of its own view `BotAim::Delay(bot)` ago, the same reaction
+time the target queue uses.
+
+The hand noise this replaced -- a mouse-count quantum with a speed floor (the tremor), an idle sine drift,
+and a random multiplier on the deceleration envelope (the brake) -- has been deleted. The only deliberate
+motor error left is the gain mismatch below.
+
+**A pure delay cannot drive this controller.** Feeding `view(t - d)` into `StepAxis` breaks the dead-beat
+term outright. A 6 degree error closes in one frame, and then the stale view keeps reporting 6 degrees
+for the next quarter second, so the hand flicks another 6 every frame and oscillates far past the
+target. A slow proportional controller would survive it (stable while `gain * d < pi/2`), but that makes
+a 180 take most of a second.
+
+**So the bot keeps an efference copy**, the way a brain does. It knows what it told its hand to do, and
+only learns from its eyes what it did *not* command. Per frame, in `Bot_UpdateFacing`:
+
+    own      += commanded step (post pitch clamp, pre AdjustView)
+    push       { now, off = v_angle - own, punchangle }
+    read       off, punch at now - delay  (interpolated, yaw the short way round)
+    seen      = own + off
+    error     = desired - seen ;  step applied to the real v_angle
+
+`off` is the disturbance: everything that moved the view without the hand. With no disturbance it is
+constant and `seen == v_angle` exactly, so turning, the nav gates and `crossbot_aim_test` are untouched at
+any delay. What the bot sees late is the disturbances: `AdjustView` (DoD recoil kick, scope sway, bipod
+clamp), anything else writing `v_angle`, and `punchangle`.
+
+**The slot stores the offset, not the view and the copy separately.** Differencing two absolute
+accumulators across the window needs an unwrapped yaw, and an unwrapped float yaw loses precision over a
+long life. The offset only changes on disturbances, so `own` and `off` can both stay wrapped.
+
+**The pitch clamp counts as commanded.** The stop is on screen, so the bot knows about it. Counting it
+as a disturbance would make the bot believe it was still pitching past 89 for a quarter second.
+
+**The trigger reads it too.** `Bot_RunPlayerMove` hands `aim.perceived` (seen plus this frame's step) to
+`BotFire::Buttons`, and `RayOnTarget` / `ArcOnTarget` add `aim.perceivedPunch` instead of the live
+`punchangle`. A spraying bot therefore keeps pulling the trigger on a crosshair that has already
+kicked off target, and stops a reaction time after the kick rather than on the same frame. Movement does
+not read it: `Bot_DecomposeMove`, the nav aim gates and `AimWithinCone` stay on the real view, because
+they are physics and stance rather than hand and trigger.
+
+The ring is cleared in `TeleportAllBots` and on respawn (`bot = CBot()`), the same as the target ring.
+Recoil *compensation* is not modelled. The controller still steers `v_angle` and ignores the punch, and
+the perceived punch is what a compensation step would read.
+
+### The efference copy is wrong on purpose
+
+With the hand noise all at 0, the efference copy is a Smith predictor with a perfect plant model: `own`
+advances by exactly what the hand did, so the bot never misses except through the target queue. A real
+predictor's error is model mismatch, and that is the error this adds. On each flick both axes draw a gain,
+and the hand moves `step * gain` while `own` still advances by the commanded `step`:
+
+    gain  = 1 + s * (u * 1.5 - 1),   u uniform [0, 1)   ->   [1 - s, 1 + s/2]
+    v_angle += step * gain ;  own += step
+
+The difference lands in `off = v_angle - own`, which is exactly the disturbance channel the view queue
+already carries. So the bot believes it arrived, sees the miss one reaction time later, and makes a
+correction. That is a real undershoot, which shaping the deceleration cannot produce (braking early only
+lands softly and slower): the aim point is right, the hand's belief about where it went is wrong. It is proportional to the movement (the Fitts
+shape again), the correction gets its own gain on the re-trigger, and the loop converges because each
+reaction time the remaining offset rate is multiplied by `-(gain - 1)`. `kMaxGainSpread` caps `s` at 0.5,
+well inside the `|gain - 1| < 1` stability bound.
+
+The range is biased low because the primary submovement of a human aimed movement usually undershoots.
+`s` is `crossbot_aim_gain`: easy 0.25, normal 0.15, hard 0.10, expert 0.05, so a normal bot can land a
+90 degree flick up to 13.5 degrees short or 6.75 degrees long.
+
+**A flick is what `UpdateGain` detects:** the combined error is above `kFlickMinError` (3 degrees) *and*
+grew by more than `kFlickGrowth` (0.5) since last frame. A converging movement's error falls monotonically,
+so nothing retriggers; a genuinely new target does, and so does the bot's own miss pushing the error back
+up through the threshold, so the correction gets its own independent gain. Both axes draw independently,
+because a shared gain would make every miss land along the movement's own line, and humans miss to the
+side too. `crossbot_aim_status` prints the pair, and a frozen value on a bot idling on a stationary
+target is the correct reading: the error never grows past 3 degrees, so it never redraws.
+
+**Only with a target, or during `crossbot_aim_test`.** Gains reset to 1 otherwise. The nav aim gates hold
+drive until the view converges, so a mismatched nav turn would cost a reaction time at every ladder and
+button. The test is included so the error can be measured.
+
+**The pitch clamp is still commanded.** On a frame that hits the stop, `own` advances by the real step,
+so a stop overshot through gain does not leave the bot believing it is still pitching.
+
+Measured with `test_aim_error.ps1 -Gains 0,0.15`, normal tier, eight flicks per cell, `crossfire`:
+
+| gain | flick | settle min | avg | max | peak |
+|---|---|---|---|---|---|
+| 0 | 180 0 | 0.479 | 0.485 | 0.494 | 520 |
+| 0 | 90 0 | 0.308 | 0.339 | 0.487 | 512 |
+| 0 | 0 90 | 0.041 | 0.340 | 0.389 | 382 |
+| 0.15 | 180 0 | 0.626 | 0.785 | 1.012 | 522 |
+| 0.15 | 90 0 | 0.291 | 0.593 | 0.820 | 515 |
+| 0.15 | 0 90 | 0.489 | 0.780 | 0.908 | 417 |
+
+The mean moves up by about one reaction time (normal's 0.30), which is the correction submovement, and
+the resting error stays 0. The pitch row's low minimum and peak are the 89 degree stop cutting the flick
+short when the test starts from a non-level view, not the controller.
+
 ### crossbot_aim_status
 
 Prints, per bot: the sense target, which bone it is currently sampling, ring occupancy, how much history
 the ring holds, the delay actually served, hand speed, and `err` -- the angle between the bot's real
 `v_angle` and the true present-time angles to its target.
+
+`seen` is the bot's belief about its own view and `perr` is the angle between `seen + perceivedPunch` and
+`v_angle + punchangle`. `perr` must read 0 whenever nothing but the hand moves the view, at any delay,
+once the gain mismatch is accounted for: with a target held and `crossbot_aim_gain` above 0 it is the
+mismatch the bot has not seen yet, and it drains to 0 within a reaction time of the view coming to rest.
+`gain` prints the pair drawn on the last flick.
+Under fire it is nonzero even at `crossbot_aim_delay 0`, because the punch it compares against is one
+`pfnRunPlayerMove` newer (the shot and the pmove decay both land after the read). A nonzero `perr` at idle
+with no recoil means the efference copy is missing a step.
 
 `err` is the number that decides whether any of this works, and it is why the command exists at all.
 Spectating cannot distinguish "correctly delayed" from "delayed and also wrong": both look like a head
@@ -349,7 +396,7 @@ polling the command. The nav sweep cannot substitute for it -- `test_nav_goal.ps
 with line-of-sight gating a lone bot never has a target, so the sweep can only ever prove the feature is
 inert when switched off.
 
-Measured on `crossfire`, both bots converged on one spawn and idling, drift off:
+Measured on `crossfire`, both bots converged on one spawn and idling:
 
 | `crossbot_aim_delay` | served | ring |
 |---|---|---|
@@ -374,55 +421,6 @@ constant velocity, and the roam phase mixes genuine target acceleration with the
 the bot at a ladder. err there has been seen anywhere between 2 and 48 degrees across runs, with no way to
 attribute any of it -- it is not a number to compare against a previous run.
 
-### The brake multiplier, and why b<1 is not really an undershoot
-
-The controller in `StepAxis` is time-optimal, so it arrives with zero velocity every time. That is the one
-thing a hand never does. Phase 3 makes it miss on purpose with a single number: `brake`, multiplying the
-deceleration envelope and nothing else.
-
-```
-envelope = (sqrt(2*a*m + 0.25*s^2) - 0.5*s) * brake
-```
-
-The dead-beat `m/dt` term is deliberately left alone. It is what closes an error small enough to close this
-frame, and multiplying it too would make tiny errors miss forever instead of terminating.
-
-`brake > 1` lets the axis carry more speed than it can shed, so it arrives moving and sails past. The
-overshoot is exact: deceleration starts at remaining `v^2/(2*a*b^2)` but stopping needs `v^2/(2*a)`, so it
-overshoots by `v^2/(2*a) * (1 - 1/b^2)`. For a large flick the peak is `v^2/(2*a) ~ E/2`, which makes the
-overshoot a fixed *fraction* of the movement rather than a fixed angle -- constant relative error, which is
-the Fitts' law signature, and it falls out of the algebra rather than being imposed.
-
-`brake < 1` is the asymmetric case and the name is a slight lie. Decelerating early does not leave the axis
-short of the target: solving `dm/dt = -b*sqrt(2*a*m)` gives `sqrt(m)` falling linearly to zero in
-`sqrt(2*E/a)/b`, so it still converges, just `1/b` times slower. What you see is a soft landing, not a
-discrete undershoot and correction. A real undershoot needs the *aim point* to be wrong, not the braking,
-and that is an offset model rather than this one. The soft landing is worth having anyway, so it stays.
-
-### Sampled once per flick, not driven by a sine
-
-The original sketch modulated the error with a sine. That was dropped: anything periodic reads as robotic
-once you watch it for a minute, which is the exact failure the model exists to avoid.
-
-`UpdateBrake` resamples both axes when the combined error magnitude is above `kFlickMinError` (3 degrees)
-*and* grew by more than `kFlickGrowth` (0.5) since last frame. During a converging movement the error falls
-monotonically, so nothing retriggers. Two things make it grow: a genuinely new target, and the bot's own
-overshoot flipping the error sign and pushing it back up through the threshold. So the correction movement
-gets its own independent brake for free, and the visible result is one ballistic movement followed by one or
-two smaller ones -- again, not imposed anywhere.
-
-The chain terminates on its own. At 60fps the dead-beat term dominates below `2*a*b^2*dt^2` ~ 2.5 degrees,
-so a correction smaller than that closes in a single frame no matter what brake was drawn, and there is no
-limit cycle at the end of a flick.
-
-Both axes are sampled independently on the same trigger. That is deliberate: a shared brake would make every
-miss land exactly along the movement's own line, and humans miss to the side too.
-
-`crossbot_aim_status` prints the live `brake` pair, and **a frozen value there is the correct reading, not a
-stuck one.** A bot idling on a stationary target never lets the error grow past 3 degrees, so it never
-resamples and holds whatever it drew on the last real flick — which is exactly what the static phase of
-`test_sense.ps1` shows. Watch it change during the roam phase instead.
-
 ### The RNG is per bot and seeded from the entity index
 
 `RandomUnit` is a plain LCG on `BotAim::State`, not `RANDOM_FLOAT`. Two reasons. It does not consume the
@@ -431,30 +429,10 @@ shared engine RNG, which the game uses for weapon spread. More importantly it is
 reproducible, which matters more here than usual, because the measurement discipline this work needed
 (`doc/testing.md`) already has enough sources of run-to-run noise without aim error adding another.
 
-`kBrakeSpread` is 0.06, scaled by `crossbot_aim_error`. Sampling is uniform and symmetric about 1. Motor
-control literature says the primary submovement usually undershoots rather than overshooting, so biasing the
-sample low is the obvious next tuning knob; it is not done because there is no measurement here that could
-justify a particular bias.
-
-### Idle micro-drift
-
-A bot holding still with a settled view is visibly a statue. `Bot_UpdateFacing` adds a slow sine to the
-*local* copy of the desired angles -- `crossbot_aim_drift` degrees of yaw at 1.7 rad/s, 60% of that in pitch
-at 1.19 rad/s, per-bot phases drawn at seed time. The two rates are incommensurate, so the pattern does not
-visibly repeat.
-
-It is added to a local copy, not to `bot.desiredAngles`, so `RunActivation` and `RunChargerUse` keep
-comparing the view against the same angles they wrote and their gates are untouched. The ladder gate at
-`kLadderAimTolerance` compares against its own locally computed `aimYaw`, so drift does show up there as
-steady-state error -- 1 degree of it, against a 6 degree tolerance.
-
-**Drift is suppressed while `testActive`.** This is not optional. `crossbot_aim_test` settles on a 0.5 degree
-tolerance and the drift amplitude is 1 degree, so with drift running the test could never settle at all.
-
 ### The settle gate had to learn about overshoot
 
 `UpdateTest` previously reported settle on the first frame inside `kTestSettleTolerance`. With overshoot in
-play, a view flying through the target at 200+ deg/s on its way past can land inside that band for one frame
+play (a gain above 1), a view flying through the target at 200+ deg/s on its way past can land inside that band for one frame
 and report a settle that never happened. It now also requires hand speed below `kTestSettleSpeed` (150
 deg/s), which is above the ~50 deg/s the dead-beat term produces on genuine arrival at typical frame rates
 and well below flythrough speed.
@@ -462,29 +440,6 @@ and well below flythrough speed.
 This is a threshold, not a proof: an overshoot small enough to cross the target slowly can still slip under
 it. Read the spread across many flicks rather than any single number, which is what
 `scripts/test_aim_error.ps1` exists to produce.
-
-### What the error actually measures out at
-
-45/45 on the nav sweep at the shipped defaults (`crossbot_aim_error 1`, `crossbot_aim_drift 1`), so the
-gate-latch cost the phase 1 controller introduced is not compounded by the error model. Eight flicks per
-cell, `crossfire`, one bot:
-
-| `crossbot_aim_error` | flick | settle min | avg | max | spread | peak |
-|---|---|---|---|---|---|---|
-| 0 | 180 0 | 0.308 | 0.349 | 0.372 | 0.064s | 895 deg/s |
-| 0 | 0 90 | 0.255 | 0.266 | 0.297 | 0.042s | 563 deg/s |
-| 1 | 180 0 | 0.296 | 0.398 | 0.543 | 0.247s | 908 deg/s |
-| 1 | 0 90 | 0.245 | 0.285 | 0.354 | 0.109s | 557 deg/s |
-
-The `crossbot_aim_error 0` rows are the regression check: brake forced to exactly 1, and the numbers land on
-the phase 1 measurements (0.37s at 899 deg/s for a 180, 0.28s at 557 for 90 of pitch). The residual 0.06s
-spread there is frame-phase jitter, not the model.
-
-At scale 1 the distribution opens up and, importantly, opens up *asymmetrically*: the mean moves up 0.05s
-but the max moves up 0.17s. That long tail is the overshoot-and-correct case, and it is the shape that was
-wanted. The minimum going slightly *below* the scale-0 minimum is not an anomaly -- a small `brake > 1`
-carries more speed in and lands with an overshoot under the dead-beat threshold, so it arrives faster than
-time-optimal-with-a-full-stop does.
 
 ## bot_sense.cpp
 
@@ -702,11 +657,35 @@ shuffle and the func_tank in `bot_fun.cpp` at once, and none of them needed an e
 teams are active. The bot only ever engages a confirmed enemy; the case where nobody has a team is
 handled one level up, by `Teams::Active` falling back to today's behaviour for the whole bot.
 
-**The suspicion table is deliberately left unfiltered.** `Hear`, `Notice` and `Push` still record
-teammates, so a bot still turns its head toward a friend's footsteps -- that is the gaze, and it looks
-right. The table drives an attack in exactly one place, the satchel, which is gated separately in
-`NearestLive`. Camping reads teams a second time for the friend-in-view calm, but that read never
-aims or shoots, so the one-attack-gate claim still holds.
+**Teammates never reach the suspicion table either.** `Push` drops anything `Teams::Of` calls
+`REL_FRIEND`, for every source at once -- sound, event, damage and sight. It used to record them on
+the theory that a head turning toward a friend's footsteps looks right. With one friend it does; with
+a CS team it does not. Every friendly step lands in the PLAYER tier, which outranks everything else in
+`LookDirection`, so on `fy_snow` the gaze spent its whole life on teammates. The same entries also
+made `BotGauss::Scared` count a friend nearby as a threat.
+
+**The filter is `== REL_FRIEND`, never `!Attackable`.** A door, lift or breakable has team zero and
+reads `REL_UNKNOWN`, which `Attackable` rejects while teams are active -- so the `Attackable` form
+would silently delete every world sound on a team map. `REL_FRIEND` only ever matches a confirmed
+teammate, or something a teammate owns: their grenades, satchels and snarks inherit the owner's team
+through `TeamOf`, and so do the bot's own. On a deathmatch map, with `crossbot_teams 0`, or before the
+bot has a team, `Of` answers `REL_UNKNOWN` and nothing is dropped.
+
+The table drives an attack in exactly one place, the satchel, which is still gated separately in
+`NearestLive`. Camping reads teams a second time for the friend-in-view calm straight off the player
+list, not the table, and that read never aims or shoots, so the one-attack-gate claim still holds.
+
+### Teammate hurt (`SUSP_ALLY`)
+
+A teammate losing health is the one way a friend reaches the table, and it enters as the *attacker*, not the
+friend. `BotSense::RefreshAllies` runs once per frame beside `RefreshMonsters`, compares each client's
+`v.health` with last frame's, and keeps the victims whose health fell (a respawn raises health, so it never
+counts). Each bot then runs `UpdateAllyHurt`: for every hurt `REL_FRIEND` that is not itself, resolve the
+attacker with `BotCombat::Attacker` (the half of `DamageSource` that does not need `dmg_take`, safe here only
+because it is read next to a real health drop) and `Push` it at the **victim's** position. Fall damage,
+`trigger_hurt` and friendly fire resolve to no attacker and push nothing. There is no range or line-of-sight
+gate: every teammate feels it. The entry is a `Coned` source like sound, so `ConeWeight` scales its score.
+It is gaze only; combat still needs `sense.target`. `crossbot_sense_status` reports it as `ally:`.
 
 ### Monsters are candidates only while they are hunting us
 
@@ -911,8 +890,23 @@ accumulation, both refine passes, `LiveCount`, `Freshest`. One choke point is th
 liveness test that disagreed with the first is how a tier gets selected and then contributes nothing.
 
 `LiveWeight` drops an entry whose entity is gone, drops a player or monster that is dead, and otherwise
-returns `max(decay - age, 0) / decay`. The handle check is what makes gibs and destroyed breakables stop
+returns `Falloff(age)`. The handle check is what makes gibs and destroyed breakables stop
 steering the bot; the dead check is what stops it staring at a corpse for the five seconds after a kill.
+
+### Recency falls off exponentially
+
+    h = decay / 4                                     // 1.25 s at the default 5 s
+    Falloff(age) = (2^(-age/h) - 1/16) / (15/16)      // age < decay, else 0
+
+The `1/16` is `2^-4`, the value at `age == decay`, subtracted and renormalised so the curve lands on
+exactly zero there. That keeps "live" meaning `age < decay`, which every liveness reader -- camp scare,
+grenade, satchel, TFC pipes, the combat hold in `Senses`, `LiveCounts` -- depends on and did not change.
+1 s old is 0.55, 2.5 s is 0.23, 4 s is 0.05.
+
+**Linear falloff never separated anyone in a fight.** A running player pushes a footstep every 0.3 s and
+a shooting one pushes an event every shot, so every entity making noise sat within a few percent of 1.0
+and the cone term alone decided the vote. The exponential makes a contact that went quiet a second ago
+worth half of one that is still talking, which is the separation the vote needs.
 
 **The dead check is scoped to players and monsters on purpose.** `IsDead` is
 `deadflag != DEAD_NO || health <= 0`, and a `func_door` or `func_train` has `health == 0`. Applying it to
@@ -938,15 +932,27 @@ Writing `KIND_PLAYER` into `kind` would have been one line fewer and would have 
 
 ### Nothing is averaged: the winner is one entry, chosen by cone
 
-Within the winning tier every live entry is scored
+Within the winning tier every live entry is scored per sense, and the entry keeps its best sense:
 
-    score = LiveWeight(entry) * ConeWeight(vantage, dirToEntry)
+    score = max over s of  Falloff(now - sourceTime[s]) * (s is DAMAGE or SIGHT ? 1 : ConeWeight(vantage, dir))
 
 and the **single highest scorer wins outright**. There is no vector sum, no mean-shift refinement and no
 degenerate-mean fallback any more -- all three existed to make averaging survive threats on opposite
-sides, and an argmax does not have that problem to solve. `authority` is still the winner's recency
-weight alone, so the cone data decides *which* entry the bot looks at and never how hard it commits to
+sides, and an argmax does not have that problem to solve. `authority` is the winning sense's recency
+alone, so the cone data decides *which* entry the bot looks at and never how hard it commits to
 looking: a fresh contact from an unwatched direction still commands a full turn.
+
+**Damage and sight skip the cone.** The cone is a prior on where threats usually come from, which is
+the right discount for a sound. Being hit, or having traced someone, is not a guess, and discounting it
+is how bots came to ignore a player shooting them in the back: the attacker scored 0.15 while any bot
+running down the main cone scored near 1.0. There are no per-sense multipliers on top -- sound and
+gunfire are already held back by the cone, and that turned out to be enough of a handicap.
+
+**Each entry carries a time per sense, `sourceTime[SUSP_COUNT]`.** There is still one entry per entity
+and `time`, `source` and `pos` still mean "the latest push", so every other reader is untouched. The
+array exists because the attacker's own gunshot lands on the same entry a frame after each hit: with only
+`source`, the hit would be overwritten by an event and fall back under the cone every other frame. `Push`
+zeroes the array whenever a slot changes owner.
 
 `ConeWeight` reads the bot's blended vantage signature (`nav_vantage.cpp`), which says which cones
 everything with line of sight to this spot arrives through:
@@ -960,10 +966,10 @@ the main cone scores 1.0 whether the spot has one cone or four. Dividing by the 
 spot at 0.25 and the floor would swamp every real hit on it.
 
 `kVantageConeFloor = 0.15` is the whole reason this is a bias and not a blindfold. An entry the map says
-nothing ever arrives from still keeps 15% of its recency weight, so a close, fresh threat from an
-unwatched direction outscores a stale one down the main sightline and the bot turns. Without the floor a
-bot could be structurally incapable of reacting to someone shooting it from a direction navgen never saw
-a sightline through.
+nothing ever arrives from still keeps 15% of its recency weight, so a noise from an unwatched direction
+can still win once everything down the main sightline has gone quiet. It no longer carries the
+shot-in-the-back case -- damage skips the cone for that -- and on its own it never could: 15% of a fresh
+hit loses to any contact down the main cone younger than about 2.9 s.
 
 The point is the wall-staring case: a noise behind the bot in a direction with no sightline used to drag
 the averaged mean into the wall between it and everything else. Now it simply loses.
@@ -1162,9 +1168,16 @@ registered. The engine does not dedupe by name alone: under valve+cstrike+tfc, `
 and `StatusValue` each hold two ids, apparently where the games disagree on size. `ScreenFade` (96)
 and `Concuss` (156) come out as one id each. A game registering `ScreenFade` with a different size
 would overwrite the stored id and blind only that game's victims; `crossbot_usermsgs` shows it.
-`MessageBegin` arms capture only for `MSG_ONE` / `MSG_ONE_UNRELIABLE` to a fake client that is one of
-our bots, and only for those two ids. Every write hook returns on a single branch while capture is
-disarmed, which is the whole cost on the common path.
+`MessageBegin` arms capture only for `MSG_ONE` / `MSG_ONE_UNRELIABLE` to one of our bots, and only for
+those two ids. Every write hook returns on a single branch while capture is disarmed, which is the
+whole cost on the common path.
+
+**The recipient test is `BotManager::FindBot`, never `FL_FAKECLIENT`.** CS wipes that flag on every
+spawn (`doc/games.md`, *Rules*), so the first version of this hook processed a cstrike bot's
+flashbangs for its first life and silently dropped every one after its first respawn -- while
+`crossbot_daze_test`, which bypasses the hook, kept passing. The id compare runs first -- two integer
+compares against the two cached ids -- so every message that is not one of ours is rejected before
+`FindBot` walks `g_bots`.
 
 Only bytes and shorts are hooked because those are the only field types the two messages use. A third
 message with any other field type must hook those writers too, or its field indices will be wrong.
@@ -1185,7 +1198,7 @@ A fade blinds only when `a >= 200` and `FFADE_MODULATE` is clear. 200 is CS's mi
 self-fade -- orange, alpha 128 -- from blinding every bot that fires one. A map `env_fade` at full
 alpha does blind bots; the screen really is covered.
 
-Blindness lasts `crossbot_blind_scale * duration`, default 0.33: ReGameDLL's `PlayerBlind` calls
+Blindness lasts `kBlindScale * duration`, 0.33: ReGameDLL's `PlayerBlind` calls
 `Blind(fadeTime * 0.33, ...)` for its own bots, so a bot is blind for a third of the time a human's
 screen stays white. Point blank and facing the grenade that is 12s of fade and 4s of blindness. A
 second flash extends to whichever ends later. That formula is `IGameProfile::BlindSeconds`'s default,
@@ -1195,7 +1208,7 @@ headshot's (alpha 200, dark red, 3 s fade after a 2 s hold, dod.c:86590), and th
 screen really is covered, so a headshot victim stays blind for about 3 s.
 
 While blind, `BotSense::Update` skips `UpdateVision` and clears `target`, `targetBone`, `visionCands`
-and `visionKeep`, emptying the delay queue if a target was held -- the same cleanup as
+and `visionKeep`, emptying the delay queue every frame -- the same cleanup as
 `crossbot_sense 0` except that **`sense.enemy` survives**. A flashed bot still knows someone was
 there. Sound, events and damage reach the suspicion list outside `UpdateVision`, so the bot keeps
 turning toward noise.
@@ -1208,20 +1221,26 @@ and `DuelDrive` declines for want of an enemy. `combat.active` is not touched, s
 blind drive is off as well, because `Update` calls `Exit` every frame there and the goal would be
 dropped again on each one.
 
-`BotFire` is untouched: a bot that had an enemy keeps shooting where it remembers them.
+**The queue is emptied every frame of blindness, not just on the edge.** `BotFire`'s `haveTarget` is
+`BotAim::ReadPredicted`, and that falls back to extrapolating from the newest queued slot for up to
+`kPredictHorizon` (1 s) whenever `predictLatched && combat.active`. Clearing only when
+`sense.target` was live -- the first version -- left every bot flashed in the gap between sightings
+with its slots intact, so it kept firing accurately for over a second after going blind. With the
+queue emptied each frame nothing can serve a target, `BotFire` reads `no-target`, and the shooting
+stops for the whole blindness. `BotFire` itself is still untouched; it simply has nothing to aim at.
 
 ### Concuss
 
 One byte. A TFC client stores it in `v_idlescale`, and `V_AddIdle` adds
 `scale * sin(t * cycle) * level` to the rendered view: pitch cycle 1 level 0.3, yaw cycle 2 level
 0.3, and roll, which a bot does not have, dropped. `Bot_UpdateFacing` adds the same to its desired
-angles right after the idle drift, so the hand controller smooths it into a wander and
+angles before the controller runs, so the hand controller smooths it into a wander and
 `Bot_DecomposeMove` makes the bot walk crooked for free. `t` is absolute time, as on the client.
 
 TFC's server, decompiled: `TeamFortress_Concuss` sets the value to 100 for 15s, or 7s for a medic;
 each think recomputes `100 * remaining / duration`, and a message goes out whenever that integer
 changes. About 100 bytes arrive, the last one zero, and the bot tracks the latest -- there is nothing
-to model. At 100 the sway is ±30 degrees on both axes; `crossbot_conc_gain` scales it.
+to model. At 100 the sway is ±30 degrees on both axes.
 
 On a client the sway is cosmetic and the real aim is untouched; a human misaims because what they see
 is moving. Applying it to the bot's actual angles is the same miss, taken directly.

@@ -110,6 +110,8 @@ int KindOf(int payload);
 
 int TargetKind(const CBot &bot);
 
+bool Urgent(const CBot &bot);
+
 bool Outranked(const CBot &bot, int payload);
 
 bool FortifyTarget(const Objectives::Site &site, int teamBit);

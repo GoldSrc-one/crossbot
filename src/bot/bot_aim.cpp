@@ -18,9 +18,9 @@ namespace
 
 	constexpr float kReferenceFov = 90.f;
 
-	constexpr float kMaxAccelYaw = 4500.f;
-	constexpr float kMaxAccelPitch = 3600.f;
-	constexpr float kMaxHandSpeed = 1200.f;
+	constexpr float kMaxAccelYaw = 3000.f;
+	constexpr float kMaxAccelPitch = 2000.f;
+	constexpr float kMaxHandSpeed = 520.f;
 
 	constexpr float kPitchLimit = 89.f;
 
@@ -32,21 +32,10 @@ namespace
 	constexpr float kTestTimeout = 3.f;
 	constexpr float kTestRestDelay = 2.f;
 
-	constexpr float kBrakeSpread = 0.06f;
 	constexpr float kFlickMinError = 3.f;
 	constexpr float kFlickGrowth = 0.5f;
-	constexpr float kMaxErrorScale = 4.f;
-
-	constexpr float kDefaultDrift = 1.f;
-	constexpr float kMaxDrift = 5.f;
-	constexpr float kDriftYawRate = 1.7f;
-	constexpr float kDriftPitchRate = 1.19f;
-	constexpr float kDriftPitchScale = 0.6f;
-
-	constexpr float kDefaultQuantum = 0.4476f;
-	constexpr float kMaxQuantum = 5.f;
-	constexpr float kDefaultImpulse = 15.f;
-	constexpr float kMaxImpulse = 100.f;
+	constexpr float kMaxGainSpread = 0.5f;
+	constexpr float kGainOvershoot = 0.5f;
 
 	constexpr float kDegenerateLos = 0.0001f;
 
@@ -66,11 +55,6 @@ namespace
 		return static_cast<float>((aim.rngState >> 8) & 0xFFFFFFu) / 16777216.f;
 	}
 
-	float RandomSigned(BotAim::State &aim)
-	{
-		return RandomUnit(aim) * 2.f - 1.f;
-	}
-
 	void SeedAim(CBot &bot)
 	{
 		BotAim::State &aim = bot.aim;
@@ -80,33 +64,30 @@ namespace
 		aim.rngSeeded = true;
 		aim.rngState = static_cast<unsigned int>(
 			g_engfuncs.pfnIndexOfEdict(bot.pEdict)) * 2654435761u + 1u;
-		aim.driftPhaseYaw = RandomUnit(aim) * 2.f * kPiF;
-		aim.driftPhasePitch = RandomUnit(aim) * 2.f * kPiF;
 	}
 
-	void UpdateBrake(CBot &bot, float yawErr, float pitchErr)
+	void UpdateGain(CBot &bot, float yawErr, float pitchErr)
 	{
 		BotAim::State &aim = bot.aim;
 
 		float mag = sqrtf(yawErr * yawErr + pitchErr * pitchErr);
-		float spread = kBrakeSpread * BotAim::ErrorScale();
-
-		if (spread <= 0.f)
-		{
-			aim.brakeYaw = 1.f;
-			aim.brakePitch = 1.f;
-		}
-		else if (mag > kFlickMinError && mag > aim.flickMag + kFlickGrowth)
-		{
-			aim.brakeYaw = 1.f + RandomSigned(aim) * spread;
-			aim.brakePitch = 1.f + RandomSigned(aim) * spread;
-		}
-
+		bool flick = mag > kFlickMinError && mag > aim.flickMag + kFlickGrowth;
 		aim.flickMag = mag;
+
+		float gain = (aim.testActive || bot.sense.target.Get()) ? BotAim::GainSpread() : 0.f;
+		if (gain <= 0.f)
+		{
+			aim.gainYaw = 1.f;
+			aim.gainPitch = 1.f;
+		}
+		else if (flick)
+		{
+			aim.gainYaw = 1.f + gain * (RandomUnit(aim) * (1.f + kGainOvershoot) - 1.f);
+			aim.gainPitch = 1.f + gain * (RandomUnit(aim) * (1.f + kGainOvershoot) - 1.f);
+		}
 	}
 
-	float StepAxis(float errAngle, float fovScale, float maxAccel, float handSpeed, float brake,
-		float dt, float quantum, float impulse, float &vel, float &pending)
+	float StepAxis(float errAngle, float fovScale, float maxAccel, float handSpeed, float dt, float &vel)
 	{
 		float errHand = errAngle / fovScale;
 		float mag = fabsf(errHand);
@@ -114,20 +95,11 @@ namespace
 		float limit = mag / dt;
 
 		float step = maxAccel * dt;
-		float envelope = (sqrtf(2.f * maxAccel * mag + 0.25f * step * step) - 0.5f * step) * brake;
+		float envelope = sqrtf(2.f * maxAccel * mag + 0.25f * step * step) - 0.5f * step;
 		if (envelope < limit)
 			limit = envelope;
 		if (limit > handSpeed)
 			limit = handSpeed;
-
-		if (impulse > 0.f)
-		{
-			float floorSpeed = impulse;
-			if (quantum > 0.f && floorSpeed * dt > quantum)
-				floorSpeed = quantum / dt;
-			if (limit < floorSpeed)
-				limit = floorSpeed;
-		}
 
 		float target = (errHand < 0.f) ? -limit : limit;
 
@@ -139,17 +111,64 @@ namespace
 
 		vel += accel * dt;
 
-		float velOut = (impulse > 0.f) ? roundf(vel / impulse) * impulse : vel;
+		return vel * fovScale * dt;
+	}
 
-		if (quantum <= 0.f)
-			return velOut * fovScale * dt;
+	template <typename Slot>
+	Slot &PushSlot(Slot *slots, size_t &head, size_t &count)
+	{
+		Slot &slot = slots[head];
+		slot.time = gpGlobals->time;
 
-		pending += velOut * dt;
+		head = (head + 1) % BotAim::kDelaySlots;
+		if (count < BotAim::kDelaySlots)
+			++count;
+		return slot;
+	}
 
-		float counts = truncf(pending / quantum);
-		pending -= counts * quantum;
+	template <typename Slot>
+	bool Bracket(const Slot *slots, size_t head, size_t count, float want, size_t &older,
+		size_t &newer, float &f)
+	{
+		newer = (head + BotAim::kDelaySlots - 1) % BotAim::kDelaySlots;
+		older = newer;
+		f = 0.f;
+		if (slots[newer].time < want)
+			return false;
 
-		return counts * quantum * fovScale;
+		for (size_t back = 0; back + 1 < count; ++back)
+		{
+			older = (newer + BotAim::kDelaySlots - 1) % BotAim::kDelaySlots;
+			if (slots[older].time > want)
+			{
+				newer = older;
+				continue;
+			}
+
+			float span = slots[newer].time - slots[older].time;
+			f = (span > 1e-6f) ? (want - slots[older].time) / span : 0.f;
+			if (f < 0.f)
+				f = 0.f;
+			else if (f > 1.f)
+				f = 1.f;
+			return true;
+		}
+
+		older = newer;
+		return false;
+	}
+
+	void ReadView(const BotAim::State &aim, float delay, Vector &off, Vector &punch)
+	{
+		size_t older = 0, newer = 0;
+		float f = 0.f;
+		Bracket(aim.viewSlots, aim.viewHead, aim.viewCount, gpGlobals->time - delay, older, newer, f);
+
+		const BotAim::ViewSlot &a = aim.viewSlots[older];
+		const BotAim::ViewSlot &b = aim.viewSlots[newer];
+		off = Vector(a.off.x + (b.off.x - a.off.x) * f,
+			Bot_NormalizeAngle(a.off.y + Bot_NormalizeAngle(b.off.y - a.off.y) * f), 0.f);
+		punch = a.punch + (b.punch - a.punch) * f;
 	}
 
 	void UpdateTest(CBot &bot, const Vector &angles)
@@ -212,14 +231,9 @@ void BotAim::PushDelaySlot(CBot &bot, const Vector &point, const Vector &vel)
 {
 	BotAim::State &aim = bot.aim;
 
-	BotAim::DelaySlot &slot = aim.delaySlots[aim.delayHead];
-	slot.time = gpGlobals->time;
+	BotAim::DelaySlot &slot = PushSlot(aim.delaySlots, aim.delayHead, aim.delayCount);
 	slot.point = point;
 	slot.vel = vel;
-
-	aim.delayHead = (aim.delayHead + 1) % BotAim::kDelaySlots;
-	if (aim.delayCount < BotAim::kDelaySlots)
-		++aim.delayCount;
 }
 
 bool BotAim::ReadDelayed(const CBot &bot, float delay, Vector &point, Vector *vel)
@@ -228,37 +242,17 @@ bool BotAim::ReadDelayed(const CBot &bot, float delay, Vector &point, Vector *ve
 	if (aim.delayCount == 0)
 		return false;
 
-	float want = gpGlobals->time - delay;
-
-	size_t newer = (aim.delayHead + BotAim::kDelaySlots - 1) % BotAim::kDelaySlots;
-	if (aim.delaySlots[newer].time < want)
+	size_t older = 0, newer = 0;
+	float f = 0.f;
+	if (!Bracket(aim.delaySlots, aim.delayHead, aim.delayCount, gpGlobals->time - delay, older, newer, f))
 		return false;
 
-	for (size_t back = 0; back + 1 < aim.delayCount; ++back)
-	{
-		size_t older = (newer + BotAim::kDelaySlots - 1) % BotAim::kDelaySlots;
-		const BotAim::DelaySlot &a = aim.delaySlots[older];
-		if (a.time > want)
-		{
-			newer = older;
-			continue;
-		}
-
-		const BotAim::DelaySlot &b = aim.delaySlots[newer];
-		float span = b.time - a.time;
-		float f = (span > 1e-6f) ? (want - a.time) / span : 0.f;
-		if (f < 0.f)
-			f = 0.f;
-		else if (f > 1.f)
-			f = 1.f;
-
-		point = a.point + (b.point - a.point) * f;
-		if (vel)
-			*vel = a.vel + (b.vel - a.vel) * f;
-		return true;
-	}
-
-	return false;
+	const BotAim::DelaySlot &a = aim.delaySlots[older];
+	const BotAim::DelaySlot &b = aim.delaySlots[newer];
+	point = a.point + (b.point - a.point) * f;
+	if (vel)
+		*vel = a.vel + (b.vel - a.vel) * f;
+	return true;
 }
 
 float BotAim::PitchLimit()
@@ -301,47 +295,14 @@ float BotAim::Delay(const CBot &bot)
 	return delay;
 }
 
-float BotAim::ErrorScale()
+float BotAim::GainSpread()
 {
-	float scale = BotDiff::AimError();
-	if (scale < 0.f)
-		scale = 0.f;
-	else if (scale > kMaxErrorScale)
-		scale = kMaxErrorScale;
-	return scale;
-}
-
-float BotAim::DriftAmplitude()
-{
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_drift");
-	float amp = cvar ? cvar->value : kDefaultDrift;
-	if (amp < 0.f)
-		amp = 0.f;
-	else if (amp > kMaxDrift)
-		amp = kMaxDrift;
-	return amp;
-}
-
-float BotAim::Quantum()
-{
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_quantum");
-	float q = cvar ? cvar->value : kDefaultQuantum;
-	if (q < 0.f)
-		q = 0.f;
-	else if (q > kMaxQuantum)
-		q = kMaxQuantum;
-	return q;
-}
-
-float BotAim::Impulse()
-{
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_aim_impulse");
-	float imp = cvar ? cvar->value : kDefaultImpulse;
-	if (imp < 0.f)
-		imp = 0.f;
-	else if (imp > kMaxImpulse)
-		imp = kMaxImpulse;
-	return imp;
+	float spread = BotDiff::AimGain();
+	if (spread < 0.f)
+		spread = 0.f;
+	else if (spread > kMaxGainSpread)
+		spread = kMaxGainSpread;
+	return spread;
 }
 
 void BotAim::ClearDelayQueue(CBot &bot)
@@ -349,6 +310,12 @@ void BotAim::ClearDelayQueue(CBot &bot)
 {
 	bot.aim.delayHead = 0;
 	bot.aim.delayCount = 0;
+}
+
+void BotAim::ClearViewQueue(CBot &bot)
+{
+	bot.aim.viewHead = 0;
+	bot.aim.viewCount = 0;
 }
 
 float BotAim::RandomRoll(CBot &bot)
@@ -437,16 +404,7 @@ Vector Bot_UpdateFacing(CBot &bot)
 	Vector desired = aim.testActive ? aim.testAngles : bot.desiredAngles;
 
 	if (!aim.testActive)
-	{
-		float amp = BotAim::DriftAmplitude();
-		if (amp > 0.f)
-		{
-			desired.y += amp * sinf(gpGlobals->time * kDriftYawRate + aim.driftPhaseYaw);
-			desired.x += amp * kDriftPitchScale *
-				sinf(gpGlobals->time * kDriftPitchRate + aim.driftPhasePitch);
-		}
 		BotDaze::Sway(bot, desired);
-	}
 
 	float dt = Bot_FrameTime();
 	if (dt < kMinFrameTime)
@@ -456,38 +414,39 @@ Vector Bot_UpdateFacing(CBot &bot)
 
 	float fovScale = FovScale(pEdict);
 
-	float yawErr = Bot_NormalizeAngle(desired.y - current.y);
-	float pitchErr = Bot_NormalizeAngle(desired.x - current.x);
+	BotAim::ViewSlot &slot = PushSlot(aim.viewSlots, aim.viewHead, aim.viewCount);
+	slot.off = Vector(current.x - aim.own.x, Bot_NormalizeAngle(current.y - aim.own.y), 0.f);
+	slot.punch = pEdict->v.punchangle;
 
-	UpdateBrake(bot, yawErr, pitchErr);
+	Vector off, punch;
+	ReadView(aim, BotAim::Delay(bot), off, punch);
+	Vector seen(aim.own.x + off.x, Bot_NormalizeAngle(aim.own.y + off.y), 0.f);
 
-	float quantum = BotAim::Quantum();
-	float impulse = BotAim::Impulse();
+	float yawErr = Bot_NormalizeAngle(desired.y - seen.y);
+	float pitchErr = Bot_NormalizeAngle(desired.x - seen.x);
+
+	UpdateGain(bot, yawErr, pitchErr);
 
 	float turn = BotDiff::TurnScale();
 	if (turn < 0.f)
 		turn = 0.f;
 	float handSpeed = kMaxHandSpeed * turn;
 
-	float yaw = Bot_NormalizeAngle(current.y +
-		StepAxis(yawErr, fovScale, kMaxAccelYaw * turn, handSpeed, aim.brakeYaw, dt, quantum,
-			impulse, aim.yawVel, aim.yawPending));
-	float pitch = current.x +
-		StepAxis(pitchErr, fovScale, kMaxAccelPitch * turn, handSpeed, aim.brakePitch, dt, quantum,
-			impulse, aim.pitchVel, aim.pitchPending);
+	float yawStep = StepAxis(yawErr, fovScale, kMaxAccelYaw * turn, handSpeed, dt, aim.yawVel);
+	float yaw = Bot_NormalizeAngle(current.y + yawStep * aim.gainYaw);
+	float pitchStep = StepAxis(pitchErr, fovScale, kMaxAccelPitch * turn, handSpeed, dt, aim.pitchVel);
+	float pitch = current.x + pitchStep * aim.gainPitch;
 
-	if (pitch > kPitchLimit)
+	if (pitch > kPitchLimit || pitch < -kPitchLimit)
 	{
-		pitch = kPitchLimit;
+		pitch = (pitch > 0.f) ? kPitchLimit : -kPitchLimit;
 		aim.pitchVel = 0.f;
-		aim.pitchPending = 0.f;
+		pitchStep = pitch - current.x;
 	}
-	else if (pitch < -kPitchLimit)
-	{
-		pitch = -kPitchLimit;
-		aim.pitchVel = 0.f;
-		aim.pitchPending = 0.f;
-	}
+
+	aim.own = Vector(aim.own.x + pitchStep, Bot_NormalizeAngle(aim.own.y + yawStep), 0.f);
+	aim.perceived = Vector(seen.x + pitchStep, Bot_NormalizeAngle(seen.y + yawStep), 0.f);
+	aim.perceivedPunch = punch;
 
 	if (g_pGameProfile)
 	{

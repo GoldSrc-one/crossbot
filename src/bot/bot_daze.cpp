@@ -5,11 +5,9 @@
 #include <string.h>
 
 #include "../game/crossplay.h"
-#include "../game/ent_handle.h"
 #include "../game/game_profile.h"
 #include "bot.h"
 #include "bot_daze.h"
-#include "bot_log.h"
 #include "bot_manager.h"
 
 namespace
@@ -17,7 +15,7 @@ namespace
 	constexpr float kFixedScale = 4096.f;
 	constexpr int kFadeModulate = 0x0002;
 	constexpr int kFlashAlpha = 200;
-	constexpr float kDefaultBlindScale = 0.33f;
+	constexpr float kBlindScale = 0.33f;
 
 	constexpr float kPitchCycle = 1.f;
 	constexpr float kYawCycle = 2.f;
@@ -34,24 +32,9 @@ namespace
 	int g_fields[kMaxFields];
 	int g_fieldCount = 0;
 
-	float CvarValue(const char *name, float fallback)
-	{
-		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer(name);
-		return cvar ? cvar->value : fallback;
-	}
-
-	int DebugLevel()
-	{
-#if BOT_VLOG_ON
-		return static_cast<int>(CvarValue("crossbot_daze_debug", 0.f));
-#else
-		return 0;
-#endif
-	}
-
 	float SwayScale(const CBot &bot)
 	{
-		return static_cast<float>(bot.daze.concuss) * CvarValue("crossbot_conc_gain", 1.f);
+		return static_cast<float>(bot.daze.concuss);
 	}
 }
 
@@ -69,43 +52,27 @@ void BotDaze::Sway(const CBot &bot, Vector &angles)
 	angles.y += s * sinf(gpGlobals->time * kYawCycle) * kYawLevel;
 }
 
-void BotDaze::OnScreenFade(CBot &bot, int duration, int hold, int flags, int r, int g, int b, int a)
+void BotDaze::OnScreenFade(CBot &bot, int duration, int hold, int flags, int a)
 {
+	if ((flags & kFadeModulate) != 0 || a < kFlashAlpha)
+		return;
+
 	State &st = bot.daze;
 	float now = gpGlobals->time;
 	float fadeSec = static_cast<float>(duration & 0xFFFF) / kFixedScale;
 	float holdSec = static_cast<float>(hold & 0xFFFF) / kFixedScale;
 
-	const char *verdict = "blind";
-	if ((flags & kFadeModulate) != 0)
-	{
-		verdict = "ignored, modulate";
-	}
-	else if (a < kFlashAlpha)
-	{
-		verdict = "ignored, alpha below 200";
-	}
-	else
-	{
-		float scale = CvarValue("crossbot_blind_scale", kDefaultBlindScale);
-		IGameProfile *profile = XPlay::ProfileFor(bot.gameDll);
-		float until = now + (profile ? profile->BlindSeconds(fadeSec, holdSec, scale) : scale * fadeSec);
-		if (st.blindUntil <= now)
-			st.blindStart = now;
-		if (until > st.blindUntil)
-			st.blindUntil = until;
-		st.fadeSec = fadeSec;
-		st.holdSec = holdSec;
-		st.alpha = a;
-		++st.flashes;
-	}
-
-	if (DebugLevel() >= 1)
-	{
-		BOT_VLOG("CrossBot: %s ScreenFade dur=%d (%.2fs) hold=%d (%.2fs) flags=0x%04x "
-			"rgba=%d,%d,%d,%d -> %s, blind for %.2fs\n", bot.name, duration, fadeSec, hold, holdSec,
-			flags & 0xFFFF, r, g, b, a, verdict, Blind(bot) ? st.blindUntil - now : 0.f);
-	}
+	IGameProfile *profile = XPlay::ProfileFor(bot.gameDll);
+	float until = now + (profile ? profile->BlindSeconds(fadeSec, holdSec, kBlindScale) :
+		kBlindScale * fadeSec);
+	if (st.blindUntil <= now)
+		st.blindStart = now;
+	if (until > st.blindUntil)
+		st.blindUntil = until;
+	st.fadeSec = fadeSec;
+	st.holdSec = holdSec;
+	st.alpha = a;
+	++st.flashes;
 }
 
 void BotDaze::OnConcuss(CBot &bot, int scale)
@@ -122,20 +89,6 @@ void BotDaze::OnConcuss(CBot &bot, int scale)
 		st.concussUpdates = 1;
 		++st.concs;
 	}
-
-	int level = DebugLevel();
-	if (level < 1)
-		return;
-
-	if (was == 0 && st.concuss != 0)
-		BOT_VLOG("CrossBot: %s Concuss onset scale=%d -> sway up to %.1f deg\n", bot.name,
-			st.concuss, SwayScale(bot) * kYawLevel);
-	else if (was != 0 && st.concuss == 0)
-		BOT_VLOG("CrossBot: %s Concuss cleared after %.2fs, %u updates\n", bot.name,
-			now - st.concussStart, st.concussUpdates);
-	else if (level >= 2)
-		BOT_VLOG("CrossBot: %s Concuss scale=%d at %.2fs\n", bot.name, st.concuss,
-			now - st.concussStart);
 }
 
 void BotDaze::OnRegUserMsg(const char *name, int id)
@@ -152,15 +105,8 @@ void BotDaze::OnMessageBegin(int dest, int type, edict_t *ed)
 {
 	g_capture = nullptr;
 
-	if ((dest != MSG_ONE && dest != MSG_ONE_UNRELIABLE) || !ed || (ed->v.flags & FL_FAKECLIENT) == 0)
+	if ((dest != MSG_ONE && dest != MSG_ONE_UNRELIABLE) || !ed)
 		return;
-
-	if (DebugLevel() >= 2)
-	{
-		const char *name = GET_USER_MSG_NAME(PLID, type, nullptr);
-		BOT_VLOG("CrossBot: %s <- message %d %s\n", CBotPlayerNameOf(ed), type,
-			name ? name : "(engine)");
-	}
 
 	if (type <= 0 || (type != g_screenFadeId && type != g_concussId))
 		return;
@@ -192,8 +138,7 @@ void BotDaze::OnMessageEnd()
 		return;
 
 	if (g_captureType == g_screenFadeId && g_fieldCount >= 7)
-		OnScreenFade(*bot, g_fields[0], g_fields[1], g_fields[2], g_fields[3], g_fields[4],
-			g_fields[5], g_fields[6]);
+		OnScreenFade(*bot, g_fields[0], g_fields[1], g_fields[2], g_fields[6]);
 	else if (g_captureType == g_concussId && g_fieldCount >= 1)
 		OnConcuss(*bot, g_fields[0]);
 }

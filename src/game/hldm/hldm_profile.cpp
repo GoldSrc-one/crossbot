@@ -172,11 +172,6 @@ PmSim::FallRule CHLDMProfile::FallDamage() const
 	return PmSim::kHlFall;
 }
 
-bool CHLDMProfile::AllowsGoalTier(BotGoal::Tier) const
-{
-	return true;
-}
-
 void CHLDMProfile::Respawn(edict_t *pEdict) const
 {
 	unsigned short buttons = (pEdict->v.deadflag == DEAD_RESPAWNABLE) ? IN_ATTACK : 0;
@@ -208,8 +203,19 @@ ItemKind CHLDMProfile::ClassifyItem(edict_t *ent) const
 		return ITEM_RECHARGE;
 	if (strcmp(classname, "trigger_hurt") == 0)
 		return IsHealingHurt(ent) ? ITEM_HEALVOLUME : ITEM_NONE;
+	if (IsArmouryArmor(ent))
+		return ITEM_PICKUP;
 
 	return ITEM_NONE;
+}
+
+bool CHLDMProfile::IsArmouryArmor(edict_t *ent)
+{
+	if (strcmp(CBotClassOf(ent), "armoury_entity") != 0)
+		return false;
+
+	const char *model = STRING(ent->v.model);
+	return strcmp(model, "models/w_kevlar.mdl") == 0 || strcmp(model, "models/w_assault.mdl") == 0;
 }
 
 float CHLDMProfile::ItemRespawnDelay(ItemKind kind) const
@@ -293,7 +299,7 @@ bool CHLDMProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
 		return false;
 
 	if (strcmp(classname, "item_healthkit") == 0 || strcmp(classname, "item_battery") == 0 ||
-		strcmp(classname, "item_longjump") == 0)
+		strcmp(classname, "item_longjump") == 0 || IsArmouryArmor(ent))
 		return true;
 
 	static const char *const kPreferred[] = { "weapon_gauss", "weapon_crossbow", "weapon_egon" };

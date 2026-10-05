@@ -9,7 +9,6 @@ public:
 	bool Detect(const char *gamedir) const override;
 	float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const override;
 	PmSim::FallRule FallDamage() const override;
-	bool AllowsGoalTier(BotGoal::Tier tier) const override;
 
 	ItemKind ClassifyItem(edict_t *ent) const override;
 	float ItemRespawnDelay(ItemKind kind) const override;

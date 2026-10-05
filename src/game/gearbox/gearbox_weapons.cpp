@@ -62,7 +62,7 @@ namespace
 			kNoMode,
 			kNoMode },
 		{ OP4_PENGUIN, "weapon_penguin", -1, 0.2f, RANGE_CLOSE, 0.f,
-			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 200.f, 0.5f, 0.f, 250.f, 0.f, 0.f, WPN_Q_INHERIT_VEL | WPN_Q_HOMING },
+			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 200.f, 0.5f, 0.f, 250.f, 0.f, 0.f, WPN_Q_INHERIT_VEL | WPN_Q_HOMING | WPN_Q_TEAM_UNSAFE },
 			kNoMode,
 			kNoMode },
 	};

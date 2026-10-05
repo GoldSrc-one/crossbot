@@ -14,6 +14,7 @@
 #include "bot.h"
 #include "bot_combat.h"
 #include "bot_difficulty.h"
+#include "bot_fun.h"
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
@@ -206,7 +207,7 @@ namespace
 
 		st.enemyInArea = st.enemyMelee && EnemyInOurArea(bot, enemy);
 
-		bool now = st.enemyMelee && st.enemyInArea && BotCombat::DuelEnabled();
+		bool now = st.enemyMelee && st.enemyInArea;
 		if (now == st.dueling)
 			return;
 
@@ -431,12 +432,6 @@ bool BotCombat::Ambushing(const CBot &bot)
 	return bot.combat.active && !bot.combat.enemyAware && AmbushEnabled();
 }
 
-bool BotCombat::DuelEnabled()
-{
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_duel");
-	return !cvar || cvar->value != 0.f;
-}
-
 bool BotCombat::Dueling(const CBot &bot)
 {
 	return bot.combat.active && bot.combat.dueling;
@@ -467,6 +462,11 @@ edict_t *BotCombat::DamageSource(edict_t *pEdict)
 	if (!pEdict || pEdict->v.dmg_take == 0.f)
 		return nullptr;
 
+	return Attacker(pEdict);
+}
+
+edict_t *BotCombat::Attacker(edict_t *pEdict)
+{
 	edict_t *ent = pEdict->v.dmg_inflictor;
 	if (!ent || ent->free || ent == pEdict || BotSense::NoTarget(ent))
 		return nullptr;
@@ -639,6 +639,13 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		st.driving = false;
 		st.lastReason = "difficulty";
+		return false;
+	}
+
+	if (BotFun::CombatTank(bot, mesh))
+	{
+		st.driving = false;
+		st.lastReason = "going for a tank";
 		return false;
 	}
 

@@ -12,18 +12,12 @@
 
 cvar_t g_tracePathCvar = {
 	"crossbot_trace_path",
-	"crossplay/addons/crossbot/trace/nav_trace.txt",
+	"",
 	FCVAR_SERVER
 };
 
 cvar_t g_navAvoidCvar = {
 	"crossbot_nav_avoid",
-	"1",
-	FCVAR_SERVER
-};
-
-cvar_t g_navBreakCvar = {
-	"crossbot_nav_break",
 	"1",
 	FCVAR_SERVER
 };
@@ -55,18 +49,6 @@ cvar_t g_combatDebugCvar = {
 cvar_t g_ambushCvar = {
 	"crossbot_ambush",
 	"-1",
-	FCVAR_SERVER
-};
-
-cvar_t g_duelCvar = {
-	"crossbot_duel",
-	"1",
-	FCVAR_SERVER
-};
-
-cvar_t g_braceCvar = {
-	"crossbot_brace",
-	"1",
 	FCVAR_SERVER
 };
 
@@ -112,33 +94,15 @@ cvar_t g_tacticsCvar = {
 	FCVAR_SERVER
 };
 
-cvar_t g_tacticsBudgetCvar = {
-	"crossbot_tactics_budget",
-	"3",
-	FCVAR_SERVER
-};
-
-cvar_t g_tacticsMarginCvar = {
-	"crossbot_tactics_margin",
-	"1",
-	FCVAR_SERVER
-};
-
 cvar_t g_tacticsDebugCvar = {
 	"crossbot_tactics_debug",
 	"0",
 	FCVAR_SERVER
 };
 
-cvar_t g_goalBiasCvar = {
-	"crossbot_goal_bias",
-	"2",
-	FCVAR_SERVER
-};
-
-cvar_t g_detourBudgetCvar = {
-	"crossbot_detour_budget",
-	"6",
+cvar_t g_snipeCvar = {
+	"crossbot_snipe",
+	"1",
 	FCVAR_SERVER
 };
 
@@ -148,45 +112,9 @@ cvar_t g_campCvar = {
 	FCVAR_SERVER
 };
 
-cvar_t g_campBudgetCvar = {
-	"crossbot_camp_budget",
-	"3",
-	FCVAR_SERVER
-};
-
-cvar_t g_campRadiusCvar = {
-	"crossbot_camp_radius",
-	"1024",
-	FCVAR_SERVER
-};
-
-cvar_t g_campReachCvar = {
-	"crossbot_camp_reach",
-	"512",
-	FCVAR_SERVER
-};
-
-cvar_t g_campZoomCvar = {
-	"crossbot_camp_zoom",
-	"0.85",
-	FCVAR_SERVER
-};
-
-cvar_t g_campZoomDistCvar = {
-	"crossbot_camp_zoom_dist",
-	"768",
-	FCVAR_SERVER
-};
-
 cvar_t g_campDebugCvar = {
 	"crossbot_camp_debug",
 	"0",
-	FCVAR_SERVER
-};
-
-cvar_t g_oppoJumpCvar = {
-	"crossbot_oppo_jump",
-	"-1",
 	FCVAR_SERVER
 };
 
@@ -204,6 +132,12 @@ cvar_t g_oppoIntervalCvar = {
 
 cvar_t g_turnScaleCvar = {
 	"crossbot_turn_scale",
+	"-1",
+	FCVAR_SERVER
+};
+
+cvar_t g_aimGainCvar = {
+	"crossbot_aim_gain",
 	"-1",
 	FCVAR_SERVER
 };
@@ -298,33 +232,9 @@ cvar_t g_senseDecayCvar = {
 	FCVAR_SERVER
 };
 
-cvar_t g_aimErrorCvar = {
-	"crossbot_aim_error",
-	"-1",
-	FCVAR_SERVER
-};
-
 cvar_t g_fireCvar = {
 	"crossbot_fire",
 	"1",
-	FCVAR_SERVER
-};
-
-cvar_t g_aimDriftCvar = {
-	"crossbot_aim_drift",
-	"1",
-	FCVAR_SERVER
-};
-
-cvar_t g_aimQuantumCvar = {
-	"crossbot_aim_quantum",
-	"0.4476",
-	FCVAR_SERVER
-};
-
-cvar_t g_aimImpulseCvar = {
-	"crossbot_aim_impulse",
-	"15",
 	FCVAR_SERVER
 };
 
@@ -337,42 +247,6 @@ cvar_t g_vantageCvar = {
 cvar_t g_carefulCvar = {
 	"crossbot_careful",
 	"1",
-	FCVAR_SERVER
-};
-
-cvar_t g_carefulPinCvar = {
-	"crossbot_careful_pin",
-	"-1",
-	FCVAR_SERVER
-};
-
-cvar_t g_rangePrefCvar = {
-	"crossbot_range_pref",
-	"0.5",
-	FCVAR_SERVER
-};
-
-cvar_t g_rangeShortCvar = {
-	"crossbot_range_short",
-	"512",
-	FCVAR_SERVER
-};
-
-cvar_t g_rangeLongCvar = {
-	"crossbot_range_long",
-	"1024",
-	FCVAR_SERVER
-};
-
-cvar_t g_rangePinCvar = {
-	"crossbot_range_pin",
-	"-1",
-	FCVAR_SERVER
-};
-
-cvar_t g_rangeForceCvar = {
-	"crossbot_range_force",
-	"-1",
 	FCVAR_SERVER
 };
 
@@ -406,28 +280,6 @@ cvar_t g_airmoveVerifyCvar = {
 	FCVAR_SERVER
 };
 
-cvar_t g_airmoveCorrectCvar = {
-	"crossbot_airmove_correct",
-	"1",
-	FCVAR_SERVER
-};
-
-#ifdef CROSSBOT_BSPTRACE
-
-cvar_t g_bspTraceCvar = {
-	"crossbot_bsptrace",
-	"0",
-	FCVAR_SERVER
-};
-
-cvar_t g_bspTraceBlockersCvar = {
-	"crossbot_bsptrace_blockers",
-	"0",
-	FCVAR_SERVER
-};
-
-#endif
-
 cvar_t g_timeDebugCvar = {
 	"crossbot_time_debug",
 	"0",
@@ -438,7 +290,7 @@ cvar_t g_timeDebugCvar = {
 
 cvar_t g_verboseCvar = {
 	"crossbot_verbose",
-	"1",
+	"0",
 	FCVAR_SERVER
 };
 
@@ -460,24 +312,6 @@ cvar_t g_perfSpikeCvar = {
 
 #endif
 
-cvar_t g_dazeDebugCvar = {
-	"crossbot_daze_debug",
-	"0",
-	FCVAR_SERVER
-};
-
-cvar_t g_blindScaleCvar = {
-	"crossbot_blind_scale",
-	"0.33",
-	FCVAR_SERVER
-};
-
-cvar_t g_concGainCvar = {
-	"crossbot_conc_gain",
-	"1",
-	FCVAR_SERVER
-};
-
 void GameDLLInit()
 {
 	BotPerf::InstallTraceWrappers();
@@ -485,14 +319,11 @@ void GameDLLInit()
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_navBreakCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_teamsCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_ambushCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_duelCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_braceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_funCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_funDebugCvar);
@@ -500,22 +331,14 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_strategicDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_objectivesCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tacticsCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_tacticsBudgetCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_tacticsMarginCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tacticsDebugCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_goalBiasCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_detourBudgetCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_snipeCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_campCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_campBudgetCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_campRadiusCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_campReachCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_campZoomCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_campZoomDistCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_campDebugCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_difficultyCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoIntervalCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_turnScaleCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_aimGainCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_backCheckCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_headPctCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_predictPctCvar);
@@ -531,33 +354,15 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_aimErrorCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDriftCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_aimQuantumCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_aimImpulseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_fireCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_vantageCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulPinCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_rangePrefCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_rangeShortCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_rangeLongCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_rangePinCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_rangeForceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_grenadeCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_dazeDebugCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_blindScaleCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_concGainCvar);
-#ifdef CROSSBOT_BSPTRACE
-	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_bspTraceBlockersCvar);
-#endif
 	g_engfuncs.pfnCvar_RegisterVariable(&g_airmoveVerifyCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_airmoveCorrectCvar);
 #ifdef CROSSBOT_VERBOSE
 	g_engfuncs.pfnCvar_RegisterVariable(&g_verboseCvar);
 #endif

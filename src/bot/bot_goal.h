@@ -28,6 +28,7 @@ struct Candidate
 	uint32_t areaId = 0;
 	Vector point;
 	int payload = 0;
+	float worth = 0.f;
 };
 
 struct Stop
@@ -66,6 +67,8 @@ float Bias();
 float DetourBudget();
 
 bool Select(CBot &bot, const Nav::NavMesh &mesh);
+
+void Commit(CBot &bot, const Candidate &cand);
 
 void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh);
 

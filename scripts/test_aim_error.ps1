@@ -1,12 +1,10 @@
 param(
     [string]$Map = "crossfire",
     [int]$Port = 0,
-    [float[]]$Scales = @(0.0, 1.0),
+    [float[]]$Gains = @(0.0, 0.15),
     [float[]]$Fovs = @(0.0),
     [string[]]$Shapes = @("180 0", "0 90"),
     [int]$Flicks = 8,
-    [float]$Quantum = -1,
-    [float]$Impulse = -1,
     [string]$HLDSDir = "D:\hlds"
 )
 
@@ -38,17 +36,14 @@ Write-Host "Server PID=$serverPid"
 try {
     Invoke-CbRcon $Port "crossbot_gather 0" | Out-Null
     Invoke-CbRcon $Port "crossbot_sense 0" | Out-Null
-    if ($Quantum -ge 0) { Invoke-CbRcon $Port "crossbot_aim_quantum $Quantum" | Out-Null }
-    if ($Impulse -ge 0) { Invoke-CbRcon $Port "crossbot_aim_impulse $Impulse" | Out-Null }
     Invoke-CbRcon $Port "crossbot_add valve Flicker" | Out-Null
     Start-Sleep -Seconds 3
 
-    foreach ($scale in $Scales) {
-        Invoke-CbRcon $Port "crossbot_aim_error $scale" | Out-Null
-
+    foreach ($gain in $Gains) {
+        Invoke-CbRcon $Port "crossbot_aim_gain $gain" | Out-Null
         foreach ($fov in $Fovs) {
             foreach ($shape in $Shapes) {
-                Write-Host "`n--- error=$scale fov=$fov flick=($shape) ---"
+                Write-Host "`n--- gain=$gain fov=$fov flick=($shape) ---"
                 $delta = ($shape -split " ")[0]
                 $pitch = ($shape -split " ")[1]
                 for ($i = 0; $i -lt $Flicks; $i++) {
@@ -62,7 +57,7 @@ try {
         }
     }
 
-    Invoke-CbRcon $Port "crossbot_aim_error -1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_aim_gain -1" | Out-Null
     Start-Sleep -Seconds 2
 }
 finally {
@@ -94,7 +89,7 @@ if ($cur) { $flicksSeen += ,$cur }
 if (-not $flicksSeen) { Write-Host "FAIL: no flicks in the log -- did the bot spawn?"; exit 1 }
 
 $idx = 0
-foreach ($scale in $Scales) {
+foreach ($gain in $Gains) {
     foreach ($fov in $Fovs) {
         foreach ($shape in $Shapes) {
             $group = @($flicksSeen | Select-Object -Skip $idx -First $Flicks)
@@ -112,12 +107,12 @@ foreach ($scale in $Scales) {
                 $max = ($settle | Measure-Object -Maximum).Maximum
                 $avg = ($settle | Measure-Object -Average).Average
                 $pavg = ($peak | Measure-Object -Average).Average
-                Write-Host ("error={0,-4} fov={1,-4} flick=({2,-6}) n={3}/{4}  settle min {5:F3} avg {6:F3} max {7:F3}  spread {8:F3}s  peak avg {9:F0} deg/s" -f `
-                    $scale, $fovLabel, $shape, $settle.Count, $group.Count, $min, $avg, $max, ($max - $min), $pavg)
+                Write-Host ("gain={0,-4} fov={1,-4} flick=({2,-6}) n={3}/{4}  settle min {5:F3} avg {6:F3} max {7:F3}  spread {8:F3}s  peak avg {9:F0} deg/s" -f `
+                    $gain, $fovLabel, $shape, $settle.Count, $group.Count, $min, $avg, $max, ($max - $min), $pavg)
             }
             else {
-                Write-Host ("error={0,-4} fov={1,-4} flick=({2,-6}) n=0/{3}  NO SETTLE -- the view never came within tolerance" -f `
-                    $scale, $fovLabel, $shape, $group.Count)
+                Write-Host ("gain={0,-4} fov={1,-4} flick=({2,-6}) n=0/{3}  NO SETTLE -- the view never came within tolerance" -f `
+                    $gain, $fovLabel, $shape, $group.Count)
             }
 
             if ($rest) {

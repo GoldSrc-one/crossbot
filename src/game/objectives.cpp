@@ -13,6 +13,7 @@
 #include "gamedata.h"
 #include "objectives.h"
 #include "teams.h"
+#include "../nav/nav.h"
 
 namespace
 {
@@ -468,8 +469,39 @@ bool TfcCriteria(const std::vector<TfcGoal> &goals, const edict_t *ent)
 	return true;
 }
 
+int TfcTeamBit(const edict_t *ent)
+{
+	return TeamBit(TfcTeamCheck(ent, g_off.tfc_teamcheck, Int(ent, g_off.tfc_teamNo)));
+}
+
+void StampDetourTeams()
+{
+	auto self = [](edict_t *ent) {
+		Nav::SetDetourTeams(CenterOf(ent), static_cast<uint32_t>(TfcTeamBit(ent)));
+	};
+	auto activator = [](edict_t *ent) {
+		int mask = TfcTeamBit(ent);
+		if (ent->v.target)
+		{
+			edict_t *gated = FIND_ENTITY_BY_STRING(nullptr, "targetname", STRING(ent->v.target));
+			int gatedMask = (gated && g_engfuncs.pfnIndexOfEdict(gated) != 0) ? TfcTeamBit(gated) : 0;
+			if (gatedMask)
+				mask = mask ? (mask & gatedMask) : gatedMask;
+		}
+		Nav::SetDetourTeams(CenterOf(ent), static_cast<uint32_t>(mask));
+	};
+	ForEach("func_door", self);
+	ForEach("func_door_rotating", self);
+	ForEach("trigger_multiple", activator);
+	ForEach("trigger_once", activator);
+	ForEach("func_button", activator);
+	ForEach("func_rot_button", activator);
+}
+
 void ReadTfc()
 {
+	StampDetourTeams();
+
 	int allTeams = 0;
 	auto spawn = [&](edict_t *ent) {
 		int team = Int(ent, g_off.tfc_teamNo);
@@ -734,6 +766,23 @@ void PrintStatus()
 		static_cast<int>(g_tables.sites.size()), static_cast<int>(g_tables.payloads.size()),
 		static_cast<int>(g_tables.carriers.size()), static_cast<int>(g_tables.spawns.size()));
 	SERVER_PRINT(msg);
+
+	if (const Nav::NavMesh *mesh = Nav::Get())
+	{
+		for (size_t a = 0; a < mesh->planAreas.size(); ++a)
+		{
+			for (const NavPlan::PlanDetour &d : mesh->planAreas[a].detours)
+			{
+				if (!d.teamMask)
+					continue;
+				TeamList(static_cast<int>(d.teamMask), attack, sizeof(attack));
+				snprintf(msg, sizeof(msg), "CrossBot: detour area %d <- %u activator (%.0f,%.0f,%.0f) teams %s%s\n",
+					static_cast<int>(a), d.fromAreaId, d.actCenter.x, d.actCenter.y, d.actCenter.z, attack,
+					d.blocked ? " blocked" : "");
+				SERVER_PRINT(msg);
+			}
+		}
+	}
 
 	ForEachPlayer([&](edict_t *player) {
 		if (g_reader == READER_CS)

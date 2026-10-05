@@ -156,11 +156,24 @@ namespace
 	constexpr float kDiscardTimeout = 1.5f;
 
 	constexpr int kGoalActivateTouch = 1;
+	constexpr int kGoalActivateInverted = 4;
 	constexpr int kGoalStateActive = 1;
 	constexpr int kGoalStateRemoved = 3;
+	constexpr int kGoalStateDelayed = 4;
+	constexpr int kGoalEffectsAp = 1 | 2;
+	constexpr int kGoalResultHarmful = 0x4 | 0x20 | 0x40;
+	constexpr int kForeignClass = 3;
+	constexpr float kForeignMaxArmor = 100.f;
 	constexpr int kTfcTeams = 4;
-	constexpr int kGrenadeCap = 4;
+	constexpr int kMaxWeaponBits = 32;
 	constexpr float kStationFull = 100.f;
+
+	constexpr float kHealthWeight = 1.f;
+	constexpr float kArmorWeight = 0.5f;
+	constexpr float kAmmoWeight = 0.5f;
+	constexpr float kGrenadeWeight = 0.25f;
+	constexpr float kDetpackWeight = 0.5f;
+	constexpr float kNeedWorth = 20.f;
 
 	const int kDisguises[] = { 1, 2, 3, 4, 5, 6, 7, 9 };
 
@@ -238,20 +251,37 @@ namespace
 
 	bool IsPack(const edict_t *ent)
 	{
-		if ((FieldInt(ent, g_offsets.ent_goalActivation) & kGoalActivateTouch) == 0)
+		const GameOffsets &o = g_offsets;
+		int activation = FieldInt(ent, o.ent_goalActivation);
+		if ((activation & kGoalActivateTouch) == 0 || (activation & kGoalActivateInverted) != 0)
 			return false;
-		if (ent->v.health < 0.f || ent->v.frags > 0.f)
+		if ((FieldInt(ent, o.ent_goalEffects) & kGoalEffectsAp) == 0 ||
+			(FieldInt(ent, o.ent_goalResult) & kGoalResultHarmful) != 0)
+			return false;
+		if (ent->v.health < 0.f || ent->v.armorvalue < 0.f || ent->v.frags > 0.f)
 			return false;
 		for (int i = 0; i < kTfcTeams; ++i)
 		{
-			if (g_offsets.ent_increaseTeam >= 0 && FieldInt(ent, g_offsets.ent_increaseTeam + i * 4) > 0)
+			if (o.ent_increaseTeam >= 0 && FieldInt(ent, o.ent_increaseTeam + i * 4) > 0)
 				return false;
 		}
-		return ent->v.health > 0.f || ent->v.armorvalue > 0.f ||
-			FieldInt(ent, g_offsets.ent_ammoShells) > 0 || FieldInt(ent, g_offsets.ent_ammoNails) > 0 ||
-			FieldInt(ent, g_offsets.ent_ammoCells) > 0 || FieldInt(ent, g_offsets.ent_ammoRockets) > 0 ||
-			FieldInt(ent, g_offsets.ent_noGrenades1) > 0 || FieldInt(ent, g_offsets.ent_noGrenades2) > 0 ||
-			FieldInt(ent, g_offsets.ent_ammoDetpack) > 0;
+		for (int field : o.ent_goalCriteria)
+		{
+			if (FieldInt(ent, field) != 0)
+				return false;
+		}
+
+		const int gives[] = { o.ent_ammoShells, o.ent_ammoNails, o.ent_ammoCells, o.ent_ammoRockets,
+			o.ent_noGrenades1, o.ent_noGrenades2, o.ent_ammoDetpack };
+		bool any = ent->v.health > 0.f || ent->v.armorvalue > 0.f;
+		for (int field : gives)
+		{
+			int n = FieldInt(ent, field);
+			if (n < 0)
+				return false;
+			any = any || n > 0;
+		}
+		return any;
 	}
 
 	bool NeedsAmmo(const edict_t *player, const edict_t *pack, int ammo, int maxAmmo)
@@ -260,35 +290,103 @@ namespace
 		return FieldInt(pack, ammo) > 0 && max > 0 && FieldInt(player, ammo) < max;
 	}
 
-	bool NeedsGrenade(const edict_t *player, const edict_t *pack, int count, int type)
+	bool Foreign(const edict_t *player)
 	{
-		return FieldInt(pack, count) > 0 && FieldInt(player, type) != 0 && FieldInt(player, count) < kGrenadeCap;
+		return XPlay::OwnerOf(player) != XPlay::Current();
 	}
 
-	bool PackUseful(const edict_t *player, const edict_t *pack)
+	int GrenadeCap(int type)
+	{
+		if (type == 3 || type == 4)
+			return 2;
+		if (type == 2 || type == 9)
+			return 3;
+		return 4;
+	}
+
+	float Gain(float give, float have, float max)
+	{
+		if (give <= 0.f || max <= 0.f)
+			return 0.f;
+		return std::clamp(std::min(give, max - have) / max, 0.f, 1.f);
+	}
+
+	bool PackAdmits(const edict_t *player, const edict_t *pack)
 	{
 		int state = FieldInt(pack, g_offsets.ent_goalState);
-		if (state == kGoalStateActive || state == kGoalStateRemoved)
+		if (state == kGoalStateActive || state == kGoalStateRemoved || state == kGoalStateDelayed)
+			return false;
+		if ((pack->v.effects & EF_NODRAW) != 0 || pack->v.solid == SOLID_NOT)
 			return false;
 		int team = FieldInt(pack, g_offsets.ent_teamNo);
-		if (team != 0 && team != player->v.team)
+		if (team != 0 && team != FieldInt(player, g_offsets.ent_teamNo))
 			return false;
-		if (pack->v.playerclass != 0 && pack->v.playerclass != player->v.playerclass)
-			return false;
-		if (FieldInt(pack, g_offsets.ent_itemsAllowed) != 0)
-			return false;
+		int playerClass = Foreign(player) ? kForeignClass : player->v.playerclass;
+		return pack->v.playerclass == 0 || pack->v.playerclass == playerClass;
+	}
 
+	float PackGain(const edict_t *player, const edict_t *pack, float ammoNeed)
+	{
 		const GameOffsets &o = g_offsets;
-		return (pack->v.health > 0.f && player->v.health < player->v.max_health) ||
-			(pack->v.armorvalue > 0.f && player->v.armorvalue < FieldFloat(player, o.ent_maxarmor)) ||
-			NeedsAmmo(player, pack, o.ent_ammoShells, o.ent_maxammoShells) ||
-			NeedsAmmo(player, pack, o.ent_ammoNails, o.ent_maxammoNails) ||
-			NeedsAmmo(player, pack, o.ent_ammoCells, o.ent_maxammoCells) ||
-			NeedsAmmo(player, pack, o.ent_ammoRockets, o.ent_maxammoRockets) ||
-			NeedsGrenade(player, pack, o.ent_noGrenades1, o.ent_tpGrenades1) ||
-			NeedsGrenade(player, pack, o.ent_noGrenades2, o.ent_tpGrenades2) ||
-			(FieldInt(pack, o.ent_ammoDetpack) > 0 && player->v.playerclass == kClassDemoman &&
-				FieldInt(player, o.ent_ammoDetpack) < 1);
+		float maxHealth = player->v.max_health > 0.f ? player->v.max_health : 100.f;
+		float hurt = std::clamp(1.f - player->v.health / maxHealth, 0.f, 1.f);
+		float health = Gain(pack->v.health, player->v.health, maxHealth) * (1.f + hurt);
+		float maxArmor = Foreign(player) ? kForeignMaxArmor : FieldFloat(player, o.ent_maxarmor);
+		float armor = Gain(pack->v.armorvalue, player->v.armorvalue, maxArmor);
+
+		const int pools[4][2] = {
+			{ o.ent_ammoShells, o.ent_maxammoShells },
+			{ o.ent_ammoNails, o.ent_maxammoNails },
+			{ o.ent_ammoCells, o.ent_maxammoCells },
+			{ o.ent_ammoRockets, o.ent_maxammoRockets },
+		};
+		const int grenades[2][2] = {
+			{ o.ent_noGrenades1, o.ent_tpGrenades1 },
+			{ o.ent_noGrenades2, o.ent_tpGrenades2 },
+		};
+
+		float ammo = 0.f;
+		float grenade = 0.f;
+		float detpack = 0.f;
+		if (Foreign(player))
+		{
+			for (const auto &pool : pools)
+			{
+				if (FieldInt(pack, pool[0]) > 0)
+					ammo = ammoNeed;
+			}
+			for (const auto &slot : grenades)
+			{
+				if (FieldInt(pack, slot[0]) > 0)
+					grenade = ammoNeed;
+			}
+		}
+		else
+		{
+			for (int id = 0; id < kMaxWeaponBits; ++id)
+			{
+				TFCAmmoField field = TFC_AmmoField(id);
+				if ((player->v.weapons & (1 << id)) == 0 || field == TFC_FIELD_NONE)
+					continue;
+				const int *pool = pools[field];
+				ammo = std::max(ammo, Gain(static_cast<float>(FieldInt(pack, pool[0])),
+					static_cast<float>(FieldInt(player, pool[0])), static_cast<float>(FieldInt(player, pool[1]))));
+			}
+			for (const auto &slot : grenades)
+			{
+				int type = FieldInt(player, slot[1]);
+				if (type == 0)
+					continue;
+				grenade = std::max(grenade, Gain(static_cast<float>(FieldInt(pack, slot[0])),
+					static_cast<float>(FieldInt(player, slot[0])), static_cast<float>(GrenadeCap(type))));
+			}
+			if (player->v.playerclass == kClassDemoman && FieldInt(pack, o.ent_ammoDetpack) > 0 &&
+				FieldInt(player, o.ent_ammoDetpack) < 1)
+				detpack = 1.f;
+		}
+
+		return kHealthWeight * health + kArmorWeight * armor + kAmmoWeight * ammo +
+			kGrenadeWeight * grenade + kDetpackWeight * detpack;
 	}
 
 	bool AmmoboxUseful(const edict_t *player, const edict_t *box)
@@ -1606,12 +1704,24 @@ bool ItemUsable(edict_t *player, edict_t *item)
 {
 	const char *classname = CBotClassOf(item);
 	if (strcmp(classname, "building_dispenser") == 0)
-		return FieldInt(item, g_offsets.ent_teamNo) == player->v.team;
+		return FieldInt(item, g_offsets.ent_teamNo) == FieldInt(player, g_offsets.ent_teamNo);
 	if (IsPackClass(classname))
-		return PackUseful(player, item);
+		return PackAdmits(player, item) && PackGain(player, item, 1.f) > 0.f;
 	if (strcmp(classname, "tf_ammobox") == 0)
-		return AmmoboxUseful(player, item);
+		return Foreign(player) || AmmoboxUseful(player, item);
 	return true;
+}
+
+float ItemWorth(edict_t *player, edict_t *item, float ammoNeed)
+{
+	if (!IsPackClass(CBotClassOf(item)) || !PackAdmits(player, item))
+		return 0.f;
+	return kNeedWorth * PackGain(player, item, ammoNeed);
+}
+
+float PackWait(edict_t *item)
+{
+	return IsPackClass(CBotClassOf(item)) ? FieldFloat(item, g_offsets.ent_wait) : 0.f;
 }
 
 float StationValue(edict_t *player)

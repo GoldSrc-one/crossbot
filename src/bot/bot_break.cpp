@@ -202,12 +202,6 @@ namespace
 namespace BotBreak
 {
 
-bool Enabled()
-{
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_nav_break");
-	return !cvar || cvar->value != 0.f;
-}
-
 bool IsTarget(edict_t *ent)
 {
 	if (!ent || ent->free)
@@ -233,9 +227,6 @@ bool Active(const CBot &bot)
 
 PhaseThrough::PhaseThrough()
 {
-	if (!Enabled())
-		return;
-
 	for (int i = 1; i < gpGlobals->maxEntities; ++i)
 	{
 		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
@@ -260,7 +251,7 @@ bool AimSwing(CBot &bot, edict_t *ent, Vector &aimAngles, bool &swing)
 {
 	swing = false;
 
-	if (!Enabled() || !IsTarget(ent))
+	if (!IsTarget(ent))
 		return false;
 
 	edict_t *pEdict = bot.pEdict;
@@ -295,7 +286,7 @@ bool EngageStandoff(CBot &bot, edict_t *ent, float minRange)
 	if (st.active)
 		return st.target.Is(ent);
 
-	if (!Enabled() || !g_pGameProfile || !ent || ent->free)
+	if (!g_pGameProfile || !ent || ent->free)
 		return false;
 
 	if (st.refused.Is(ent) && gpGlobals->time < st.refusedUntil)
@@ -327,7 +318,7 @@ bool Engage(CBot &bot, edict_t *ent)
 	if (st.active)
 		return st.target.Is(ent);
 
-	if (!Enabled() || !g_pGameProfile || !IsTarget(ent))
+	if (!g_pGameProfile || !IsTarget(ent))
 		return false;
 
 	if (st.refused.Is(ent) && gpGlobals->time < st.refusedUntil)
@@ -357,7 +348,7 @@ bool Run(CBot &bot)
 	if (!st.active)
 		return false;
 
-	if (!Enabled() || !g_pGameProfile)
+	if (!g_pGameProfile)
 	{
 		st.active = false;
 		st.target.Clear();

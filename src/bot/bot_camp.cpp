@@ -13,6 +13,7 @@
 #include "../nav/nav_math.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_path.h"
+#include "../nav/nav_query.h"
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_camp.h"
@@ -23,25 +24,30 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_sense.h"
+#include "bot_strategic.h"
+#include "bot_tactics.h"
 
 namespace
 {
-	constexpr float kDefaultBudget = 3.f;
-	constexpr float kDefaultScareRadius = 1024.f;
-	constexpr float kDefaultReachRadius = 512.f;
+	constexpr float kBudget = 3.f;
+	constexpr float kScareRadius = 1024.f;
+	constexpr float kReachRadius = 512.f;
 
 	constexpr float kCampScareEpsilon = 16.f;
 	constexpr float kCampStale = 1.f;
 	constexpr float kCampMaxTravel = 3.f;
 	constexpr float kCampCooldown = 5.f;
 	constexpr float kCampDuckSlack = 0.95f;
-	constexpr float kDefaultZoomShare = 0.85f;
-	constexpr float kDefaultZoomDist = 768.f;
+	constexpr float kZoomShare = 0.85f;
+	constexpr float kZoomDist = 768.f;
 	constexpr float kFriendCheckInterval = 0.2f;
 	constexpr float kFriendFallbackCone = 90.f;
 	constexpr float kSpotForever = 1.0e9f;
 	constexpr float kSpotReuse = 30.f;
 	constexpr float kDeployTraverse = 45.f;
+	constexpr float kStandEyeLift = 46.f;
+	constexpr float kDuckEyeLift = 12.f;
+	constexpr float kSnipeCheckInterval = 0.5f;
 
 	BotCamp::Bipod ChooseBipod(const CBot &bot, const Nav::CampSpot &camp)
 	{
@@ -101,11 +107,14 @@ namespace
 		spot.zoom = spot.bipod == BotCamp::BIPOD_NONE && ChooseZoom(camp, spot.duck, zoomFov);
 	}
 
-	float CvarValue(const char *name, float fallback)
+	bool NowClosest(CBot &bot)
 	{
-		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer(name);
-		float v = cvar ? cvar->value : fallback;
-		return v < 0.f ? 0.f : v;
+		BotCamp::State &st = bot.camp;
+		if (st.spot.snipeId <= 0 || gpGlobals->time < st.nextSnipeCheck)
+			return false;
+
+		st.nextSnipeCheck = gpGlobals->time + kSnipeCheckInterval;
+		return BotTactics::Closest(bot);
 	}
 
 	bool FriendInView(const CBot &bot, float range)
@@ -182,27 +191,27 @@ bool DebugEnabled()
 
 float Budget()
 {
-	return CvarValue("crossbot_camp_budget", kDefaultBudget);
+	return kBudget;
 }
 
 float ScareRadius()
 {
-	return CvarValue("crossbot_camp_radius", kDefaultScareRadius);
+	return kScareRadius;
 }
 
 float ReachRadius()
 {
-	return CvarValue("crossbot_camp_reach", kDefaultReachRadius);
+	return kReachRadius;
 }
 
 float ZoomShare()
 {
-	return CvarValue("crossbot_camp_zoom", kDefaultZoomShare);
+	return kZoomShare;
 }
 
 float ZoomDist()
 {
-	return CvarValue("crossbot_camp_zoom_dist", kDefaultZoomDist);
+	return kZoomDist;
 }
 
 bool Holding(const CBot &bot)
@@ -215,7 +224,7 @@ void BuildRoute(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &f
 	State &st = bot.camp;
 	st.route.clear();
 
-	if (!Enabled() || mesh.camps.empty() || bot.currentAreaId < 0)
+	if (!Enabled() || mesh.camps.empty() || bot.currentAreaId < 0 || BotStrategic::Urgent(bot))
 		return;
 
 	const std::vector<float> &toGoal = bot.goal.toTargetCosts;
@@ -278,6 +287,9 @@ void Track(CBot &bot)
 		return;
 	}
 
+	if (st.charging && !bot.goal.stop.camp)
+		st.charging = false;
+
 	bool was = st.scared;
 
 	float radius = ScareRadius();
@@ -300,7 +312,7 @@ void Track(CBot &bot)
 		st.scared = false;
 	else if (contact)
 	{
-		if (!st.scared || dist < st.scareDist - kCampScareEpsilon)
+		if (!st.scared || (contact->time > st.scareTime && dist < st.scareDist - kCampScareEpsilon))
 		{
 			st.scared = true;
 			st.scareDist = dist;
@@ -311,6 +323,9 @@ void Track(CBot &bot)
 
 	if (st.scared && gpGlobals->time - st.scareTime > kCampStale)
 		st.scared = false;
+
+	if (!st.scared)
+		st.rolled = false;
 
 	if (DebugEnabled() && st.scared != was)
 		BOT_VLOG("CrossBot: %s %s\n", bot.name, st.scared
@@ -325,6 +340,12 @@ bool Consider(CBot &bot)
 
 	if (bot.goal.stop.camp)
 	{
+		if (st.charging && !st.scared)
+		{
+			st.charging = false;
+			BotGoal::Advance(bot);
+			return true;
+		}
 		if (!st.holding && st.spot.timed && st.spot.raceOut > 0.f && st.scared)
 		{
 			NoteSpot(bot, st.spot.campIndex, kSpotForever);
@@ -335,6 +356,12 @@ bool Consider(CBot &bot)
 		if (!st.holding && !st.spot.timed && !Enabled())
 		{
 			Abandon(bot, "camping is off");
+			BotGoal::Advance(bot);
+			return true;
+		}
+		if (!st.holding && NowClosest(bot))
+		{
+			Abandon(bot, "it is now the closest to the target");
 			BotGoal::Advance(bot);
 			return true;
 		}
@@ -349,6 +376,32 @@ bool Consider(CBot &bot)
 		return false;
 	if (Bot_ManeuverActive(bot))
 		return false;
+
+	if (!st.rolled)
+	{
+		st.rolled = true;
+		const Nav::NavMesh *mesh = Nav::Get();
+		float ready = g_pGameProfile ? g_pGameProfile->EvaluateCombat(bot.pEdict, bot.inventory) : 0.f;
+		if (mesh && g_pGameProfile && (g_pGameProfile->CreepButtons() != 0 || g_pGameProfile->CreepSpeed() > 0.f) &&
+			g_engfuncs.pfnRandomFloat(0.f, 1.f) < ready)
+		{
+			const Nav::Area *area = Nav::FindAreaNearest(*mesh, st.scarePos);
+			if (area)
+			{
+				st.spot = RouteSpot();
+				st.spot.pos = st.scarePos;
+				st.spot.areaId = static_cast<int>(area->id);
+				st.charging = true;
+
+				BOT_VLOG("CrossBot: %s is scared (%.0f out) but ready (%.2f) and charges at (%.1f,%.1f,%.1f)\n",
+					bot.name, st.scareDist, ready, st.scarePos.x, st.scarePos.y, st.scarePos.z);
+
+				BotGoal::CommitCampStop(bot, st.scarePos, st.spot.areaId, -1);
+				Bot_ResetNavPath(bot);
+				return true;
+			}
+		}
+	}
 
 	const std::vector<float> &toGoal = bot.goal.toTargetCosts;
 	if (static_cast<size_t>(bot.currentAreaId) >= toGoal.size())
@@ -401,6 +454,13 @@ bool OnArrived(CBot &bot)
 {
 	State &st = bot.camp;
 
+	if (st.charging)
+	{
+		st.charging = false;
+		st.nextCampTime = gpGlobals->time + kCampCooldown;
+		return BotGoal::Advance(bot);
+	}
+
 	st.holding = true;
 	st.holdStart = gpGlobals->time;
 	st.checkTravel = false;
@@ -440,6 +500,12 @@ bool Run(CBot &bot)
 		if (gpGlobals->time - st.holdStart >= st.spot.holdFor)
 		{
 			Leave(bot, "its time is up");
+			BotGoal::Advance(bot);
+			return false;
+		}
+		if (NowClosest(bot))
+		{
+			Leave(bot, "it is now the closest to the target");
 			BotGoal::Advance(bot);
 			return false;
 		}
@@ -534,6 +600,8 @@ void Reset(CBot &bot)
 	st.route.clear();
 	st.holding = false;
 	st.checkTravel = false;
+	st.charging = false;
+	st.rolled = false;
 	st.spot = RouteSpot();
 }
 
@@ -597,6 +665,25 @@ void CommitTimed(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdF
 	BotGoal::CommitCampStop(bot, camp.pos, camp.areaId, campIndex);
 }
 
+void CommitSnipe(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdFor, int weaponId,
+	const Vector &watch)
+{
+	CommitTimed(bot, mesh, campIndex, holdFor, 0.f, 0.f, 0.f);
+
+	RouteSpot &spot = bot.camp.spot;
+	spot.snipeId = weaponId;
+	bot.camp.nextSnipeCheck = 0.f;
+	BotAim::LosAngles(SpotEye(mesh.camps[campIndex]), watch, spot.yaw, spot.pitch);
+
+	const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(weaponId) : nullptr;
+	spot.zoom = spot.bipod == BIPOD_NONE && spec && spec->zoomFov > 0.f;
+}
+
+int SnipeId(const CBot &bot)
+{
+	return bot.goal.stop.camp ? bot.camp.spot.snipeId : 0;
+}
+
 void NoteSpot(CBot &bot, int campIndex, float seconds)
 {
 	float ready = gpGlobals->time + seconds;
@@ -628,6 +715,11 @@ bool SpotReady(const CBot &bot, int campIndex)
 float SpotDist(const Nav::CampSpot &camp)
 {
 	return ChooseDuck(camp) ? camp.crouchDist : camp.standDist;
+}
+
+Vector SpotEye(const Nav::CampSpot &camp)
+{
+	return camp.pos + Vector(0.f, 0.f, ChooseDuck(camp) ? kDuckEyeLift : kStandEyeLift);
 }
 
 void OnRespawn(CBot &bot)

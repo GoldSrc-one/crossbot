@@ -22,6 +22,7 @@ cmake --build build
 if errorlevel 1 exit /b 1
 
 if exist "%CROSSBOT_DEPLOY%\" (
+    copy /y "%~dp0names.txt" "%CROSSBOT_DEPLOY%\names.txt" >nul
     copy /y "%~dp0build\crossbot_mm.dll" "%CROSSBOT_DEPLOY%\crossbot_mm.dll" >nul
     if errorlevel 1 (
         echo build.bat: FAILED to copy crossbot_mm.dll into hlds -- is the server still running?

@@ -92,9 +92,10 @@ bool GateAllowsCrossing(const NavMesh &mesh, uint32_t connIdx, uint32_t fromId, 
 
 }
 
-void SetPlanTeamMask(uint32_t mask)
+void SetPlanTeam(uint32_t teamBit, bool carrier)
 {
-	g_planTeamMask = mask;
+	g_planTeamMask = carrier ? 0u : teamBit;
+	NavPlan::SetDetourTeamMask(teamBit);
 }
 
 PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,

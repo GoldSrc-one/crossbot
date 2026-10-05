@@ -41,6 +41,7 @@ struct RouteSpot
 	float raceRunner = 0.f;
 	float raceOut = 0.f;
 	float raceLead = 0.f;
+	int snipeId = 0;
 };
 
 struct SpotMemo
@@ -63,11 +64,14 @@ struct State
 	float scareTime = 0.f;
 	bool friendInView = false;
 	float nextFriendCheck = 0.f;
+	bool charging = false;
+	bool rolled = false;
 
 	bool unzoom = false;
 	bool checkTravel = false;
 
 	float nextCampTime = 0.f;
+	float nextSnipeCheck = 0.f;
 
 	unsigned int camps = 0;
 
@@ -117,11 +121,18 @@ void OnRespawn(CBot &bot);
 void CommitTimed(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdFor, float runner, float out,
 	float lead);
 
+void CommitSnipe(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdFor, int weaponId,
+	const Vector &watch);
+
+int SnipeId(const CBot &bot);
+
 void NoteSpot(CBot &bot, int campIndex, float seconds);
 
 bool SpotReady(const CBot &bot, int campIndex);
 
 float SpotDist(const Nav::CampSpot &camp);
+
+Vector SpotEye(const Nav::CampSpot &camp);
 
 void AddSandbags();
 

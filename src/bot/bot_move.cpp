@@ -11,8 +11,12 @@
 #include "bot_perf.h"
 #include "bot_timing.h"
 #include "../game/game_profile.h"
+#include "../game/teams.h"
 #include "../nav/baked_blockers.h"
+#include "../nav/nav.h"
 #include "../nav/nav_math.h"
+#include "../nav/nav_mesh.h"
+#include "../nav/nav_query.h"
 #include "../nav/pm_sim.h"
 
 namespace
@@ -132,6 +136,105 @@ namespace
 		bot.moveForward = fmove;
 		bot.moveSide = smove;
 	}
+
+	constexpr float kSpacingRadius = 64.f;
+	constexpr float kSpacingHeight = 72.f;
+	constexpr float kSpacingProbe = 24.f;
+	constexpr float kSpacingGoldenAngle = 2.39996f;
+	constexpr int kSpacingWaterlevel = 2;
+	constexpr float kRangePref = 0.5f;
+
+	bool SpacingProbeOnMesh(const CBot &bot, const Vector &probe)
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+			return false;
+		if (bot.currentAreaId >= 0 && static_cast<size_t>(bot.currentAreaId) < mesh->areas.size() &&
+			Nav::AreaContainsPoint(mesh->areas[bot.currentAreaId], probe))
+			return true;
+		return Nav::FindAreaExact(*mesh, probe) != nullptr;
+	}
+
+	void ApplySpacing(CBot &bot, const Vector &angles, float &fmove, float &smove,
+		unsigned short &buttons)
+	{
+		edict_t *pEdict = bot.pEdict;
+		if (!Teams::Active(pEdict))
+			return;
+		if ((pEdict->v.flags & FL_ONGROUND) == 0 || pEdict->v.movetype != MOVETYPE_WALK ||
+			pEdict->v.waterlevel >= kSpacingWaterlevel || (buttons & IN_JUMP) != 0)
+			return;
+		if (bot.rideActive || bot.ladderActive || bot.airmoveActive || bot.fun.aboard)
+			return;
+
+		int self = g_engfuncs.pfnIndexOfEdict(pEdict);
+		float px = 0.f, py = 0.f;
+		for (int i = 1; i <= gpGlobals->maxClients; ++i)
+		{
+			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+			if (!ent || ent == pEdict || !CBotIsLivePlayer(ent) ||
+				Teams::Of(pEdict, ent) != Teams::REL_FRIEND)
+				continue;
+
+			Vector d = pEdict->v.origin - ent->v.origin;
+			if (fabsf(d.z) >= kSpacingHeight)
+				continue;
+			float dist = sqrtf(d.x * d.x + d.y * d.y);
+			if (dist >= kSpacingRadius)
+				continue;
+
+			float dx, dy;
+			if (dist < 1.f)
+			{
+				dx = cosf(self * kSpacingGoldenAngle);
+				dy = sinf(self * kSpacingGoldenAngle);
+			}
+			else
+			{
+				dx = d.x / dist;
+				dy = d.y / dist;
+			}
+			float w = 1.f - dist / kSpacingRadius;
+			px += dx * w;
+			py += dy * w;
+		}
+
+		float len = sqrtf(px * px + py * py);
+		if (len < 0.001f)
+			return;
+		Vector dir(px / len, py / len, 0.f);
+		if (len > 1.f)
+			len = 1.f;
+		if (!SpacingProbeOnMesh(bot, pEdict->v.origin + dir * kSpacingProbe))
+			return;
+
+		Vector world = ComposeMove(angles.y, fmove, smove);
+		float speed = sqrtf(world.x * world.x + world.y * world.y);
+		float drive;
+		if (speed < 1.f)
+		{
+			world = dir;
+			drive = len * Bot_MaxSpeed(pEdict);
+		}
+		else
+		{
+			world = world + dir * (len * speed);
+			if (sqrtf(world.x * world.x + world.y * world.y) < 1.f)
+				return;
+			drive = speed;
+		}
+
+		Bot_DecomposeMove(angles.y, world, drive, fmove, smove);
+
+		buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVERIGHT | IN_MOVELEFT);
+		if (fmove > kBeamGuardDeadzone) buttons |= IN_FORWARD;
+		else if (fmove < -kBeamGuardDeadzone) buttons |= IN_BACK;
+		if (smove > kBeamGuardDeadzone) buttons |= IN_MOVERIGHT;
+		else if (smove < -kBeamGuardDeadzone) buttons |= IN_MOVELEFT;
+
+		bot.moveForward = fmove;
+		bot.moveSide = smove;
+	}
 }
 
 void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
@@ -142,7 +245,10 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 	edict_t *pEdict = bot.pEdict;
 	byte msec = Bot_FrameMsec();
 
-	buttons |= BotFire::Buttons(bot, angles);
+	unsigned short fireButtons = BotFire::Buttons(bot, bot.aim.perceived);
+	if ((buttons & IN_USE) != 0)
+		fireButtons &= ~IN_RELOAD;
+	buttons |= fireButtons;
 
 	Vector view = angles;
 	BotGrenade::Run(bot, view);
@@ -160,9 +266,23 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 		if (braceDuck)
 			buttons |= IN_DUCK;
 	}
+	else
+		ApplySpacing(bot, angles, fmove, smove, buttons);
 
 	if (g_pGameProfile)
 		g_pGameProfile->MoveAdjust(bot, fmove, smove, buttons);
+
+	if (g_pGameProfile && bot.camp.charging && bot.goal.stop.camp)
+	{
+		buttons |= g_pGameProfile->CreepButtons();
+		float creep = g_pGameProfile->CreepSpeed();
+		float drive = sqrtf(fmove * fmove + smove * smove);
+		if (creep > 0.f && drive > creep)
+		{
+			fmove *= creep / drive;
+			smove *= creep / drive;
+		}
+	}
 
 	ApplyBeamGuard(bot, angles, fmove, smove, buttons);
 
@@ -331,10 +451,6 @@ float Bot_Carefulness(const CBot &bot)
 	if (!g_pGameProfile || !bot.pEdict)
 		return 0.f;
 
-	cvar_t *pin = g_engfuncs.pfnCVarGetPointer("crossbot_careful_pin");
-	if (pin && pin->value >= 0.f)
-		return pin->value > 1.f ? 1.f : pin->value;
-
 	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_careful");
 	float scale = cvar ? cvar->value : 1.f;
 	if (scale <= 0.f)
@@ -358,15 +474,6 @@ PmSim::FallRule Bot_FallDamage(const CBot &)
 
 WeaponRangeClass Bot_RangeClass(const CBot &bot)
 {
-	cvar_t *force = g_engfuncs.pfnCVarGetPointer("crossbot_range_force");
-	if (force && force->value >= 0.f)
-	{
-		int forced = static_cast<int>(force->value);
-		if (forced == RANGE_CLOSE || forced == RANGE_LONG)
-			return static_cast<WeaponRangeClass>(forced);
-		return RANGE_NONE;
-	}
-
 	const BotInventory &inv = bot.inventory;
 	if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
 		return RANGE_NONE;
@@ -386,31 +493,11 @@ NavPlan::RangeBias Bot_RangeBias(const CBot &bot, bool readiness)
 	if (cls == RANGE_NONE)
 		return bias;
 
-	cvar_t *shortCvar = g_engfuncs.pfnCVarGetPointer("crossbot_range_short");
-	cvar_t *longCvar = g_engfuncs.pfnCVarGetPointer("crossbot_range_long");
-	if (shortCvar && shortCvar->value > 0.f)
-		bias.shortDist = shortCvar->value;
-	if (longCvar && longCvar->value > bias.shortDist)
-		bias.longDist = longCvar->value;
-
 	bias.preferLong = (cls == RANGE_LONG);
 
-	cvar_t *pin = g_engfuncs.pfnCVarGetPointer("crossbot_range_pin");
-	if (pin && pin->value >= 0.f)
-	{
-		bias.weight = pin->value > 1.f ? 1.f : pin->value;
-		return bias;
-	}
-
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_range_pref");
-	float scale = cvar ? cvar->value : 0.f;
-	if (scale <= 0.f)
-		return bias;
-	if (scale > 1.f)
-		scale = 1.f;
 	if (!readiness)
 	{
-		bias.weight = scale;
+		bias.weight = kRangePref;
 		return bias;
 	}
 
@@ -420,7 +507,7 @@ NavPlan::RangeBias Bot_RangeBias(const CBot &bot, bool readiness)
 	if (ready > 1.f)
 		ready = 1.f;
 
-	bias.weight = ready * scale;
+	bias.weight = ready * kRangePref;
 	return bias;
 }
 

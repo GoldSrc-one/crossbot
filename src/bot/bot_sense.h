@@ -20,6 +20,7 @@ enum SuspicionSource : unsigned char
 	SUSP_EVENT,
 	SUSP_DAMAGE,
 	SUSP_SIGHT,
+	SUSP_ALLY,
 	SUSP_COUNT,
 };
 
@@ -52,6 +53,7 @@ struct Suspicion
 {
 	Vector pos;
 	float time = 0.f;
+	float sourceTime[SUSP_COUNT] = {};
 	CBotEntHandle ent;
 	SuspicionSource source = SUSP_SOUND;
 	SuspicionKind kind = KIND_OTHER;
@@ -139,6 +141,8 @@ void ResetBoneCache();
 
 void RefreshMonsters();
 
+void RefreshAllies();
+
 int MonsterCount();
 
 void Update(CBot &bot);
@@ -161,6 +165,8 @@ bool Senses(const CBot &bot, const edict_t *ent);
 
 const Suspicion *NearestLive(const CBot &bot, const Vector &point, float radius, bool livingOnly,
 	float *distOut = nullptr);
+
+bool HeardEnemy(const CBot &bot, Vector &pos, Vector &vel, edict_t **entOut);
 
 const char *SourceName(SuspicionSource source);
 

@@ -111,6 +111,23 @@ survives into the air, pressed one frame later it finishes on the press itself. 
 `JumpLandsIn` assumes — `duckTrace` for the whole arc — is met from the same frame as before. Jump
 *height* never depended on the duck either; both branches of `PM_Jump` give the same 45-unit impulse.
 
+### Teammate spacing
+`ApplySpacing` bends the commanded move away from every live teammate (`Teams::Of == REL_FRIEND`)
+closer than `kSpacingRadius` units in 2D (64, `|dz| < 72` so a floor above does not count).
+Each teammate contributes its away direction weighted `1 - d/R`, so the push fades to nothing at the
+radius. Two bots on the same spot split along a golden-angle direction from their entity index.
+
+It lives in the funnel because clumps form in every drive — spawn holds, camp spots, goal arrival,
+combat, two bots walking one corridor — and one call site covers all of them. A standing bot walks
+off at `push * maxspeed`; a moving bot keeps its speed and has its direction bent by the push, so the
+path follower sees a lateral nudge rather than a new heading.
+
+It is skipped wherever a sideways nudge breaks a maneuver: in the air, off `MOVETYPE_WALK` (ladders),
+swimming, any command carrying IN_JUMP (an air-move launch), riding a lift or a train
+(`rideActive`, `fun.aboard`), `ladderActive`, `airmoveActive`, and while `BotFire::Brace` has planted
+the bot for a shot. A push whose 24-unit probe leaves the nav mesh is dropped, so a bot is never
+shouldered off a ledge. It runs before `MoveAdjust` and the tripmine beam guard so both still win.
+
 ## bot_move_nav.cpp
 
 ### Constants
@@ -139,7 +156,8 @@ first two are the `HitQualifies` idiom from `bot_avoid.cpp` minus the solid-clas
 runtime and navgen must agree on that list, which is why it is one function and not two.
 
 ### WriteTraceLog
-Writes bot trajectory trace to file specified by crossbot_trace_path cvar (defaults to crossplay/addons/crossbot/trace/nav_trace.txt).
+Writes bot trajectory trace to file specified by crossbot_trace_path cvar. The cvar defaults to empty,
+which records nothing and writes nothing; set it to a path to turn tracing on.
 Verbose builds only. The `bot.traceLog` append in `Bot_MoveNav` is inside `#if BOT_VLOG_ON`, so in a
 `-DCROSSBOT_VERBOSE=OFF` build the vector is empty and this returns at its first line -- no file, no
 print. Every bot writes the same path, so the file is only meaningful with one bot on the server;
@@ -381,8 +399,6 @@ Mid-flight, an error past `kAirmoveCorrectAbandon` clears the arc for the rest o
 reference has stopped describing this flight — the bot was knocked, or hit something the sim did not — and
 steering hard toward a stale target is worse than coasting. One bounce flight showed the failure it prevents:
 a peak error of 264 units, corrected for 96 frames, landing 675 units out.
-
-`crossbot_airmove_correct 0` disables the whole thing and restores branch 4 unconditionally.
 
 **A landing outside `airmoveTargetArea` penalizes the connection, then forces a repath.**
 `RunAirmoveFlight` resolves the landed area and calls `Nav::PenalizeConnection` on the index latched at
@@ -757,6 +773,17 @@ reproducible failure: crossfire's two-unit stops carry only walk and elevator co
 moves, and ladder tops are ordinary volumetric areas. The `undecided` lines those two still emit
 (`test25_ladder2`, `test53_ladder4`) are genuine — a descent that ends mid-drop is in no area.
 
+**A failed ride forgets the press that summoned it.** `RunActivation` only knows it sent one `IN_USE`
+edge, not that the lift moved. Crossfire's lifts drop the press whenever it lands mid-cycle (a
+`func_door` ignores Use unless parked, the `wait 3` button ignores it until it returns), and a bot that
+dawdles past the 1 s dwell boards a lift already on its way back down. Both used to end the same way:
+the press sat in `activationMemo` for `kActivationMemory`, every repath from the bottom stop skipped the
+button detour as serviced, and the bot boarded the parked lift, timed out 4.6 s later, repathed and
+boarded again, three or four times over. The same fault also showed up as a bot wiggling on lift4 at
+`(-832, 1264)`. On any failed or undecided ride `FinishElevatorRide` now erases the memo entry
+for the gate right before the ride waypoint (scanning back no further than the previous barrier), so
+the repath presses again.
+
 **`totalTime` under-reports by the whole ride.** The ETA integrates over segments, and there is no segment,
 so `BuildPathProfile` adds `elevatorWaitTime + elevatorTravelTime` after the loop. Without it
 `test55_plat`'s ETA is 3.8 s against a 4.96 s ride and `test_nav_goal.ps1` — which times out at twice the
@@ -906,6 +933,16 @@ segment that reaches the shaft carries the corner's index and the ride's index n
 - **Memo.** Serviced activators are remembered by centre for `kActivationMemory` seconds. This is what stops a
   mid-detour repath from pressing twice (waypoint indices change, world state does not), and what makes a
   failed press retry on its own once the memo lapses
+- **A remembered gate only floors once the bot is there.** "Serviced" can come from the memo, not from
+  this plan: a bot that rides a lift up and plans back through it inside `kActivationMemory` finds the
+  button detour still in its path, 100+ units ahead. Flooring `s` at that gate then pins projection
+  ahead of the bot, `lateral` passes `rejoinAbort`, and it repaths every frame into the same plan. On
+  crossfire it crawled 0.7 units per repath for the full 15 s. So the floor applies only when the gate is
+  behind the bot (`i < waypointIndex`, since a segment carries the index of the waypoint it reaches) or
+  the bot is within `kActivationEngageRadius` of it. A press in this plan always ends inside that
+  radius, but not necessarily inside `kActivationStandRadius`: one finished its hold 16 units short,
+  still on the segment reaching the gate. With an 8-unit radius the floor dropped there, and the bot
+  stalled on the outbound leg and gave up the goal
 
 ### RunActivation ordering
 Ahead of RunActivation, since a board point can sit inside the engage radius of a later button.
@@ -1072,8 +1109,7 @@ The nav mesh is generated once at a fixed design speed and every connection's `c
 holding `item_longjump`, which replaces a jump with `forward * 560` and `sqrt(2*800*56)` up — has a
 movement option no plan on that mesh can contain. This checks, four times a second, whether taking it
 right now beats walking the plan, and if so hops off-plan and repaths from wherever it lands. It is not a
-planner change: the plan stays what it is and the bot occasionally short-circuits it. Can be disabled with
-`crossbot_oppo_jump = 0`.
+planner change: the plan stays what it is and the bot occasionally short-circuits it.
 
 ### Why the design speed had to go in the nav file
 

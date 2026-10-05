@@ -53,16 +53,37 @@ namespace
 		return false;
 	}
 
-	bool AttackPoint(CBot &bot, Vector &base, Vector &vel)
+	bool AttackPoint(CBot &bot, Vector &base, Vector &vel, bool &heard)
 	{
+		heard = false;
 		edict_t *target = bot.sense.target.Get();
 		if (!target || gpGlobals->time - bot.sense.targetTime > kTargetFresh)
-			return false;
+		{
+			if (!BotSense::HeardEnemy(bot, base, vel, &target))
+				return false;
+			heard = true;
+			base.z += target->v.mins.z + kFeetLift;
+			return true;
+		}
 
 		base = target->v.origin;
 		base.z += target->v.mins.z + kFeetLift;
 		vel = target->v.velocity;
 		return true;
+	}
+
+	bool AttackClear(CBot &bot, const WeaponMode &mode, const Vector &base, const Vector &vel, bool heard)
+	{
+		edict_t *pEdict = bot.pEdict;
+		if ((mode.quirks & WPN_Q_TEAM_UNSAFE) != 0 && BotFire::FriendCloser(pEdict, base))
+			return false;
+		if (!heard)
+			return true;
+
+		Vector look, impact;
+		float flight = 0.f;
+		return BotFire::SolveOffhand(mode, pEdict->v.origin, base, vel, look, flight, pEdict, &impact) &&
+			BotFire::HarmFavors(pEdict, impact, base + vel * flight, mode.splash);
 	}
 
 	bool ScaredPoint(CBot &bot, Vector &base, Vector &vel)
@@ -160,9 +181,11 @@ namespace
 		}
 
 		Vector base, vel;
-		bool target = st.scared ? ScaredPoint(bot, base, vel) : AttackPoint(bot, base, vel);
+		bool heard = false;
+		bool target = st.scared ? ScaredPoint(bot, base, vel) : AttackPoint(bot, base, vel, heard);
 		if (target && !st.scared)
-			target = (base - pEdict->v.origin).Length() >= st.minRange && !FriendNear(pEdict, base, kLandClear);
+			target = (base - pEdict->v.origin).Length() >= st.minRange && !FriendNear(pEdict, base, kLandClear) &&
+				AttackClear(bot, st.mode, base, vel, heard);
 		Vector look;
 		float flight = 0.f;
 		bool solved = target && BotFire::SolveOffhand(st.mode, pEdict->v.origin, base, vel, look, flight);
@@ -193,6 +216,8 @@ namespace
 		++st.throws;
 		if (st.scared)
 			++st.scaredThrows;
+		if (heard)
+			++st.heardThrows;
 		BOT_VLOG("CrossBot: %s throws grenade slot %d after %.2fs, flight %.2fs, %s\n", bot.name,
 			st.slot + 1, held, st.flight, st.haveLook ? "aimed" : "unaimed");
 		Apply(bot, angles);
@@ -230,6 +255,7 @@ void Run(CBot &bot, Vector &angles)
 	int slot = -1;
 	bool scared = false;
 	Vector base, vel;
+	bool heard = false;
 
 	for (int s = 0; s < kMaxOffhandSlots && slot < 0; ++s)
 	{
@@ -240,14 +266,15 @@ void Run(CBot &bot, Vector &angles)
 		if (!read || info.count <= 0)
 			continue;
 
-		if (info.use == OFFHAND_ATTACK && AttackPoint(bot, base, vel))
+		if (info.use == OFFHAND_ATTACK && AttackPoint(bot, base, vel, heard))
 		{
 			++st.sightings;
 			float dist = (base - pEdict->v.origin).Length();
 			st.lastDist = dist;
 			if (st.minDist <= 0.f || dist < st.minDist)
 				st.minDist = dist;
-			if (dist < info.minRange || dist > info.maxRange || FriendNear(pEdict, base, kLandClear))
+			if (dist < info.minRange || dist > info.maxRange || FriendNear(pEdict, base, kLandClear) ||
+				!AttackClear(bot, info.mode, base, vel, heard))
 			{
 				++st.rangeRejects;
 				continue;
@@ -299,18 +326,19 @@ void Reset(CBot &bot)
 	fresh.forced = st.forced;
 	fresh.refused = st.refused;
 	fresh.scaredThrows = st.scaredThrows;
+	fresh.heardThrows = st.heardThrows;
 	st = fresh;
 }
 
 void PrintStatus(const CBot &bot)
 {
 	const State &st = bot.grenade;
-	char line[256];
+	char line[320];
 	snprintf(line, sizeof(line),
 		"CrossBot: %s grenade slot=%d why=%s held=%.2f flight=%.2f primes=%u throws=%u forced=%u "
-		"refused=%u scared=%u slots=%d:%d,%d:%d sightings=%u rejects=%u dist=%.0f min=%.0f\n",
+		"refused=%u scared=%u heard=%u slots=%d:%d,%d:%d sightings=%u rejects=%u dist=%.0f min=%.0f\n",
 		bot.name, st.slot + 1, st.why, st.slot >= 0 ? gpGlobals->time - st.primeTime : 0.f, st.flight,
-		st.primes, st.throws, st.forced, st.refused, st.scaredThrows, st.types[0], st.counts[0], st.types[1],
+		st.primes, st.throws, st.forced, st.refused, st.scaredThrows, st.heardThrows, st.types[0], st.counts[0], st.types[1],
 		st.counts[1], st.sightings, st.rangeRejects, st.lastDist, st.minDist);
 	SERVER_PRINT(line);
 }

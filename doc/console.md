@@ -3,7 +3,7 @@
 `commands.cpp` registers every server command in `Register()`. They are thin wrappers — the work lives
 in `BotManager` or `Nav`, and each one is documented where that work is.
 
-- `crossbot_add [gamedir|*] [name] [model|team]` — add a bot to a loaded game. The first argument is
+- `crossbot_add [gamedir|*] [name] [model|team]` — add a bot to a loaded game. With no name, one is picked at random from `addons/crossbot/names.txt` (deployed by `build.bat`). The first argument is
   always the game directory; `*` or nothing picks a random playable one, and an unknown name lists
   what is loaded. A game is playable only with both gamedata and a game profile — see
   `doc/games.md`. The third argument belongs to that game's profile rather than to this command:
@@ -77,11 +77,12 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_aim_test <bot> <yawDelta> [pitchDelta] [fov]` — command a flick relative to the bot's current view
   and print settle time and peak hand speed; the only check on the 180-in-0.4s derivation. Overrides
   navigation aim for 3 seconds. Two seconds in it also prints a **rest error**: the miss still standing once
-  the view has stopped, which is the number the hand quantum sets and the one that should shrink with zoom.
+  the view has stopped, which must read 0 now that no hand resolution is modelled.
   The optional 4th argument writes `pev->fov` before the flick (0 meaning the engine default) so a script
   can sweep that; see `doc/perception.md`, `bot_aim.cpp`
 - `crossbot_aim_status` — per bot: sense target, bone sampled, ring occupancy, delay served, hand speed,
-  and `err`, the angle between the real view and the true present-time angles to the target. `err` is the
+  `seen`/`perr` (the bot's delayed belief about its own view, and how far that belief is from the real
+  view plus punch), and `err`, the angle between the real view and the true present-time angles to the target. `err` is the
   one number that separates "correctly delayed" from "delayed and also wrong", but it no longer bottoms out
   at zero: it is measured against the target eye while the bot aims at a random hitbox bone, so a couple of
   degrees is the floor. Read its trend across delays, not its value; see `doc/perception.md`, `bot_aim.cpp`
@@ -114,7 +115,8 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
 - `crossbot_grenade_status` — per bot, the off-hand grenade state (`bot_grenade.cpp`, TFC only):
   `slot` being cooked (0 none), `why`, `held` seconds, the last solved `flight`, and counters `primes`,
   `throws`, `forced` (released at 1 s left without a shot, toward the most open direction), `refused`
-  (the game never set the primed bit), `scared` (caltrop throws). `slots=type:count,type:count` is what
+  (the game never set the primed bit), `scared` (caltrop throws), `heard` (throws at an enemy heard
+  but not seen). `slots=type:count,type:count` is what
   the profile read last, `sightings`/`rejects` count attack decisions and how many failed the range or
   friend gate, `dist`/`min` the last and smallest target distance seen. Counters survive respawn
 - `crossbot_sense_status` — per bot: the bot's own `team`, aim target and bone, `cands`/`keep` for the
@@ -147,6 +149,17 @@ in `BotManager` or `Nav`, and each one is documented where that work is.
   from the simulated impact point to the target's box, against the splash radius allowed there — so
   do not compare them against the other three. `flight` is the solved projectile flight time in
   milliseconds, zero for hitscan **and for homing**, which solves nothing.
+
+  `heard=` counts throws at an enemy the bot heard but could not see, and `harmveto=` counts heard
+  arcs refused because the simulated blast would hurt the bot as much as or more than the enemy
+  (`why=arc-harm`). `why=heard` is the switch to a throwable for such a throw. Both are per-life, like
+  `ambush=`. See `doc/combat.md`, "Throwing at a heard enemy".
+
+  `intent=` is the weapon id of a live throw intent, or 0. `dropped=` counts intents given up, per
+  life: when the throw stops being solvable, or when the grenade was ready and the pin was not pulled.
+  `banned=1` means grenades are off until the current combat ends. `why=drawing` is the grenade's
+  deploy. `why=throw-blocked` is a pulled pin whose throw no longer solves. `why=throw-dropped` is the
+  switch back to a gun. See `doc/combat.md`, "The throw intent".
 
   `commit` is what the bot has started and will not walk away from — `none`, `charge` (gauss spinning
   up), `throw` (handgrenade pin pulled, waiting for the engine to let go of it) or `guide` (rocket in
@@ -200,6 +213,19 @@ it appears from both sides of the aim-queue boundary and means the same thing on
   (`IGameProfile::AmmoEntity`, see `doc/games.md`). It gives only when the mode is *unusable*, never on
   a timer, so reloading and clip depletion stay real and only permanent starvation is removed. Before
   this, an RPG run reached one rocket per bot per life.
+- `crossbot_combat_status` — the combat cvars, then per bot: who it is fighting, for how long, how long
+  unseen, whether combat has taken movement over (`driving=`), the current probe with its exposure
+  against the exposure where the bot stands, and the duel flags `melee=`/`inarea=`; see
+  `doc/testing.md`, `bot_combat.cpp`
+- `crossbot_camp_status [x y z]` — the camp spot count and `crossbot_camp`'s effective value, then the
+  nearest camp spot to each bot (or to the given point): position, area, facing, score, and the stand
+  and crouch score, spread and distance; see `doc/goals.md`, `bot_camp.cpp`
+- `crossbot_vantage_status [x y z]` — the loaded vantage field, then the blend at each bot's eye (or at
+  the given point, which is the round-trip test); see `doc/perception.md`, "crossbot_vantage_status"
+- `crossbot_airmove_cache_stats` — the airmove cache's occupancy, hit rate, inserts, evictions and,
+  under `crossbot_airmove_verify 1`, verified and `MISMATCH` counts; see `doc/testing.md`, "Airmove
+  cache: correctness and tuning"
+- `crossbot_difficulty_status` — the resolved tier and every difficulty-derived value; see below
 
 ## crossbot_difficulty_status
 
@@ -262,20 +288,14 @@ take a whole match to produce, and it takes any entity classname, ammo boxes inc
 
 Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
 
-- `crossbot_verbose` — **read-only marker, not a switch.** Registered only when the plugin was built
-  with `CROSSBOT_VERBOSE` (the default), the same way `crossbot_perf` marks a `CROSSBOT_PERF` build.
-  Setting it does nothing: the narration is compiled out, not branched on. It exists so a script can
-  tell the two builds apart before it starts parsing per-bot log lines —
-  `test_server_start.ps1 -RequireVerbose` probes it and refuses to run without it
-- `crossbot_bsptrace` / `crossbot_bsptrace_blockers` — **only exist in a `-DCROSSBOT_BSPTRACE=ON`
-  build**, which is not the default. A/B the in-process BSP hull tracer against the engine's
-  `pfnTraceHull` on the planner's airmove traces; read with `crossbot_bsptrace_stats`. Mode 1 still
-  returns the engine's answer, so it measures without changing behaviour. See `doc/testing.md` for the
-  numbers and why it is off
-- `crossbot_trace_path` — where `WriteTraceLog` puts the bot trajectory (verbose builds only)
+- `crossbot_verbose` — per-bot narration (`BOT_VLOG`), **default 0**. Master switch: every
+  `crossbot_*_debug` dump prints through the same macro, so those need it on too. Registered only
+  when the plugin was built with `CROSSBOT_VERBOSE` (the default); an OFF build compiles the lines out
+  and has no cvar. `test_server_start.ps1` sets it to 1 on every test server, and
+  `-RequireVerbose` probes for it and refuses to run without it
+- `crossbot_trace_path` — where `WriteTraceLog` puts the bot trajectory (verbose builds only; empty,
+  the default, disables it)
 - `crossbot_nav_avoid` — obstacle avoidance layer, 0 to A/B a suspected regression without rebuilding
-- `crossbot_nav_break` — breaking `func_breakable` out of the way. Default 1. With it off the bot falls
-  back to the pre-`BotBreak` behaviour: it avoids the breakable, or gives up on the goal behind it
 - `crossbot_gather` — item gathering goals. Default 1. `test_nav_goal.ps1` sets it to 0, because a bot
   that picks a new goal a frame after arriving never shows the harness the `hasGoal=0` it polls for
 - `crossbot_fun` — the fun goal tier. Default 1. With it off `BotGoal::Select` reduces exactly to the
@@ -296,16 +316,10 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   reader, or with offsets missing, behaves identically either way
 - `crossbot_tactics` — camp-spot tactics for `support` and `defend` strategic goals. Default 1. 0 keeps the
   intents but never picks a spot; see `doc/goals.md`, `bot_tactics.cpp`
-- `crossbot_tactics_budget` — seconds a spot may add to a runner's best path and still count as on it.
-  Default 3
-- `crossbot_tactics_margin` — seconds a bot must beat the runner to a spot by. Default 1
-- `crossbot_tactics_debug` — also log when a supporter finds no spot ahead of its runner. Default 0
-- `crossbot_goal_bias` — exponent in the fun/strategic weight `1 / (cost + 2)^bias`. Default 2. 0 is
-  uniform random across candidates, which is how you tell a selection problem from a distance-weighting
-  one; large values collapse to nearest-first. Does not affect gather, which is always cheapest-first
-- `crossbot_detour_budget` — seconds of extra travel a bot will accept to pick something up on the way
-  to a distant goal. Default 6. 0 disables detours entirely without disabling the tier, so a bot walks
-  straight at its target; see `doc/goals.md`, `bot_goal.cpp`
+- `crossbot_tactics_debug` — also log when a supporter finds no spot ahead of its runner, or a sniper no post.
+  Default 0
+- `crossbot_snipe` — sniper posts: a bot with a long-range weapon that is not its team's closest to the target
+  may hold a camp spot overlooking it, dead ends included. Default 1; off with `crossbot_tactics 0` too
 - `crossbot_teams` — friend/foe gating. Default 1, and inert unless the map belongs to `cstrike`,
   `tfc` or `dod`. With it on a bot never sights, chases, retaliates against or detonates a satchel on
   anything that is not a confirmed enemy; with it off every gate returns "attackable" and the bot
@@ -315,45 +329,30 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   by one) drops whatever it was walking to and repositions locally instead, until the enemy dies,
   vanishes, stops being sensed, or goes 5s unseen. With it off the bot never enters the state and
   keeps gathering through a firefight — it still shoots, since aim and the trigger are
-  `crossbot_fire`'s. Inert without `crossbot_sense`, which is what supplies the sighting. Unlike the
-  `crossbot_chase` it replaces, it is **not** disabled by `crossbot_gather 0`: combat is no longer a
-  goal, so it does not live inside `SelectGoal`
+  `crossbot_fire`'s. Inert without `crossbot_sense`, which is what supplies the sighting. It is **not**
+  disabled by `crossbot_gather 0`: combat is not a goal, so it does not live inside `SelectGoal`
 - `crossbot_combat_debug` — one line per probe: which way the bot decided to shuffle, the area it
   resolved to, and the exposure there against the exposure where it stands. Also logs the frame an
   enemy notices the bot, which is what ends an ambush
 - `crossbot_ambush` — open on an enemy who has not noticed the bot yet with melee at contact range,
-  otherwise a grenade or a snark. Default 1. Off, the bot always opens with its best gun, which is
+  otherwise a grenade or a snark. Default -1 (tier: on below expert). 0, the bot always opens with its best gun, which is
   what it did before the flag existed — useful as the A/B, since the awareness verdict is still
   logged either way. Inert without `crossbot_combat`, which owns the flag, and it decides nothing on
   its own: an ambush weapon is only ever *offered*, and if none is usable at that range the ordinary
   selection runs untouched
-- `crossbot_duel` — mirror an opponent who has melee out: draw melee too, charge until in reach, back
-  off after each swing. Default 1. Gated on the enemy standing in the bot's *own* nav area, so how far
-  a duel can start from is the map's business, not a tunable. Off, the bot fights a crowbar opponent
-  with whatever it would otherwise have picked, and the `melee=`/`inarea=` flags are still reported so
-  the A/B is readable. Inert without `crossbot_combat`. Note that a bot holding melee out of range is
-  the *point* here rather than a bug: the charge is what closes the gap
-- `crossbot_brace` — stop and duck to fire a `WPN_Q_BRACE` weapon (the OP4 M249). Default 1. 0 lets the
-  bot keep moving while it sprays, for A/B runs; `bracing=` and `braces=` in `crossbot_fire_status`
-  show it working (`bracing=3` is an expert holding its speed and bracing for one frame). See
-  `doc/combat.md`, "Brace"
 - `crossbot_grenade_cook`, `crossbot_backstab`, `crossbot_brace_moving` — tier flags, default -1.
   See `doc/difficulty.md`
 - `crossbot_wallbang` — tier flag, default -1: shoot a lost target through a wall the round gets
   through. `wallbangs=` in `crossbot_fire_status` counts the shots and `why=wallbang` shows one lined
   up; `gaussjumps=` sits beside it. See `doc/combat.md`, "Wall-banging"
-- `crossbot_wallbang_probe` — runs `Penetrates` from every live bot's held weapon at every other bot
-  of the same game that a wall hides, printing the first texture and `THROUGH` or `stopped`. The
-  live wallbang is rare (it needs a predicted target behind a wall); this checks the replay directly
 - `crossbot_spread_fit` — CS spread gate: the largest cone allowed, as a multiple of the target's half
   width. Default -1 (tier: 2 / 1.5 / 1.25 / 1); 0 turns the gate off for A/B runs. `spreadwaits=` in
   `crossbot_fire_status` counts the holds. See `doc/combat.md`, "The CS spread gate"
 - `crossbot_gather_debug` — dump every gather selection: each item entity, its area, and its cost or the
   reason it was skipped, plus the bot's readiness in the header and an `ENEMY` marker on the enemy row.
   Default 0, and verbose enough to be worth turning back off; see `doc/goals.md`
-- `crossbot_oppo_jump` — opportunistic jumping. Default -1, following `crossbot_difficulty`,
-  which enables it at every tier; 0 forces it off and 1 forces it on. The retry throttle is
-  `crossbot_oppo_interval`, which easy halves to 0.5s
+- `crossbot_oppo_interval` — retry throttle for opportunistic jumping (always on). Default -1 (tier);
+  easy halves it to 0.5s
 - `crossbot_time_debug` — movement-clock diagnostics. Default 0. Once a second prints the server's own
   frame budget, then one line per bot: msec issued versus that budget, how much of it the engine
   actually ran (`SV_RunCmd` silently drops commands while the `clockwindow` guard is armed, which is
@@ -370,33 +369,17 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   at both settings; see `doc/perception.md`, `bot_sense.cpp`
 - `crossbot_sense_decay` — suspicion weight and decay window in seconds, clamped [0.1, 60]. Default 5.
   Doubles as the blend authority: a suspicion this old has zero pull on the view
-- `crossbot_aim_error` — scale on the intentional over/undershoot, clamped [0, 4]. Default -1,
-  following `crossbot_difficulty` (2.0 easy down to 0.35 expert). At 0 the brake
-  is forced to exactly 1 and the controller is time-optimal again, which is the regression baseline
-  `scripts/test_aim_error.ps1` measures against. Above 1 is for seeing the effect, not for playing against
+- `crossbot_aim_gain` — spread of the motor gain mismatch rolled per flick, clamped [0, 0.5]. Default -1,
+  meaning `crossbot_difficulty` (0.25 easy down to 0.05 expert). The hand moves `step * gain` with gain
+  in `[1 - s, 1 + s/2]` while the efference copy records `step`, so the miss is seen one reaction time
+  later and corrected. Only while a target is held or `crossbot_aim_test` runs. 0 makes the controller
+  exact, which is the regression baseline `scripts/test_aim_error.ps1` measures against; see
+  `doc/perception.md`, "The efference copy is wrong on purpose"
 - `crossbot_fire` — whether bots shoot at all. Default 1. Inert without `crossbot_sense`, since firing
   needs a target and an aim queue; and inert in the nav sweep either way, because a lone bot never
   acquires one. Turning it off also stops weapon *switching* and the out-of-combat reload, which are
   the same decision made without a target; see
   `doc/combat.md`, `bot_fire.cpp`
-- `crossbot_daze_debug` — 1 logs every intercepted `ScreenFade` with its raw wire fields and verdict,
-  and the onset and clear of each concussion; 2 adds every intermediate `Concuss` byte and one line
-  per user message addressed to any bot. Default 0. Verbose builds only
-- `crossbot_blind_scale` — how long a flash blinds, as a fraction of the fade duration on the wire.
-  Default 0.33, ReGameDLL's own ratio for its bots
-- `crossbot_conc_gain` — multiplier on the `Concuss` byte before it becomes sway. Default 1, which at
-  TFC's start value of 100 is ±30 degrees on pitch and yaw
-- `crossbot_aim_drift` — idle micro-drift amplitude in degrees, clamped [0, 5]. Default 1. Suppressed while
-  `crossbot_aim_test` is running, because 1 degree of drift against a 0.5 degree settle tolerance would mean
-  the test never settles at all
-- `crossbot_aim_quantum` — degrees of hand travel per mouse count, clamped [0, 5]. Default 0.4476, which is
-  `atan(1/128)`: one unit of miss per 128 units of range at fov 90, so 32 units at 4096. This is the value
-  itself, not a scale. It is in **hand** space, so the angular quantum is `value * fov / 90` and zooming
-  buys precision — that is the whole point of it. 0 disables
-- `crossbot_aim_impulse` — smallest non-zero hand speed in deg/s, clamped [0, 100]. Default 15. The hand
-  cannot creep more slowly than this, so it never fully stops: it dithers across the nearest mouse count and
-  `crossbot_aim_status` shows an idle hand speed of 21 rather than 0. 0 disables
-
 - `crossbot_grenade` — whether bots prime and throw off-hand grenades (TFC). Default 1.
 - `crossbot_deploy` — whether bots place tripmines and satchels. Default 1. **The nav sweep sets it to
   0**, the same way it sets `crossbot_gather 0`: a mine changes every route through the doorway it
@@ -417,6 +400,23 @@ Cvars, all `FCVAR_SERVER`, registered in `dll_hooks.cpp`:
   search and the standoff shot, and openings that narrow are rare enough that an unpinned scan across
   six stock maps finds none, so those branches would ship untested. Not for playing against — a
   vertical beam in a wide doorway is walked past without anyone noticing it
+- `crossbot_camp` — camping at the map's camp spots. Default -1 (tier: on below expert); 0 forces off,
+  1 forces on. See `doc/goals.md`, `bot_camp.cpp`
+- `crossbot_camp_debug` — the per-retarget camp route line and the scare transitions. Default 0
+- `crossbot_vantage` — the baked vantage field that steers where an idle bot looks. Default 1. 0 is the
+  no-vantage rehearsal: the blend goes invalid without regenerating the nav; see `doc/perception.md`
+- `crossbot_careful` — scale on carefulness, the `(1 - readiness)` exposure weight in route planning,
+  clamped [0, 1]. Default 1; 0 restores pure fastest-route planning. See `doc/goals.md`, "Carefulness"
+- `crossbot_airmove_verify` — re-simulate every airmove cache hit and compare. Default 0. A correctness
+  harness that costs the whole speedup; see `doc/testing.md`
+- `crossbot_difficulty` — the tier, 0-3 (easy/normal/hard/expert). Default 1
+- `crossbot_turn_scale`, `crossbot_back_check`, `crossbot_head_pct`, `crossbot_predict_pct`,
+  `crossbot_combat_interrupt`, `crossbot_pickup_priority`, `crossbot_gauss`, `crossbot_bunnyhop` —
+  difficulty-derived, default -1 (tier); any value `>= 0` pins it. Each is described in
+  `doc/difficulty.md`, "cvars"
+- `crossbot_perf` / `crossbot_perf_spike` — the zone profiler: report window in seconds (default 0, off)
+  and the frame-time threshold in ms that logs a spike (default 5). **Only exist in a
+  `-DCROSSBOT_PERF=ON` build**; see `doc/diagnostics.md`, `profile_hlds.ps1`
 
 Output from all of these is `SERVER_PRINT`, so it goes to the HLDS console and `D:\hlds\qconsole.log` —
 **not** to the stdout of whatever script sent the command over RCON.

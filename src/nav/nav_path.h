@@ -17,7 +17,7 @@ using Waypoint = NavPlan::PlanWaypoint;
 
 using PlannedPath = NavPlan::PlannedRoute;
 
-void SetPlanTeamMask(uint32_t mask);
+void SetPlanTeam(uint32_t teamBit, bool carrier);
 
 PlannedPath PlanPath(const NavMesh &mesh, uint32_t startArea, uint32_t goalArea,
 	const Vector &startPoint, const Vector &goalPoint,

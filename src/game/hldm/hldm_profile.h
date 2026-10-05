@@ -13,7 +13,6 @@ public:
 	edict_t *MonsterEnemy(edict_t *ent) const override;
 	float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const override;
 	PmSim::FallRule FallDamage() const override;
-	bool AllowsGoalTier(BotGoal::Tier tier) const override;
 	void Respawn(edict_t *pEdict) const override;
 
 	ItemKind ClassifyItem(edict_t *ent) const override;
@@ -57,6 +56,8 @@ public:
 		unsigned int size) const override;
 
 protected:
+	static bool IsArmouryArmor(edict_t *ent);
+
 	bool PreferredWeaponOrAmmo(const char *classname, const char *const *weapons,
 		size_t count) const;
 

@@ -62,6 +62,9 @@ struct State
 	float lastSeenEnemy = 0.f;
 	int shots = 0;
 
+	bool combatTank = false;
+	float nextCombatScan = 0.f;
+
 	CBotEntHandle train;
 	bool aboard = false;
 	bool dismounting = false;
@@ -124,6 +127,8 @@ void OnBlocked(CBot &bot, const char *what);
 void OnRespawn(CBot &bot);
 
 bool Run(CBot &bot);
+
+bool CombatTank(CBot &bot, const Nav::NavMesh &mesh);
 
 bool Mounted(const CBot &bot);
 

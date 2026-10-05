@@ -142,6 +142,8 @@ void EnterGame(int iGame)
 		LeaveGame();
 		return;
 	}
+	if (iGame == g_current && g_pGameProfile == g_profiles[iGame])
+		return;
 
 	g_current = iGame;
 	GameData::Activate(iGame);

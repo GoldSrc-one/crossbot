@@ -451,7 +451,13 @@ bool CCSProfile::IsMeleeWeapon(int id) const
 
 int CCSProfile::AmbushWeapon(AmbushKind kind) const
 {
-	return kind == AMBUSH_GRENADE ? CS_HEGRENADE : 0;
+	switch (kind)
+	{
+	case AMBUSH_GRENADE: return CS_HEGRENADE;
+	case AMBUSH_FLASH: return CS_FLASHBANG;
+	case AMBUSH_SMOKE: return CS_SMOKEGRENADE;
+	default: return 0;
+	}
 }
 
 int CCSProfile::DeployWeapon(DeployKind) const

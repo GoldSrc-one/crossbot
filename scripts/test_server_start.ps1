@@ -104,6 +104,10 @@ if ($ready -and $RequireVerbose) {
     }
 }
 
+if ($ready) {
+    & "$PSScriptRoot\rcon.ps1" -Port $Port -Command "crossbot_verbose 1" | Out-Null
+}
+
 if ($ready -and $Commands.Count -gt 0) {
     & "$PSScriptRoot\rcon.ps1" -Port $Port -Command "exec $ConfigName" | Out-Null
     Remove-Item $cfgPath -ErrorAction SilentlyContinue

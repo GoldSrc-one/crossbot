@@ -20,9 +20,7 @@
 #include "../game/gamedata.h"
 #include "../game/give_item.h"
 #include "../game/objectives.h"
-#include "../nav/bsp_trace.h"
 #include "../nav/nav.h"
-#include "../nav/nav_water.h"
 
 namespace
 {
@@ -323,7 +321,7 @@ namespace
 			CBot *bot = BotManager::FindBot(ent);
 			if (flash)
 				BotDaze::OnScreenFade(*bot, static_cast<int>(duration * 4096.f),
-					static_cast<int>(hold * 4096.f), 0, 255, 255, 255, value);
+					static_cast<int>(hold * 4096.f), 0, value);
 			else
 				BotDaze::OnConcuss(*bot, value);
 			return true;
@@ -343,11 +341,6 @@ namespace
 	void Cmd_CrossBotFireStatus()
 	{
 		BotManager::PrintFireStatus();
-	}
-
-	void Cmd_CrossBotWallbangProbe()
-	{
-		BotManager::PrintWallbangProbe();
 	}
 
 	void Cmd_CrossBotWeaponCarry()
@@ -424,6 +417,7 @@ namespace
 			{ WPN_Q_SPINUP,        "spinup" },
 			{ WPN_Q_AIM_FEET,      "aimfeet" },
 			{ WPN_Q_BRACE,         "brace" },
+			{ WPN_Q_TEAM_UNSAFE,   "teamunsafe" },
 		};
 
 		out[0] = '\0';
@@ -854,20 +848,6 @@ namespace
 		ListCandidates(BotDeploy::PrintGates);
 	}
 
-#ifdef CROSSBOT_BSPTRACE
-	void Cmd_CrossBotBspTrace()
-	{
-		int argc = g_engfuncs.pfnCmd_Argc();
-		if (argc > 1 && strcmp(g_engfuncs.pfnCmd_Argv(1), "reset") == 0)
-		{
-			BspTrace::ResetStats();
-			SERVER_PRINT("CrossBot: bsp trace stats reset\n");
-			return;
-		}
-		BspTrace::PrintStats();
-	}
-#endif
-
 	void Cmd_CrossBotAirmoveCache()
 	{
 		const NavPlan::AirmoveCache &cache = Bot_AirmoveCache();
@@ -926,61 +906,6 @@ namespace
 			mesh->conns.size());
 		SERVER_PRINT(summary);
 	}
-
-	void Cmd_CrossBotNavWater()
-	{
-		const Nav::NavMesh *mesh = Nav::Get();
-		if (!mesh)
-		{
-			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
-			return;
-		}
-
-		if (mesh->waterVolumes.empty())
-		{
-			SERVER_PRINT("CrossBot: this map has no water\n");
-			return;
-		}
-
-		const std::vector<float> &surfaces = Nav::WaterSurfaces(*mesh);
-
-		for (size_t i = 0; i < mesh->waterVolumes.size(); ++i)
-		{
-			const Nav::WaterVolume &vol = mesh->waterVolumes[i];
-			float live = (i < surfaces.size()) ? surfaces[i] : vol.surfaceZ;
-
-			char msg[240];
-			snprintf(msg, sizeof(msg),
-				"CrossBot: water %zu model *%u surface %.1f (baked %.1f, travel %.1f)%s\n", i,
-				vol.modelIndex, live, vol.surfaceZ, vol.travel.z, vol.moving ? " moving" : "");
-			SERVER_PRINT(msg);
-		}
-
-		size_t wetAreas = 0;
-		for (const Nav::Area &area : mesh->areas)
-		{
-			if (Nav::AreaSubmerged(*mesh, area))
-				++wetAreas;
-		}
-
-		size_t blocked = 0;
-		size_t swimLive = 0;
-		for (const Nav::Connection &c : mesh->conns)
-		{
-			bool submerged = Nav::ConnSubmerged(*mesh, c);
-			if (crossbot_nav::ConnBlockedByWater(c.connType, submerged))
-				++blocked;
-			else if (c.connType == crossbot_nav::CONN_SWIM)
-				++swimLive;
-		}
-
-		char summary[200];
-		snprintf(summary, sizeof(summary),
-			"CrossBot: %zu/%zu areas submerged, %zu/%zu connections switched off by water, "
-			"%zu swim links live\n",
-			wetAreas, mesh->areas.size(), blocked, mesh->conns.size(), swimLive);
-		SERVER_PRINT(summary);
-	}
 }
 
 namespace CrossBotCommands
@@ -997,7 +922,6 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_targets", Cmd_CrossBotListTargets);
 	ADD_SERVER_COMMAND("crossbot_waypoints", Cmd_CrossBotNavWaypoints);
 	ADD_SERVER_COMMAND("crossbot_nav_penalties", Cmd_CrossBotNavPenalties);
-	ADD_SERVER_COMMAND("crossbot_nav_water", Cmd_CrossBotNavWater);
 	ADD_SERVER_COMMAND("crossbot_list_items", Cmd_CrossBotListItems);
 	ADD_SERVER_COMMAND("crossbot_list_fun", Cmd_CrossBotListFun);
 	ADD_SERVER_COMMAND("crossbot_list_goals", Cmd_CrossBotListGoals);
@@ -1005,9 +929,6 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
 	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
 	ADD_SERVER_COMMAND("crossbot_airmove_cache_stats", Cmd_CrossBotAirmoveCache);
-#ifdef CROSSBOT_BSPTRACE
-	ADD_SERVER_COMMAND("crossbot_bsptrace_stats", Cmd_CrossBotBspTrace);
-#endif
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
 	ADD_SERVER_COMMAND("crossbot_weaponspec", Cmd_CrossBotWeaponSpec);
 	ADD_SERVER_COMMAND("crossbot_equip", Cmd_CrossBotEquip);
@@ -1027,7 +948,6 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_ability_status", Cmd_CrossBotAbilityStatus);
 	ADD_SERVER_COMMAND("crossbot_daze_test", Cmd_CrossBotDazeTest);
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
-	ADD_SERVER_COMMAND("crossbot_wallbang_probe", Cmd_CrossBotWallbangProbe);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
 	ADD_SERVER_COMMAND("crossbot_weapon_carry", Cmd_CrossBotWeaponCarry);
 }

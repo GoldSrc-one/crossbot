@@ -47,8 +47,6 @@ private:
 	std::vector<std::pair<edict_t *, int>> m_saved;
 };
 
-bool Enabled();
-
 bool IsTarget(edict_t *ent);
 
 bool AimSwing(CBot &bot, edict_t *ent, Vector &aimAngles, bool &swing);

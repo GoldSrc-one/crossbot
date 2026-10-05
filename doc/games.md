@@ -153,6 +153,14 @@ reload.
    CrossPlay debug builds). Use `CBotPrivateData(ent)`, or `XPlay::PrivateData(ent, game)` when the
    entity's own game is the right lens — that is what `CBotIsLivePlayer` does.
 3. **Never edit anything under `D:\hlds\crossplay\` except `addons\crossbot\`.**
+4. **Never test `FL_FAKECLIENT`, and never set it.** ReGameDLL's `CBasePlayer::Spawn`
+   (`player.cpp:5725`) does `pev->flags &= FL_PROXY;` then `pev->flags |= FL_CLIENT;`, so CS keeps
+   `FL_CLIENT` and **wipes `FL_FAKECLIENT` on every spawn**, round restart included. HL masks with
+   `FL_PROXY | FL_FAKECLIENT` and keeps it, which is exactly why the flag looks dependable until a
+   cstrike bot dies once. Use `BotManager::FindBot(ent)` to ask whether an edict is one of our bots;
+   `FL_CLIENT` is safe to read and is what separates players from monsters in `bot_sense.cpp` and
+   `bot_combat.cpp`. `AddBot` deliberately no longer ORs the bit back in after `ClientPutInServer`,
+   because that only ever covered the bot's first life.
 
 ## Reading CrossPlay's complaints
 
@@ -294,7 +302,7 @@ ammo to do it — `BotFire::WeaponArmed`, which reuses the existing `AmmoReady` 
 clip and reserve rules. A mode with `AIM_NONE` is skipped there, which is what stops a dry python
 counting as armed on the strength of its zoom toggle.
 
-Three methods exist because Ricochet broke an HLDM assumption, and `CHLDMProfile` answers each with
+Two methods exist because Ricochet broke an HLDM assumption, and `CHLDMProfile` answers each with
 the old behaviour:
 
 - `FallDamage()` is how landing hurts, as a `PmSim::FallRule`: the safe speed and the damage per u/s
@@ -312,8 +320,6 @@ the old behaviour:
   | Ricochet; DMC under `mp_falldamage 0` | none | | |
 
   HL's own `mp_falldamage 0` is a flat 10 per landing and is not modelled.
-- `AllowsGoalTier(tier)` is which goal tiers this game's bots pursue at all (`doc/goals.md`,
-  `bot_goal.cpp`).
 - `ModeAvailable(player, spec, mode)` is a per-player veto on a firing mode that no `WeaponSpec` field
   can express, because it depends on state the table does not describe. `BotFire::ModeViable` asks it
   right before `AmmoReady`, so a refused mode is never selected and never pressed.
@@ -428,6 +434,18 @@ classifies every HEV charger as `ITEM_NONE` and the bot ignores them all.
 `item_` catches `item_suit`, `item_antidote` and `item_security` as well. They are harmless: the bot
 touches one, nothing happens, and the full list keeps it away for 60 s.
 
+**Foreign items are classified by their owner's profile, not by this one** (`doc/goals.md`, "Every
+item is judged by the game that owns it"). The pickups AMXX plugin (`scripting/pickups.sma`, a
+metamod `FM_Touch` hook that runs before CrossPlay's own Touch filter) translates foreign weapons,
+items and ammo into the toucher's game. So a foreign bot can take far more than armour, and the bot
+just tries the touch.
+
+**`IsArmouryArmor` makes a CS armoury holding kevlar or an assault suit a preferred `ITEM_PICKUP`**
+(Ricochet shares it). With owner-context classification, a real CS armoury reaches `CCSProfile`
+instead. This branch now only matters when cstrike has no profile. The armour is told apart by model, `models/w_kevlar.mdl` or `models/w_assault.mdl`, which `CArmoury::Spawn` sets from
+`m_iItem` (ARMOURY_KEVLAR 16, ARMOURY_ASSAULT 17), so no CS offset is read through the bot's gamedata.
+An emptied armoury is `EF_NODRAW` and drops out of the scan. `CCSProfile` still classifies armouries itself.
+
 **Why it takes an edict and not a classname.** A `trigger_hurt` is a healing pool or a death trap
 depending on the sign of `pev->dmg`, and `pool_party` ships one of each (`dmg -40` and `dmg 200`).
 Nothing in the classname separates them, so the signature had to widen; `CHLDMProfile` is the only
@@ -483,11 +501,11 @@ that takes.
 `EvaluateCombat` is always 0. Carefulness is `1 - readiness`, so a Ricochet bot always routes for
 cover, and the range bias, which scales by readiness, is always off.
 
-### Gathers `item_*` and nothing else
+### Gathers `item_*` and CS armour, nothing else
 
-`AllowsGoalTier` admits `GOAL_GATHER` only — no strategic goals, no fun goals, and therefore no camping,
-because camp routes are only built for tiers above gather. `ClassifyItem` is `item_` prefix or
-nothing: no weapons, ammo, chargers or healing volumes. On a Ricochet map that means the
+Every goal tier is on, as for every other game. An earlier gate that admitted only gather left Ricochet
+bots standing on their spawns on `fy_snow`, where the strategic `roam` intent is the only goal there is.
+`ClassifyItem` is `item_` prefix, a CS kevlar/assault armoury, or nothing: no weapons, ammo, chargers or healing volumes. On a Ricochet map that means the
 `item_powerup*` family; `ItemRespawnDelay` is their `DISC_POWERUP_RESPAWN_TIME`, 10 s. A powerup that is
 waiting to respawn is `EF_NODRAW`, which the item scan already skips.
 
@@ -685,7 +703,7 @@ release.
 | 13 | flamethrower | bursts at 600, range 300 |
 | 14, 15 | rpg, ic | rockets at 900 and 600, `WPN_Q_AIM_FEET`; the RPG has a clip of 4 |
 | 17 | ac | hitscan, sticky |
-| 20, 21 | tranq, railgun | nails at 1500 |
+| 20, 21 | tranq, railgun | nails at 1500; the tranq is `RANGE_NONE`: its dart slows for 15s and barely hurts, so it has no ground to prefer and never makes a sniper |
 
 Speeds come from each projectile's `Spawn` (103660-104076), clip sizes and ammo names from each
 `GetItemInfo`. The pipebomb launcher is worth almost nothing (0.02) because its bombs only go off on
@@ -843,17 +861,43 @@ knowable), which is why the objective maps never spend the pack that way.
 
 ### Backpacks and dispensers are gather goals
 
-A TFC resupply pack is an `info_tfgoal` with the touch bit and no score: `ClassifyItem` calls one
-`ITEM_PICKUP` when `goal_activation & 1`, `health >= 0`, `frags <= 0`, no `increase_team`, and it
-actually gives something (`health`, `armorvalue`, `ammo_*`, `no_grenades_1/2`, `ammo_detpack`).
-`item_tfgoal` is explicitly *not* an item any more — flags are strategic payloads, and the `item_*`
-prefix rule in `hldm_profile.cpp` used to hand them to the gather layer.
+A TFC resupply pack is an `info_tfgoal` that a touch hands to the AP. The chain is `tfgoal_touch`
+114581 → `ActivateDoResults` 114430 → `APMeetsCriteria` 111796 → `DoResults` 113212 →
+`IsAffectedBy` 108305 → `Apply_Results` 114047 → `CheckClassStats` 77810. `IsPack` mirrors it:
+- `goal_activation & 1`, and not `& 4` (which inverts the criteria);
+- `goal_effects & 3`, so the AP or the AP's team is affected (`& 8` alone means everyone *but* the AP);
+- no `goal_result` bit from `0x4` (ends the round), `0x20` (force respawn) or `0x40` (deletes the
+  engineer's buildings);
+- `frags <= 0`, no `increase_team`, nothing negative;
+- every criteria field zero: `teamcheck`, the six `if_goal/group_is_*`, `if_item_has(nt)_moved`,
+  `has(nt)_item_from_group` and `items_allowed`. No shipped pack uses any of them. A pack whose
+  criteria fail is not consumed when touched, and `NoteFull` would then ignore *every* `info_tfgoal`;
+- and it gives something.
 
-Wanting one is a separate question from seeing one, so `IGameProfile::ItemUsable` (new, asked in
-`BotItems::ScanItems`) answers it: the pack's `team_no`, `playerclass` and `items_allowed` must admit
-this bot (`APMeetsCriteria` 111796), and at least one thing it gives must be below the bot's maximum.
-Without that check a pack the bot cannot take would be touched, not vanish, and `NoteFull` would
-ignore *every* `info_tfgoal` for the full timeout.
+`item_tfgoal` is explicitly *not* an item — flags are strategic payloads. A brush `i_t_g` is always
+`EF_NODRAW` with origin 0, and on the 20 shipped maps the only brush pack is koth_one's 3-hp "cap
+hp", so brush packs are left out. A dump of every pack (around 300) shows point `info_tfgoal`s with
+`g_a=1 g_e=1`, typically 25 health and 50 armour, `wait` 1–60 s, and `team_no` 0, 1 or 2.
+
+`PackAdmits` covers the per-player part. It rejects `goal_state` 1 (active, i.e. taken), 3 (removed)
+and 4 (delayed), and `EF_NODRAW`. `team_no` is compared with the player's TFC `team_no`, not
+`pev->team`, which is also correct for a foreign player's CrossPlay copy. `playerclass` is compared
+with 3 for a foreign player, because CrossPlay's Touch fakes soldier.
+
+`PackGain` is what the pack is worth to the player, in units of "one full refill". It is turned into
+seconds by `kNeedWorth` (20, `tfc_ability.cpp`), and `ItemWorth` returns that (see `doc/goals.md`, "Worth: need
+pulls"):
+```
+1.0  × healthGain/maxHealth × (1 + missing health fraction)
+0.5  × armourGain/maxarmor
+0.5  × best ammoGain/max over the pools of weapons in pev->weapons (TFC_AmmoField; spanner = cells)
+0.25 × best grenadeGain/cap per type held (2 for nail and MIRV, 3 for conc and caltrop, 4 otherwise)
+0.5  if a demoman with no detpack and the pack gives one
+```
+`xGain = min(give, max − have)`. For a foreign player, the TFC fields on its copy are not its real ammo,
+so the ammo and grenade terms use the scan's `ammoNeed` instead, and armour uses a max of 100.
+`ItemUsable` is `PackAdmits && PackGain > 0`. The old flat grenade cap of 4 sent soldiers holding two
+nail grenades after grenade-only packs.
 
 A dispenser is not a pickup but a station: `DispenserTouch` (24095) starts a refill thinker that tops
 the toucher up 0.2 s later and then once a second while they stay within 24 units, giving ammo and
@@ -893,6 +937,37 @@ four pools. The `IN_ATTACK` refusal is not guarded: a bot that touches a box mid
 The `tfc.c` decompile is not the live DLL. Every field it touches sits exactly 16 bytes past the
 offset in `tfc-win.json` (`ammo_shells` 228 vs 212, `team_no` 312 vs 296, `m_flTouchableAt` 1164 vs
 1148). Match its fields by name, never by byte offset.
+
+### Team-only doors, lifts and buttons
+
+TFC runs `APMeetsCriteria` (tfc.c:111796) on almost everything a player activates: `MultiTouch`,
+buttons, `CBaseDoor::DoorActivate`, plat triggers, teleports. A `team_no` (or `teamcheck`) on the
+activator *or* on the door it fires refuses every other team. 2fort's spawn and battlement doors and
+both lifts are all opened by `trigger_multiple` with `team_no`; cz2, dustbowl, flagrun, push, ravelin,
+well, crossover2 and badlands have more of them (badlands puts the team on the door, not the trigger).
+
+navgen knows none of this. The runtime fills it in: `Objectives::ReadTfc` → `StampDetourTeams`
+(objectives.cpp) runs on every objectives refresh. It walks `trigger_multiple`, `trigger_once`,
+`func_button` and `func_rot_button`, takes the activator's team, ANDs in the team of whatever its
+`target` names when that has one, and calls `Nav::SetDetourTeams(CenterOf(ent), mask)`, which stamps
+every detour whose `actCenter` lies within 2 units. `func_door` and `func_door_rotating` stamp their
+own team, which covers an unnamed use-only door acting as its own activator. Unrestricted entities
+stamp 0, so when a `teamcheck` flips back the mask clears. `teamcheck` is read live, which is why this
+is not baked into the .nav: avanti, juno and magelli swap attack and defence at run time.
+`crossbot_list_objectives` prints every team-gated detour.
+
+The planner side is in `doc/path_planning.md` (team mask). Known limits:
+
+- **The door's team is read through one direct `target` only.** A relay or `multi_manager` between
+  the trigger and the door hides the door's team. No shipped map does this.
+- **One activator per detour.** navgen keeps the cheapest service point per entry, whatever team it
+  belongs to. A door with activators for two teams would be gated to whichever one navgen picked. No
+  shipped map has one; the check was a scan of every `target` across `D:\hlds\tfc\maps`.
+- **Disjoint teams read as "everyone".** A team-1 trigger firing a team-2 door can never open it, but
+  the AND comes out 0. No shipped map does this either.
+- **Unnamed team *touch* doors are unguarded.** rock2 (8) and hunted (5) have `func_door`s with
+  `team_no`, no `targetname` and no use-only flag. navgen classifies those `ACT_NONE`, so there is no
+  detour to stamp and every team still plans through them.
 
 ## cs_profile.cpp
 
@@ -1547,8 +1622,8 @@ sync.
 
 ### rangeClass and zoomFov fail it the same way, for the same reason
 
-`rangeClass` is `RANGE_CLOSE` or `RANGE_LONG` (`RANGE_NONE` only for the table's empty slots, and it
-means "no opinion"). It says nothing about operating the gun; it says what ground the gun wants, which
+`rangeClass` is `RANGE_CLOSE` or `RANGE_LONG`, or `RANGE_NONE` for "no opinion": the table's empty slots,
+Ricochet's disc and TFC's tranq. It says nothing about operating the gun; it says what ground the gun wants, which
 is a judgement about the mod that no runtime observation supplies. `Bot_RangeBias` turns it into a
 routing weight, so a bot holding a shotgun accepts a longer route through tighter ground and a bot
 holding a crossbow does the reverse (`doc/goals.md`, "Range bias"). Its two thresholds are cvars, not

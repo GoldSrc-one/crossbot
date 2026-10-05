@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 
 #include "../game/game_profile.h"
+#include "../game/objectives.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
 #include "../nav/nav_path.h"
@@ -27,8 +29,8 @@ namespace
 	constexpr float kSelectRetryInterval = 0.5f;
 	constexpr float kStrategicRefreshInterval = 0.25f;
 	constexpr float kGoalBiasFloor = 2.f;
-	constexpr float kDefaultBias = 2.f;
-	constexpr float kDefaultDetourBudget = 6.f;
+	constexpr float kBias = 2.f;
+	constexpr float kDetourBudget = 6.f;
 
 	unsigned int NextRand(CBot &bot)
 	{
@@ -63,9 +65,6 @@ namespace
 	void CollectTier(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
 		BotGoal::Tier tier, std::vector<BotGoal::Candidate> &out)
 	{
-		if (g_pGameProfile && !g_pGameProfile->AllowsGoalTier(tier))
-			return;
-
 		switch (tier)
 		{
 		case BotGoal::GOAL_STRATEGIC:
@@ -165,6 +164,16 @@ namespace
 		}
 
 		return PickCheapest(bot, mesh, costs, cands, costOut);
+	}
+
+	bool Carrying(const CBot &bot)
+	{
+		for (const Objectives::Carrier &carrier : Objectives::Get().carriers)
+		{
+			if (carrier.player.Is(bot.pEdict))
+				return true;
+		}
+		return false;
 	}
 
 	bool Skipped(const CBot &bot, edict_t *ent)
@@ -283,7 +292,7 @@ namespace
 				continue;
 			if (in >= here)
 				continue;
-			if (out + in - here > budget)
+			if (out + in - here > budget + c.worth)
 				continue;
 
 			if (!best || out < bestFrom)
@@ -312,16 +321,12 @@ namespace BotGoal
 
 float Bias()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_goal_bias");
-	float v = cvar ? cvar->value : kDefaultBias;
-	return v < 0.f ? 0.f : v;
+	return kBias;
 }
 
 float DetourBudget()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_detour_budget");
-	float v = cvar ? cvar->value : kDefaultDetourBudget;
-	return v < 0.f ? 0.f : v;
+	return kDetourBudget;
 }
 
 const char *TierName(Tier tier)
@@ -354,31 +359,56 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
 		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
 
+	std::vector<Candidate> gather;
+	CollectTier(bot, mesh, costs, GOAL_GATHER, gather);
+	PruneUnreachable(bot, mesh, costs, gather);
+
 	std::vector<Candidate> promoted;
 	if (BotDiff::PickupPriority())
 	{
-		CollectTier(bot, mesh, costs, GOAL_GATHER, promoted);
-		PruneUnreachable(bot, mesh, costs, promoted);
+		promoted = gather;
 		BotItems::KeepPreferred(promoted);
 	}
 
 	std::vector<Candidate> cands;
+	std::vector<Candidate> roam;
 	Tier tier = GOAL_NONE;
 
-	for (int t = GOAL_STRATEGIC; t >= GOAL_GATHER; --t)
+	if (!Carrying(bot))
+	{
+		std::copy_if(gather.begin(), gather.end(), std::back_inserter(cands), [&](const Candidate &c) {
+			return c.worth > CandCost(bot, mesh, costs, c);
+		});
+		if (!cands.empty())
+			tier = GOAL_GATHER;
+	}
+	bool needed = tier != GOAL_NONE;
+
+	for (int t = GOAL_STRATEGIC; tier == GOAL_NONE && t >= GOAL_GATHER; --t)
 	{
 		cands.clear();
-		CollectTier(bot, mesh, costs, static_cast<Tier>(t), cands);
+		if (t == GOAL_GATHER)
+			cands = gather;
+		else
+			CollectTier(bot, mesh, costs, static_cast<Tier>(t), cands);
 		PruneUnreachable(bot, mesh, costs, cands);
 		if (t == GOAL_STRATEGIC)
 		{
 			BotStrategic::Prioritize(cands);
 			KeepCheapestPerEntity(bot, mesh, costs, cands);
+			if (std::all_of(cands.begin(), cands.end(), [](const Candidate &c) {
+					return BotStrategic::KindOf(c.payload) == BotStrategic::KIND_ROAM; }))
+				roam.swap(cands);
 		}
 		if (t == GOAL_FUN)
 		{
 			BotFun::Prioritize(cands);
 			cands.insert(cands.end(), promoted.begin(), promoted.end());
+			if (cands.empty() && !roam.empty())
+			{
+				cands.swap(roam);
+				t = GOAL_STRATEGIC;
+			}
 		}
 		if (!cands.empty())
 		{
@@ -412,7 +442,7 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 
 	bool strategic = best->tier == GOAL_STRATEGIC;
 	BOT_VLOG("CrossBot: %s wants %s%s%s%s %s at (%.1f,%.1f,%.1f) in area %u, %.1fs away, %zu candidates\n",
-		bot.name, TierName(best->tier), (best->tier != tier) ? " (promoted)" : "",
+		bot.name, TierName(best->tier), (best->tier != tier) ? " (promoted)" : (needed ? " (needed)" : ""),
 		strategic ? " to " : "", strategic ? BotStrategic::KindName(best->payload) : "",
 		CBotClassOf(best->ent), best->point.x, best->point.y,
 		best->point.z, best->areaId, cost, cands.size());
@@ -434,6 +464,20 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 
 	PickStop(bot, mesh, costs);
 	return true;
+}
+
+void Commit(CBot &bot, const Candidate &cand)
+{
+	State &st = bot.goal;
+	st.target = MakeStop(cand);
+	st.targetOrigin = cand.ent ? cand.ent->v.origin : cand.point;
+	st.skipped.clear();
+	st.toTargetCosts.clear();
+	st.toTargetArea = -1;
+	BotCamp::Reset(bot);
+
+	CommitStop(bot, st.target, false);
+	Bot_ResetNavPath(bot);
 }
 
 void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)

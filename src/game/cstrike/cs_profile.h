@@ -15,6 +15,7 @@ public:
 	unsigned short FireToggle(const CBot &bot, bool firing) const override;
 	bool SpreadWide(edict_t *player, int id, void *weapon, float limit, float &ready) const override;
 	bool ItemUsable(edict_t *player, edict_t *item) const override;
+	float CreepSpeed() const override { return 130.f; }
 	bool Penetrates(const CBot &bot, int id, const Vector &eye, const Vector &dir,
 		float entry) const override;
 

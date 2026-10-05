@@ -89,12 +89,6 @@ bool RebuildCosts(CBot &bot, const Nav::NavMesh &mesh)
 	return RebuildCostsImpl(bot, mesh);
 }
 
-bool Enabled()
-{
-	float pin = BotDiff::Pin("crossbot_oppo_jump");
-	return pin >= 0.f ? pin != 0.f : true;
-}
-
 void OnRepath(CBot &bot)
 {
 	bot.oppoCostsGoalArea = -1;
@@ -192,7 +186,7 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 {
 	edict_t *pEdict = bot.pEdict;
 
-	if (!Enabled() || !bot.hasGoal)
+	if (!bot.hasGoal)
 		return false;
 	if (gpGlobals->time < bot.oppoNextCheck)
 		return false;
@@ -289,9 +283,6 @@ bool TryJump(CBot &bot, const Nav::NavMesh &mesh)
 		longJump ? "lj" : "jump", bot.oppoCosts[here], bot.oppoCosts[land], flight,
 		bot.airmoveArc.flightTime, gain,
 		land);
-
-	if (!Bot_AirmoveCorrectEnabled())
-		bot.airmoveArc.Clear();
 
 	return true;
 }

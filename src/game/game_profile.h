@@ -60,6 +60,8 @@ enum AmbushKind
 	AMBUSH_SNARK,
 	AMBUSH_PENGUIN,
 	AMBUSH_GRAPPLE,
+	AMBUSH_FLASH,
+	AMBUSH_SMOKE,
 	AMBUSH_COUNT,
 };
 
@@ -110,8 +112,6 @@ public:
 
 	virtual PmSim::FallRule FallDamage() const = 0;
 
-	virtual bool AllowsGoalTier(BotGoal::Tier tier) const = 0;
-
 	virtual void Respawn(edict_t *pEdict) const = 0;
 
 	virtual bool PreThink(edict_t *) const { return false; }
@@ -144,6 +144,10 @@ public:
 
 	virtual void MoveAdjust(CBot &, float &, float &, unsigned short &) const {}
 
+	virtual unsigned short CreepButtons() const { return 0; }
+
+	virtual float CreepSpeed() const { return 0.f; }
+
 	virtual float MaxSpeed(edict_t *, float engineMax) const { return engineMax; }
 
 	virtual bool CanDeploy(edict_t *) const { return false; }
@@ -151,6 +155,10 @@ public:
 	virtual float BlindSeconds(float fadeSec, float, float scale) const { return scale * fadeSec; }
 
 	virtual bool ItemUsable(edict_t *, edict_t *) const { return true; }
+
+	virtual float ItemWorth(edict_t *, edict_t *, float) const { return 0.f; }
+
+	virtual float ItemRespawnIn(edict_t *, ItemKind kind) const { return ItemRespawnDelay(kind); }
 
 	virtual bool Fortifies(edict_t *) const { return false; }
 

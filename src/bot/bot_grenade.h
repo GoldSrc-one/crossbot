@@ -36,6 +36,7 @@ struct State
 	unsigned int forced = 0;
 	unsigned int refused = 0;
 	unsigned int scaredThrows = 0;
+	unsigned int heardThrows = 0;
 };
 
 bool Enabled();

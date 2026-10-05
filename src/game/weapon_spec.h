@@ -53,6 +53,7 @@ enum WeaponQuirks : unsigned int
 	WPN_Q_SPINUP        = 1u << 9,
 	WPN_Q_AIM_FEET      = 1u << 10,
 	WPN_Q_BRACE         = 1u << 11,
+	WPN_Q_TEAM_UNSAFE   = 1u << 12,
 };
 
 struct WeaponMode

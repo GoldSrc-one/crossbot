@@ -41,8 +41,6 @@ namespace BotManager
 
 	void PrintFireStatus();
 
-	void PrintWallbangProbe();
-
 	void PrintDeployStatus();
 
 	void PrintWeaponCarry();

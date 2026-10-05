@@ -20,6 +20,8 @@ bool DebugEnabled();
 
 bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot);
 
+bool Closest(const CBot &bot);
+
 void ForgetMap();
 
 }

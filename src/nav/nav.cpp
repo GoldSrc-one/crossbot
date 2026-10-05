@@ -1,6 +1,7 @@
 #include "nav.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "nav_loader.h"
 #include "nav_water.h"
@@ -79,6 +80,7 @@ float ConnectionPenalty(uint32_t connIndex)
 namespace
 {
 constexpr float kPadStepSeconds = 0.5f;
+constexpr float kActCenterMatch = 2.f;
 
 
 void Unlist(std::vector<uint32_t> &list, uint32_t idx)
@@ -156,6 +158,19 @@ void SetTeleportWait(int connIndex, float waitSeconds)
 bool IsAddedTeleport(int connIndex)
 {
 	return std::find(g_addedUsed.begin(), g_addedUsed.end(), connIndex) != g_addedUsed.end();
+}
+
+void SetDetourTeams(const Vector &actCenter, uint32_t teamMask)
+{
+	if (!g_mesh)
+		return;
+
+	for (NavPlan::PlanArea &area : g_mesh->planAreas)
+		for (NavPlan::PlanDetour &d : area.detours)
+			if (fabsf(d.actCenter.x - actCenter.x) <= kActCenterMatch &&
+				fabsf(d.actCenter.y - actCenter.y) <= kActCenterMatch &&
+				fabsf(d.actCenter.z - actCenter.z) <= kActCenterMatch)
+				d.teamMask = teamMask;
 }
 
 void AddCamp(const CampSpot &spot)

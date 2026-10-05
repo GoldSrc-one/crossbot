@@ -26,11 +26,11 @@ keep reading `->value` fresh; do not cache values.
 | | easy `0` | normal `1` | hard `2` | expert `3` |
 |---|---|---|---|---|
 | `aimDelay` mid -> range | 0.40 -> .32-.48 | 0.30 -> .24-.36 | 0.25 -> .20-.30 | 0.20 -> .16-.24 |
-| `aimError` scale | 2.00 | 1.00 | 0.60 | 0.35 |
 | `turnScale` | 0.85 | 1.00 | 1.10 | 1.20 |
+| `aimGain` | 0.25 | 0.15 | 0.10 | 0.05 |
 | `oppoInterval` | 0.50 | 0.25 | 0.25 | 0.25 |
-| `backPeriod` mid -> range | off | off | 1.50 -> 1.0-2.0 | 1.125 -> .75-1.5 |
-| `headPct` | 0 | 0 | 60 | 90 |
+| `backPeriod` mid -> range | off | 2.00 -> 1.33-2.67 | 1.50 -> 1.0-2.0 | 1.125 -> .75-1.5 |
+| `headPct` | 10 | 40 | 60 | 90 |
 | `predictPct` | 0 | 0 | 70 | 90 |
 | `combatInterrupt` | yes | yes | yes | **no** |
 | `camp` | yes | yes | yes | **no** |
@@ -61,8 +61,7 @@ disagreed for a long time; this resolves it in favour of the cvar and deletes th
 > A difficulty-derived cvar defaults to `-1`. Negative means *derive from the tier*. Any value `>= 0`
 > is an operator override and wins outright; for booleans `0` forces off and `1` forces on.
 
-Same semantics as `crossbot_careful_pin` and `crossbot_range_pin`, applied to the *existing* cvar
-rather than adding a second knob for one number. The other direction is not implementable: "did the
+The override lives in the *existing* cvar rather than a second knob for one number. The other direction is not implementable: "did the
 operator set this?" is not observable through `cvar_t`, because the engine reallocs `->string` on
 every set.
 
@@ -79,8 +78,8 @@ server, so it exists from the first commit rather than being added later.
 | flag | site |
 |---|---|
 | `aimDelay` | `BotAim::Delay`, feeding the lead push in `UpdateVision`, `ApplyLook` and `BotFire::Think` |
-| `aimError` | `BotAim::ErrorScale` |
 | `turnScale` | `Bot_UpdateFacing`, scaling `kMaxAccelYaw` / `kMaxAccelPitch` / `kMaxHandSpeed` |
+| `aimGain` | `BotAim::GainSpread`, the per-flick motor gain mismatch rolled in `UpdateGain`; see "The efference copy is wrong on purpose" in `doc/perception.md` |
 | `oppoInterval` | `BotOppo::TryJump`'s retry throttle |
 | `backPeriod` | the back-check in `BotSense::ApplyLook` |
 | `headPct` | `SamplePoint` via the per-engagement `headLatched` |
@@ -108,12 +107,11 @@ makes every bot on the server react on the same metronome, which reads as a mach
 lobby of players. Measured: two bots on crossfire at hard held 0.177 and 0.233 simultaneously, each
 stable across frames, and re-rolled into easy's band (0.374) on their next target change.
 
-`aimError` and `turnScale` are also YaPB's idea (`aimError`, and the controller stiffening at
+`aimGain` and `turnScale` are also YaPB's idea (`aimError`, and the controller stiffening at
 `src/vision.cpp:160`). Without them the tiers differ only in *latency*, which reads as lag rather than
-as skill. Unlike YaPB, expert aim error is 0.35 rather than zero: YaPB's aim error is a random offset,
-so deleting it just makes the bot accurate, whereas this one is a hand model -- drift phase, quantum,
-impulse, brake -- and zeroing it removes the human texture the whole of `bot_aim.cpp` exists to
-produce. An expert should be fast and correct, not inhumanly still.
+as skill. Unlike YaPB, expert aim error is 0.05 rather than zero: YaPB's aim error is a random offset,
+so deleting it just makes the bot accurate, whereas this one is a motor mismatch the bot has to see and
+correct a reaction time later. An expert should be fast and correct, not inhumanly exact.
 
 ### Head aiming and shooting blind are probabilities, and both latch
 
@@ -127,9 +125,9 @@ same stated reason (`m_enemyBodyPartSet`, `src/combat.cpp:746`). `predictLatched
 loss of sight, or the bot strobes between tracking and forgetting several times a second.
 
 The head bone is found once per model in `BuildBoneSet` by looking for hitgroup 1, so the runtime pick
-is an index rather than a search. `TraceVisible` tries it first and falls back to the ordinary uniform
-pick when the head trace fails, which costs one extra traceline on the engagements that rolled head
-and nothing on the others. Measured on crossfire: expert picked bone 39 on 18 of 18 on-target samples;
+is an index rather than a search. `headLatched` only picks which comes first: `TraceVisible` tries the head (or the ordinary uniform
+pick when it rolled body) and, when that trace is blocked, tries the other one, which costs one extra
+traceline on any engagement whose first pick is obstructed. Measured on crossfire: expert picked bone 39 on 18 of 18 on-target samples;
 normal spread 8 samples over 8 different bones.
 
 ### Predicting an enemy you cannot see
@@ -182,7 +180,7 @@ period.
 It has its own RNG stream (`SeedBack`). Drawing from the vision LCG would shift every subsequent bone
 and candidate pick, changing sweep determinism at the tiers where the feature is off.
 
-Measured on crossfire: 0 glances over 30s at normal; 19 and 11 over 60s at expert, with the difference
+Measured on crossfire (before normal was enabled): 0 glances over 30s at normal; 19 and 11 over 60s at expert, with the difference
 between the two bots being how much of that time each spent `gated`.
 
 ### Expert drops the goal for nothing
@@ -444,7 +442,9 @@ maxspeed, and the ratio only decides how much of the ramp-up it is willing to ho
 - `crossbot_back_check` — back-check period midpoint in seconds; 0 disables. Default -1 (tier)
 - `crossbot_turn_scale` — scale on the aim controller's acceleration and hand-speed ceiling.
   Default -1 (tier)
-- `crossbot_head_pct` — chance per engagement of aiming at the head first. Default -1 (tier)
+- `crossbot_aim_gain` — spread of the per-flick motor gain mismatch, clamped [0, 0.5]; 0 makes the
+  efference copy exact again. Default -1 (tier)
+- `crossbot_head_pct` — chance per engagement of trying the head bone before a random one. Default -1 (tier)
 - `crossbot_predict_pct` — chance per loss of sight of tracking the enemy through cover.
   Default -1 (tier)
 - `crossbot_combat_interrupt` — may combat drop the goal and take movement over. Default -1 (tier)
@@ -464,6 +464,5 @@ maxspeed, and the ratio only decides how much of the ramp-up it is willing to ho
 - `crossbot_spread_fit` — in CS, the largest spread cone allowed, as a multiple of the target's half
   width; 0 turns the spread gate off. Default -1 (tier). See `doc/combat.md`, "The CS spread gate"
 
-`crossbot_aim_delay`, `crossbot_aim_error`, `crossbot_camp`, `crossbot_oppo_jump` and
-`crossbot_ambush` now default to -1 and follow the tier; any value `>= 0` still pins them exactly as
-before.
+`crossbot_aim_delay`, `crossbot_camp` and `crossbot_ambush` now default to -1
+and follow the tier; any value `>= 0` still pins them exactly as before.

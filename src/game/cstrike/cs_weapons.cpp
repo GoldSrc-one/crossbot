@@ -12,6 +12,7 @@ namespace
 	const WeaponMode kZoom = { FIRE_TAP, AIM_NONE, TOGGLE_ZOOM, AMMO_NONE, 0, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_NONE };
 	const WeaponMode kKnife = { FIRE_HOLD, AIM_TARGET, TOGGLE_NONE, AMMO_NONE, 0, 0.f, 0.f, 48.f, 0.f, 0.f, 0.f, WPN_Q_NONE };
 	const WeaponMode kHeGrenade = { FIRE_TAP, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 750.f, 0.55f, 0.f, 350.f, 0.f, 0.f, WPN_Q_THROW_ARC | WPN_Q_INHERIT_VEL };
+	const WeaponMode kUnsafeGrenade = { FIRE_TAP, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 750.f, 0.5f, 0.f, 350.f, 0.f, 0.f, WPN_Q_THROW_ARC | WPN_Q_INHERIT_VEL | WPN_Q_TEAM_UNSAFE };
 
 	const WeaponSpec kCSWeapons[kCSWeaponSlots] = {
 		{},
@@ -23,7 +24,7 @@ namespace
 		{ CS_C4, "weapon_c4", -1, 0.f, RANGE_NONE, 0.f, kNoMode, kNoMode, kNoMode },
 		{ CS_MAC10, "weapon_mac10", 30, 0.25f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
 		{ CS_AUG, "weapon_aug", 30, 0.4f, RANGE_LONG, 55.f, kAuto, kAuto, kZoom },
-		{ CS_SMOKEGRENADE, "weapon_smokegrenade", -1, 0.f, RANGE_NONE, 0.f, kNoMode, kNoMode, kNoMode },
+		{ CS_SMOKEGRENADE, "weapon_smokegrenade", -1, 0.f, RANGE_CLOSE, 0.f, kUnsafeGrenade, kNoMode, kNoMode },
 		{ CS_ELITE, "weapon_elite", 30, 0.15f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
 		{ CS_FIVESEVEN, "weapon_fiveseven", 20, 0.12f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
 		{ CS_UMP45, "weapon_ump45", 25, 0.25f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
@@ -39,7 +40,7 @@ namespace
 		{ CS_M4A1, "weapon_m4a1", 30, 0.4f, RANGE_LONG, 0.f, kAuto, kNoMode, kNoMode },
 		{ CS_TMP, "weapon_tmp", 30, 0.22f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
 		{ CS_G3SG1, "weapon_g3sg1", 20, 0.45f, RANGE_LONG, 40.f, kSemi, kSemi, kZoom },
-		{ CS_FLASHBANG, "weapon_flashbang", -1, 0.f, RANGE_NONE, 0.f, kNoMode, kNoMode, kNoMode },
+		{ CS_FLASHBANG, "weapon_flashbang", -1, 0.f, RANGE_CLOSE, 0.f, kUnsafeGrenade, kNoMode, kNoMode },
 		{ CS_DEAGLE, "weapon_deagle", 7, 0.2f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
 		{ CS_SG552, "weapon_sg552", 30, 0.4f, RANGE_LONG, 55.f, kAuto, kAuto, kZoom },
 		{ CS_AK47, "weapon_ak47", 30, 0.4f, RANGE_LONG, 0.f, kAuto, kNoMode, kNoMode },

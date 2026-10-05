@@ -7,8 +7,6 @@
     [int]$DuelSeconds = 180,
     [int]$ProjectileSeconds = 420,
     [int]$PollSeconds = 2,
-    [float]$Quantum = -1,
-    [float]$Impulse = -1,
     [switch]$Full,
     [string]$HLDSDir = "D:\hlds"
 )
@@ -269,8 +267,6 @@ try {
     Invoke-CbRcon $Port "crossbot_sense 1" | Out-Null
 
     Invoke-CbRcon $Port "crossbot_fire 0" | Out-Null
-    if ($Quantum -ge 0) { Invoke-CbRcon $Port "crossbot_aim_quantum $Quantum" | Out-Null }
-    if ($Impulse -ge 0) { Invoke-CbRcon $Port "crossbot_aim_impulse $Impulse" | Out-Null }
 
     Invoke-CbRcon $Port "crossbot_add valve Fire1" | Out-Null
 

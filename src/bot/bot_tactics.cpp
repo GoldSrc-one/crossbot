@@ -6,15 +6,20 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../game/game_profile.h"
 #include "../game/objectives.h"
 #include "../game/teams.h"
 #include "../nav/astar_graph.h"
+#include "../nav/nav.h"
 #include "../nav/nav_camp.h"
+#include "../nav/nav_math.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_path.h"
 #include "../nav/plan_search.h"
 #include "bot.h"
+#include "bot_aim.h"
 #include "bot_camp.h"
+#include "bot_fire.h"
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
@@ -24,8 +29,8 @@
 
 namespace
 {
-	constexpr float kDefaultBudget = 3.f;
-	constexpr float kDefaultMargin = 1.f;
+	constexpr float kBudget = 3.f;
+	constexpr float kMargin = 1.f;
 	constexpr float kBiasFloor = 2.f;
 	constexpr float kFriendSpotRadius = 96.f;
 	constexpr float kNearTarget = 4.f;
@@ -35,6 +40,12 @@ namespace
 	constexpr float kFitFloor = 0.1f;
 	constexpr int kThreatSteps = 16;
 	constexpr float kThreatReach = 512.f;
+	constexpr float kSnipeHoldMin = 5.f;
+	constexpr float kSnipeHoldMax = 15.f;
+	constexpr float kSnipeCone = 45.f;
+	constexpr float kSnipeDist = 512.f;
+	constexpr float kSnipeDistRatio = 2.f;
+	constexpr float kSnipeTargetLift = 12.f;
 
 	std::unordered_map<uint32_t, std::vector<float>> g_spawnFields;
 
@@ -131,19 +142,24 @@ namespace
 		return friends.back();
 	}
 
-	int Roll(const std::vector<Choice> &choices)
+	float Weight(const Choice &c, bool meet)
+	{
+		return Weight(meet ? c.runner : c.out) * c.fit;
+	}
+
+	int Roll(const std::vector<Choice> &choices, bool meet = false)
 	{
 		if (choices.empty())
 			return -1;
 
 		float total = 0.f;
 		for (const Choice &c : choices)
-			total += Weight(c.out) * c.fit;
+			total += Weight(c, meet);
 
 		float roll = g_engfuncs.pfnRandomFloat(0.f, total);
 		for (size_t i = 0; i < choices.size(); ++i)
 		{
-			roll -= Weight(choices[i].out) * choices[i].fit;
+			roll -= Weight(choices[i], meet);
 			if (roll <= 0.f)
 				return static_cast<int>(i);
 		}
@@ -195,6 +211,86 @@ namespace
 			return true;
 		return threat && BotCamp::FacesThreat(camp, Downhill(mesh, *threat, camp.areaId, camp.pos));
 	}
+
+	float OffAxis(const Nav::CampSpot &camp, Vector los)
+	{
+		float yaw = camp.yaw * NavMath::kPiF / 180.f;
+		float pitch = camp.pitch * NavMath::kPiF / 180.f;
+		Vector facing(cosf(pitch) * cosf(yaw), cosf(pitch) * sinf(yaw), -sinf(pitch));
+		float dot = DotProduct(facing, los.Normalize());
+		return acosf(std::max(-1.f, std::min(1.f, dot))) * 180.f / NavMath::kPiF;
+	}
+
+	bool Snipe(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot)
+	{
+		if (CvarValue("crossbot_snipe", 1.f) == 0.f)
+			return false;
+
+		const BotGoal::Stop &target = bot.goal.target;
+		int kind = BotStrategic::KindOf(target.payload);
+		if (kind == BotStrategic::KIND_DELIVER || kind == BotStrategic::KIND_HEAL)
+			return false;
+
+		edict_t *targetEnt = target.ent.Get();
+		const std::vector<float> &toTarget = bot.goal.toTargetCosts;
+		float here = At(toTarget, bot.currentAreaId);
+		if (!targetEnt || here >= Nav::kUnreachableSeconds)
+			return false;
+
+		int weaponId = BotFire::SnipeWeapon(bot);
+		if (weaponId <= 0 || BotTactics::Closest(bot))
+			return false;
+
+		Vector watch = target.point + Vector(0.f, 0.f, kSnipeTargetLift);
+
+		std::vector<Choice> choices;
+		for (size_t i = 0; i < mesh.camps.size(); ++i)
+		{
+			const Nav::CampSpot &camp = mesh.camps[i];
+			float out = At(fromBot, camp.areaId);
+			if (out >= Nav::kUnreachableSeconds || out > here)
+				continue;
+
+			float spotDist = BotCamp::SpotDist(camp);
+			if (spotDist < kSnipeDist)
+				continue;
+
+			Vector los = watch - BotCamp::SpotEye(camp);
+			float d = los.Length();
+			if (d < kSnipeDist || d * kSnipeDistRatio < spotDist || d > spotDist * kSnipeDistRatio)
+				continue;
+			if (OffAxis(camp, los) > kSnipeCone)
+				continue;
+			if (!Usable(bot, mesh, camp, i, &toTarget))
+				continue;
+
+			Choice c;
+			c.campIndex = static_cast<int>(i);
+			c.out = out;
+			choices.push_back(c);
+		}
+
+		int pick = Roll(choices);
+		if (pick < 0)
+		{
+			if (BotTactics::DebugEnabled())
+				BOT_VLOG("CrossBot: %s finds no sniping post over %s\n", bot.name, CBotTargetNameOf(targetEnt));
+			return false;
+		}
+
+		const Choice &c = choices[pick];
+		const Nav::CampSpot &camp = mesh.camps[c.campIndex];
+		Vector los = watch - BotCamp::SpotEye(camp);
+		const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(weaponId);
+		float hold = g_engfuncs.pfnRandomFloat(kSnipeHoldMin, kSnipeHoldMax);
+
+		BOT_VLOG("CrossBot: %s snipes %s from spot %d (%.0f away, %.0f deg off its facing, %.1fs walk, %.1fs "
+			"from the target), holding %.1fs with %s\n", bot.name, CBotTargetNameOf(targetEnt), c.campIndex,
+			los.Length(), OffAxis(camp, los), c.out, here, hold, spec && spec->classname ? spec->classname : "?");
+
+		BotCamp::CommitSnipe(bot, mesh, c.campIndex, hold, weaponId, watch);
+		return true;
+	}
 }
 
 namespace BotTactics
@@ -221,18 +317,22 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 	if (!Enabled() || mesh.camps.empty())
 		return false;
 
+	if (Snipe(bot, mesh, fromBot))
+		return true;
+
 	const BotGoal::Stop &target = bot.goal.target;
 	int kind = BotStrategic::KindOf(target.payload);
 	if (kind != BotStrategic::KIND_SUPPORT && kind != BotStrategic::KIND_DEFEND)
 		return false;
 
 	edict_t *targetEnt = target.ent.Get();
-	const std::vector<float> &toTarget = bot.goal.toTargetCosts;
-	if (!targetEnt || toTarget.empty())
+	if (!targetEnt || target.areaId < 0 || bot.currentAreaId < 0)
 		return false;
 
-	float budget = CvarValue("crossbot_tactics_budget", kDefaultBudget);
-	float margin = CvarValue("crossbot_tactics_margin", kDefaultMargin);
+	std::vector<float> toTarget, fromHere;
+	Nav::AreaCostsToGoal(mesh, static_cast<uint32_t>(target.areaId), toTarget);
+	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), fromHere);
+
 	bool defend = kind == BotStrategic::KIND_DEFEND;
 	NavPlan::RangeBias range = Bot_RangeBias(bot, false);
 
@@ -285,13 +385,13 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 		{
 			const Nav::CampSpot &camp = mesh.camps[i];
 			float in = At(toTarget, camp.areaId);
-			float out = At(fromBot, camp.areaId);
+			float out = At(fromHere, camp.areaId);
 			float r = At(*from, camp.areaId);
 			if (in >= Nav::kUnreachableSeconds || out >= Nav::kUnreachableSeconds || r >= Nav::kUnreachableSeconds)
 				continue;
-			if (in >= runnerToTarget || r + in - runnerToTarget > budget)
+			if (in >= runnerToTarget || r + in - runnerToTarget > kBudget)
 				continue;
-			if (clock + out + margin >= r)
+			if (clock + out + kMargin >= r)
 				continue;
 			if (!Usable(bot, mesh, camp, i, defend ? from : &toTarget))
 				continue;
@@ -305,7 +405,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 		}
 	}
 
-	int pick = Roll(choices);
+	int pick = Roll(choices, defend);
 	if (pick >= 0)
 	{
 		const Choice &c = choices[pick];
@@ -321,7 +421,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 				"holding %.1fs\n", bot.name, CBotPlayerNameOf(runner), CBotTargetNameOf(targetEnt), c.campIndex, c.out,
 				c.runner, c.fit, hold);
 
-		BotCamp::CommitTimed(bot, mesh, c.campIndex, hold, c.runner, c.out, clock + margin);
+		BotCamp::CommitTimed(bot, mesh, c.campIndex, hold, c.runner, c.out, clock + kMargin);
 		return true;
 	}
 
@@ -338,7 +438,7 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 	{
 		const Nav::CampSpot &camp = mesh.camps[i];
 		float in = At(toTarget, camp.areaId);
-		float out = At(fromBot, camp.areaId);
+		float out = At(fromHere, camp.areaId);
 		if (in > kNearTarget || out >= Nav::kUnreachableSeconds || !Usable(bot, mesh, camp, i, from))
 			continue;
 
@@ -359,6 +459,26 @@ bool Pick(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot
 		"holding %.1fs\n", bot.name, c.campIndex, CBotTargetNameOf(targetEnt), c.out, clock, c.fit, hold);
 
 	BotCamp::CommitTimed(bot, mesh, c.campIndex, hold, 0.f, 0.f, 0.f);
+	return true;
+}
+
+bool Closest(const CBot &bot)
+{
+	const Nav::NavMesh *mesh = Nav::Get();
+	float here = At(bot.goal.toTargetCosts, bot.currentAreaId);
+	if (!mesh || here >= Nav::kUnreachableSeconds)
+		return true;
+
+	for (int i = 1; i <= gpGlobals->maxClients; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!LiveFriend(bot, ent) || (g_pGameProfile && g_pGameProfile->IsDead(ent)))
+			continue;
+
+		uint32_t area = 0;
+		if (AreaOf(*mesh, ent->v.origin, area) && At(bot.goal.toTargetCosts, static_cast<int>(area)) < here)
+			return false;
+	}
 	return true;
 }
 

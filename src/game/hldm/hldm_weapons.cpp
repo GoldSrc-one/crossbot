@@ -78,7 +78,7 @@ namespace
 			kNoMode,
 			{ FIRE_TAP, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 274.f, 0.5f, 0.f, 375.f, 0.f, 0.f, WPN_Q_HIDDEN_STATE | WPN_Q_INHERIT_VEL } },
 		{ HLDM_SNARK, "weapon_snark", -1, 0.1f, RANGE_CLOSE, 0.f,
-			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 200.f, 0.5f, 0.f, 0.f, 0.f, 0.f, WPN_Q_INHERIT_VEL | WPN_Q_HOMING },
+			{ FIRE_HOLD, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, 1, 200.f, 0.5f, 0.f, 0.f, 0.f, 0.f, WPN_Q_INHERIT_VEL | WPN_Q_HOMING | WPN_Q_TEAM_UNSAFE },
 			kNoMode,
 			kNoMode },
 	};

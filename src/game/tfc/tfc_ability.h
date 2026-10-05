@@ -28,6 +28,10 @@ int ClassifyItem(edict_t *ent);
 
 bool ItemUsable(edict_t *player, edict_t *item);
 
+float ItemWorth(edict_t *player, edict_t *item, float ammoNeed);
+
+float PackWait(edict_t *item);
+
 float StationValue(edict_t *player);
 
 bool Fortifies(edict_t *ent);

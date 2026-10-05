@@ -65,10 +65,6 @@ try {
     Write-Host "defect. served must equal the requested delay exactly at every step."
     Write-Host "Do not use crossbot_teleport here: it stacks every bot on the identical origin, which"
     Write-Host "makes the eye-to-eye vector zero, so no angle exists and the queue is never fed."
-    Write-Host "Idle micro-drift is switched off for this phase: it is a deliberate ~1 degree of error,"
-    Write-Host "and leaving it on would mask exactly the small defects this phase exists to catch."
-
-    Invoke-CbRcon $Port "crossbot_aim_drift 0" | Out-Null
 
     Invoke-CbRcon $Port "crossbot_nav_goal $($spawn.X) $($spawn.Y) $($spawn.Z)" | Out-Null
     Write-Host "Walking to the goal..."
@@ -89,7 +85,6 @@ try {
         Write-Host "`n===== ROAM: gather on, bots move ====="
         Write-Host "err may be large -- that is target acceleration. Watch queue and served instead."
         Invoke-CbRcon $Port "crossbot_aim_delay -1" | Out-Null
-        Invoke-CbRcon $Port "crossbot_aim_drift 1" | Out-Null
         Invoke-CbRcon $Port "crossbot_gather 1" | Out-Null
 
         $deadline = (Get-Date).AddSeconds($RoamSeconds)

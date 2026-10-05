@@ -64,6 +64,8 @@ namespace
 
 	constexpr float kTankAimTolerance = 4.f;
 	constexpr float kTankReachRange = 56.f;
+	constexpr float kCombatTankScan = 0.5f;
+	constexpr float kCombatTankDot = 0.7f;
 
 	constexpr int kSfTrainNoControl = 2;
 
@@ -1665,6 +1667,7 @@ void Forget(CBot &bot)
 	st.startTime = 0.f;
 	st.holdUntil = 0.f;
 	st.startToggle = -1;
+	st.combatTank = false;
 }
 
 bool Mounted(const CBot &bot)
@@ -1933,6 +1936,82 @@ bool Run(CBot &bot)
 	bot.moveForward = 0.f;
 	bot.moveSide = 0.f;
 	Bot_RunPlayerMove(bot, angles, 0.f, 0.f, buttons);
+	return true;
+}
+
+bool CombatTank(CBot &bot, const Nav::NavMesh &mesh)
+{
+	State &st = bot.fun;
+
+	if (st.combatTank && ValidFor(bot, st.goal.Get(), PackPayload(FUN_TANK, FUN_ACT_USE)))
+		return true;
+	st.combatTank = false;
+
+	if (!Enabled() || !g_pGameProfile || bot.currentAreaId < 0 || gpGlobals->time < st.nextCombatScan)
+		return false;
+	st.nextCombatScan = gpGlobals->time + kCombatTankScan;
+
+	edict_t *enemy = BotCombat::Enemy(bot);
+	if (!enemy)
+		return false;
+
+	BuildTable();
+
+	const Vector &from = bot.pEdict->v.origin;
+	Vector toEnemy = enemy->v.origin - from;
+	float enemyDist = toEnemy.Length();
+	Vector enemyDir = Norm2D(toEnemy);
+	Vector enemyEye = enemy->v.origin + enemy->v.view_ofs;
+
+	BotGoal::Candidate best;
+	float bestDist = enemyDist;
+
+	for (const Entry &entry : g_table)
+	{
+		if (entry.kind != FUN_TANK)
+			continue;
+
+		edict_t *ent = EntryEdict(entry);
+		if (!ent || Blocked(bot, ent))
+			continue;
+
+		edict_t *tank = TankOfControls(ent);
+		if (!TankFree(tank, bot.pEdict))
+			continue;
+
+		float yaw = 0.f, pitch = 0.f;
+		if (!AnglesToward(tank, enemyEye, yaw, pitch) || !InCone(ReadCone(tank), yaw, pitch))
+			continue;
+
+		std::vector<BotItems::Placement> places;
+		CollectUsePoints(mesh, ent, from, places);
+
+		for (const BotItems::Placement &p : places)
+		{
+			Vector toPoint = p.point - from;
+			float dist = toPoint.Length();
+			if (dist >= bestDist)
+				continue;
+			if (DotProduct(Norm2D(toPoint), enemyDir) < kCombatTankDot)
+				continue;
+
+			best.tier = BotGoal::GOAL_FUN;
+			best.ent = ent;
+			best.areaId = p.areaId;
+			best.point = p.point;
+			best.payload = PackPayload(FUN_TANK, FUN_ACT_USE);
+			bestDist = dist;
+		}
+	}
+
+	if (!best.ent)
+		return false;
+
+	BOT_VLOG("CrossBot: %s goes for the tank %s mid-fight, %.0f out, %s %.0f out\n", bot.name,
+		CBotClassOf(TankOfControls(best.ent)), bestDist, CBotTargetNameOf(enemy), enemyDist);
+
+	BotGoal::Commit(bot, best);
+	st.combatTank = true;
 	return true;
 }
 

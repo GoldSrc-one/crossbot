@@ -34,6 +34,10 @@ namespace BotItems
 
 	Vector ItemCenter(edict_t *ent, ItemKind kind);
 
+	ItemKind Classify(edict_t *ent);
+	float ChargerValue(edict_t *ent, ItemKind kind, edict_t *player);
+	float ChargerFull(edict_t *ent, ItemKind kind);
+
 	void NoteRespawning(CBot &bot, edict_t *ent, ItemKind kind);
 	void NoteIgnored(CBot &bot, edict_t *ent, float seconds);
 	void NoteFull(CBot &bot, const char *classname);
