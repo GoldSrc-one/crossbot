@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "../../bot/bot_move.h"
+#include "../cvars.h"
 #include "../../bot/bot_weapons.h"
 #include "../crossplay.h"
 #include "../ent_handle.h"
@@ -121,15 +122,13 @@ bool CDMCProfile::Detect(const char *gamedir) const
 
 PmSim::FallRule CDMCProfile::FallDamage() const
 {
-	return CVAR_GET_FLOAT("mp_falldamage") != 0.f ? PmSim::kHlFall : PmSim::kNoFall;
+	return CBotCvarFloat("mp_falldamage") != 0.f ? PmSim::kHlFall : PmSim::kNoFall;
 }
 
-bool CDMCProfile::Disguised(edict_t *pEdict) const
+bool CDMCProfile::Cloaked(edict_t *pEdict) const
 {
-	constexpr int kInvisibility = 1 << 19;
-	void *priv = CBotPrivateData(pEdict);
-	return priv && g_offsets.plr_iQuakeItems >= 0 &&
-		(GameData::Peek<int>(priv, g_offsets.plr_iQuakeItems) & kInvisibility) != 0;
+	return pEdict->v.renderfx == kRenderFxGlowShell &&
+		(static_cast<int>(pEdict->v.renderamt) == 5 || pEdict->v.rendermode == kRenderTransColor);
 }
 
 float CDMCProfile::ItemRespawnDelay(ItemKind kind) const

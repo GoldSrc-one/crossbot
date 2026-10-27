@@ -55,7 +55,7 @@ function Invoke-CbPhase {
     param([string]$Name, [string]$Map, [int]$Port, [string[]]$Boot,
         [scriptblock]$Body, [string]$LogDir, [string]$HldsDir,
         [string]$LogPrefix, [string]$ConfigPrefix,
-        [System.Collections.ArrayList]$Failures)
+        [System.Collections.ArrayList]$Failures, [string[]]$Games = @("valve"))
     $log = Join-Path $LogDir "${LogPrefix}_$Name.log"
     if (Test-Path $log) { Remove-Item $log }
 
@@ -64,7 +64,7 @@ function Invoke-CbPhase {
 
     $start = & "$script:CbScriptsDir\test_server_start.ps1" -Map $Map -Port $Port -LogFile $log `
         -WaitSeconds 90 -ConfigName "${ConfigPrefix}_$Name.cfg" -Commands $Boot -HLDSDir $HldsDir `
-        -RequireVerbose
+        -Games $Games -RequireVerbose
     if ($start -notmatch 'PID=(\d+)') {
         Assert-Cb $false "$Name server started ($start)" $Failures
         return @()

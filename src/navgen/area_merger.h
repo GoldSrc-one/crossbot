@@ -42,6 +42,7 @@ struct Area
 	uint8_t activation = crossbot_nav::ACT_NONE;
 	double openSeconds = 0.0;
 	int passableIndex = -1;
+	int floorPassableIndex = -1;
 	Vec3 driftVelocity;
 	int elevatorStopId = -1;
 	int activationEntity = -1;

@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "../game/game_profile.h"
+#include "../game/cvars.h"
 #include "../game/objectives.h"
 #include "../game/teams.h"
 #include "../nav/nav.h"
@@ -16,14 +17,17 @@
 #include "../nav/nav_query.h"
 #include "bot.h"
 #include "bot_aim.h"
+#include "bot_break.h"
 #include "bot_camp.h"
 #include "bot_difficulty.h"
+#include "bot_fire.h"
 #include "bot_goal.h"
 #include "bot_items.h"
 #include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_sense.h"
+#include "bot_sight.h"
 #include "bot_strategic.h"
 #include "bot_tactics.h"
 
@@ -48,6 +52,8 @@ namespace
 	constexpr float kStandEyeLift = 46.f;
 	constexpr float kDuckEyeLift = 12.f;
 	constexpr float kSnipeCheckInterval = 0.5f;
+	constexpr float kOccupiedRadius = 96.f;
+	constexpr float kCamperHold = 2.f;
 
 	BotCamp::Bipod ChooseBipod(const CBot &bot, const Nav::CampSpot &camp)
 	{
@@ -164,10 +170,8 @@ namespace
 		if (!closest)
 			return false;
 
-		TraceResult tr;
 		Vector centre = closest->v.origin + closest->v.view_ofs;
-		TRACE_LINE(eye, centre, dont_ignore_monsters, pEdict, &tr);
-		return tr.flFraction >= 1.f || tr.pHit == closest;
+		return BotSight::Clarity(eye, centre, dont_ignore_monsters, pEdict, closest) > 0.f;
 	}
 }
 
@@ -182,7 +186,7 @@ bool Enabled()
 bool DebugEnabled()
 {
 #if BOT_VLOG_ON
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_camp_debug");
+	cvar_t *cvar = CBotCvar("crossbot_camp_debug");
 	return cvar && cvar->value != 0.f;
 #else
 	return false;
@@ -365,6 +369,13 @@ bool Consider(CBot &bot)
 			BotGoal::Advance(bot);
 			return true;
 		}
+		if (!st.holding && st.spot.campIndex >= 0 && SpotOccupied(bot, st.spot.pos))
+		{
+			Abandon(bot, "a teammate got there first");
+			st.nextCampTime = 0.f;
+			BotGoal::Advance(bot);
+			return true;
+		}
 		return false;
 	}
 
@@ -423,7 +434,7 @@ bool Consider(CBot &bot)
 			continue;
 
 		float d = (spot.pos - bot.pEdict->v.origin).Length();
-		if (d > reach)
+		if (d > reach || SpotOccupied(bot, spot.pos))
 			continue;
 		if (!best || d < bestDist)
 		{
@@ -466,6 +477,13 @@ bool OnArrived(CBot &bot)
 	st.checkTravel = false;
 	if (st.spot.zoom)
 		st.unzoom = true;
+
+	if (st.spot.clearEnt > 0)
+	{
+		edict_t *blocker = INDEXENT(st.spot.clearEnt);
+		if (blocker && !blocker->free && BotBreak::IsTarget(blocker))
+			BotBreak::Engage(bot, blocker);
+	}
 
 	float dist = 0.f;
 	if (BotSense::NearestLive(bot, bot.pEdict->v.origin, ScareRadius(), true, &dist))
@@ -652,7 +670,7 @@ void CommitTimed(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float holdF
 		? toGoal[camp.areaId] : Nav::kUnreachableSeconds;
 	FillSpot(bot, camp, spot, HeldZoomFov(bot));
 	spot.timed = true;
-	spot.holdFor = holdFor;
+	spot.holdFor = BotFire::CampWeapon(bot) ? holdFor * kCamperHold : holdFor;
 	spot.raceRunner = runner;
 	spot.raceOut = out;
 	spot.raceLead = lead;
@@ -712,6 +730,26 @@ bool SpotReady(const CBot &bot, int campIndex)
 	return true;
 }
 
+bool SpotOccupied(const CBot &bot, const Vector &pos)
+{
+	float mine = (bot.pEdict->v.origin - pos).LengthSquared();
+	for (int i = 1; i <= gpGlobals->maxClients; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!ent || ent == bot.pEdict || !CBotIsLivePlayer(ent))
+			continue;
+		if (g_pGameProfile && g_pGameProfile->IsDead(ent))
+			continue;
+		if (Teams::Of(bot.pEdict, ent) != Teams::REL_FRIEND)
+			continue;
+
+		float theirs = (ent->v.origin - pos).LengthSquared();
+		if (theirs <= kOccupiedRadius * kOccupiedRadius && theirs < mine)
+			return true;
+	}
+	return false;
+}
+
 float SpotDist(const Nav::CampSpot &camp)
 {
 	return ChooseDuck(camp) ? camp.crouchDist : camp.standDist;
@@ -756,7 +794,68 @@ bool FacesThreat(const Nav::CampSpot &camp, const Vector &threat)
 
 Bipod HeldBipod(const CBot &bot)
 {
-	return bot.camp.holding ? bot.camp.spot.bipod : BIPOD_NONE;
+	return (bot.camp.holding || bot.camp.directed) ? bot.camp.spot.bipod : BIPOD_NONE;
+}
+
+bool HeldProne(const CBot &bot)
+{
+	return bot.camp.directed && bot.camp.spot.prone;
+}
+
+void HoldDirected(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float yaw, float pitch, int stance)
+{
+	State &st = bot.camp;
+	RouteSpot spot;
+	spot.campIndex = campIndex;
+	spot.pos = bot.pEdict->v.origin;
+	if (campIndex >= 0 && static_cast<size_t>(campIndex) < mesh.camps.size())
+	{
+		const Nav::CampSpot &camp = mesh.camps[campIndex];
+		spot.areaId = camp.areaId;
+		FillSpot(bot, camp, spot, HeldZoomFov(bot));
+	}
+	spot.yaw = yaw;
+	spot.pitch = pitch;
+	spot.zoom = false;
+
+	bool deploy = g_pGameProfile && g_pGameProfile->CanDeploy(bot.pEdict);
+	switch (stance)
+	{
+	case BotDirective::STANCE_STAND:
+		spot.duck = false;
+		spot.bipod = BIPOD_NONE;
+		break;
+	case BotDirective::STANCE_CROUCH:
+		spot.duck = true;
+		spot.bipod = BIPOD_NONE;
+		break;
+	case BotDirective::STANCE_PRONE:
+		spot.duck = false;
+		spot.prone = true;
+		if (deploy && spot.bipod == BIPOD_NONE)
+			spot.bipod = BIPOD_PRONE;
+		break;
+	default:
+		break;
+	}
+
+	st.holding = false;
+	st.directed = true;
+	st.holdStart = gpGlobals->time;
+	st.spot = spot;
+	BOT_VLOG("CrossBot: %s holds on orders at (%.0f,%.0f,%.0f) camp %d, yaw %.0f, %s\n", bot.name,
+		spot.pos.x, spot.pos.y, spot.pos.z, campIndex, yaw,
+		spot.bipod == BIPOD_SANDBAG ? "deploying on sandbags" : spot.bipod == BIPOD_PRONE ? "deploying prone" :
+		spot.prone ? "prone" : spot.duck ? "crouched" : "standing");
+}
+
+void EndDirected(CBot &bot)
+{
+	State &st = bot.camp;
+	if (!st.directed)
+		return;
+	st.directed = false;
+	st.spot = RouteSpot();
 }
 
 void AddSandbags()
@@ -785,10 +884,18 @@ void AddSandbags()
 		if (!best)
 			continue;
 
+		const Nav::CampSpot *closest = nullptr;
+		for (const Nav::CampSpot &camp : mesh->camps)
+		{
+			if ((camp.flags & crossbot_nav::CAMP_DEPLOY) == 0 && (!closest ||
+				(camp.pos - best->point).LengthSquared() < (closest->pos - best->point).LengthSquared()))
+				closest = &camp;
+		}
+
 		Nav::CampSpot spot;
 		spot.pos = best->point;
 		spot.yaw = bag.yaw;
-		spot.score = 1.f;
+		spot.score = closest ? closest->score : 1.f;
 		spot.standScore = 1.f;
 		spot.areaId = static_cast<int>(best->areaId);
 		spot.flags = crossbot_nav::CAMP_DEPLOY;

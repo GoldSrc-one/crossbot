@@ -1,6 +1,9 @@
 ﻿#pragma once
 
+#include <memory>
+
 #include "../game/weapon_spec.h"
+#include "../nav/bsp_world.h"
 #include "../nav/pm_sim.h"
 #include "../nav/plan_search.h"
 #include "bot.h"
@@ -22,7 +25,11 @@ Vector Bot_YawDir(float yawDeg);
 
 bool Bot_TraceHitEntity(const TraceResult &tr);
 
-PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull);
+std::shared_ptr<const Nav::WorldSnapshot> Bot_WorldSnapshot();
+
+PmSim::PmTraceFn Bot_WorldTraceFn(edict_t *ignore, int hull, bool phaseBreakables = false);
+
+PmSim::PmArcFn Bot_WorldArcFn(edict_t *ignore, int hull, bool phaseBreakables = false);
 
 PmSim::PmPushFn Bot_PushFields(int hull);
 
@@ -49,6 +56,10 @@ bool Bot_Frozen(const edict_t *pEdict);
 float Bot_MaxSpeed(edict_t *pEdict);
 
 PmSim::PmPhysics Bot_Physics(edict_t *pEdict);
+
+Vector Bot_ClearLineOfSight(CBot &bot, const Vector &moveDir, const Vector &target);
+
+void Bot_ClearLineOfFire(CBot &bot, Vector &moveDir, float &drive, const Vector &enemy);
 
 void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
 	unsigned short buttons, bool allowLongJump = false, float upmove = 0.f);

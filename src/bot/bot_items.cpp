@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "../game/crossplay.h"
+#include "../game/cvars.h"
 #include "../game/game_profile.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
@@ -18,6 +19,7 @@
 #include "bot_log.h"
 #include "bot_move.h"
 #include "bot_move_nav.h"
+#include "bot_sight.h"
 
 extern IGameProfile *g_pGameProfile;
 
@@ -30,6 +32,7 @@ namespace
 	constexpr float kChargerUseRadius = 48.f;
 	constexpr float kChargerSpotSearch = 96.f;
 	constexpr float kGoalItemSeenInterval = 0.25f;
+	constexpr float kRecollectCooldown = 15.f;
 	constexpr float kHealReachMargin = 48.f;
 	constexpr float kStandOriginLift = 18.f;
 	constexpr int kHullHuman = 1;
@@ -106,7 +109,7 @@ namespace
 	using BotItems::Placement;
 
 	void ResolveVolumeAreas(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
-		std::vector<Placement> &out)
+		std::vector<Placement> &out, bool all = false)
 	{
 		Vector volMins = ent->v.absmin;
 		Vector volMaxs = ent->v.absmax;
@@ -130,6 +133,13 @@ namespace
 				spot = area.centroid;
 			if (!Nav::AreaContainsPoint(area, spot))
 				continue;
+			spot.z = Nav::AreaFloorZ(area, spot.x, spot.y);
+
+			TraceResult tr;
+			Vector top(spot.x, spot.y, std::min(area.maxs.z, volMaxs.z));
+			g_engfuncs.pfnTraceHull(top, Vector(spot.x, spot.y, area.mins.z), ignore_monsters, kHullDuck, nullptr, &tr);
+			if (!tr.fStartSolid && !tr.fAllSolid && tr.flFraction < 1.f && tr.vecEndPos.z > spot.z)
+				spot.z = tr.vecEndPos.z;
 
 			bool crouch = (area.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0;
 			Vector probe = crouch ? spot : spot + Vector(0.f, 0.f, kStandOriginLift);
@@ -142,7 +152,7 @@ namespace
 			out.push_back(place);
 		}
 
-		if (out.size() <= kHealAreaCandidates)
+		if (all || out.size() <= kHealAreaCandidates)
 			return;
 
 		std::partial_sort(out.begin(), out.begin() + kHealAreaCandidates, out.end(),
@@ -360,7 +370,7 @@ namespace
 	bool DebugEnabled()
 	{
 #if BOT_VLOG_ON
-		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_gather_debug");
+		cvar_t *cvar = CBotCvar("crossbot_gather_debug");
 		return cvar && cvar->value != 0.f;
 #else
 		return false;
@@ -602,7 +612,7 @@ void ClearGoalItem(CBot &bot)
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_gather");
+	cvar_t *cvar = CBotCvar("crossbot_gather");
 	return !cvar || cvar->value != 0.f;
 }
 
@@ -617,9 +627,9 @@ const Nav::Area *StandArea(const Nav::NavMesh &mesh, const Vector &center)
 }
 
 void VolumeAreas(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
-	std::vector<Placement> &out)
+	std::vector<Placement> &out, bool all)
 {
-	ResolveVolumeAreas(mesh, ent, from, out);
+	ResolveVolumeAreas(mesh, ent, from, out, all);
 }
 
 void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
@@ -728,9 +738,7 @@ bool UpdateGoalItem(CBot &bot)
 	bot.goalItemSeenCheck = gpGlobals->time + kGoalItemSeenInterval;
 
 	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
-	TraceResult tr;
-	TRACE_LINE(ent->v.origin, eye, dont_ignore_monsters, ent, &tr);
-	if (tr.pHit != bot.pEdict)
+	if (BotSight::Clarity(ent->v.origin, eye, dont_ignore_monsters, ent, bot.pEdict) <= 0.f)
 		return false;
 
 	BOT_VLOG("CrossBot: %s saw %s was already taken, giving up on it\n", bot.name,
@@ -749,9 +757,12 @@ void OnTouch(CBot &bot, edict_t *ent)
 
 	if (IsPickupGone(ent))
 	{
-		BOT_VLOG("CrossBot: %s picked up %s, back in %.0fs\n", bot.name,
-			CBotClassOf(ent), RespawnIn(ent, bot.goalItemKind));
-		NoteRespawning(bot, ent, bot.goalItemKind);
+		float secs = RespawnIn(ent, bot.goalItemKind);
+		BOT_VLOG("CrossBot: %s picked up %s, back in %.0fs\n", bot.name, CBotClassOf(ent), secs);
+		if (secs < kRecollectCooldown)
+			NoteIgnored(bot, ent, kRecollectCooldown);
+		else
+			NoteRespawning(bot, ent, bot.goalItemKind);
 	}
 	else
 	{

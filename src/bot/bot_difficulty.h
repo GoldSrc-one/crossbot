@@ -35,6 +35,7 @@ struct Row
 	float spreadFit;
 	float spreadEarly;
 	float spreadLate;
+	float noticeScale;
 };
 
 constexpr float kDelaySpread = 0.2f;
@@ -85,6 +86,8 @@ bool Wallbang();
 float SpreadFit();
 
 void SpreadWait(float &loOut, float &hiOut);
+
+float NoticeScale();
 
 void PrintStatus();
 

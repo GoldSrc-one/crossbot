@@ -10,7 +10,7 @@ public:
 	const char *GetName() const override;
 	bool Detect(const char *gamedir) const override;
 	PmSim::FallRule FallDamage() const override;
-	bool Disguised(edict_t *pEdict) const override;
+	bool Cloaked(edict_t *pEdict) const override;
 
 	float ItemRespawnDelay(ItemKind kind) const override;
 	bool ItemPreferred(edict_t *ent, ItemKind kind) const override;

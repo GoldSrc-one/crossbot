@@ -1,7 +1,8 @@
-﻿#include <extdll.h>
+#include <extdll.h>
 #include <meta_api.h>
 
 #include "bot_manager.h"
+#include "../game/cvars.h"
 #include "bot_tactics.h"
 #include "bot.h"
 #include "bot_camp.h"
@@ -11,6 +12,7 @@
 #include "bot_fire.h"
 #include "bot_fun.h"
 #include "bot_goal.h"
+#include "bot_hitch.h"
 #include "bot_items.h"
 #include "bot_log.h"
 #include "bot_move.h"
@@ -18,8 +20,10 @@
 #include "bot_opportunist.h"
 #include "bot_perf.h"
 #include "bot_sense.h"
+#include "bot_sight.h"
 #include "bot_timing.h"
 #include "bot_weapons.h"
+#include "../brain/brain_feed.h"
 #include "../game/crossplay.h"
 #include "../game/gamedata.h"
 #include "../game/game_profile.h"
@@ -56,7 +60,7 @@ namespace
 	CBot g_bots[kMaxBots];
 	int g_botSerial = 0;
 
-	bool PickRandomName(char *out, size_t size)
+	bool PickRandomName(const char *prefix, char *out, size_t size)
 	{
 		static std::vector<std::string> names;
 		static bool loaded = false;
@@ -80,14 +84,12 @@ namespace
 		for (int tries = 0; tries < 8; tries++)
 		{
 			const std::string &pick = names[(size_t)g_engfuncs.pfnRandomLong(0, (int)names.size() - 1)];
+			snprintf(out, size, "%s%s", prefix, pick.c_str());
 			bool taken = false;
 			for (const auto &bot : g_bots)
-				taken |= bot.inUse && pick == bot.name;
+				taken |= bot.inUse && strcmp(out, bot.name) == 0;
 			if (!taken || tries == 7)
-			{
-				snprintf(out, size, "%s", pick.c_str());
 				return true;
-			}
 		}
 		return false;
 	}
@@ -109,7 +111,7 @@ namespace
 	bool TouchDebugEnabled()
 	{
 #if BOT_VLOG_ON
-		cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_gather_debug");
+		cvar_t *cvar = CBotCvar("crossbot_gather_debug");
 		return cvar && cvar->value != 0.f;
 #else
 		return false;
@@ -142,12 +144,25 @@ CBot *FindBot(edict_t *pEdict)
 	return nullptr;
 }
 
+int Slots()
+{
+	return kMaxBots;
+}
+
+CBot *Slot(int index)
+{
+	if (index < 0 || index >= kMaxBots || !g_bots[index].inUse)
+		return nullptr;
+	return &g_bots[index];
+}
+
 void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 {
 	(void)pEdictList;
 	(void)edictCount;
 	(void)clientMax;
 
+	Nav::FlushPlans();
 	for (auto &bot : g_bots)
 		bot = CBot();
 
@@ -157,6 +172,11 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 	const char *mapName = g_engfuncs.pfnSzFromIndex(gpGlobals->mapname);
 	Nav::LoadForMap(mapName);
+
+	char bspPath[512] = "";
+	XPlay::FindMapBsp(mapName, bspPath, sizeof(bspPath));
+	BotSense::LoadLight(bspPath);
+	BotSight::Build(mapName, bspPath);
 
 	XPlay::DetectProfiles();
 	Teams::DetectMap();
@@ -174,10 +194,13 @@ void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 
 void ServerDeactivate()
 {
+	Nav::FlushPlans();
 	for (auto &bot : g_bots)
 		bot = CBot();
 
 	BotSense::ResetBoneCache();
+	BotSense::ForgetLight();
+	BotSight::Clear();
 	Bot_ResetAirmoveCache();
 	BotFun::ResetMap();
 
@@ -207,6 +230,42 @@ void ClientDisconnect(edict_t *pEntity)
 
 namespace
 {
+	constexpr float kSpawnJump = 128.f;
+	constexpr float kSpawnNear = 64.f;
+
+	const char *const kSpawnClassnames[] = {
+		"info_player_start", "info_player_deathmatch", "info_player_coop", "info_player_teamspawn", "i_p_t",
+		"info_player_allies", "info_player_axis", "info_ctfspawn",
+	};
+
+	template <typename Fn>
+	void ForEachSpawn(Fn fn)
+	{
+		for (const char *classname : kSpawnClassnames)
+		{
+			edict_t *ent = nullptr;
+			while (true)
+			{
+				ent = FIND_ENTITY_BY_STRING(ent, "classname", classname);
+				if (!ent || g_engfuncs.pfnIndexOfEdict(ent) == 0)
+					break;
+				if (!ent->free)
+					fn(classname, ent);
+			}
+		}
+	}
+
+	bool Reborn(const CBot &bot)
+	{
+		const Vector &origin = bot.pEdict->v.origin;
+		if (!bot.hasLastOrigin || (origin - bot.lastOrigin).Length() <= kSpawnJump)
+			return false;
+
+		bool onSpawn = false;
+		ForEachSpawn([&](const char *, edict_t *ent) { onSpawn = onSpawn || (ent->v.origin - origin).Length() <= kSpawnNear; });
+		return onSpawn;
+	}
+
 	bool IsCarrier(const edict_t *pEdict)
 	{
 		for (const Objectives::Carrier &carrier : Objectives::Get().carriers)
@@ -221,12 +280,16 @@ namespace
 	{
 		BotPerf::NoteBot(bot.name);
 
+		Bot_NoteHurt(bot);
+
 		if (g_pGameProfile->PreThink(bot.pEdict))
 		{
 			bot.wasDead = true;
 			BotTiming::EndBot(bot);
 			return;
 		}
+
+		BotDirective::Think(bot);
 
 		bool dead = g_pGameProfile->IsDead(bot.pEdict);
 		if (dead)
@@ -236,6 +299,13 @@ namespace
 			{
 				BotFun::NoteDeath(bot);
 				BotDeploy::NoteDeath(bot);
+				BotGoal::NoteDeath(bot);
+				for (auto &other : g_bots)
+				{
+					if (&other != &bot && other.inUse && other.pEdict && !other.wasDead &&
+						Teams::Of(other.pEdict, bot.pEdict) == Teams::REL_FRIEND)
+						Bot_NoteFriendDeath(other, bot);
+				}
 			}
 			g_pGameProfile->Respawn(bot.pEdict);
 			bot.wasDead = true;
@@ -243,11 +313,16 @@ namespace
 			return;
 		}
 
-		if (bot.wasDead)
+		if (bot.wasDead || Reborn(bot))
 		{
 			BOTPERF_SCOPE(ZONE_RESPAWN);
+			if (!bot.wasDead)
+				BOT_VLOG("CrossBot: %s was put back at its spawn alive, starting a new life\n", bot.name);
 			bot.wasDead = false;
 			bot.gravity = 1.f;
+			bot.hurtConn = -1;
+			bot.hurtAreaId = -1;
+			bot.search.reset();
 			bot.spawnHoldUntil = gpGlobals->time + g_engfuncs.pfnRandomFloat(0.f, 1.f);
 			BotGoal::OnRespawn(bot);
 			BotSense::OnRespawn(bot);
@@ -255,6 +330,7 @@ namespace
 			BotFire::Reset(bot);
 			BotGrenade::Reset(bot);
 			BotAbility::Reset(bot);
+			BotDirective::OnRespawn(bot);
 			BotDeploy::OnRespawn(bot);
 			bot.daze = BotDaze::State();
 			bot.brk = BotBreak::State();
@@ -358,6 +434,7 @@ void StartFrame()
 
 	Bot_BeginFrame();
 	BotTiming::BeginFrame();
+	BotSight::Poll();
 
 	if (gpGlobals->time >= g_nextBeamRefresh || gpGlobals->time < g_nextBeamRefresh - kBeamRefresh)
 	{
@@ -379,11 +456,22 @@ void StartFrame()
 
 	if (anyBot)
 	{
+		BotSight::RefreshBodies();
 		CheckDriftSpeeds();
 		Objectives::Refresh();
 		RefreshWorlds();
 	}
 
+	if (BrainFeed::TakeRoundStart())
+	{
+		for (auto &bot : g_bots)
+		{
+			if (bot.inUse)
+				BotDirective::OnNewRound(bot);
+		}
+	}
+
+	BotHitch::Section(BotHitch::SECTION_BOTS);
 	for (auto &bot : g_bots)
 	{
 		if (!bot.inUse)
@@ -394,6 +482,7 @@ void StartFrame()
 			continue;
 
 		XPlay::InGame(bot.gameDll, [&bot] { ThinkOneBot(bot); });
+		BotHitch::BotDone(bot.name);
 	}
 
 	XPlay::LeaveGame();
@@ -478,11 +567,14 @@ bool AddBot(int iGame, const char *name, const char *arg)
 		return false;
 	}
 
+	cvar_t *prefixCvar = CBotCvar("crossbot_name_prefix");
+	const char *prefix = prefixCvar && prefixCvar->string ? prefixCvar->string : "";
+
 	char botName[32];
 	if (name && name[0])
-		snprintf(botName, sizeof(botName), "%s", name);
-	else if (!PickRandomName(botName, sizeof(botName)))
-		snprintf(botName, sizeof(botName), "CrossBot%d", ++g_botSerial);
+		snprintf(botName, sizeof(botName), "%s%s", prefix, name);
+	else if (!PickRandomName(prefix, botName, sizeof(botName)))
+		snprintf(botName, sizeof(botName), "%sCrossBot%d", prefix, ++g_botSerial);
 
 	edict_t *pEdict = nullptr;
 	XPlay::InGame(iGame, [&] { pEdict = CREATE_FAKE_CLIENT(botName); });
@@ -553,12 +645,12 @@ bool KillAllBots()
 	return any;
 }
 
-bool TeleportAllBots(const Vector &point)
+bool TeleportAllBots(const Vector &point, const char *name)
 {
 	bool any = false;
 	for (auto &bot : g_bots)
 	{
-		if (!bot.inUse)
+		if (!bot.inUse || (name && CB_STRICMP(bot.name, name) != 0))
 			continue;
 
 		SET_ORIGIN(bot.pEdict, point);
@@ -703,6 +795,8 @@ void PrintSenseStatus()
 
 		edict_t *target = bot.sense.target.Get();
 		edict_t *enemy = bot.sense.enemy.Get();
+		int noticeCount = 0;
+		const BotSense::NoticeSlot *notice = BotSense::TopNotice(bot, noticeCount);
 		const BotSense::Suspicion *fresh = BotSense::Freshest(bot);
 
 		char freshBuf[96] = "-";
@@ -727,21 +821,26 @@ void PrintSenseStatus()
 		char line[768];
 		snprintf(line, sizeof(line),
 			"CrossBot: %s team=%d target=%s enemy=%s enemyAge=%.1fs bone=%d leadblk=%d "
+			"notice=%d:%s:%.2f/%.2fs light=%.0f/%.0f/%.2f dark=%u clar=%.2f cov=%u/%u/%u "
 			"cands=%d keep=%s keeps=inc:%u,new:%u susp=%d/%zu "
 			"kinds=p:%d,m:%d,o:%d hunt=%d "
-			"mon=list:%d,seen:%u,mine:%u,trc:%u,hit:%u "
+			"mon=list:%d,seen:%u,mine:%u,trc:%u,hit:%u cloak=%u/%u "
 			"tier=%s fresh=%s look=%s pushed=sgt:%u,snd:%u,evt:%u,dmg:%u,ally:%u\n",
 			bot.name, Teams::TeamOf(bot.pEdict), target ? CBotTargetNameOf(target) : "-",
 			enemy ? CBotTargetNameOf(enemy) : "-",
 			enemy ? gpGlobals->time - bot.sense.enemyTime : 0.f, bot.sense.targetBone,
 			bot.sense.leadVetoes,
+			noticeCount, notice ? CBotTargetNameOf(notice->ent.Get()) : "-",
+			notice ? notice->progress : 0.f, notice ? notice->need : 0.f,
+			bot.sense.lightTarget, bot.sense.lightBack, bot.sense.lightVis, bot.sense.darkDrops,
+			bot.sense.clarity, bot.sense.covPartial, bot.sense.covBlocked, bot.sense.covTraces,
 			bot.sense.visionCands, BotSense::KeepName(bot.sense.visionKeep),
 			bot.sense.keeps[BotSense::KEEP_INCUMBENT], bot.sense.keeps[BotSense::KEEP_NEW],
 			live, BotSense::kSuspicionSlots,
 			kinds[BotSense::KIND_PLAYER], kinds[BotSense::KIND_MONSTER],
 			kinds[BotSense::KIND_OTHER], hunting,
 			BotSense::MonsterCount(), bot.sense.monSeen, bot.sense.monMine,
-			bot.sense.monTraces, bot.sense.monHits,
+			bot.sense.monTraces, bot.sense.monHits, bot.sense.cloakSkips, bot.sense.cloakRolls,
 			bot.sense.lookValid ? BotSense::KindName(bot.sense.lookKind) : "-", freshBuf, lookBuf,
 			pushes[BotSense::SUSP_SIGHT], pushes[BotSense::SUSP_SOUND],
 			pushes[BotSense::SUSP_EVENT], pushes[BotSense::SUSP_DAMAGE],
@@ -779,10 +878,10 @@ void PrintMonsters()
 		char line[400];
 		snprintf(line, sizeof(line),
 			"CrossBot: monster #%d %s flags=0x%x health=%.0f takedamage=%d solid=%d "
-			"box=(%.0f,%.0f,%.0f) enemy=%d:%s\n",
+			"box=(%.0f,%.0f,%.0f) team=%d enemy=%d:%s\n",
 			i, CBotClassOf(ent), ent->v.flags, ent->v.health,
 			static_cast<int>(ent->v.takedamage), ent->v.solid,
-			centre.x, centre.y, centre.z,
+			centre.x, centre.y, centre.z, Teams::TeamOf(ent),
 			foe ? g_engfuncs.pfnIndexOfEdict(foe) : -1,
 			foe ? CBotTargetNameOf(foe) : "-");
 		SERVER_PRINT(line);
@@ -811,13 +910,16 @@ void PrintMonsters()
 
 			TraceResult tr;
 			TRACE_LINE(eye, centre, dont_ignore_monsters, bot.pEdict, &tr);
-			bool los_ok = tr.flFraction >= 1.f || tr.pHit == ent;
+			bool covered = false;
+			float clarity = BotSight::Clarity(eye, centre, dont_ignore_monsters, bot.pEdict, ent, &covered);
 
 			char sub[256];
 			snprintf(sub, sizeof(sub),
-				"CrossBot:   %s dist=%.0f mine=%d cone=%d los=%d hit=%s\n",
-				bot.name, dist, mine ? 1 : 0, cone ? 1 : 0, los_ok ? 1 : 0,
-				tr.pHit ? CBotClassOf(tr.pHit) : "-");
+				"CrossBot:   %s dist=%.0f mine=%d cone=%d los=%d clarity=%.2f%s hit=%s rel=%s tgt=%d fight=%d\n",
+				bot.name, dist, mine ? 1 : 0, cone ? 1 : 0, clarity > 0.f ? 1 : 0, clarity,
+				covered ? " (coverage)" : "", tr.pHit ? CBotClassOf(tr.pHit) : "-",
+				Teams::RelationName(Teams::Of(bot.pEdict, ent)), bot.sense.target.Get() == ent ? 1 : 0,
+				bot.combat.active && bot.combat.enemy.Get() == ent ? 1 : 0);
 			SERVER_PRINT(sub);
 		}
 	}
@@ -827,6 +929,8 @@ void PrintMonsters()
 		"CrossBot: %d monster edict(s), %d in the sense list, mon_hEnemy offset %d\n",
 		count, BotSense::MonsterCount(), g_offsets.mon_hEnemy);
 	SERVER_PRINT(summary);
+
+	BotSight::Print();
 }
 
 void PrintTeamsStatus()
@@ -844,10 +948,26 @@ void PrintTeamsStatus()
 		if (!CBotIsLivePlayer(ent))
 			continue;
 
-		char line[320];
+		const char *spawn = "-";
+		float spawnDist = 0.f;
+		int spawnTeam = 0;
+		ForEachSpawn([&](const char *classname, edict_t *point) {
+			float d = (point->v.origin - ent->v.origin).Length();
+			if (spawn[0] == '-' || d < spawnDist)
+			{
+				spawn = classname;
+				spawnDist = d;
+				spawnTeam = point->v.team;
+			}
+		});
+
+		char line[512];
 		int written = snprintf(line, sizeof(line),
-			"CrossBot: player #%d %s team=%d bot=%d", i, CBotPlayerNameOf(ent),
-			Teams::TeamOf(ent), FindBot(ent) ? 1 : 0);
+			"CrossBot: player #%d %s game=%s team=%d bot=%d hp=%.0f deadflag=%d movetype=%d iuser1=%d "
+			"origin=(%.0f,%.0f,%.0f) spawn=%s/%.0f/team%d",
+			i, CBotPlayerNameOf(ent), XPlay::GameDir(XPlay::OwnerOf(ent)), Teams::TeamOf(ent),
+			FindBot(ent) ? 1 : 0, ent->v.health, ent->v.deadflag, ent->v.movetype, ent->v.iuser1,
+			ent->v.origin.x, ent->v.origin.y, ent->v.origin.z, spawn, spawnDist, spawnTeam);
 
 		for (auto &bot : g_bots)
 		{
@@ -1043,9 +1163,9 @@ void PrintVantageStatus(const Vector *at)
 		char head[256];
 		snprintf(head, sizeof(head),
 			"CrossBot: %s at (%.0f,%.0f,%.0f): %d neighbors, nearest %.1f, exposure %.4f "
-			"(%.2f of max)\n",
+			"(%.2f of max), visibility %.2f\n",
 			who, eye.x, eye.y, eye.z, blend.neighbors, blend.nearestDist, blend.exposure,
-			field.maxExposure > 0.f ? blend.exposure / field.maxExposure : 0.f);
+			field.maxExposure > 0.f ? blend.exposure / field.maxExposure : 0.f, blend.visibility);
 		SERVER_PRINT(head);
 
 		for (int i = 0; i < blend.watchCount; ++i)
@@ -1158,7 +1278,7 @@ void PrintFireStatus()
 			"stickyshots=%d uphill=%d selfveto=%d aimveto=%d spreadwaits=%d targetaims=%d "
 			"switches=%d reloads=%d emptyswitch=%d idleswitch=%d "
 			"idlereload=%d ambush=%d duel=%d heard=%d harmveto=%d intent=%d dropped=%d banned=%d "
-			"spinups=%d lasers=%d braces=%d bracing=%d "
+			"spinups=%d lasers=%d braces=%d bracing=%d bracewaits=%d "
 			"gaussjumps=%d wallbangs=%d target=%s\n",
 			bot.name, heldBuf, fire.zoomed ? 1 : 0, BotFire::ModeName(fire.mode), fire.lastReason,
 			ammoBuf, aimBuf, BotFire::CommitName(fire.commit), held, fire.shots,
@@ -1168,7 +1288,7 @@ void PrintFireStatus()
 			fire.switches, fire.reloads,
 			fire.emptySwitches, fire.idleSwitches, fire.idleReloads, fire.ambushes, fire.duels,
 			fire.heardThrows, fire.harmVetoes, fire.throwId, fire.throwDrops, BotFire::ThrowBanned(bot) ? 1 : 0,
-			fire.spinups, fire.lasers, fire.braces, fire.bracing, fire.gaussJumps, fire.wallbangs,
+			fire.spinups, fire.lasers, fire.braces, fire.bracing, fire.braceWaits, fire.gaussJumps, fire.wallbangs,
 			target ? CBotTargetNameOf(target) : "-");
 		SERVER_PRINT(line);
 	}
@@ -1456,6 +1576,16 @@ void PrintNavStatus()
 		msg += "\n";
 		PrintLong(msg);
 	}
+}
+
+void PrintSpawns()
+{
+	ForEachSpawn([](const char *classname, edict_t *ent) {
+		char msg[128];
+		snprintf(msg, sizeof(msg), "CrossBot: spawn %s (%.1f,%.1f,%.1f)\n", classname,
+			ent->v.origin.x, ent->v.origin.y, ent->v.origin.z);
+		SERVER_PRINT(msg);
+	});
 }
 
 void PrintWaypoints()

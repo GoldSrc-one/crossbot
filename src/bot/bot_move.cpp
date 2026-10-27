@@ -6,8 +6,11 @@
 #include <vector>
 
 #include "bot_move.h"
+#include "../game/cvars.h"
+#include "bot_break.h"
 #include "bot_fire.h"
 #include "bot_deploy.h"
+#include "bot_log.h"
 #include "bot_perf.h"
 #include "bot_timing.h"
 #include "../game/game_profile.h"
@@ -24,6 +27,8 @@ namespace
 	constexpr byte kMaxJumpCommandMsec = 50;
 
 	constexpr float kMoveSpeed = 250.f;
+
+	constexpr float kBraceShare = 0.9f;
 
 	constexpr int kMaxPlayers = 33;
 
@@ -107,9 +112,31 @@ namespace
 		if (lookahead < kBeamGuardMin) lookahead = kBeamGuardMin;
 		if (lookahead > kBeamGuardMax) lookahead = kBeamGuardMax;
 
-		BotDeploy::BeamBlock guard = BotDeploy::BeamGuard(bot, dir, lookahead);
+		const BotDeploy::Beam *beam = NULL;
+		BotDeploy::BeamBlock guard = BotDeploy::BeamGuard(bot, dir, lookahead, &beam);
 		if (guard == BotDeploy::BEAM_CLEAR)
 			return;
+
+		float now = gpGlobals->time;
+		bot.avoid.guardBeam = beam ? beam->ent : NULL;
+		bot.avoid.guardTime = now;
+		if (beam && now >= bot.avoid.guardLogTime)
+		{
+			bot.avoid.guardLogTime = now + 1.f;
+			const Vector &o = bot.pEdict->v.origin;
+			Vector seg = beam->end - beam->start;
+			float segLen2 = seg.x * seg.x + seg.y * seg.y;
+			float t = segLen2 > 0.f
+				? ((o.x - beam->start.x) * seg.x + (o.y - beam->start.y) * seg.y) / segLen2 : 0.f;
+			t = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
+			float lx = o.x - (beam->start.x + seg.x * t);
+			float ly = o.y - (beam->start.y + seg.y * t);
+			BOT_VLOG("CrossBot: %s beam guard %s at (%.1f,%.1f,%.1f) dir (%.2f,%.2f) beam (%.0f,%.0f,%.0f)-"
+				"(%.0f,%.0f,%.0f) lateral %.0f speed %.0f\n",
+				bot.name, guard == BotDeploy::BEAM_STOP ? "stop" : "duck", o.x, o.y, o.z, dir.x, dir.y,
+				beam->start.x, beam->start.y, beam->start.z, beam->end.x, beam->end.y, beam->end.z,
+				sqrtf(lx * lx + ly * ly), speed);
+		}
 
 		if (guard == BotDeploy::BEAM_DUCK)
 			buttons |= IN_DUCK;
@@ -172,7 +199,7 @@ namespace
 		for (int i = 1; i <= gpGlobals->maxClients; ++i)
 		{
 			edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-			if (!ent || ent == pEdict || !CBotIsLivePlayer(ent) ||
+			if (!ent || ent == pEdict || !CBotIsLivePlayer(ent) || (g_pGameProfile && g_pGameProfile->IsDead(ent)) ||
 				Teams::Of(pEdict, ent) != Teams::REL_FRIEND)
 				continue;
 
@@ -235,6 +262,111 @@ namespace
 		bot.moveForward = fmove;
 		bot.moveSide = smove;
 	}
+
+	constexpr float kLineSticky = 0.5f;
+	constexpr float kLineSightHalf = 24.f;
+	constexpr float kLineFireHalf = 64.f;
+	constexpr float kLineSightTurn = 0.785398f;
+
+	float LineBlock(CBot &bot, const Vector &target, float halfWidth)
+	{
+		edict_t *pEdict = bot.pEdict;
+		const Vector &from = pEdict->v.origin;
+		float dx = target.x - from.x, dy = target.y - from.y;
+		float len = sqrtf(dx * dx + dy * dy);
+		float left = 0.f, right = 0.f;
+		if (len >= 1.f && Teams::Active(pEdict) && (pEdict->v.flags & FL_ONGROUND) != 0)
+		{
+			dx /= len;
+			dy /= len;
+			float fallback = (g_engfuncs.pfnIndexOfEdict(pEdict) & 1) ? 1.f : -1.f;
+			for (int i = 1; i <= gpGlobals->maxClients; ++i)
+			{
+				edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+				if (!ent || ent == pEdict || !CBotIsLivePlayer(ent) || (g_pGameProfile && g_pGameProfile->IsDead(ent)) ||
+					Teams::Of(pEdict, ent) != Teams::REL_FRIEND)
+					continue;
+
+				Vector f = ent->v.origin - from;
+				float along = f.x * dx + f.y * dy;
+				if (along <= 0.f || along >= len)
+					continue;
+				if (fabsf(f.z - (target.z - from.z) * along / len) >= kSpacingHeight)
+					continue;
+				float lat = dx * f.y - dy * f.x;
+				float w = 1.f - fabsf(lat) / halfWidth;
+				if (w <= 0.f)
+					continue;
+
+				float sticky = halfWidth * kLineSticky;
+				float side = (lat > sticky) ? -1.f : (lat < -sticky) ? 1.f
+					: (bot.lineSide != 0.f ? bot.lineSide : fallback);
+				if (side > 0.f)
+					left = fmaxf(left, w);
+				else
+					right = fmaxf(right, w);
+			}
+		}
+
+		float side = 0.f, w = 0.f;
+		if (left > 0.f && right == 0.f)
+		{
+			side = 1.f;
+			w = left;
+		}
+		else if (right > 0.f && left == 0.f)
+		{
+			side = -1.f;
+			w = right;
+		}
+
+		if (side != bot.lineSide)
+		{
+			BOT_VLOG("CrossBot: %s line to (%.0f,%.0f,%.0f) %s\n", bot.name, target.x, target.y, target.z,
+				side > 0.f ? "steers left" : side < 0.f ? "steers right"
+					: (left > 0.f ? "blocked both sides, goes middle" : "is clear"));
+			bot.lineSide = side;
+		}
+		return side * w;
+	}
+}
+
+Vector Bot_ClearLineOfSight(CBot &bot, const Vector &moveDir, const Vector &target)
+{
+	float s = LineBlock(bot, target, kLineSightHalf);
+	if (s == 0.f)
+		return moveDir;
+
+	float a = s * kLineSightTurn;
+	float c = cosf(a), sn = sinf(a);
+	Vector turned(moveDir.x * c - moveDir.y * sn, moveDir.x * sn + moveDir.y * c, 0.f);
+	float len = sqrtf(turned.x * turned.x + turned.y * turned.y);
+	if (len < 0.001f || !SpacingProbeOnMesh(bot, bot.pEdict->v.origin + turned * (kSpacingProbe / len)))
+		return moveDir;
+	return turned;
+}
+
+void Bot_ClearLineOfFire(CBot &bot, Vector &moveDir, float &drive, const Vector &enemy)
+{
+	float s = LineBlock(bot, enemy, kLineFireHalf);
+	if (s == 0.f)
+		return;
+
+	edict_t *pEdict = bot.pEdict;
+	float dx = enemy.x - pEdict->v.origin.x, dy = enemy.y - pEdict->v.origin.y;
+	float len = sqrtf(dx * dx + dy * dy);
+	float side = (s > 0.f) ? 1.f : -1.f;
+	Vector perp(-dy / len * side, dx / len * side, 0.f);
+	if (!SpacingProbeOnMesh(bot, pEdict->v.origin + perp * kSpacingProbe))
+		return;
+
+	float push = fabsf(s) * Bot_MaxSpeed(pEdict);
+	Vector world = moveDir * drive + perp * push;
+	float wl = sqrtf(world.x * world.x + world.y * world.y);
+	if (wl < 1.f)
+		return;
+	moveDir = Vector(world.x / wl, world.y / wl, 0.f);
+	drive = fmaxf(drive, push);
 }
 
 void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove,
@@ -255,12 +387,15 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 
 	bool braceDuck = false;
 	bool stanceOnly = false;
-	if (BotFire::Brace(bot, buttons, braceDuck, stanceOnly))
+	float braceCap = 0.f;
+	if (BotFire::Brace(bot, buttons, braceDuck, stanceOnly, braceCap))
 	{
-		if (!stanceOnly)
+		float drive = sqrtf(fmove * fmove + smove * smove);
+		float allowed = braceCap * kBraceShare;
+		if (!stanceOnly && drive > allowed)
 		{
-			fmove = 0.f;
-			smove = 0.f;
+			fmove *= allowed / drive;
+			smove *= allowed / drive;
 		}
 		buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
 		if (braceDuck)
@@ -272,7 +407,7 @@ void Bot_RunPlayerMove(CBot &bot, const Vector &angles, float fmove, float smove
 	if (g_pGameProfile)
 		g_pGameProfile->MoveAdjust(bot, fmove, smove, buttons);
 
-	if (g_pGameProfile && bot.camp.charging && bot.goal.stop.camp)
+	if (g_pGameProfile && ((bot.camp.charging && bot.goal.stop.camp) || BotFire::BraceCreep(bot)))
 	{
 		buttons |= g_pGameProfile->CreepButtons();
 		float creep = g_pGameProfile->CreepSpeed();
@@ -344,11 +479,110 @@ bool Bot_TraceHitEntity(const TraceResult &tr)
 	if (hit->v.solid == SOLID_BSP && (hit->v.flags & FL_WORLDBRUSH) != 0)
 		return false;
 	return !crossbot_nav::IsBakedBlocker(STRING(hit->v.classname),
-		static_cast<int>(hit->v.spawnflags));
+		static_cast<int>(hit->v.spawnflags), hit->v.targetname != 0);
 }
 
-PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
+std::shared_ptr<const Nav::WorldSnapshot> Bot_WorldSnapshot()
 {
+	static std::shared_ptr<const Nav::WorldSnapshot> s_snap;
+	static float s_time = -1.f;
+
+	const Nav::NavMesh *mesh = Nav::Get();
+	if (!mesh || !mesh->world)
+		return nullptr;
+	if (s_snap && s_time == gpGlobals->time && s_snap->world == mesh->world)
+		return s_snap;
+
+	auto snap = std::make_shared<Nav::WorldSnapshot>();
+	snap->world = mesh->world;
+	int models = static_cast<int>(mesh->world->models.size());
+
+	for (int i = 1; i < gpGlobals->maxEntities; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		if (!ent || ent->free || ent->v.solid == SOLID_NOT)
+			continue;
+
+		const char *model = STRING(ent->v.model);
+		int sub = (model && model[0] == '*') ? atoi(model + 1) : -1;
+		if (sub >= models)
+			sub = -1;
+
+		const char *classname = STRING(ent->v.classname);
+		Nav::WorldSolid solid;
+		solid.index = i;
+		solid.owner = ent->v.owner ? g_engfuncs.pfnIndexOfEdict(ent->v.owner) : 0;
+		solid.origin = ent->v.origin;
+		solid.absmin = ent->v.absmin;
+		solid.absmax = ent->v.absmax;
+
+		if (classname && strcmp(classname, "trigger_push") == 0)
+		{
+			if (sub <= 0)
+				continue;
+			solid.model = sub;
+			Nav::SetSolidAngles(solid, ent->v.angles);
+			solid.push = ent->v.movedir * (ent->v.speed != 0.f ? ent->v.speed : kDefaultPushSpeed);
+			snap->pushes.push_back(solid);
+			continue;
+		}
+
+		if (ent->v.solid == SOLID_TRIGGER || ent->v.size.x == 0.f)
+			continue;
+
+		bool named = ent->v.targetname != 0;
+		bool baked = crossbot_nav::IsBakedBlocker(classname, static_cast<int>(ent->v.spawnflags), named);
+		if (ent->v.solid == SOLID_BSP)
+		{
+			if (sub <= 0 || (ent->v.flags & FL_MONSTERCLIP) != 0)
+				continue;
+			solid.model = sub;
+			Nav::SetSolidAngles(solid, ent->v.angles);
+			solid.counts = crossbot_nav::IsBarrierWall(classname, named) ||
+				((ent->v.flags & FL_WORLDBRUSH) == 0 && !baked);
+		}
+		else if (ent->v.movetype == MOVETYPE_PUSHSTEP)
+		{
+			solid.boxMins = ent->v.mins;
+			solid.boxMaxs = ent->v.maxs;
+			solid.counts = !baked;
+		}
+		else
+			continue;
+
+		solid.breakable = BotBreak::IsTarget(ent);
+		snap->solids.push_back(solid);
+	}
+
+	s_snap = std::move(snap);
+	s_time = gpGlobals->time;
+	return s_snap;
+}
+
+namespace
+{
+	Nav::TraceFilter WorldFilter(edict_t *ignore, int hull, bool phaseBreakables)
+	{
+		Nav::TraceFilter filter;
+		filter.hull = hull;
+		filter.ignore = ignore ? g_engfuncs.pfnIndexOfEdict(ignore) : 0;
+		filter.phaseBreakables = phaseBreakables;
+		return filter;
+	}
+}
+
+PmSim::PmTraceFn Bot_WorldTraceFn(edict_t *ignore, int hull, bool phaseBreakables)
+{
+	std::shared_ptr<const Nav::WorldSnapshot> snap = Bot_WorldSnapshot();
+	if (snap)
+	{
+		Nav::TraceFilter filter = WorldFilter(ignore, hull, phaseBreakables);
+		return [snap, filter](const Vector &start, const Vector &end)
+		{
+			return Nav::TraceWorld(*snap, filter, start, end);
+		};
+	}
+
 	return [ignore, hull](const Vector &start, const Vector &end)
 	{
 		TraceResult tr;
@@ -362,6 +596,19 @@ PmSim::PmTraceFn Bot_EngineTraceFn(edict_t *ignore, int hull)
 		out.startsolid = tr.fStartSolid != 0;
 		out.hitEntity = Bot_TraceHitEntity(tr);
 		return out;
+	};
+}
+
+PmSim::PmArcFn Bot_WorldArcFn(edict_t *ignore, int hull, bool phaseBreakables)
+{
+	std::shared_ptr<const Nav::WorldSnapshot> snap = Bot_WorldSnapshot();
+	if (!snap)
+		return nullptr;
+
+	Nav::TraceFilter filter = WorldFilter(ignore, hull, phaseBreakables);
+	return [snap, filter](const Vector &start, const Vector &vel, float gravity, float maxTime)
+	{
+		return Nav::SafeArcTime(*snap, filter, start, vel, gravity, maxTime);
 	};
 }
 
@@ -385,59 +632,13 @@ Vector Bot_DriftVelocity(edict_t *pEdict, const PmSim::PmPushFn &push)
 
 PmSim::PmPushFn Bot_PushFields(int hull)
 {
-	struct Field
-	{
-		Vector mins, maxs;
-		Vector push;
-		edict_t *ent;
-	};
-
-	std::vector<Field> fields;
-
-	for (int i = 1; i < gpGlobals->maxEntities; ++i)
-	{
-		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-		if (!ent || ent->free || ent->v.solid == SOLID_NOT)
-			continue;
-
-		const char *classname = STRING(ent->v.classname);
-		if (!classname || strcmp(classname, "trigger_push") != 0)
-			continue;
-
-		Field field;
-		field.mins = ent->v.absmin;
-		field.maxs = ent->v.absmax;
-		field.push = ent->v.movedir * (ent->v.speed != 0.f ? ent->v.speed : kDefaultPushSpeed);
-		field.ent = ent;
-		fields.push_back(field);
-	}
-
-	if (fields.empty())
+	std::shared_ptr<const Nav::WorldSnapshot> snap = Bot_WorldSnapshot();
+	if (!snap || snap->pushes.empty())
 		return nullptr;
 
-	Vector hullMins = (hull == kHullDuck) ? Vector(-16.f, -16.f, -18.f) : Vector(-16.f, -16.f, -36.f);
-	Vector hullMaxs = (hull == kHullDuck) ? Vector(16.f, 16.f, 18.f) : Vector(16.f, 16.f, 36.f);
-
-	return [fields, hull, hullMins, hullMaxs](const Vector &origin)
+	return [snap, hull](const Vector &origin)
 	{
-		Vector total(0.f, 0.f, 0.f);
-
-		for (const Field &field : fields)
-		{
-			if (origin.x < field.mins.x - hullMaxs.x || origin.x > field.maxs.x - hullMins.x ||
-				origin.y < field.mins.y - hullMaxs.y || origin.y > field.maxs.y - hullMins.y ||
-				origin.z < field.mins.z - hullMaxs.z || origin.z > field.maxs.z - hullMins.z)
-				continue;
-
-			TraceResult tr;
-			g_engfuncs.pfnTraceModel(origin, origin, hull, field.ent, &tr);
-			if (!tr.fStartSolid && !tr.fAllSolid)
-				continue;
-
-			total = total + field.push;
-		}
-
-		return total;
+		return Nav::PushAt(*snap, hull, origin);
 	};
 }
 
@@ -451,7 +652,7 @@ float Bot_Carefulness(const CBot &bot)
 	if (!g_pGameProfile || !bot.pEdict)
 		return 0.f;
 
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_careful");
+	cvar_t *cvar = CBotCvar("crossbot_careful");
 	float scale = cvar ? cvar->value : 1.f;
 	if (scale <= 0.f)
 		return 0.f;
@@ -467,9 +668,12 @@ float Bot_Carefulness(const CBot &bot)
 	return (1.f - readiness) * scale;
 }
 
-PmSim::FallRule Bot_FallDamage(const CBot &)
+PmSim::FallRule Bot_FallDamage(const CBot &bot)
 {
-	return g_pGameProfile ? g_pGameProfile->FallDamage() : PmSim::kHlFall;
+	PmSim::FallRule rule = g_pGameProfile ? g_pGameProfile->FallDamage() : PmSim::kHlFall;
+	if (bot.pEdict)
+		rule.health = bot.pEdict->v.health;
+	return rule;
 }
 
 WeaponRangeClass Bot_RangeClass(const CBot &bot)
@@ -547,7 +751,7 @@ float Bot_MaxSpeed(edict_t *pEdict)
 	{
 		maxspeed = pEdict->v.maxspeed;
 		if (maxspeed <= 1.f)
-			maxspeed = g_engfuncs.pfnCVarGetFloat("sv_maxspeed");
+			maxspeed = CBotCvarFloat("sv_maxspeed");
 		if (maxspeed <= 1.f)
 			maxspeed = kMoveSpeed;
 	}
@@ -562,27 +766,27 @@ PmSim::PmPhysics Bot_Physics(edict_t *pEdict)
 
 	float gravity = PmSim::kGravity * Bot_GravityMultiplier(pEdict);
 
-	float airAccel = g_engfuncs.pfnCVarGetFloat("sv_airaccelerate");
+	float airAccel = CBotCvarFloat("sv_airaccelerate");
 	if (airAccel <= 0.f)
 		airAccel = 10.f;
 
-	float accel = g_engfuncs.pfnCVarGetFloat("sv_accelerate");
+	float accel = CBotCvarFloat("sv_accelerate");
 	if (accel <= 0.f)
 		accel = 10.f;
 
-	float groundFriction = g_engfuncs.pfnCVarGetFloat("sv_friction");
+	float groundFriction = CBotCvarFloat("sv_friction");
 	if (groundFriction <= 0.f)
 		groundFriction = 4.f;
 
-	float stopSpeed = g_engfuncs.pfnCVarGetFloat("sv_stopspeed");
+	float stopSpeed = CBotCvarFloat("sv_stopspeed");
 	if (stopSpeed <= 0.f)
 		stopSpeed = 100.f;
 
-	float edgeFriction = g_engfuncs.pfnCVarGetFloat("sv_edgefriction");
+	float edgeFriction = CBotCvarFloat("sv_edgefriction");
 	if (edgeFriction <= 0.f)
 		edgeFriction = 2.f;
 
-	float maxVelocity = g_engfuncs.pfnCVarGetFloat("sv_maxvelocity");
+	float maxVelocity = CBotCvarFloat("sv_maxvelocity");
 	if (maxVelocity <= 0.f)
 		maxVelocity = kDefaultMaxVelocity;
 

@@ -7,6 +7,8 @@
     [int]$DuelSeconds = 180,
     [int]$ProjectileSeconds = 420,
     [int]$PollSeconds = 2,
+    [float]$Notice = -1,
+    [int]$Coverage = -1,
     [switch]$Full,
     [string]$HLDSDir = "D:\hlds"
 )
@@ -265,6 +267,8 @@ $failures = @()
 try {
     Invoke-CbRcon $Port "crossbot_gather 1" | Out-Null
     Invoke-CbRcon $Port "crossbot_sense 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_notice $Notice" | Out-Null
+    if ($Coverage -ge 0) { Invoke-CbRcon $Port "crossbot_coverage $Coverage" | Out-Null }
 
     Invoke-CbRcon $Port "crossbot_fire 0" | Out-Null
 
@@ -366,7 +370,8 @@ try {
         if ($Full) { continue }
 
         $shots = Get-TotalShots $duel
-        if ($shots -gt 0 -and (Get-TotalBurned $duel) -gt 0 -and $duel.Targets -gt 0 -and $duel.Firing -gt 0) { break }
+        if ($shots -gt 0 -and (Get-TotalBurned $duel) -gt 0 -and $duel.Targets -gt 0 -and $duel.Firing -gt 0 -and
+            (Get-TotalSticky $duel) -gt 0) { break }
     }
 
     $duelShots = Get-TotalShots $duel

@@ -9,7 +9,7 @@
 #include <meta_api.h>
 
 #include "../game/crossplay.h"
-#include "bsp_checksum.h"
+#include "bsp_world.h"
 #include "nav_format.h"
 
 namespace Nav
@@ -66,6 +66,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 	std::vector<NavVantageRecord> vantageRecords;
 	std::vector<NavWaterVolumeRecord> waterRecords;
 	std::vector<NavCampRecord> campRecords;
+	std::vector<NavBarrierRecord> barrierRecords;
 
 	bool ok = ReadArray(f, header.areaCount, areaRecords) &&
 		ReadArray(f, header.connCount, connRecords) &&
@@ -75,7 +76,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		ReadArray(f, header.detourPointCount, detourPoints) &&
 		ReadArray(f, header.vantageCount, vantageRecords) &&
 		ReadArray(f, header.waterVolumeCount, waterRecords) &&
-		ReadArray(f, header.campCount, campRecords);
+		ReadArray(f, header.campCount, campRecords) &&
+		ReadArray(f, header.barrierCount, barrierRecords);
 	std::fclose(f);
 
 	if (!ok)
@@ -88,15 +90,15 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 
 	char bspPath[512];
 	XPlay::FindMapBsp(mapName, bspPath, sizeof(bspPath));
-	uint32_t liveChecksum = ComputeLiveBspChecksum(bspPath);
-	if (liveChecksum == 0)
+	std::shared_ptr<const BspWorld> world = LoadBspWorld(bspPath);
+	if (!world)
 	{
 		char msg[1024];
 		snprintf(msg, sizeof(msg), "CrossBot: could not verify %s against live map %s (bots disabled).\n", navPath, bspPath);
 		SERVER_PRINT(msg);
 		return nullptr;
 	}
-	if (liveChecksum != header.bspChecksum)
+	if (world->checksum != header.bspChecksum)
 	{
 		char msg[1024];
 		snprintf(msg, sizeof(msg), "CrossBot: %s is stale (checksum mismatch against %s), ignoring.\n", navPath, bspPath);
@@ -106,6 +108,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 
 	auto mesh = std::make_unique<NavMesh>();
 	mesh->mapName = mapName;
+	mesh->world = std::move(world);
 	mesh->designMaxSpeed = (header.designMaxSpeed > 1.f) ? header.designMaxSpeed : kNavDefaultDesignSpeed;
 
 	mesh->areas.resize(areaRecords.size());
@@ -121,6 +124,8 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		area.waterVolume = rec.waterVolume;
 		area.submergeZ = rec.submergeZ;
 		area.driftVelocity = Vector(rec.driftVelocity[0], rec.driftVelocity[1], rec.driftVelocity[2]);
+		area.barrier = rec.barrier < barrierRecords.size() ? rec.barrier : kNoBarrier;
+		area.barrierFloor = rec.barrierFloor < barrierRecords.size() ? rec.barrierFloor : kNoBarrier;
 		area.connIndices.reserve(rec.connCount);
 		for (uint32_t k = 0; k < rec.connCount; ++k)
 			area.connIndices.push_back(areaConnIndex[rec.connOffset + k]);
@@ -276,6 +281,16 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		vol.moving = (rec.flags & crossbot_nav::WATERVOL_MOVING) != 0;
 	}
 
+	mesh->barriers.resize(barrierRecords.size());
+	for (size_t i = 0; i < barrierRecords.size(); ++i)
+	{
+		const NavBarrierRecord &rec = barrierRecords[i];
+		Barrier &b = mesh->barriers[i];
+		b.modelIndex = rec.modelIndex;
+		b.mins = Vector(rec.mins[0], rec.mins[1], rec.mins[2]);
+		b.maxs = Vector(rec.maxs[0], rec.maxs[1], rec.maxs[2]);
+	}
+
 	mesh->vantageField.spacing = header.vantageSpacing;
 	mesh->vantageField.maxExposure = header.maxExposure;
 	mesh->vantageField.vantages.resize(vantageRecords.size());
@@ -285,6 +300,7 @@ std::unique_ptr<NavMesh> LoadNavFile(const char *mapName)
 		Vantage &v = mesh->vantageField.vantages[i];
 		v.pos = Vector(rec.pos[0], rec.pos[1], rec.pos[2]);
 		v.exposure = rec.exposure;
+		v.visibility = rec.visibility;
 		v.watchCount = 0;
 		for (size_t k = 0; k < kNavWatchDirs; ++k)
 		{

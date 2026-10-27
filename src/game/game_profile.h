@@ -86,6 +86,24 @@ struct OffhandInfo
 
 constexpr int kMaxOffhandSlots = 2;
 
+struct AbilityInfo
+{
+	const char *name;
+	const char *command;
+	const char *desc;
+	const char *args = nullptr;
+};
+
+struct RadioInfo
+{
+	const char *command;
+	int code;
+	const char *sound;
+	const char *text;
+};
+
+constexpr int kRadioSignalBase = 100;
+
 struct BotInventory;
 struct CBot;
 
@@ -126,15 +144,29 @@ public:
 
 	virtual bool AbilityRun(CBot &, const Nav::NavMesh &) const { return false; }
 
+	virtual int Abilities(const AbilityInfo *&list) const { list = nullptr; return 0; }
+
+	virtual bool StartAbility(CBot &, const char *, const char *, edict_t *) const { return false; }
+
+	virtual bool AbilityArg(const char *, const char *, char *, size_t) const { return false; }
+
+	virtual bool CanProne(edict_t *) const { return false; }
+
+	virtual int RadioCommands(const RadioInfo *&list) const { list = nullptr; return 0; }
+
 	virtual void RefreshWorld() const {}
 
 	virtual bool Disguised(edict_t *) const { return false; }
+
+	virtual bool Cloaked(edict_t *) const { return false; }
 
 	virtual bool HoldFire(const CBot &) const { return false; }
 
 	virtual unsigned short FireToggle(const CBot &, bool) const { return 0; }
 
 	virtual bool SpreadWide(edict_t *, int, void *, float, float &) const { return false; }
+
+	virtual bool BraceSpeed(edict_t *, int, void *, float, float &) const { return false; }
 
 	virtual bool Penetrates(const CBot &, int, const Vector &, const Vector &, float) const { return false; }
 
@@ -201,6 +233,8 @@ public:
 	virtual int MeleeWeapon() const = 0;
 
 	virtual bool IsMeleeWeapon(int id) const = 0;
+
+	virtual bool MeleeOnlyAllows(int id) const = 0;
 
 	virtual int AmbushWeapon(AmbushKind kind) const = 0;
 

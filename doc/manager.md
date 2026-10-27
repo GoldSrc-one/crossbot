@@ -13,13 +13,11 @@ inside `pfnRunPlayerMove` (`SV_RunCmd` sets `v.button` from the usercmd, then `p
 `CBasePlayer::PreThink` dispatches to `PlayerDeathThink` whenever `deadflag >= DEAD_DYING`). Stop calling
 `pfnRunPlayerMove` for a dead bot and the game DLL never gets another chance to respawn it.
 
-**The button has to be released before it is pressed.** `PlayerDeathThink` gates the `DEAD_DEAD` →
-`DEAD_RESPAWNABLE` transition on *no* button being held (`player.cpp`, "wait for all buttons released"),
-and only the following call, with `deadflag` already `DEAD_RESPAWNABLE`, reaches `respawn()`. Holding
-`IN_ATTACK` on every dead frame — which is what `CHLDMProfile::Respawn` used to do — therefore parks the
-bot at `DEAD_DEAD` permanently; it also never reaches the `mp_forcerespawn` branch further down, so
-nothing else rescues it. `Respawn` now sends zero buttons until `deadflag == DEAD_RESPAWNABLE` and
-`IN_ATTACK` on that frame alone.
+**The button has to be released before it is pressed.** `Respawn` sends zero buttons until
+`deadflag == DEAD_RESPAWNABLE` and `IN_ATTACK` on that frame alone. `PlayerDeathThink` gates the
+`DEAD_DEAD` → `DEAD_RESPAWNABLE` transition on *no* button being held (`player.cpp`, "wait for all
+buttons released"), and only the following call reaches `respawn()`. Holding `IN_ATTACK` on every dead
+frame parks the bot at `DEAD_DEAD` forever, and it never reaches the `mp_forcerespawn` branch either.
 
 Nothing resets the bot's plan across a death. It does not need to: the respawn moves the bot far enough
 that `Bot_MoveNav`'s `kTeleportJumpThreshold` guard calls `ResetPath` on the first live frame, and when
@@ -29,7 +27,21 @@ goal it was given.
 
 `crossbot_kill` exists to make this testable from the dedicated-server console.
 
-A dead bot's only physics tick is the respawn frame. `pfnRunPlayerMove` receives one frame's worth of msec (not a token 1ms), and leaves `gpGlobals->frametime` holding whatever msec it was given. Every later bot in the frame would inherit that stale timing if nothing restored it, so the respawn is a full frame's worth to avoid propagating old command msec into the next bot's calculations.
+**A respawn without a death is still a new life.** Several games put living players back on a spawn
+point without killing them: CS `RoundRespawn` at every round restart, DoD `RoundRespawn`, TFC goals
+with result 0x20 (`CBasePlayer::ForceRespawn`), plus AMXX revive and respawn plugins in any game.
+`wasDead` never flips for these, so `Reborn` in `bot_manager.cpp` treats a jump of more than
+`kSpawnJump` since the last `Bot_MoveNav` frame (`bot.lastOrigin`) that lands within `kSpawnNear` of any
+spawn entity as a new life. It runs the same per-life reset as a death and logs `was put back at its
+spawn alive`. Without it, a CS survivor holding a timed camp keeps holding it from the spawn, aiming the
+old spot's yaw at the spawn wall until `holdFor` runs out. Spawn entities are the `kSpawnClassnames`
+list, every game's classname and any team; `crossbot_list_spawns` prints it. Anything else that lands a
+living bot within `kSpawnNear` of a spawn also counts: `crossbot_teleport` onto a spawn, or a teleporter
+whose destination is next to one.
+
+**The respawn frame gets a full frame's msec**, not a token 1 ms. It is a dead bot's only physics tick,
+and `pfnRunPlayerMove` leaves `gpGlobals->frametime` holding whatever msec it was given, so a short value
+would leak into every later bot's frame.
 
 ### Level changes drop every bot, and that is the engine doing it
 
@@ -81,7 +93,7 @@ The pairs that carry the diagnosis:
   remembers, how stale the sighting is, and the bot's `EvaluateCombat` score. `combat=0` next to a
   live `enemy=` is normal and not a contradiction: sense remembers someone the bot never saw well
   enough to fight, or combat already exited on one of its own rules while the suspicion lingers.
-  `ready=` no longer selects anything — it survives because carefulness still routes by it.
+  `ready=` selects nothing; it is shown because carefulness routes by it.
   `enemyAge=` above `crossbot_sense_decay` should never be seen; the record is dropped there.
   `crossbot_combat_status` is the fuller view.
 - `breaking=` with `health=`, `swings=` and `for=` — present only while `BotBreak` owns the frame.

@@ -3,12 +3,16 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <queue>
+#include <unordered_map>
 
 #include "clipnode_tree.h"
 #include "hull_defs.h"
 #include "point_grid.h"
+#include "reachability.h"
 #include "vis_sampling.h"
 #include "work_pool.h"
 
@@ -26,6 +30,7 @@ constexpr double kCampGridCell = 32.0;
 constexpr double kCampMinTargetDistSq = 1.0e-6;
 constexpr double kCampMinGain = 1.02;
 constexpr size_t kCampBatchChunk = 256;
+constexpr double kCampBudgetScale = 2.0;
 
 struct CampTarget
 {
@@ -136,8 +141,6 @@ struct CampContext
 	int worldHeadnode = 0;
 	const BinLayout *bins = nullptr;
 	size_t minVisible = 0;
-	// Targets sorted by leaf: targetOrder[k] is a candidate index, targetEyes its float eye at 3 * k.
-	// Groups are runs of one leaf, at most kCampBatchChunk long.
 	std::vector<size_t> targetOrder;
 	std::vector<float> targetEyes;
 	std::vector<size_t> groupBegin;
@@ -171,8 +174,6 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 	slot.standTargets.clear();
 	slot.crouchTargets.clear();
 
-	// World traces go visleaf by visleaf: one batch per target group with the stand and/or crouch eye as
-	// the starts. The loop below reads the results in candidate order, so the target lists keep their order.
 	slot.standBlocked.resize(candidates.size());
 	slot.crouchBlocked.resize(candidates.size());
 	slot.blocked.resize(2 * kCampBatchChunk);
@@ -325,11 +326,314 @@ void EvaluateCandidate(const CampContext &ctx, size_t index, SlotState &slot, Ev
 	out.valid = true;
 }
 
+double BoxDist(const Vec3 &p, const Vec3 &mins, const Vec3 &maxs)
+{
+	Vec3 d(std::max(0.0, std::max(mins.x - p.x, p.x - maxs.x)),
+		std::max(0.0, std::max(mins.y - p.y, p.y - maxs.y)),
+		std::max(0.0, std::max(mins.z - p.z, p.z - maxs.z)));
+	return d.Length();
+}
+
+bool SeesObjective(const CampContext &ctx, const CampObjective &obj, const std::vector<int> &nearbyLeaves,
+	const Vec3 &eye, const uint8_t *row, SlotState &slot)
+{
+	for (size_t p = 0; p < obj.points.size(); ++p)
+	{
+		TraceResult tr = TraceHull(ctx.hull, ctx.worldHeadnode, eye, obj.points[p]);
+		++slot.counters.worldTraces;
+		if (tr.startsolid || tr.allsolid)
+			continue;
+		if (tr.fraction < 1.f && BoxDist(tr.endpos, obj.mins[p], obj.maxs[p]) > crossbot_nav::kOverlookMargin)
+			continue;
+		if (!BlockersOccluded(ctx.hull, *ctx.blockers, eye, tr.endpos, slot.counters))
+			return true;
+	}
+
+	for (size_t s = 0; s < obj.nearby.size(); ++s)
+	{
+		if (row && !ctx.vis->RowVisible(row, nearbyLeaves[s]))
+			continue;
+		if (!Occluded(ctx.hull, ctx.worldHeadnode, *ctx.blockers, eye, obj.nearby[s], slot.counters))
+			return true;
+	}
+
+	return false;
+}
+
+uint64_t SeenObjectives(const CampContext &ctx, const std::vector<CampObjective> &objectives,
+	const std::vector<std::vector<int>> &nearbyLeaves, size_t index, SlotState &slot)
+{
+	const VantageCandidate &self = (*ctx.candidates)[index];
+	Vec3 eye(self.floor.x, self.floor.y, self.floor.z + kStandEyeLift);
+	if ((self.areaFlags & crossbot_nav::NAV_AREA_CROUCH) != 0 ||
+		ClassifyPoint(ctx.hull, ctx.worldHeadnode, eye) == CONTENTS_SOLID)
+		eye.z = self.floor.z + kDuckEyeLift;
+	if (ClassifyPoint(ctx.hull, ctx.worldHeadnode, eye) == CONTENTS_SOLID)
+		return 0;
+
+	const uint8_t *row = slot.standReader->VisRow(ctx.vis->LeafForPoint(eye));
+	uint64_t seen = 0;
+	for (size_t k = 0; k < objectives.size(); ++k)
+	{
+		if (SeesObjective(ctx, objectives[k], nearbyLeaves[k], eye, row, slot))
+			seen |= uint64_t(1) << k;
+	}
+	return seen;
+}
+
+constexpr double kAreaFloorNormalZ = 0.3;
+constexpr int kTfcActivateTouch = 1;
+constexpr int kTfcActivateDetpack = 2;
+constexpr int kDodSfTnt = 64;
+
+void AddNearby(const MergeResult &merged, const std::vector<std::vector<size_t>> &areaConns, const Vec3 &point,
+	std::vector<Vec3> &out)
+{
+	int goal = FindAreaContainingPoint(point, merged.areas);
+	if (goal < 0)
+		return;
+
+	const double reach = crossbot_nav::kOverlookReach;
+	std::vector<double> field(merged.areas.size(), reach + 1.0);
+	typedef std::pair<double, int> Entry;
+	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+	field[goal] = 0.0;
+	open.push(Entry(0.0, goal));
+	while (!open.empty())
+	{
+		Entry top = open.top();
+		open.pop();
+		int current = top.second;
+		if (top.first > field[current])
+			continue;
+
+		for (size_t ci : areaConns[current])
+		{
+			const MergedConnection &c = merged.conns[ci];
+			int from = (c.areaA == current) ? c.areaB : c.areaA;
+			if (!crossbot_nav::ConnAllowsDirection(c.connFlags, static_cast<uint32_t>(c.areaA),
+				static_cast<uint32_t>(from)))
+				continue;
+			if (c.connType == crossbot_nav::CONN_AIRMOVE && std::fabs(c.gravity - 1.0) > 1e-3)
+				continue;
+
+			double base = static_cast<double>(ConnectionTravelSeconds(merged.areas, c)) +
+				static_cast<double>(ConnectionCostSeconds(c, true));
+			double step = top.first + std::max(0.0, base);
+			if (step > reach || step >= field[from])
+				continue;
+			field[from] = step;
+			open.push(Entry(step, from));
+		}
+	}
+
+	std::vector<Entry> close;
+	for (size_t i = 0; i < field.size(); ++i)
+	{
+		if (static_cast<int>(i) != goal && field[i] <= reach)
+			close.push_back(Entry(field[i], static_cast<int>(i)));
+	}
+	std::sort(close.begin(), close.end());
+	if (close.size() > crossbot_nav::kOverlookSamples)
+		close.resize(crossbot_nav::kOverlookSamples);
+
+	for (const Entry &e : close)
+	{
+		const Area &area = merged.areas[e.second];
+		Vec3 sum;
+		double minZ = 1e30;
+		size_t n = 0;
+		for (const Face &f : area.polytope.faces)
+		{
+			for (const Vec3 &v : f.winding)
+			{
+				sum = sum + v;
+				minZ = std::min(minZ, v.z);
+				++n;
+			}
+		}
+		if (n == 0)
+			continue;
+
+		Vec3 c = sum * (1.0 / static_cast<double>(n));
+		double floorZ = minZ;
+		bool any = false;
+		for (const Plane &pl : area.boundPlanes)
+		{
+			if (pl.normal.z <= kAreaFloorNormalZ)
+				continue;
+			double z = (pl.dist - pl.normal.x * c.x - pl.normal.y * c.y) / pl.normal.z;
+			if (!any || z > floorZ)
+			{
+				floorZ = z;
+				any = true;
+			}
+		}
+		out.push_back(Vec3(c.x, c.y, floorZ + crossbot_nav::kOverlookChest));
+	}
+}
+
+bool TfcObjective(const Entity &ent)
+{
+	const std::string *ga = ent.Find("goal_activation");
+	if (!ga)
+		ga = ent.Find("g_a");
+	int activation = ga ? std::atoi(ga->c_str()) : 0;
+	if ((activation & kTfcActivateDetpack) != 0)
+		return true;
+	if ((activation & kTfcActivateTouch) == 0)
+		return false;
+	if (std::atof(ent.Get("frags").c_str()) > 0.0)
+		return true;
+	for (int team = 1; team <= 4; ++team)
+	{
+		if (std::atof(ent.Get("increase_team" + std::to_string(team)).c_str()) > 0.0)
+			return true;
+	}
+	return false;
+}
+
+std::string ObjectiveName(const Entity &ent)
+{
+	std::string name = ent.Get("classname");
+	const char *keys[] = { "point_name", "netname", "targetname", "model" };
+	for (const char *key : keys)
+	{
+		std::string value = ent.Get(key);
+		if (!value.empty())
+			return name + " " + value;
+	}
+	return name;
+}
+
+}
+
+std::vector<CampObjective> BuildCampObjectives(const BspFile &bsp, const std::vector<Entity> &entities,
+	const MergeResult &merged)
+{
+	std::vector<CampObjective> out;
+
+	bool dod = false;
+	bool rescue = false;
+	bool hostages = false;
+	for (const Entity &ent : entities)
+	{
+		std::string cls = ent.Get("classname");
+		dod = dod || cls.compare(0, 4, "dod_") == 0;
+		rescue = rescue || cls == "func_hostage_rescue" || cls == "info_hostage_rescue";
+		hostages = hostages || cls == "hostage_entity";
+	}
+
+	std::vector<std::vector<size_t>> areaConns(merged.areas.size());
+	for (size_t i = 0; i < merged.conns.size(); ++i)
+	{
+		const MergedConnection &c = merged.conns[i];
+		if (c.areaA < 0 || c.areaB < 0 || c.areaA == c.areaB)
+			continue;
+		areaConns[c.areaA].push_back(i);
+		areaConns[c.areaB].push_back(i);
+	}
+
+	auto open = [&](const Entity &ent)
+	{
+		CampObjective obj;
+		obj.name = ObjectiveName(ent);
+		out.push_back(obj);
+		return out.size() - 1;
+	};
+
+	auto join = [&](const Entity &ent, size_t index)
+	{
+		Vec3 origin = ParseEntityOrigin(ent.Get("origin"));
+		Vec3 point = origin;
+		Vec3 mins = origin;
+		Vec3 maxs = origin;
+		int model = ParseBrushModelIndex(ent.Get("model"));
+		if (model > 0 && model < static_cast<int>(bsp.Models().size()))
+		{
+			const dmodel_t &m = bsp.Models()[model];
+			mins = Vec3(origin.x + m.mins[0], origin.y + m.mins[1], origin.z + m.mins[2]);
+			maxs = Vec3(origin.x + m.maxs[0], origin.y + m.maxs[1], origin.z + m.maxs[2]);
+			point = ModelWorldCenter(m, origin);
+		}
+
+		CampObjective &obj = out[index];
+		obj.points.push_back(point);
+		obj.mins.push_back(mins);
+		obj.maxs.push_back(maxs);
+		++obj.entities;
+		AddNearby(merged, areaConns, point, obj.nearby);
+	};
+
+	std::unordered_map<std::string, size_t> controlPoints;
+	std::unordered_map<std::string, size_t> objectGroups;
+	size_t hostageObjective = SIZE_MAX;
+	size_t rescueObjective = SIZE_MAX;
+	for (const Entity &ent : entities)
+	{
+		std::string cls = ent.Get("classname");
+		if (cls == "func_bomb_target" || cls == "info_bomb_target" || cls == "func_hostage_rescue" ||
+			cls == "info_hostage_rescue" || cls == "func_vip_safetyzone" || cls == "func_escapezone" ||
+			(cls == "dod_object" && ent.Get("object_group").empty()) || cls == "item_tfgoal" ||
+			(dod && cls == "func_breakable" && (std::atoi(ent.Get("spawnflags").c_str()) & kDodSfTnt) != 0) ||
+			((cls == "info_tfgoal" || cls == "i_t_g") && TfcObjective(ent)))
+		{
+			join(ent, open(ent));
+		}
+		else if (cls == "dod_control_point")
+		{
+			size_t index = open(ent);
+			join(ent, index);
+			std::string name = ent.Get("targetname");
+			if (!name.empty())
+				controlPoints[name] = index;
+		}
+		else if (cls == "dod_object")
+		{
+			std::string group = ent.Get("object_group");
+			auto it = objectGroups.find(group);
+			if (it == objectGroups.end())
+			{
+				it = objectGroups.emplace(group, open(ent)).first;
+				out[it->second].name = cls + " " + group;
+			}
+			join(ent, it->second);
+		}
+		else if (cls == "hostage_entity")
+		{
+			if (hostageObjective == SIZE_MAX)
+				hostageObjective = open(ent);
+			join(ent, hostageObjective);
+		}
+		else if (cls == "info_player_start" && hostages && !rescue)
+		{
+			if (rescueObjective == SIZE_MAX)
+				rescueObjective = open(ent);
+			join(ent, rescueObjective);
+		}
+	}
+
+	for (const Entity &ent : entities)
+	{
+		if (ent.Get("classname") != "dod_capture_area")
+			continue;
+		auto it = controlPoints.find(ent.Get("target"));
+		join(ent, it != controlPoints.end() ? it->second : open(ent));
+	}
+
+	if (out.size() > kMaxCampObjectives)
+	{
+		std::printf("camp objectives: %zu found, only the first %zu rank camp spots\n", out.size(),
+			kMaxCampObjectives);
+		out.resize(kMaxCampObjectives);
+	}
+
+	return out;
 }
 
 std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	const std::vector<BlockingVolume> &visBlockers, const std::vector<VantageCandidate> &candidates,
-	const CampParams &params, CampStats *statsOut)
+	const std::vector<CampObjective> &objectives, const CampParams &params, CampStats *statsOut)
 {
 	CampStats stats;
 	std::chrono::steady_clock::time_point buildStart = std::chrono::steady_clock::now();
@@ -353,8 +657,6 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	ctx.hull = vis.Hull0();
 	ctx.worldHeadnode = bsp.Models()[0].headnode[kHullPoint];
 	ctx.bins = &bins;
-	// minVisible counts probes at the kDefaultVantageGrid lattice; a sparser lattice needs proportionally fewer
-	// to cover the same seen floor area.
 	double gridScale = kDefaultVantageGrid / params.gridSize;
 	size_t minVisible = std::max<size_t>(1, static_cast<size_t>(
 		std::lround(static_cast<double>(params.minVisible) * gridScale * gridScale)));
@@ -387,12 +689,55 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	double area = static_cast<double>(count) * params.gridSize * params.gridSize;
 	size_t budget = (params.countOverride > 0)
 		? params.countOverride
-		: static_cast<size_t>(area / (params.spacing * params.spacing));
+		: static_cast<size_t>(kCampBudgetScale * area / (params.spacing * params.spacing));
 	budget = std::max<size_t>(budget, 1);
 	stats.budget = budget;
 
 	double denom = (count > 1) ? static_cast<double>(count - 1) : 1.0;
 	double minSeen = static_cast<double>(minVisible);
+
+	size_t threads = (params.threadCount > 0) ? params.threadCount : DefaultThreadCount();
+	threads = std::max<size_t>(1, threads);
+	stats.threads = threads;
+
+	ThreadPool pool(threads);
+
+	std::vector<std::unique_ptr<SlotState>> slots;
+	slots.reserve(pool.ThreadCount());
+	for (size_t s = 0; s < pool.ThreadCount(); ++s)
+	{
+		std::unique_ptr<SlotState> slot(new SlotState());
+		slot->standReader.reset(new VisRowReader(vis));
+		slot->crouchReader.reset(new VisRowReader(vis));
+		slots.push_back(std::move(slot));
+	}
+
+	std::vector<uint64_t> sees(count, 0);
+	std::vector<int> tier(count, 0);
+	stats.objectives = objectives.size();
+	if (!objectives.empty())
+	{
+		std::chrono::steady_clock::time_point objectiveStart = std::chrono::steady_clock::now();
+		std::vector<std::vector<int>> nearbyLeaves(objectives.size());
+		for (size_t k = 0; k < objectives.size(); ++k)
+		{
+			for (const Vec3 &p : objectives[k].nearby)
+				nearbyLeaves[k].push_back(vis.LeafForPoint(p));
+		}
+
+		pool.Run(count, [&](size_t item, size_t slot)
+		{
+			sees[item] = SeenObjectives(ctx, objectives, nearbyLeaves, item, *slots[slot]);
+		});
+
+		for (size_t i = 0; i < count; ++i)
+		{
+			tier[i] = sees[i] != 0 ? 1 : 0;
+			if (tier[i] > 0)
+				++stats.overlookers;		}
+		stats.objectiveSeconds = std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - objectiveStart).count();
+	}
 
 	struct Entry
 	{
@@ -411,7 +756,9 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	};
 
 	std::vector<double> score(count, 0.0);
-	std::priority_queue<Entry, std::vector<Entry>, Less> queue;
+	std::vector<std::priority_queue<Entry, std::vector<Entry>, Less>> queues(objectives.size() + 1);
+	const size_t none = objectives.size();
+	stats.lanePicks.assign(queues.size(), 0);
 
 	const uint32_t rejectFlags = crossbot_nav::NAV_AREA_WATER | crossbot_nav::NAV_AREA_ELEVATOR;
 
@@ -429,7 +776,13 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 		Entry e;
 		e.score = score[i];
 		e.index = i;
-		queue.push(e);
+		if (sees[i] == 0)
+			queues[none].push(e);
+		for (size_t k = 0; k < objectives.size(); ++k)
+		{
+			if ((sees[i] >> k) & 1)
+				queues[k].push(e);
+		}
 		++stats.queued;
 	}
 
@@ -448,22 +801,6 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 
 	PointGrid grid(points, kCampGridCell);
 	grid.SetExtent(extentMins, extentMaxs);
-
-	size_t threads = (params.threadCount > 0) ? params.threadCount : DefaultThreadCount();
-	threads = std::max<size_t>(1, threads);
-	stats.threads = threads;
-
-	ThreadPool pool(threads);
-
-	std::vector<std::unique_ptr<SlotState>> slots;
-	slots.reserve(pool.ThreadCount());
-	for (size_t s = 0; s < pool.ThreadCount(); ++s)
-	{
-		std::unique_ptr<SlotState> slot(new SlotState());
-		slot->standReader.reset(new VisRowReader(vis));
-		slot->crouchReader.reset(new VisRowReader(vis));
-		slots.push_back(std::move(slot));
-	}
 
 	std::vector<Evaluation> cache(count);
 	std::vector<uint8_t> cached(count, 0);
@@ -489,8 +826,19 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	double neighborQueryRadius = std::sqrt(neighborRadius * neighborRadius +
 		kCampNeighborMaxZ * kCampNeighborMaxZ);
 
-	while (kept.size() < budget && !queue.empty())
+	while (kept.size() < budget)
 	{
+		size_t lane = queues.size();
+		for (size_t q = 0; q < queues.size(); ++q)
+		{
+			if (!queues[q].empty() && (lane == queues.size() || stats.lanePicks[q] < stats.lanePicks[lane]))
+				lane = q;
+		}
+		if (lane == queues.size())
+			break;
+
+		std::priority_queue<Entry, std::vector<Entry>, Less> &queue = queues[lane];
+		uint64_t laneBit = (lane == none) ? 0 : (uint64_t(1) << lane);
 		Entry top = queue.top();
 		queue.pop();
 
@@ -526,6 +874,8 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 				double nx = points[n].x - points[current].x;
 				double ny = points[n].y - points[current].y;
 				if (nx * nx + ny * ny > neighborRadius * neighborRadius)
+					continue;
+				if ((sees[n] & laneBit) != laneBit)
 					continue;
 				neighbors.push_back(n);
 			}
@@ -568,13 +918,15 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 			}
 
 			size_t best = count;
+			int bestTier = tier[current];
 			double bestScore = cache[current].score * kCampMinGain;
 			for (size_t n : neighbors)
 			{
 				if (!cache[n].valid)
 					continue;
-				if (cache[n].score > bestScore)
+				if (tier[n] > bestTier || (tier[n] == bestTier && cache[n].score > bestScore))
 				{
+					bestTier = tier[n];
 					bestScore = cache[n].score;
 					best = n;
 				}
@@ -632,7 +984,7 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 
 		for (size_t f : touched)
 		{
-			if (consumed[f] == 0)
+			if (consumed[f] == 0 && tier[f] <= tier[current])
 			{
 				double factor = std::min(1.0, minDist[f] / params.spacing);
 				score[f] *= factor;
@@ -662,6 +1014,16 @@ std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 		spot.crouchDist = ev.crouch.dist;
 		spot.areaId = winner.areaId;
 		spot.flags = ev.flags;
+		spot.objectives = sees[current];
+		if (sees[current] != 0)
+			++stats.overlookKept;
+		else
+			++stats.lanePicks[none];
+		for (size_t k = 0; k < objectives.size(); ++k)
+		{
+			if ((sees[current] >> k) & 1)
+				++stats.lanePicks[k];
+		}
 		spot.climbStart = points[top.index];
 		spot.climbSteps = climbSteps;
 		kept.push_back(spot);

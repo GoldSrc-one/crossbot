@@ -11,6 +11,7 @@
 #include "clipnode_tree.h"
 #include "floor_support.h"
 #include "hull_defs.h"
+#include "nav_light.h"
 #include "point_grid.h"
 #include "vis_sampling.h"
 #include "work_pool.h"
@@ -28,6 +29,8 @@ constexpr double kVantagePvsCost = 1.0;
 constexpr double kVantageTraceCost = 18.0;
 constexpr size_t kVantageTileSlots = 256;
 constexpr size_t kVantageBatchChunk = 32;
+constexpr float kLightDrop = 2048.f;
+constexpr float kLightRange = 4096.f;
 
 struct ColumnKey
 {
@@ -205,6 +208,26 @@ void ExtractWatchDirs(const std::vector<double> &hist, const std::vector<double>
 
 	std::sort(vantage.watch.begin(), vantage.watch.end(),
 		[](const WatchDir &a, const WatchDir &b) { return a.amount > b.amount; });
+}
+
+double ProbeVisibility(const Nav::LightMap &light, const Vantage &v)
+{
+	Vector eye(static_cast<float>(v.pos.x), static_cast<float>(v.pos.y), static_cast<float>(v.pos.z));
+	float lt = Nav::kSpecialLight;
+	light.Sample(eye, eye - Vector(0.f, 0.f, kLightDrop), 0.f, lt);
+
+	double sum = 0.0;
+	double wsum = 0.0;
+	for (const WatchDir &wd : v.watch)
+	{
+		Vec3 d = DirFromAngles(wd.yaw, wd.pitch);
+		Vector away(static_cast<float>(-d.x), static_cast<float>(-d.y), static_cast<float>(-d.z));
+		float lb = Nav::kSpecialLight;
+		light.Sample(eye, eye + away * kLightRange, 0.f, lb);
+		sum += wd.amount * Nav::LightVisibility(lt, lb);
+		wsum += wd.amount;
+	}
+	return wsum > 0.0 ? sum / wsum : Nav::LightVisibility(lt, lt);
 }
 
 double InterpolationError(const std::vector<std::vector<double>> &shape,
@@ -547,9 +570,6 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	}
 	else
 	{
-	// World traces go visleaf by visleaf: each leaf's vantages (contiguous in `order`) are cut into chunks
-	// of at most kVantageBatchChunk, and every PVS-visible chunk pair is one SegmentsBlockedBatch. The chunk
-	// cap bounds the per-thread scratch, which grows with combos * tree depth.
 	std::vector<float> posF(3 * count);
 	for (size_t a = 0; a < count; ++a)
 	{
@@ -573,7 +593,6 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	}
 	size_t chunkCount = chunkBegin.size();
 
-	// A chunk owns its pairs with every later slot, which is exactly the sum of its slots' costs.
 	std::vector<size_t> chunkSlots(chunkCount);
 	std::vector<double> chunkCost(chunkCount, 0.0);
 	for (size_t c = 0; c < chunkCount; ++c)
@@ -617,7 +636,6 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 				for (size_t x = 0; x < n; ++x)
 				{
 					size_t i = order[chunkBegin[c] + x];
-					// Inside one chunk only the pairs above the diagonal are new.
 					for (size_t y = (d == c) ? x + 1 : 0; y < m; ++y)
 					{
 						size_t j = order[chunkBegin[d] + y];
@@ -690,6 +708,17 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 	distHist.clear();
 	distHist.shrink_to_fit();
 
+	if (params.light && count > 0)
+	{
+		double visSum = 0.0;
+		for (size_t i = 0; i < count; ++i)
+		{
+			vantages[i].visibility = ProbeVisibility(*params.light, vantages[i]);
+			visSum += vantages[i].visibility;
+		}
+		stats.meanVisibility = visSum / static_cast<double>(count);
+	}
+
 	stats.deriveSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now() - deriveStart).count();
 
@@ -726,7 +755,7 @@ std::vector<Vantage> BuildVantages(const BspFile &bsp, const VisIndex &vis,
 			for (size_t b = 0; b < bins.Count(); ++b)
 				shape[i][b] = hist[i][b] / sum;
 		}
-		exposureNorm[i] = vantages[i].exposure * exposureScale;
+		exposureNorm[i] = vantages[i].exposure * vantages[i].visibility * exposureScale;
 	}
 
 	hist.clear();

@@ -1,4 +1,5 @@
 #include "bot_perf.h"
+#include "../game/cvars.h"
 
 #ifdef CROSSBOT_PERF
 
@@ -29,6 +30,7 @@ namespace
 		"sn_vision",
 		"sn_bone",
 		"sn_los",
+		"sn_cov",
 		"sn_enemy",
 		"sn_look",
 		"fire",
@@ -462,7 +464,7 @@ void TraceEnd()
 
 void FrameBegin()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_perf");
+	cvar_t *cvar = CBotCvar("crossbot_perf");
 	float want = cvar ? cvar->value : 0.f;
 
 	if (want <= 0.f)
@@ -491,7 +493,7 @@ void FrameBegin()
 
 	g_reportInterval = want;
 
-	cvar_t *spike = g_engfuncs.pfnCVarGetPointer("crossbot_perf_spike");
+	cvar_t *spike = CBotCvar("crossbot_perf_spike");
 	g_spikeMs = spike ? spike->value : 5.f;
 
 	for (int i = 0; i < ZONE_COUNT; ++i)

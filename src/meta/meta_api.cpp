@@ -1,6 +1,11 @@
 ﻿#include <extdll.h>
 #include <meta_api.h>
 
+#include "../brain/brain.h"
+#include "../bot/bot_sight.h"
+#include "../bot/bot_stall.h"
+#include "../nav/plan_worker.h"
+
 meta_globals_t *gpMetaGlobals;
 gamedll_funcs_t *gpGamedllFuncs;
 mutil_funcs_t *gpMetaUtilFuncs;
@@ -51,6 +56,10 @@ C_DLLEXPORT int Meta_Attach(PLUG_LOADTIME now, META_FUNCTIONS *pFunctionTable, m
 
 C_DLLEXPORT int Meta_Detach(PLUG_LOADTIME now, PL_UNLOAD_REASON reason)
 {
+	BotStall::Shutdown();
+	Nav::StopPlanWorker();
+	Brain::Shutdown();
+	BotSight::Clear();
 	return TRUE;
 }
 

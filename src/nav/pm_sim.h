@@ -22,6 +22,8 @@ using PmTraceFn = std::function<PmTrace(const Vector &start, const Vector &end)>
 
 using PmPushFn = std::function<Vector(const Vector &origin)>;
 
+using PmArcFn = std::function<float(const Vector &start, const Vector &velocity, float gravity, float maxTime)>;
+
 struct PmPhysics
 {
 	float maxSpeed = 320.f;
@@ -61,6 +63,7 @@ struct FallRule
 {
 	float safeSpeed;
 	float perSpeed;
+	float health = 100.f;
 };
 
 constexpr FallRule kHlFall = { kPlayerMaxSafeFallSpeed, kDamageForFallSpeed };
@@ -69,7 +72,7 @@ constexpr FallRule kNoFall = { 0.f, 0.f };
 float FallDamageFor(float fallSpeed, const FallRule &rule = kHlFall);
 float FallHeight(float fallSpeed, float gravity);
 float FallSpeed(float fallHeight, float gravity);
-float FallPenaltySeconds(float damage);
+float FallPenaltySeconds(float damage, float health = 100.f);
 float PlainJumpHeight(float gravity);
 
 class PmSimulator
@@ -80,10 +83,13 @@ public:
 	void Begin(const Vector &origin, float yawDegrees, float commandedSpeed, bool jump);
 	void BeginAirborne(const Vector &origin, const Vector &velocity, float yawDegrees, float commandedSpeed);
 	bool Step();
+	int Coast(const PmArcFn &arc, float maxTime);
 
 	void RequestJump() { m_jumpPending = true; }
 
 	const Vector &Origin() const { return m_origin; }
+	Vector Velocity() const { return Vector(m_vel[0], m_vel[1], m_vel[2]); }
+	float FrameTime() const { return m_physics.frameTime; }
 	bool OnGround() const { return m_onGround; }
 	float Time() const { return m_time; }
 	float FallSpeed() const { return m_fallSpeed; }

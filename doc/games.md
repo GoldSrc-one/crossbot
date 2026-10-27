@@ -1,38 +1,42 @@
 # Games
 
-CrossPlay loads several real game DLLs into one server, and everything per-game — profiles, offsets, teams, models, weapons — hangs off whichever game a bot belongs to.
-First half is the hosting seam, second half the per-game systems.
+CrossPlay loads several real game DLLs into one server, and everything per-game (profiles, offsets,
+teams, models, weapons) hangs off the game a bot belongs to. This file owns:
+
+- the CrossPlay seam: game contexts and the rules for touching another game's data;
+- `IGameProfile` and each game's profile (`src/game/<game>/`);
+- teams, gamedata offsets, and the small helpers in `src/game/`;
+- the weapon table format (`weapon_spec.h`) and the Half-Life table.
+
+How the bot fires a weapon is `doc/combat.md`; this file says what the table means.
 
 ## CrossPlay hosting
 
 `src/game/crossplay.h`, `src/game/crossplay.cpp`
 
-CrossBot no longer runs on a server with one game DLL. It runs on **CrossPlay**, a hyper-game that
-loads several real game DLLs into one HLDS process and multiplexes them onto a single entity pool.
-Everything in this section is about the seam between the two.
-
-## The server it lives in
+CrossPlay is a hyper-game: it loads several real game DLLs into one HLDS process and multiplexes them
+onto a single entity pool.
 
 ```
 hlds -console -game crossplay -xgame1 valve -sgame1 valve +map crossfire
 ```
 
 - `-game crossplay` is the hyper-game directory, `D:\hlds\crossplay\`.
-- `-xgameN <dir>` is a real game DLL for CrossPlay to load. These become `gGameDirs[N-1]`, and
-  `gNumGameDlls` counts them. Up to 8.
+- `-xgameN <dir>` is a game DLL for CrossPlay to load. They become `gGameDirs[N-1]`, counted by
+  `gNumGameDlls`, up to 8.
 - `-sgameN <dir>` adds the same mod to the engine's content search path, so its maps, models and
   sounds resolve.
 
-The load chain is `engine -> crossplay/addons/metamod/metamod.dll (real Metamod) -> plugins.ini ->
-crossplay/dlls/crossplay.dll -> per-xgame liblist.gam -> hl.dll and friends`. **CrossBot is a plugin
-of that top-level Metamod**, so it sits *above* CrossPlay: its hooks always run with CrossPlay's
-`gCaller == -1`, and its `g_engfuncs` is the raw engine table rather than CrossPlay's hooked one.
+The load chain is engine → `crossplay/addons/metamod/metamod.dll` → `plugins.ini` →
+`crossplay/dlls/crossplay.dll` → each xgame's `liblist.gam` → `hl.dll` and friends. **CrossBot is a
+plugin of the top-level Metamod**, so it sits above CrossPlay: its hooks run with CrossPlay's
+`gCaller == -1`, and its `g_engfuncs` is the raw engine table, not CrossPlay's hooked one.
 
-Registering the plugin — a `win32 addons/crossbot/crossbot_mm.dll` line in
-`crossplay/addons/metamod/plugins.ini` — is an operator step. Nothing in this repo writes that file;
-`test_server_start.ps1` warns when the line is absent.
+Registering the plugin (a `win32 addons/crossbot/crossbot_mm.dll` line in
+`crossplay/addons/metamod/plugins.ini`) is an operator step. Nothing in this repo writes that file;
+`test_server_start.ps1` warns when the line is missing.
 
-## The data model
+### The data model
 
 CrossPlay keeps one `edict_t` pool but **one private-data object per game DLL per edict**:
 
@@ -43,490 +47,397 @@ CrossPlay keeps one `edict_t` pool but **one private-data object per game DLL pe
 | `gEntityObjects[game][index]` | that game's `CBaseEntity *` for edict `index` |
 | `GameContext(game, cb, ctx)` | run `cb` with `game` as the caller |
 
-`gEntityOwners[0]` is the world, so it names the game the **map** belongs to. `gEntityObjects` is a
-full matrix, not a diagonal: when a game allocates an entity's private data, CrossPlay builds proxy
-objects of the same classname in every other loaded game, so a `valve` bot can look at a `cstrike`
-entity through `valve`'s eyes. A game with no such class gets a null there — that is the designed
-soft failure, and every read is null-checked.
+- `gEntityOwners[0]` is the world, so it names the game the **map** belongs to.
+- `gEntityObjects` is a full matrix: when a game allocates an entity, CrossPlay builds same-classname
+  proxies in every other loaded game, so a `valve` bot can look at a `cstrike` entity through
+  `valve`'s eyes. A game with no such class gets null, the designed soft failure; every read is
+  null-checked.
+- Entering a context rewrites `pvPrivateData` on every live edict and swaps `gpGlobals->teamplay`, so
+  it is expensive. Entering the context that is already current is a free early return, which is what
+  makes `MDLL_*` calls safe from inside a bot's own context.
 
-Entering a context is expensive: it rewrites `pvPrivateData` on *every* live edict and swaps
-`gpGlobals->teamplay`. Entering the context that is already current is free (an early return), which
-is what makes `MDLL_*` calls safe from inside a bot's own context — CrossPlay resolves the same owner
-and its own context enter becomes a no-op.
+### Two halves of "which game"
 
-## The two halves of "which game"
-
-CrossBot separates them deliberately.
-
-- `XPlay::EnterGame(i)` installs *CrossBot's* view: `g_offsets = g_gameOffsets[i]` and
+- `XPlay::EnterGame(i)` installs **CrossBot's** view: `g_offsets = g_gameOffsets[i]` and
   `g_pGameProfile = g_profiles[i]`. Cheap, no CrossPlay involvement. `XPlay::Current()` reports it,
   and `CBotPrivateData(ent)` reads `gEntityObjects[Current()][ent]`.
-- `XPlay::InGame(i, lambda)` installs *the engine's* view for the duration of the call, via
-  `GameContext`. Only needed when calling into a game DLL or an engine function that dispatches into
-  one.
-
-`InGame` is a template over a stateless thunk, so it takes a lambda:
+- `XPlay::InGame(i, lambda)` installs **the engine's** view for the call, through `GameContext`. Only
+  needed when calling into a game DLL, or an engine function that dispatches into one. It is a
+  template over a stateless thunk, so it takes a lambda:
 
 ```cpp
 edict_t *pEdict = nullptr;
 XPlay::InGame(iGame, [&] { pEdict = CREATE_FAKE_CLIENT(botName); });
 ```
 
-Only `crossplay.cpp` includes `crossplay_api.h`. That header declares `maxGameDlls` inside
-`extern "C"`, which gives it external linkage and multiply-defines it across translation units;
-`crossplay.h` exposes `XPlay::kMaxGames` instead and static-asserts the two agree.
+Only `crossplay.cpp` includes `crossplay_api.h`: that header declares `maxGameDlls` inside
+`extern "C"`, which multiply-defines it across translation units. `crossplay.h` exposes
+`XPlay::kMaxGames` and static-asserts the two agree.
 
-## Where CrossBot enters a context
+### Where CrossBot enters a context
 
-- `BotManager::StartFrame` — one `EnterGame` + `InGame` per bot around `ThinkOneBot`, which covers
-  the whole AI: respawn, `BotWeapons::Refresh`, `Bot_MoveNav` and everything under it, including
-  `FakeCmd::Run` (weapon selection, via `MDLL_ClientCommand`) and `pfnRunPlayerMove`. Monster refresh
-  runs once per frame in the **map owner's** context instead.
-- `BotManager::AddBot` — around `CREATE_FAKE_CLIENT`. Mandatory: CrossPlay's `CreateFakeClient`
-  ReHLDS hook `DebugError`s on `gCaller == -1`, and it is what stamps the new client's owner.
-  `MDLL_ClientConnect` / `MDLL_ClientPutInServer` stay outside; CrossPlay enters its own.
-  The third `crossbot_add` argument (`ApplyAddArg`) also stays outside: it is a plain engine call
-  on an edict, and it runs before `ClientConnect` so the game DLL reads a finished userinfo buffer,
-  the order a real client arrives in.
-- `BotManager::Touch`, `OnSound`, `OnEvent`, `KillAllBots` — per resolved bot.
-- `GiveItem::Give` / `Spawn` — around `pfnCreateNamedEntity`, so CrossPlay stamps the owner as the
-  entity's private data is allocated. `Give` takes the game from the receiving player.
-- Console commands that read private data — `ScopedGame` in `commands.cpp`, keyed by the bot's
-  `gameDll` or `XPlay::OwnerOf(player)`. A dump with no bot or player to key on takes the map
-  owner instead — `PrintMonsters`, and `ListMesh` for the `crossbot_list_*` family. Missing that
-  context is not always a quiet misreport: `crossbot_list_items` took the server down, because
-  `ClassifyItem` is called on a null `g_pGameProfile`. See `doc/console.md`.
+- **`BotManager::StartFrame`**: one `EnterGame` + `InGame` per bot around `ThinkOneBot`, covering the
+  whole AI (respawn, `BotWeapons::Refresh`, `Bot_MoveNav`, `FakeCmd::Run`, `pfnRunPlayerMove`). Monster
+  refresh runs once per frame in the map owner's context. `IGameProfile::RefreshWorld` runs once a
+  second per loaded game in that game's context.
+- **`BotManager::AddBot`**, around `CREATE_FAKE_CLIENT`. Mandatory: CrossPlay's `CreateFakeClient`
+  ReHLDS hook `DebugError`s on `gCaller == -1`, and it stamps the new client's owner.
+  `MDLL_ClientConnect` / `MDLL_ClientPutInServer` stay outside, since CrossPlay enters its own. So does
+  `ApplyAddArg` (a plain engine call), which runs before `ClientConnect` so the game reads a finished
+  userinfo buffer, as for a real client.
+- **`BotManager::Touch`, `OnSound`, `OnEvent`, `KillAllBots`**: per resolved bot.
+- **`GiveItem::Give` / `Spawn`**, around `pfnCreateNamedEntity`, so CrossPlay stamps the owner at
+  allocation. `Give` takes the game from the receiving player.
+- **Console commands that read private data**: `ScopedGame` in `commands.cpp`, keyed by the bot's
+  `gameDll` or `XPlay::OwnerOf(player)` (see below).
 
-**Hooks hand back the game they found.** `Touch`, `OnSound` and `OnEvent` are engine callbacks, and
-they fire *inside* a bot's think as readily as outside it: `GiveItem` spawning a weapon plays its
-pickup sound, `pfnRunPlayerMove` fires a gun. They used to end with `LeaveGame()`, which nulled
-`g_pGameProfile` for the rest of the enclosing think. With one game loaded that is a crash on the
-next profile call -- it took the server down in `IdleSelect` the moment `crossbot_fire_pin` handed a
-joining bot its crossbow. With two games it is quieter and worse: the rest of the think runs against
-the other game's profile and offsets. Both `ScopedGame` structs now save `XPlay::Current()` and give
-it back to `EnterGame` on the way out, and the three hooks use them. `EnterGame(-1)` falls through to
-`LeaveGame`, so a hook entered from no game still leaves none. The one bare `LeaveGame` left is the
-end of `StartFrame`, which is never nested. Copying a `ScopedGame` is deleted, since two destructors
-would restore twice.
+**Hooks hand back the game they found.** `Touch`, `OnSound` and `OnEvent` fire inside a bot's think
+as readily as outside it (`GiveItem` plays a pickup sound, `pfnRunPlayerMove` fires a gun). Leaving the
+game on the way out would null `g_pGameProfile` for the rest of the enclosing think (a crash with one
+game loaded) or run it against another game's profile (silent with two). Both `ScopedGame` structs
+save `XPlay::Current()` and restore it through `EnterGame`; `EnterGame(-1)` falls through to
+`LeaveGame`, so a hook entered from no game leaves none. The one bare `LeaveGame` is the end of
+`StartFrame`, which never nests. Copying a `ScopedGame` is deleted, since two destructors would
+restore twice.
 
 `ServerActivate` and `ServerDeactivate` need no context; they call `XPlay::DetectProfiles()` and
 `XPlay::ForgetProfiles()`.
 
+### Console dumps need a game context
 
-## Every dump needs a game context
+A console command runs at `gCaller == -1` with no game entered: `g_pGameProfile` is null and
+`CBotPrivateData` returns null for every entity. Bot code never sees that state, so anything a dump
+reuses from the bot side meets it for the first time there. Without a context there are two failure
+shapes:
 
-A console command runs at `gCaller == -1` with **no game entered**: `g_pGameProfile` is null and
-`CBotPrivateData` returns null for every entity (see `doc/games.md`). Bot code never sees that
-state, because `BotManager::StartFrame` enters a game around each bot's think, so anything a dump
-reuses from the bot side meets both for the first time when the dump calls it.
+- **Crash.** `crossbot_list_items` reaches `BotItems::PrintCandidates`, which would call
+  `g_pGameProfile->ClassifyItem` through a null vtable. HLDS prints nothing and reloads the level, which
+  looks like a bad console line, not a missing context. `PrintCandidates` therefore also refuses to run
+  without a profile.
+- **Silent and cached.** `ChainTerminal` null-checks the profile and returns false for every switch, so
+  a `crossbot_list_fun` before the first bot connects would leave `BuildTable`'s per-map table empty of
+  switch and trigger goals for the rest of the map (on crossfire, no nuke). `crossbot_list_gates` would
+  never show `mined`, because `GateHasMine` returns false.
 
-`crossbot_list_items` did exactly that and killed the server on every call, with or without bots
-connected: `BotItems::PrintCandidates` calls `g_pGameProfile->ClassifyItem` on the first entity it
-reaches, which is a call through a null vtable. The symptom hid the cause. HLDS printed nothing and
-reloaded the level instead of dying visibly, which reads like a bad console line or a stray
-`pfnTraceModel` rather than a missing context.
+So `ListMesh` in `commands.cpp` resolves both halves for every mesh-backed dump (the nav mesh, then a
+playable game: the map owner if playable, otherwise the first that is) and each command enters it with
+`ScopedGame` before calling bot code, as `PrintMonsters` does. `crossbot_list_spawns` and
+`crossbot_list_targets` read only `pev` fields and need neither. Console line length limits are in
+`doc/console.md`.
 
-The silent half was worse. `crossbot_list_fun` never crashed, because `ChainTerminal` null-checks the
-profile before asking it for a terminal — it simply returned false for every switch, and `BuildTable`
-dropped them all. That table is cached per map, so one `crossbot_list_fun` run before the first bot
-connected left the bots with no switch or trigger goal for the rest of the map: on `crossfire`, 2
-entries instead of 3, with the nuke missing. `crossbot_list_gates` degrades the same way, since
-`GateHasMine` returns false with no profile and `mined` can never appear.
+### Rules
 
-`ListMesh` in `commands.cpp` therefore resolves both halves of the precondition for every mesh-backed
-dump — the nav mesh, then a playable game, the map owner where it is playable and otherwise the first
-one that is — and each command enters it with `ScopedGame` before calling into bot code. That is the
-shape `PrintMonsters` already used. `crossbot_list_spawns` and `crossbot_list_targets` read only
-`pev` fields through the engine and need none of it.
-
-`BotItems::PrintCandidates` also refuses to run without a profile rather than faulting. The dump is
-the one place that code is reachable with no bot in the picture, and a printed line beats a level
-reload.
-
-## No console line may reach 1024 characters
-
-## Rules
-
-1. **Never write `gEntityOwners`.** CrossPlay owns it; it stamps ownership from `gCaller` in
-   `PvAllocEntPrivateData` and in the `CreateFakeClient` hook. Reading it is fine.
+1. **Never write `gEntityOwners`.** CrossPlay stamps it from `gCaller` in `PvAllocEntPrivateData` and
+   the `CreateFakeClient` hook. Reading is fine.
 2. **Never read `edict->pvPrivateData` directly.** Outside a context it is garbage (`0xFFFFFFFF` in
    CrossPlay debug builds). Use `CBotPrivateData(ent)`, or `XPlay::PrivateData(ent, game)` when the
-   entity's own game is the right lens — that is what `CBotIsLivePlayer` does.
+   entity's own game is the right lens (as `CBotIsLivePlayer` does).
 3. **Never edit anything under `D:\hlds\crossplay\` except `addons\crossbot\`.**
-4. **Never test `FL_FAKECLIENT`, and never set it.** ReGameDLL's `CBasePlayer::Spawn`
-   (`player.cpp:5725`) does `pev->flags &= FL_PROXY;` then `pev->flags |= FL_CLIENT;`, so CS keeps
-   `FL_CLIENT` and **wipes `FL_FAKECLIENT` on every spawn**, round restart included. HL masks with
-   `FL_PROXY | FL_FAKECLIENT` and keeps it, which is exactly why the flag looks dependable until a
-   cstrike bot dies once. Use `BotManager::FindBot(ent)` to ask whether an edict is one of our bots;
-   `FL_CLIENT` is safe to read and is what separates players from monsters in `bot_sense.cpp` and
-   `bot_combat.cpp`. `AddBot` deliberately no longer ORs the bit back in after `ClientPutInServer`,
-   because that only ever covered the bot's first life.
+4. **Never test or set `FL_FAKECLIENT`.** ReGameDLL's `CBasePlayer::Spawn` (`player.cpp:5725`) does
+   `pev->flags &= FL_PROXY; pev->flags |= FL_CLIENT;`, wiping `FL_FAKECLIENT` on every spawn and round
+   restart. HL keeps it, which is why it looks dependable until a cstrike bot dies once. Use
+   `BotManager::FindBot(ent)` to ask whether an edict is our bot; `FL_CLIENT` is safe and is what
+   separates players from monsters in `bot_sense.cpp` and `bot_combat.cpp`.
 
-## Reading CrossPlay's complaints
+### Reading CrossPlay's complaints
 
-`crossplay.lib` symlinks to a **Debug** build, so these fire loudly on stderr (`D:\hlds\hlds.err`) and
-each names a broken rule:
+`crossplay.lib` links a **Debug** `crossplay.dll`, so these fire loudly on stderr (`D:\hlds\hlds.err`)
+and each names a broken rule:
 
-| Message | What it means |
+| Message | Meaning |
 | --- | --- |
 | `Bad caller!` | an engine call that needs a context was made at `gCaller == -1` |
 | `Entity without owner!` | an entity reached a dispatch with `gEntityOwners == -1` |
 | `Owner mismatch!` | two games claim the same edict |
 | `Wrong private data pointer on enter/exit!` | someone wrote `pvPrivateData` behind CrossPlay's back |
 
-## Per-game state in CrossBot
+### Per-game state
 
-`GameOffsets` and `IGameProfile` were both single globals keyed to "the" mod. They are now arrays.
-
-- `gamedata.cpp` holds `g_gameOffsets[kMaxGames]` plus a per-game loaded flag, filled by
-  `GameData::LoadAll()` at `GameDLLInit` from `crossplay/gamedata/<gamedir>-win.json`.
-  `GameData::Activate(i)` copies one into the `g_offsets` every peek site still reads.
+- `gamedata.cpp` holds `g_gameOffsets[kMaxGames]` plus a loaded flag per game, filled by
+  `GameData::LoadAll()` at `GameDLLInit`. `GameData::Activate(i)` copies one into the `g_offsets`
+  every peek site reads.
 - `crossplay.cpp` holds `g_profiles[kMaxGames]`, filled by `XPlay::DetectProfiles()` at
-  `ServerActivate` via `GameProfile_Detect(gamedir)`. `g_pGameProfile` is the active one.
+  `ServerActivate` through `GameProfile_Detect(gamedir)`. `g_pGameProfile` is the active one.
 - A game is **playable** (`XPlay::Supported`) only with both. `crossbot_add` refuses anything else and
-  `XPlay::PickRandomSupported()` draws only from that set. Today `valve`, `ricochet`, `gearbox`,
-  `dmc`, `tfc`, `cstrike` and `czero` qualify, one profile each except CS, which serves both.
+  `XPlay::PickRandomSupported()` draws only from that set: `valve`, `ricochet`, `gearbox`, `dmc`,
+  `tfc`, `cstrike`/`czero` (one profile), `dod`, `rewolf` and `ts`.
+- Each `CBot` carries `gameDll`, set once in `AddBot`; it is the key to all of the above.
 
-The profiles live one directory per game: `src/game/hldm/`, `src/game/ricochet/`, `src/game/gearbox/`,
-`src/game/dmc/`, `src/game/tfc/`, `src/game/cstrike/`.
-`src/game/game_profile.cpp` holds `GameProfile_Detect`, the only file that names them all. Anything
-that is not a profile — teams, objectives, gamedata — stays in `src/game/` itself, because it keys off
-the map's game rather than the bot's.
+Profiles live one directory per game: `src/game/hldm/`, `ricochet/`, `gearbox/`, `dmc/`, `tfc/`,
+`cstrike/`, `dod/`, `rewolf/`, `ts/`. `src/game/game_profile.cpp` holds `GameProfile_Detect`, the only file that names
+them all, returning function-local statics. Anything keyed off the **map's** game rather than the bot's
+(teams, objectives, gamedata) stays in `src/game/` itself.
 
-Each `CBot` carries `gameDll`. It is set once in `AddBot` and is the key to everything above.
+## The profile interface (game_profile.h)
 
-## Per-game systems
+`IGameProfile` is the mod-specific half of the bot. Everything that is not geometry lives behind it,
+so `src/bot/` never names a Half-Life classname or constant. `CHLDMProfile` is the base
+implementation and every other profile derives from it, overriding what its game changes.
+`g_pGameProfile` is a plain global (defined in `bot_manager.cpp`) because it is read on nearly every
+item decision; an accessor would cost a call for nothing.
 
-## game_profile.h
+### Weapons
 
-### IGameProfile
-The mod-specific half of the bot. Everything a bot needs to know that is not geometry lives behind
-this interface, so `src/bot/` never names a Half-Life classname or constant. `CHLDMProfile` is the
-base implementation; `CRicochetProfile` and `CGearboxProfile` derive from it. `GameProfile_Detect`
-returns function-local statics.
+- **`GetWeaponSpec(id)`** returns the `WeaponSpec` for the raw `m_iId` the inventory walk produces, or
+  null. It answers with a struct because it describes a table, not a policy (see "The weapon table").
+- **`WeaponSlotCount()` / `WeaponSlot(i)`** walk the raw table, empty and broken rows included, for the
+  places that need every weapon: `ItemPreferred` and `crossbot_weaponspec`. Every caller goes through
+  the virtuals so a derived profile never silently sees HL's table.
+- **`ItemSlots()`** is the number of `m_rgpPlayerItems` buckets: HL 6 (`MAX_ITEM_TYPES`), OP4 7, Gunman 11. It is a
+  profile value because the gamedata JSON carries no array sizes.
+- **`ReadInventory(player, inv)`** fills `BotInventory`. HLDM runs the shared item walk
+  (`BotWeapons::ReadItems`); DMC, TFC and DoD override it.
+- **`SelectWeapon(player, spec)`** switches weapons. HLDM sends `weapon_<name>` through `FakeCmd`; DMC
+  drives `CmdStart`.
+- **`ModeAvailable(player, spec, mode)`** is a per-player veto on a firing mode that depends on state the
+  table cannot describe (Ricochet's hard disc, DoD's undeployed MGs). `BotFire::ModeViable` asks it
+  right before `AmmoReady`, so a refused mode is never selected or pressed.
+- **`ThrowLaunch(mode, viewPitch, elevation, speed)`** holds what a table of floats cannot: a weapon
+  whose launch direction and speed are one parameter. It maps the held pitch to what leaves the hand
+  and returns false for any mode without `WPN_Q_THROW_ARC`. It maps that way round on purpose: the
+  pitch is what the bot commands and what the fire gate re-measures, so nothing inverts the game's
+  remap. See "The throw law".
+- **`AmmoEntity(weaponId, pool)`** maps a weapon and ammo pool to the classname that refills it, so
+  `src/bot/` never names `ammo_ARgrenades`. The pin's auto-equip needs it (`doc/combat.md`), and
+  `WeaponSpec` records which pool a mode spends, not which pickup fills it. Null where nothing fills the
+  pool (the crowbar, the hornetgun's regenerating hive). HLDM's table is why it is a table: the MP5
+  clip takes `ammo_9mmAR` and its grenade `ammo_ARgrenades`; gauss and egon share uranium under two
+  classnames; the hand grenade, snark, tripmine and satchel are their own ammo.
 
-`WeaponSlotCount()` / `WeaponSlot(i)` walk the raw table, empty and broken rows included, for the two
-places that need every weapon rather than one id: `ItemPreferred` (which weapon's ammo counts as
-preferred) and `crossbot_weaponspec`. `CHLDMProfile` used to call `HLDM_WeaponSpec` and
-`HLDM_WeaponSlot` directly from `EvaluateCombat`, `AmmoEntity` and `ItemPreferred`, which made every
-derived profile silently see HL's table; all three now go through the virtuals.
+### Weapon roles
 
-`ItemSlots()` is how many `m_rgpPlayerItems` buckets the game's `CBasePlayer` has. HL has 6
-(`MAX_ITEM_TYPES` in the SDK the plugin compiles against), OP4 has 7. It is a profile value rather than
-a gamedata one because the JSON is a bare offset per field and carries no array sizes.
+`src/bot/` must not name a weapon, so each role it needs is a profile answer:
 
-`IsMeleeWeapon(id)` is the set, `MeleeWeapon()` the one to prefer. HLDM's set is the crowbar alone;
-see `gearbox_profile.cpp` below for why the distinction exists.
+- **`IsMeleeWeapon(id)`** is the set; **`MeleeWeapon()`** the one to draw (the breaker uses it). HLDM's
+  set is the crowbar; OP4 and TFC have several (see their sections).
+- **`AmbushWeapon(kind)`** answers what to open with against someone unaware. `AmbushKind` is
+  `AMBUSH_GRENADE`, `AMBUSH_SNARK`, `AMBUSH_PENGUIN`, `AMBUSH_FLASH`, `AMBUSH_SMOKE` (the thrown group)
+  and `AMBUSH_GRAPPLE` (last resort); a mod returns 0 for kinds it lacks. It must be a named role:
+  `WPN_Q_THROW_ARC` picks out the hand grenade, but nothing in `WeaponSpec` separates a snark from a
+  hornet gun (both `WPN_Q_HOMING`, and the snark is deliberately not an arc). A throwable-creature
+  quirk would be a type tag, which the table rejects.
+- **`DeployWeapon(kind)` / `DeployEntity(kind)`** (`DEPLOY_TRIPMINE`, `DEPLOY_SATCHEL`) answer "which
+  weapon places one" and "what a placed one looks like". `bot_deploy.cpp` needs both (to fire, to check
+  a gate is mined, to confirm a placement, to find its own charges) and `bot_avoid.cpp` needs the
+  second to recognise a beam's owner. A mod with no deployables returns 0 and null and the feature
+  idles.
 
-`g_pGameProfile` is a real global (defined in `bot_manager.cpp`) rather than a `BotManager` accessor
-because it is read on nearly every item decision; an accessor bought nothing and cost a call.
+### Policy
 
-`GetWeaponSpec(id)` is the one method that answers with a struct rather than a scalar, because what it
-describes is a table rather than a policy — see `weapon_spec.h` below. It takes the raw `m_iId` the
-inventory walk produces, so the caller needs no weapon vocabulary of its own, and returns null for any
-id this game has no weapon for.
+- **`EvaluateCombat(pEdict, inv)`** scores combat readiness in [0,1], the input that decides whether an
+  enemy or an item wins goal selection (`doc/goals.md`, "Carefulness"). It is the one method taking a
+  `BotInventory`; `game_profile.h` forward-declares it so the header names nothing from `src/bot/`, and
+  passing it keeps `BotWeapons::Refresh` the single reader of weapon private data.
+  `CHLDMProfile::EvaluateCombat` is a product, so a dying bot with a full arsenal and a healthy bot with
+  nothing loaded both score near zero:
 
-`MonsterEnemy(ent)` answers "who is this monster hunting", as an edict or null. It is the only reason
-`src/bot/` can gate monster engagement without knowing what a `CBaseMonster` is; see `gamedata.cpp`,
-`mon_hEnemy`, for the read itself and why the serial check is not optional.
+      survive = (health + armorvalue) / (maxHealth + maxArmor)
+      arms    = sum of WeaponSpec::value over every armed weapon, clamped to 1
+      result  = survive * arms
 
-`ThrowLaunch(mode, viewPitch, elevation, speed)` is here for the one thing a table of floats could not
-hold: a weapon whose launch direction and launch speed are the *same* parameter. It maps the pitch the
-bot is holding to what leaves the hand, and returns false for any mode without `WPN_Q_THROW_ARC`. It
-maps that way round rather than the reverse on purpose — the pitch is what the bot commands and what
-the fire gate re-measures, so nothing anywhere has to invert the game's own remap. See
-`WPN_Q_THROW_ARC` under `weapon_spec.h`.
-
-
-`DeployWeapon(kind)` and `DeployEntity(kind)` are the two halves of the same rule `MeleeWeapon()`
-follows: `src/bot/` must not name `weapon_tripmine` or `monster_satchel`. `DeployKind` is
-`DEPLOY_TRIPMINE` / `DEPLOY_SATCHEL`, and the pair answers "which weapon places one" and "what does a
-placed one look like in the world". `bot_deploy.cpp` needs both — the first to draw and fire, the
-second to check whether a gate is already mined, to confirm a placement landed, and to find the
-bot's own live charges — and `bot_avoid.cpp` needs the second to recognise a beam's owner. A mod with
-no deployables returns 0 and null and the whole feature idles.
-
-`AmbushWeapon(kind)` follows the same rule for a third role: what to open with against someone who
-has not noticed the bot yet. `AmbushKind` is `AMBUSH_GRENADE` / `AMBUSH_SNARK` / `AMBUSH_PENGUIN`
-(the thrown group) and `AMBUSH_GRAPPLE` (the last resort). HLDM answers the first two with the hand
-grenade and the snark and 0 for the rest; gearbox adds the penguin and the grapple.
-
-`ApplyAddArg(iGame, pEdict, arg, out, size)` is the profile's claim on the optional third
-`crossbot_add` argument. The command does not interpret it — it maps `*` and the empty string to null
-and hands the rest over untouched — because what the argument *means* is per-mod: `CHLDMProfile`
-reads it as a player model, and the team mods will read it as a team. It runs once on a fresh fake
-client, after `CREATE_FAKE_CLIENT` and before `MDLL_ClientConnect`, so the game DLL reads a finished
-userinfo buffer at connect the way it would for a real client, and it writes back what it settled on
-for the `added ... as '...'` console line. A null `arg` means the operator gave none and the profile
-should pick its own default, at random where that makes sense. See `player_models.cpp`.
-
-It has to be a named role and cannot be inferred from the table. `WPN_Q_THROW_ARC` does pick out the
-hand grenade uniquely, but **nothing in `WeaponSpec` separates a snark from a hornet gun** — both are
-`WPN_Q_HOMING`, and the snark is deliberately not `IsArc` because homing wins. Adding a throwable-
-creature quirk to express that would be a type tag, which is the class of field this table rejects.
-A mod with neither returns 0 for both and `bot_fire.cpp` never offers an ambush weapon, which is the
-same outcome as carrying none.
-
-`AmmoEntity(weaponId, pool)` is the mapping from a weapon and one of its ammo pools to the entity
-classname that refills it, and it is here for the same reason `ThrowLaunch` is: `src/bot/` must not
-name `ammo_ARgrenades`. It exists because the pin now equips (see `bot_fire.cpp` in `doc/combat.md`), and
-"give this bot ammo for the mode it is pinned to" cannot be answered from `WeaponSpec` — the table
-records which *pool* a mode spends, not which pickup fills it, and the two are not one-to-one. It
-returns null where no entity fills that pool, which is the crowbar and the hornetgun's self-regenerating
-hive.
-
-Three rows in `CHLDMProfile`'s table are the reason it is a table and not a prefix rule: MP5 secondary
-takes `ammo_ARgrenades` while its clip takes `ammo_9mmAR`; the gauss and the egon share uranium under
-two different classnames; and the handgrenade, snark, tripmine and satchel are their own ammo, so the
-mapping returns the weapon classname back.
-`EvaluateCombat(pEdict, inv)` scores how ready a bot is to fight, in `[0,1]`, and is the only input
-that decides whether an enemy or an item wins a goal selection — see `doc/goals.md`, "Carefulness". It is mod policy rather than geometry for the obvious reason: what
-counts as well-armed is entirely a property of the game's weapon set.
-
-It is the one profile method that takes a `BotInventory`. `game_profile.h` forward-declares the struct
-rather than including `bot_weapons.h`, so the header still names nothing from `src/bot/`; only the
-implementation does. Passing the inventory rather than re-reading it keeps the per-frame walk in
-`BotWeapons::Refresh` the single reader of the game DLL's private data.
-
-`CHLDMProfile::EvaluateCombat` is survivability times firepower, a product rather than a weighted sum,
-so a bot at death's door with a full arsenal and a healthy bot with nothing loaded both score near
-zero — either half alone is enough to make hunting a bad idea:
-
-    survive = (health + armorvalue) / (maxHealth + maxArmor)
-    arms    = sum of WeaponSpec::value over every armed weapon, clamped to 1
-    result  = survive * arms
-
-`maxHealth` reads `pev->max_health` and falls back to 100; there is no pev field for maximum armor, so
-it is a constant. "Armed" means holding a weapon with a mode that can actually deal damage and has the
-ammo to do it — `BotFire::WeaponArmed`, which reuses the existing `AmmoReady` rather than restating the
-clip and reserve rules. A mode with `AIM_NONE` is skipped there, which is what stops a dry python
-counting as armed on the strength of its zoom toggle.
-
-Two methods exist because Ricochet broke an HLDM assumption, and `CHLDMProfile` answers each with
-the old behaviour:
-
-- `FallDamage()` is how landing hurts, as a `PmSim::FallRule`: the safe speed and the damage per u/s
-  above it. `kHlFall` is HL's 580 and 100/444; `kNoFall` never hurts. `Bot_FallDamage` hands the rule to
-  the planners, which price each fall from the height the `.nav` stores (`doc/path_planning.md`,
-  "Falls are priced per game"), and to the runtime `FallDamageFor` vetoes in `bot_opportunist.cpp`,
-  `bot_gauss.cpp` and the ladder bail. The rules, from each game's `FlPlayerFallDamage`:
+  `maxHealth` is `pev->max_health` or 100; there is no pev field for maximum armour, so it is a
+  constant. "Armed" is `BotFire::WeaponArmed`: a mode that deals damage and has the ammo, reusing
+  `AmmoReady`. `AIM_NONE` modes are skipped, so a dry python does not count on its zoom toggle.
+- **`MonsterEnemy(ent)`** answers "who is this monster hunting", as an edict or null. It is how
+  `src/bot/` gates monster engagement without knowing what a `CBaseMonster` is; see "mon_hEnemy".
+- **`FallDamage()`** is a `PmSim::FallRule`: the safe speed and damage per u/s above it. `kHlFall` is
+  HL's 580 and 100/444; `kNoFall` never hurts. `Bot_FallDamage` hands it to the planners, which price
+  each fall from the `.nav` height (`doc/path_planning.md`, "Falls are priced per game"), and to the
+  runtime `FallDamageFor` vetoes in `bot_opportunist.cpp`, `bot_gauss.cpp` and the ladder bail. From
+  each game's `FlPlayerFallDamage`:
 
   | game | safe u/s | damage per u/s | 100 hp lethal at |
   |---|---|---|---|
-  | HL, OP4 (`mp_falldamage 1`, which CrossPlay's `server.cfg` sets) | 580 | 0.225 | 1024 |
+  | HL, OP4, Gunman (`mp_falldamage 1`, set by CrossPlay's `server.cfg`) | 580 | 0.225 | 1024 |
   | CS (ReGameDLL; `mp_falldamage 0` is none) | 500 | 0.208 | 980 |
   | DoD (dod.c 35803) | 500 | 0.25 | 900 |
   | TFC (tfc.c 38681) | 650 | 0.267 | 1024 |
   | Ricochet; DMC under `mp_falldamage 0` | none | | |
 
   HL's own `mp_falldamage 0` is a flat 10 per landing and is not modelled.
-- `ModeAvailable(player, spec, mode)` is a per-player veto on a firing mode that no `WeaponSpec` field
-  can express, because it depends on state the table does not describe. `BotFire::ModeViable` asks it
-  right before `AmmoReady`, so a refused mode is never selected and never pressed.
 
-Six hooks exist because DoD moves into the client what other mods do on the server. All of them
-default to the old behaviour:
-- `Zoomed(edict)` defaults to `0 < pev->fov < 90`. DoD reads `m_iFOV` instead.
-- `AdjustView(bot, dt, pitch, yaw)` edits the angles `Bot_UpdateFacing` is about to write, for
-  recoil, scope sway and the deploy clamp.
-- `MoveAdjust(bot, fmove, smove, buttons)` runs inside `Bot_RunPlayerMove` after the brace, for
-  sprint and the bipod.
+### Joining and spawning
+
+- **`PreThink(edict)`** runs first in every think and may own the bot (team and class joining, TFC's
+  feign). Returning true skips the rest.
+- **`Respawn(edict)`** presses whatever revives a dead player; round- and wave-based games send an
+  empty move.
+- **`IsDead(edict)`** is the asking bot's view of anyone. HLDM's treats an observer (`iuser1 > 0`) as
+  dead too (see DoD).
+- **`ApplyAddArg(iGame, pEdict, arg, out, size)`** owns the optional third `crossbot_add` argument. The
+  command maps `*` and empty to null and passes the rest untouched, because its meaning is per mod:
+  HLDM reads a player model (`player_models.cpp`), the team mods a team or class. It runs once on the
+  fresh fake client after `CREATE_FAKE_CLIENT` and before `MDLL_ClientConnect`, and writes back what it
+  settled on for the `added ... as '...'` line. Null means pick a default, at random where sensible.
+
+### Client-side behaviour
+
+DoD moves into the client what other mods do on the server. Six hooks default to the old behaviour:
+
+- `Zoomed(edict)`: default `0 < pev->fov < 90`; DoD reads `m_iFOV`.
+- `AdjustView(bot, dt, pitch, yaw)` edits the angles `Bot_UpdateFacing` is about to write (recoil,
+  scope sway, the deploy clamp).
+- `MoveAdjust(bot, fmove, smove, buttons)` runs inside `Bot_RunPlayerMove` after the brace (sprint, the
+  bipod).
 - `MaxSpeed(edict, engineMax)` is applied at the end of `Bot_MaxSpeed`.
 - `CanDeploy(edict)` decides who may take a sandbag or prone camp.
 - `BlindSeconds(fade, hold, scale)` turns a blinding ScreenFade into blind time.
 
-See `dod_profile.cpp` below.
+### Other game hooks
+
+All default to doing nothing; the game sections say who implements them.
+
+- Items: `ClassifyItem`, `ItemUsable`, `ItemWorth`, `ItemPreferred`, `ItemRespawnDelay`,
+  `ItemRespawnIn`, `ChargerValue`, `ChargerFullValue` (`doc/goals.md` owns how gathering uses them).
+- `AbilityRun` (TFC class abilities, CS planting, DoD ammo drops and bayonets).
+- TFC: `RefreshWorld`, `Disguised`, `HoldFire`, `NoteSound`, `Patients`, `Fortifies`, `CanDetpack`,
+  `OffhandRead` / `OffhandCommand` / `OffhandPrimed`.
+- DMC: `Cloaked`.
+- CS and DoD firing: `FireToggle`, `SpreadWide`, `BraceSpeed`, `Penetrates` (also HLDM's gauss),
+  `CreepSpeed`, `CreepButtons` (`doc/combat.md`).
 
 ### ItemKind
-The classification the gather goals key off. `ITEM_WEAPON`/`ITEM_AMMO`/`ITEM_PICKUP` are touched to
-collect; `ITEM_HEALTHCHARGER`/`ITEM_RECHARGE` are used with `IN_USE` and never touched at all, which
-is why `ItemKindIsCharger` exists rather than a comparison at each site — the two families share
-almost no code path. `ITEM_HEALVOLUME` is a third family: a healing `trigger_hurt` the bot only has
-to stand in.
 
-Three predicates rather than one, because the families group differently at different sites.
-`ItemKindIsCharger` still means "aim at it and hold `IN_USE`". `ItemKindIsBrush` means "read the
-absbox midpoint, `pev->origin` is `0 0 0`" and covers chargers and volumes. `ItemKindUsesValue`
-means "there is a `ChargerValue` to watch instead of a touch to wait for", and is what `OnTouch`,
-`OnArrived` and `UpdateGoalItem` branch on. `OnTouch` is the one that had to change: a trigger is
-`SOLID_TRIGGER` and really does fire `pfnTouch` on the bot, so the old charger-only test would have
-ended the goal the instant the bot waded in.
+The classification the gather goals key off:
 
-## teams.cpp
+- `ITEM_WEAPON`, `ITEM_AMMO`, `ITEM_PICKUP` are touched to collect.
+- `ITEM_HEALTHCHARGER`, `ITEM_RECHARGE` are used with `IN_USE` and never touched.
+- `ITEM_HEALVOLUME` is a healing `trigger_hurt` the bot only has to stand in.
+- `ITEM_STATION` is a TFC dispenser: touched, then stood at while it refills.
 
-The friend/foe half of teamplay and nothing else. No roles, no objectives, no coordination, no team
-join — the module exists so a bot does not aim at, chase, or blow a satchel under someone it is not
-supposed to fight. Friendly fire is off on the mods this covers, so none of it is about damage; it is
-about behaviour that would read as broken.
+The families group differently at different sites, hence several predicates instead of comparisons:
 
-### Teams are a property of the map, not of the bot
+- `ItemKindIsCharger`: aim at it and hold `IN_USE`.
+- `ItemKindIsBrush`: chargers and volumes; read the absbox midpoint, because `pev->origin` is 0 0 0.
+- `ItemKindUsesValue`: chargers, volumes and stations; there is a `ChargerValue` to watch instead of a
+  touch to wait for. `OnTouch`, `OnArrived` and `UpdateGoalItem` branch on it. A trigger is
+  `SOLID_TRIGGER` and really fires `pfnTouch` on the bot, so a charger-only test would end the goal the
+  instant the bot waded in.
 
-`DetectMap()` reads `XPlay::GameDir(XPlay::MapOwner())` — `gEntityOwners[0]`, the game that owns
-worldspawn — and matches it against `cstrike`, `tfc` and `dod`. It cannot key off the bot's own game:
-a `valve` or `dmc` bot on a cs/dod map has no team mod of its own, and it is the *map* that decides
-whether the server is playing a team game. It cannot be `gpGlobals->teamplay` either, which CrossPlay
-swaps to the *entered* game's value, so inside a `valve` bot's context it reads `valve`'s.
+## Teams (teams.cpp)
 
-The map owner changes on a map change, which is why `DetectMap()` runs at `ServerActivate` (right
-after `XPlay::DetectProfiles()`) rather than once at load, and `ForgetMap()` at `ServerDeactivate`.
-The one line it prints names the map's game and whether teams came out on; that line is the first
-thing to look for when bots misbehave on a cs/dod/tfc map.
+The friend/foe half of teamplay and nothing else: no roles, objectives, coordination or team joining.
+It exists so a bot does not aim at, chase or blow a satchel under someone it should not fight.
+Friendly fire is off on the mods covered, so this is about behaviour that would look broken, not
+damage.
 
-### The team is read live, never cached
+**Teams are a property of the map.** `DetectMap()` reads `XPlay::GameDir(XPlay::MapOwner())` (the game
+owning worldspawn) and matches `cstrike`, `czero`, `tfc` and `dod`. It cannot key off the bot's game (a
+`valve` bot on a cs map has no team mod of its own) nor `gpGlobals->teamplay` (CrossPlay swaps it to
+the entered game's value). It runs at `ServerActivate`, right after `XPlay::DetectProfiles()`, with
+`ForgetMap()` at `ServerDeactivate`. Its one printed line names the map's game and whether teams came
+on; look for it first when bots misbehave on a team map.
 
-`TeamOf(ent)` is `ent->v.team`, falling back to `ent->v.owner->v.team`. The owner hop is what makes a
-rocket, a grenade or a thrown snark inherit its thrower's team, and it is the only reason the satchel
-gate works — a suspicion pushed for a projectile carries the projectile, not the player.
+**The team is read live, never cached.** `TeamOf(ent)` is `ent->v.team`, falling back to
+`ent->v.owner->v.team`. The owner hop makes a rocket, grenade or thrown snark inherit its thrower's
+team, and is what makes the satchel gate work. A game may reassign a bot at any time (balance, forced
+join, respawn on the other side), so nothing is stored on `CBot`. `edict_t::v` is shared by every
+CrossPlay game, so teams across games are one number space and no read needs a context.
 
-Nothing is stored on `CBot`. A game may reassign a bot at any point — a team-balance move, a forced
-join, a respawn into the other side — and a cached team would be wrong for a life. Reading `v.team` on
-every call costs one dereference and needs no respawn hook. `edict_t::v` is one `entvars_t` shared by
-every CrossPlay game, so a `cstrike` player's team and a `valve` bot's team are the same number space
-and neither read needs a game context.
-
-### Zero is unknown, and unknown is never attacked
-
-`Of(self, ent)` is `REL_ENEMY` only when both teams are non-zero and differ, `REL_FRIEND` when they
-match, and `REL_UNKNOWN` otherwise. `Attackable` is the predicate every gate actually calls, and it
-answers "may this bot shoot at that": `REL_ENEMY`, or teams are not active for this bot at all.
+**Zero is unknown, and unknown is never attacked.** `Of(self, ent)` is `REL_ENEMY` only when both teams
+are non-zero and differ, `REL_FRIEND` when they match, `REL_UNKNOWN` otherwise. `Attackable`, the
+predicate every gate calls, is `REL_ENEMY` or teams not active for this bot.
 
 **`Active(self)` is false when the bot's own team is zero, and that fallback is load-bearing.** A mod
-that never fills `pev->team` would otherwise make every bot's team match every other bot's, and the
-whole server would go pacifist. With the fallback, a bot with no team of its own behaves exactly as it
-does on a `valve` map: the failure mode of a mod that ignores `pev->team` is "teams do nothing", not
-"bots do nothing", and `crossbot_teams_status` says which it is.
+that never fills `pev->team` would otherwise make every bot match every other and the server would go
+pacifist. With it, such a mod means "teams do nothing", not "bots do nothing", and
+`crossbot_teams_status` says which. It also makes every gate a no-op on deathmatch maps.
 
-The same fallback is what makes every gate a strict no-op on a deathmatch map: `Attackable` returns
-true unconditionally, so nothing in the existing test suite can see this feature.
+**What the mods do, measured.** `cstrike` fills `pev->team` on a `valve` fake client without being
+asked: bots on `cs_assault` came up `team=1`, and within a minute the mod moved three of six to
+`team=2` (hence the live read). `tfc` and `dod` report teams on for their own maps. The first minute of
+a round can be all-friends, correctly: bots join one side before the mod balances them. Nothing here
+joins a team; the TFC, CS and DoD profiles join themselves. `crossbot_teams 0` restores free-for-all on
+a team map.
 
-### What the mods actually do, measured
+**Where the gates are**, all in `src/bot/` (`doc/perception.md`, `doc/combat.md`):
+`Candidate` and `MonsterCandidate` in `bot_sense.cpp`, `DamageSource` and the team exit in
+`bot_combat.cpp`, and `NearestLive`'s `livingOnly` filter (no satchel under a teammate). Everything
+else that shoots reads `sense.target` or `sense.enemy` and is gated by the first two.
 
-`cstrike` does fill it, on a `valve` fake client, without CrossBot asking. Every bot added to a
-`cs_assault` server came up `team=1`, and after a minute or so of play the mod had moved three of six
-to `team=2` on its own — which is the whole reason the team is re-read live instead of latched at
-`AddBot`. `tfc` and `dod` both report `teams are on` for their own maps.
-
-**The first minute of a round is all-friends, and that is not a bug.** Bots join on one side before the
-mod balances them, and while they are all on one team they will not fight each other — correctly, since
-they *are* teammates. Nothing here joins a team or picks a side. `tfc` and `cstrike` bots are the
-exception: their profiles join a team themselves (see `tfc_profile.cpp` and `cs_profile.cpp`). `crossbot_teams 0` is the switch for anyone who wants
-the old free-for-all on a team map.
-
-### Where the gates are
-
-Five, and they are all `src/bot/` — see `doc/perception.md` and `doc/combat.md` for each. `Candidate` and `MonsterCandidate` in
-`bot_sense.cpp`, `DamageSource` and the enemy-still-valid exit in `bot_combat.cpp`, and `NearestLive`'s
-`livingOnly` filter, which is what stops a satchel going off under a teammate. Everything else that
-shoots — `bot_fire.cpp`, the ambush, the duel, the func_tank in `bot_fun.cpp` — reads `sense.target` or
-`sense.enemy` and is gated by the first two for free.
-
-## hldm_profile.cpp
+## Half-Life (hldm_profile.cpp)
 
 ### ClassifyItem
+
 Prefix match on `weapon_`, `ammo_`, `item_`, plus exact `weaponbox`, `func_healthcharger`,
-`func_recharge` and `trigger_hurt`. Prefix matching rather than a table of every HLDM classname is what lets the bot
-pick up mod items it has never heard of; the cost is that `SelectGoal` has to walk the whole edict
-array instead of using `FIND_ENTITY_BY_STRING`, since that engine call takes an exact name.
+`func_recharge` and `trigger_hurt`. Prefixes let the bot pick up mod items it has never heard of; the
+cost is that the item scan walks the whole edict array, since `FIND_ENTITY_BY_STRING` takes an exact
+name.
 
-**The recharger's classname is `func_recharge`, not `func_recharger`.** The wrong spelling silently
-classifies every HEV charger as `ITEM_NONE` and the bot ignores them all.
+- **The recharger's classname is `func_recharge`, not `func_recharger`.** The wrong spelling silently
+  makes every HEV charger `ITEM_NONE`.
+- `item_` also catches `item_suit`, `item_antidote`, `item_security`. Harmless: the bot touches one,
+  nothing happens, and the full list keeps it away for 60 s.
+- **Foreign items are classified by their owner's profile** (`doc/goals.md`, "Every item is judged by
+  the game that owns it"). The pickups AMXX plugin (`scripting/pickups.sma`, an `FM_Touch` hook ahead of
+  CrossPlay's Touch filter) translates foreign weapons, items and ammo into the toucher's game, so the
+  bot just tries the touch.
+- **`IsArmouryArmor`** makes a CS armoury holding kevlar or an assault suit a preferred `ITEM_PICKUP`
+  (Ricochet shares it). With owner-context classification a real CS armoury reaches `CCSProfile`, so
+  this only matters when cstrike has no profile. Armour is told apart by model (`models/w_kevlar.mdl`,
+  `models/w_assault.mdl`, set by `CArmoury::Spawn` from `m_iItem` 16/17), so no CS offset is read. An
+  emptied armoury is `EF_NODRAW` and drops out of the scan.
+- **It takes an edict, not a classname**, because a `trigger_hurt` is a healing pool or a death trap
+  depending on the sign of `pev->dmg`; `pool_party` ships one of each (`dmg -40`, `dmg 200`).
+  `IsHealingHurt` wants `dmg < 0` and no `SF_TRIGGER_HURT_NO_CLIENTS`. It does not test
+  `SF_TRIGGER_HURT_START_OFF`: that only spawns the trigger `SOLID_NOT`, and a named trigger can be
+  toggled mid-map, so whether the pool runs is a live question (`BotItems::IsVolumeInactive`).
 
-`item_` catches `item_suit`, `item_antidote` and `item_security` as well. They are harmless: the bot
-touches one, nothing happens, and the full list keeps it away for 60 s.
+### Respawn times and chargers
 
-**Foreign items are classified by their owner's profile, not by this one** (`doc/goals.md`, "Every
-item is judged by the game that owns it"). The pickups AMXX plugin (`scripting/pickups.sma`, a
-metamod `FM_Touch` hook that runs before CrossPlay's own Touch filter) translates foreign weapons,
-items and ammo into the toucher's game. So a foreign bot can take far more than armour, and the bot
-just tries the touch.
+20 s weapons and ammo, 30 s items, 30 s HEV charger, 60 s health charger: HLDM's `WEAPON_RESPAWN_TIME`,
+`AMMO_RESPAWN_TIME`, `ITEM_RESPAWN_TIME` and the deathmatch branches of `FlHEVChargerRechargeTime` /
+`FlHealthChargerRechargeTime`. They are a prediction: nothing tells the plugin when an item
+rematerialised, so a bot that guesses short walks up to an empty spot and learns (`doc/goals.md`).
 
-**`IsArmouryArmor` makes a CS armoury holding kevlar or an assault suit a preferred `ITEM_PICKUP`**
-(Ricochet shares it). With owner-context classification, a real CS armoury reaches `CCSProfile`
-instead. This branch now only matters when cstrike has no profile. The armour is told apart by model, `models/w_kevlar.mdl` or `models/w_assault.mdl`, which `CArmoury::Spawn` sets from
-`m_iItem` (ARMOURY_KEVLAR 16, ARMOURY_ASSAULT 17), so no CS offset is read through the bot's gamedata.
-An emptied armoury is `EF_NODRAW` and drops out of the scan. `CCSProfile` still classifies armouries itself.
+`ChargerValue` / `ChargerFullValue` give the charger loop one number to watch and a ceiling, so
+`bot_move_nav.cpp` never knows which field: HEV chargers read `v.armorvalue`, health chargers and pools
+read `v.health`, all capped at 100. For a pool 100 is right because `CBaseEntity::TakeHealth` refuses
+to heal past `pev->max_health`, which HLDM leaves at 100. They are also asked before travelling
+(`BotItems::Sated`, `doc/goals.md`).
 
-**Why it takes an edict and not a classname.** A `trigger_hurt` is a healing pool or a death trap
-depending on the sign of `pev->dmg`, and `pool_party` ships one of each (`dmg -40` and `dmg 200`).
-Nothing in the classname separates them, so the signature had to widen; `CHLDMProfile` is the only
-implementation and every call site already held the edict. `IsHealingHurt` wants `dmg < 0` and no
-`SF_TRIGGER_HURT_NO_CLIENTS`. It deliberately does not test `SF_TRIGGER_HURT_START_OFF`: that flag
-only spawns the trigger `SOLID_NOT`, and a trigger with a targetname can be toggled either way
-mid-map, so whether the pool is *running* is a live question — `BotItems::IsVolumeInactive` asks it
-at scan time — and not a fixed property of the entity.
+## Ricochet (ricochet_profile.cpp)
 
-### The respawn constants
-20 s weapons and ammo, 30 s items, 30 s HEV charger, 60 s health charger. These are HLDM's own
-`WEAPON_RESPAWN_TIME`, `AMMO_RESPAWN_TIME`, `ITEM_RESPAWN_TIME` and the deathmatch branches of
-`FlHEVChargerRechargeTime` / `FlHealthChargerRechargeTime`. They are a *prediction*, not a
-measurement — nothing tells the plugin when an item actually rematerialised, so a bot that guesses
-short simply walks up to an empty spot and learns from it (see `doc/goals.md`, case B).
+`CRicochetProfile` overrides only what Discwar changes. Under CrossPlay a Ricochet player runs
+Half-Life's pmove on whatever map is up, so jumping, ducking and the long jump all work even though
+Ricochet's own `PM_Jump` and `PM_Duck` return early; everything HLDM-shaped is inherited.
 
-### ChargerValue / ChargerFullValue
-The charger runner needs one number to watch and one ceiling to stop at, and which `pev` field that
-is depends on the charger. HEV chargers read `v.armorvalue`, health chargers and healing pools read
-`v.health`; all cap at 100. Keeping this behind the profile is what stops `bot_move_nav.cpp` from
-having to know which is which. 100 happens to be the right ceiling for a pool for a different
-reason: `CBaseEntity::TakeHealth` refuses to heal past `pev->max_health`, which HLDM leaves at 100.
+**One weapon, one row.** `weapon_disc` is id 1 and always held. Ammo is `m_rgAmmo[disc]`, three at most,
+and a thrown disc comes back after up to seven bounces, so nothing predicts when; `AmmoReady` just
+waits.
 
-These two are also now asked *before* travelling and not only on arrival — see `BotItems::Sated` in `doc/goals.md`.
+- **Secondary** is the decapitator, the only throw that kills. `SecondaryAttack` needs all three discs
+  and spends them all: `AMMO_PRIMARY`, `ammoPerShot 3`, `FIRE_TAP`, `AIM_LEAD` at 1000 u/s, no gravity.
+- **Primary** throws one disc and **does no damage**, only pushes. It is in the row for the hard-disc
+  powerup, and `ModeAvailable` refuses it unless `CBasePlayer::m_iPowerups & POW_HARD` (4), read through
+  `plr_iPowerups`. A hard disc always decapitates; `GivePowerup` refills `m_iPowerupDiscs` to three and
+  the flag clears when they run out, so the flag alone answers "hard discs left".
+- `POW_FAST` lets secondary fire with one disc; the row ignores it.
+- **Melee-only throws the disc.** `MeleeOnlyAllows` passes it, so `crossbot_melee_only` still lets
+  Ricochet bots fight. `IsMeleeWeapon` stays false: a melee disc would start duels (`DuelDrive` reads
+  range 0 as "swinging" and stands still) and send other games' bots charging a Ricochet player with a
+  crowbar.
 
-## ricochet_profile.cpp
+**Never combat-ready.** `EvaluateCombat` is always 0, so carefulness is 1: a Ricochet bot always routes
+for cover and the range bias is off.
 
-`CRicochetProfile` derives from `CHLDMProfile` and overrides only what Discwar changes. Respawn, player
-models, `IsDead`, the charger plumbing and everything else HLDM-shaped is inherited, because under
-CrossPlay a Ricochet player runs Half-Life's pmove on whatever map is up — jumping, ducking and the
-long jump all work, even though Ricochet's own `pm_shared.c` returns early from `PM_Jump` and `PM_Duck`.
+**Gathers `item_*` and CS armour only.** All goal tiers are on: gather alone would leave bots standing on
+`fy_snow`, where `roam` is the only goal. `ClassifyItem` is the `item_` prefix or a CS kevlar/assault
+armoury; on a Ricochet map that is `item_powerup*`, respawning after `DISC_POWERUP_RESPAWN_TIME` (10 s).
+A powerup waiting to respawn is `EF_NODRAW`.
 
-### One weapon, one row
+**No fall damage.** `CBasePlayer::PostThink` has the fall-damage call commented out: `kNoFall`.
 
-`weapon_disc` is id 1 and every player always holds it. Ammo is `m_rgAmmo[disc]`, three at most, and a
-thrown disc gives itself back when it returns — after up to seven bounces, so nothing predicts when.
-The row does not try: `AmmoReady` already releases the trigger until the pool is back, however long
-that takes.
+## Opposing Force (gearbox_profile.cpp)
 
-- **Secondary** is the decapitator, the only throw that kills. `SecondaryAttack` refuses unless the
-  player holds all three discs and then spends them all, so the row says `AMMO_PRIMARY`,
-  `ammoPerShot 3`. `FIRE_TAP`, `AIM_LEAD` at 1000 u/s, no gravity.
-- **Primary** is the same throw with one disc and **does no damage** — it only pushes. It is in the
-  row so the bot can use it with the hard-disc powerup, and `ModeAvailable` refuses it otherwise:
-  primary is allowed only while `CBasePlayer::m_iPowerups & POW_HARD` (4), read through
-  `plr_iPowerups`. A hard disc always decapitates. `GivePowerup` refills `m_iPowerupDiscs` to three and
-  the powerup flag clears when they run out, so the flag alone answers "are there hard discs left".
+`CGearboxProfile` is OP4 **deathmatch**: HLDM with ten more weapons, the same crowbar-and-glock spawn,
+and the HL weapons (ids 1-15) with SDK timings. CTF (`op4ctf_*`: `m_iTeamNum` teams, flags, a
+pipewrench/eagle/grapple loadout) is not covered.
 
-`POW_FAST` also lets secondary fire with a single disc. The row ignores that and waits for three.
-
-### Never combat-ready
-
-`EvaluateCombat` is always 0. Carefulness is `1 - readiness`, so a Ricochet bot always routes for
-cover, and the range bias, which scales by readiness, is always off.
-
-### Gathers `item_*` and CS armour, nothing else
-
-Every goal tier is on, as for every other game. An earlier gate that admitted only gather left Ricochet
-bots standing on their spawns on `fy_snow`, where the strategic `roam` intent is the only goal there is.
-`ClassifyItem` is `item_` prefix, a CS kevlar/assault armoury, or nothing: no weapons, ammo, chargers or healing volumes. On a Ricochet map that means the
-`item_powerup*` family; `ItemRespawnDelay` is their `DISC_POWERUP_RESPAWN_TIME`, 10 s. A powerup that is
-waiting to respawn is `EF_NODRAW`, which the item scan already skips.
-
-### No fall damage
-
-Ricochet's `CBasePlayer::PostThink` has the fall-damage call commented out, so `FallDamage()` is
-`kNoFall`.
-
-## gearbox_profile.cpp
-
-`CGearboxProfile` is Opposing Force **deathmatch**. It derives from `CHLDMProfile` because OP4's
-multiplayer is HLDM with ten more weapons: the spawn loadout is the same crowbar and glock, and the HL
-weapons (ids 1–15) have the same timings and speeds as in the HL SDK. CTF (`op4ctf_*`: its own
-`m_iTeamNum` teams, flags, a pipewrench/eagle/grapple loadout) is not covered.
-
-### The ids come from retail, not from the reconstructed source
-
-`halflife-op4-updated` numbers the weapons 16–25 with no gap. Retail `opfor.dll` leaves **21 unused**
-and runs 22–26, and the first live `crossbot_weaponspec <bot>` said so by printing `MISMATCH` on every
-weapon past the displacer. jk_botti and Parabot both carry the retail numbers. The table
-(`gearbox_weapons.cpp`) is 27 slots: 0–15 fall through to `HLDM_WeaponSpec`, 21 is an empty row.
+**The ids come from retail, not the reconstructed source.** `halflife-op4-updated` numbers the new
+weapons 16-25; retail `opfor.dll` leaves **21 unused** and runs 22-26 (a live `crossbot_weaponspec`
+printed `MISMATCH` past the displacer; jk_botti and Parabot agree). `gearbox_weapons.cpp` has 27 slots:
+0-15 fall through to `HLDM_WeaponSpec`, 21 is empty.
 
 | id | weapon | value | range | handling |
 |---|---|---|---|---|
@@ -541,352 +452,455 @@ weapon past the displacer. jk_botti and Parabot both carry the retail numbers. T
 | 25 | knife | 0.1 | close | the crowbar row |
 | 26 | penguin | 0.2 | close | the snark row plus splash 250 (it explodes with hand-grenade damage) |
 
-What was deliberately left out:
-- The pipewrench's charged swing and the knife's 100× backstab. Both are crowbar skins.
-- The displacer's secondary: it teleports the *user* to a spawn point, so it is not an attack.
-- The grapple's movement use, which only sticks to `xeno_grapple` textures and would be navgen work.
+Left out on purpose: the pipewrench's charged swing and the knife's backstab (both crowbar skins); the
+displacer's secondary (teleports the user, not an attack); the grapple's movement use (only sticks to
+`xeno_grapple` textures, which would be navgen work). The shock rifle underwater is a radius blast that
+kills its holder, hence `WPN_Q_NO_UNDERWATER`.
 
-The shock rifle fires underwater as a radius blast that kills its own holder, which is what
-`WPN_Q_NO_UNDERWATER` is for there.
+**Melee is a set.** `IsMeleeWeapon` is crowbar, knife, pipewrench and grapple, so an enemy holding a
+knife starts a duel. The grapple is full melee with range 0 (unlimited), so `DuelDrive` never charges
+with it and the ambush's `PASS_REACH` skips it. `MeleeWeapon()` stays the crowbar.
 
-### Melee is a set
+**Ambush order.** `AMBUSH_PENGUIN` joins the thrown group; `AMBUSH_GRAPPLE` is `PASS_LAST`, taken with no
+distance or splash gate when nothing else fits (`doc/combat.md`, "The ambush").
 
-The duel, the ambush's contact pass, idle selection and the breaker all used to compare against the
-single `MeleeWeapon()` id, so an enemy holding a knife never started a duel. `IsMeleeWeapon` is
-crowbar, knife, pipewrench and grapple. The grapple is **full** melee on purpose: its range is 0
-(unlimited), so `DuelDrive` never charges with it and the ambush's contact pass (`PASS_REACH`) skips
-it — that pass wants a finite reach. `MeleeWeapon()` stays the crowbar, which is what the breaker draws.
+**Expert pickups.** `ItemPreferred` adds `weapon_displacer` and `weapon_sniperrifle`. A displacer
+pickup carries 40 uranium, the gauss and egon pool, so it counts even for a bot that has one.
 
-### Ambush order
+The OP4 weapon quirks are under "The OP4 quirks"; `eagle_iLaserActive` under "Gamedata".
 
-`AMBUSH_PENGUIN` joins the thrown group beside the grenade and the snark. `AMBUSH_GRAPPLE` is a
-separate last resort (`PASS_LAST`): no distance and no splash gate, taken only when the bot has no
-melee in reach and nothing throwable. HLDM returns 0 for both, so valve is unchanged.
+## Deathmatch Classic (dmc_profile.cpp)
 
-### Expert pickups
-
-`ItemPreferred` adds `weapon_displacer` and `weapon_sniperrifle` to HLDM's set. The displacer is there
-for the ammo as much as the gun: a pickup carries 40 uranium, the gauss and egon pool, so it counts
-even for a bot that already holds one.
-
-## dmc_profile.cpp
-
-`CDMCProfile` is Deathmatch Classic. It derives from `CHLDMProfile` for respawn, `IsDead`, player
-models and item classification, and replaces everything about weapons, because DMC keeps no weapon
-entities at all.
+`CDMCProfile` inherits respawn, `IsDead`, player models and item classification from HLDM and replaces
+everything about weapons, because DMC keeps no weapon entities.
 
 ### The inventory is four ints and a bitmask
 
-Every DMC player carries exactly one item object, a dummy `weapon_quakegun` whose `m_iId` is 2 -- the
-glock's id -- and which only fires whatever the player's state says. The real state is on
-`CBasePlayer`: `m_iQuakeItems` holds `IT_*` bits (weapons in bits 0-7: axe, shotgun, super shotgun,
-nailgun, super nailgun, grenade launcher, rocket launcher, lightning gun), `m_iQuakeWeapon` is the one
-bit in hand, and the ammo is `m_iAmmoShells` / `Nails` / `Rockets` / `Cells`. `pev->weapons` is
-meaningless, which is why `crossbot_weapons` prints `MISMATCH` against it on every DMC bot.
+Every DMC player carries one dummy `weapon_quakegun` (`m_iId` 2, the glock's id) that fires whatever the
+player's state says. The real state is on `CBasePlayer`: `m_iQuakeItems` holds `IT_*` bits (weapons in
+bits 0-7: axe, shotgun, super shotgun, nailgun, super nailgun, grenade launcher, rocket launcher,
+lightning gun), `m_iQuakeWeapon` is the bit in hand, and ammo is `m_iAmmoShells` / `Nails` / `Rockets` /
+`Cells`. `pev->weapons` is meaningless, which is why `crossbot_weapons` prints `MISMATCH` on every DMC
+bot.
 
-So the item walk in `BotWeapons::Read` would be wrong, not merely empty -- it would report a glock.
-`IGameProfile::ReadInventory` lets a profile fill `BotInventory` itself; `CHLDMProfile` returns false
-and the walk runs as before. `CDMCProfile` emits one `BotWeapon` per set bit with no edict, no clip,
-and `primaryAmmoType` 0-3 indexing a synthetic `ammo[]` of shells, nails, rockets, cells. The refire
-timer is the player's `m_flNextAttack`; it is copied onto the held weapon's `nextPrimaryAttack` so the
-shot detector in `bot_fire.cpp` sees a timer rise when a shot leaves. `BotWeapons::ActiveWeaponId`
-takes the same path. The six fields are optional requests in `gamedata.cpp`; a DMC profile running
-without them is `GameData::Fatal`.
+The item walk would report a glock, so `CDMCProfile::ReadInventory` emits one `BotWeapon` per set bit:
+no edict, no clip, `primaryAmmoType` 0-3 indexing a synthetic shells/nails/rockets/cells `ammo[]`. The
+player's `m_flNextAttack` is copied onto the held weapon's `nextPrimaryAttack` so the shot counter sees
+a timer rise. `BotWeapons::ActiveWeaponId` takes the same path. The six fields are optional gamedata
+requests; a DMC profile without them is `GameData::Fatal`.
 
-**The weapon id is the bit plus one.** That is exactly DMC's `usercmd.weaponselect` number (1 axe ..
-8 lightning), and it keeps id 0 meaning "none" as HLDM's code expects.
+**The weapon id is the bit plus one**: DMC's own `usercmd.weaponselect` number (1 axe .. 8 lightning),
+keeping 0 as "none".
 
-Checked live, one give at a time: every pickup sets the expected bit and adds the SDK's ammo (super
+Checked live one give at a time: each pickup sets the expected bit and adds the SDK's ammo (super
 shotgun +5 shells, nailgun +30 nails, launchers +5 rockets, lightning +15 cells). **A death wipes
-`m_iQuakeItems`**, and the backpack a victim later collects carries the killer's current weapon, so a
-bot's arsenal after a fight need not resemble what it was given.
+`m_iQuakeItems`**, and a backpack carries the killer's current weapon, so an arsenal after a fight need
+not resemble what was given.
 
-### Switching is weaponselect, not a command
+### Switching is weaponselect
 
 DMC comments out impulses 1-8 and has no `weapon_` command; the only selector is `CmdStart` reading
 `usercmd.weaponselect` into `W_ChangeWeapon`, which refuses a weapon the player lacks or has no ammo
-for. `pfnRunPlayerMove` has no field for it, so `CDMCProfile::SelectWeapon` calls
-`MDLL_CmdStart` / `MDLL_CmdEnd` itself with an otherwise empty usercmd -- Parabot's route. The switch
-is instant. `IGameProfile::SelectWeapon` is the hook; `CHLDMProfile` still sends `weapon_<name>`.
+for. `pfnRunPlayerMove` has no field for it, so `CDMCProfile::SelectWeapon` calls `MDLL_CmdStart` /
+`MDLL_CmdEnd` with an otherwise empty usercmd (Parabot's route). The switch is instant.
 
 ### The table
 
-No clips, no secondary modes. Hitscan shotguns and the lightning gun (range 600, 0.1 s per cell) are
-`AIM_TARGET`; nails and rockets fly at 1000 and are led; the rocket launcher carries `WPN_Q_AIM_FEET`.
-Splash is `Q_RadiusDamage`'s reach, damage + 40 = 160. Both shotguns spend one shell per press
-because the super shotgun falls back to a single shot on one shell.
+No clips, no secondary modes. Shotguns and the lightning gun (range 600, 0.1 s per cell) are
+`AIM_TARGET`; nails and rockets fly at 1000 and are led; the rocket launcher has `WPN_Q_AIM_FEET`.
+Splash is `Q_RadiusDamage`'s reach, damage + 40 = 160. Both shotguns spend one shell per press, since
+the super shotgun fires a single shot on one shell.
 
-**The grenade launcher is `WPN_Q_THROW_ARC`** even though nothing is thrown by hand: its launch is
-`forward * 600 + up * 200`, so it leaves 18.4 degrees above the aim at 632.5 u/s, and only
-`ThrowLaunch` can say that. It is `FIRE_HOLD`, not `FIRE_TAP` -- the tap path's throw commit waits for
-a handgrenade's `m_flStartThrow`, which DMC never sets. It does not inherit the player's velocity, and
-the throw solve used to add it unconditionally; it now asks `WPN_Q_INHERIT_VEL`, which the handgrenade
-row carries, so HLDM is unchanged. The grenade spawns at `pev->origin`, not the eye, and the solve
-ignores those 18-odd units.
+**The grenade launcher is `WPN_Q_THROW_ARC`**: its launch is `forward * 600 + up * 200`, leaving 18.4°
+above the aim at 632.5 u/s, which only `ThrowLaunch` (`DMC_ThrowLaunch`) can express. It is `FIRE_HOLD`
+because the tap path's throw commit waits for a hand grenade's `m_flStartThrow`, which DMC never sets.
+It does not inherit velocity (only modes with `WPN_Q_INHERIT_VEL` do). The grenade spawns at
+`pev->origin`, not the eye; the solve ignores those 18 units.
 
-### Fall damage follows mp_falldamage
+### The rest
 
-DMC's default `mp_falldamage 0` is a flat 5 per landing, so `FallDamage()` is `kNoFall` unless the cvar
-is non-zero, where DMC uses the HL formula, `kHlFall`.
+- **Fall damage follows `mp_falldamage`.** DMC's default 0 is a flat 5 per landing, so `kNoFall`; a
+  non-zero cvar uses the HL formula, `kHlFall`.
+- **Load `valve` first: `-xgame1 valve -xgame2 dmc`.** CrossPlay's `PM_Move` routes a ducking DMC player
+  (`noDuck`) to a move donor, and its donor search never increments. With `valve` as game 0 the first
+  check succeeds; with `dmc` alone or first the server spins forever the first time a bot crouch-jumps.
+  That loop is CrossPlay's to fix.
+- **The ring makes a player 80% invisible.** `CDMCProfile::Cloaked` reads `renderfx ==
+  kRenderFxGlowShell` with `renderamt == 5`, or `rendermode == kRenderTransColor`. It is not
+  `Disguised`: the player is still a target and only sight is rolled (`doc/perception.md`, cloaked
+  enemies). Damage and sound find him as usual.
+- **Known gaps.** `mp_weaponstay` defaults to 1, so touching an owned weapon does nothing and only the
+  item timeouts teach that; quad and pentagram are not read; DMC's jump is 295 u/s against HL's ~268,
+  so plans are conservative; `WPN_Q_NO_UNDERWATER` tests `waterlevel == 3` but the lightning gun
+  discharges at `> 1`.
 
-### CrossPlay hangs a dmc-only server
+## Gunman Chronicles (rewolf_profile.cpp)
 
-CrossPlay's `PM_Move` routes a ducking DMC player (`noDuck`) to the move donor, and its donor search
-loop never increments its index. With `valve` as game 0 the first check succeeds; with `dmc` alone,
-or `dmc` first, the server spins forever the first time a bot crouch-jumps. **Load `valve` first:**
-`-xgame1 valve -xgame2 dmc`. That loop is CrossPlay's to fix.
+`CRewolfProfile` is Gunman deathmatch (`rewolf`, `gunman.dll`, November 2000): an HL SDK 2.x game with
+its own weapons, a weapon-customization system, and absolute weapon timers. Everything below was read out
+of `gunman.dll` and checked live on `takeoff`; sandbot's Gunman bot was the starting point, not the source.
 
-### Known gaps
+**The gamedata is the matcher's.** No PDB or symbol file exists, so `rewolf-win.json` comes from
+`GamedataMatcher` against the HL oracle (Valve class names only). Every field the bot reads is backed by
+gunman's own save tables or was checked in code (`DefaultReload` for `m_fInReload`, `m_iClip`,
+`m_flNextAttack`; `AddPlayerItem` / `RemovePlayerItem` / `GiveAmmo` for `m_rgpPlayerItems` 1152,
+`m_pActiveItem` 1196, `m_rgAmmo` 1212). `CBaseEntity` is 32 bytes, so `m_fInAttack`, `m_flStartThrow` and
+`m_chargeReady` do not exist. There are 11 item buckets (`MAX_ITEM_TYPES` loops stop at 11).
 
-- `mp_weaponstay` defaults to 1: touching an owned weapon does nothing, and only the item timeouts
-  teach the bot that.
-- Quad, pentagram and invisibility are not read.
-- DMC's jump is 295 u/s against HL's ~268; plans are conservative.
-- `WPN_Q_NO_UNDERWATER` tests `waterlevel == 3`, but the lightning gun discharges at `> 1`.
+### Timers are absolute
 
-## tfc_profile.cpp
+Every weapon's `UseDecrement()` returns 0, and `m_flNextAttack` is compared against `gpGlobals->time`, so
+gunman stores `m_flNextPrimaryAttack`, `m_flNextSecondaryAttack` and `m_flNextAttack` as absolute times.
+`ReadInventory` runs the shared item walk and subtracts `gpGlobals->time`, which gives the bot the same
+relative "ready at <= 0" timers as HL. The gauss pistol's pulse sets only the player's `m_flNextAttack`, so
+the held weapon's primary timer is the larger of the two, as in DMC, and the shot counter sees it rise.
 
-`CTFCProfile` is Team Fortress Classic. TFC is the Half-Life SDK with QuakeC Team Fortress 2.x ported
-into it, and the two halves show in the data: the inventory is a normal HL item chain
-(`m_rgpPlayerItems`, `m_pActiveItem`, `CBasePlayerWeapon`), while everything TF — ammo, grenades,
-`tfstate`, disguise, buildings, goal keys — is a QuakeC field living **on `CBaseEntity`**
-(`tfstate` +140, `ammo_shells`/`nails`/`cells`/`rockets` +212/220/228/236, `no_grenades_1/2`,
-`tp_grenades_1/2`, `is_building`, `is_feigning`, `team_no` ...). Class and team are mirrored into
-`pev->playerclass` and `pev->team`. It derives from `CHLDMProfile`; `Detect` does not look at
-`deathmatch`. References below are into the decompiled `tfc.c`.
+### Customization is a console command
 
-### Joining is two commands, checked against state
+`cust_<slider><value>` calls a virtual on the **active** weapon with the slider digit and the value;
+`custupdate` calls another. The client's menu only sends these commands, so a bot can too. The table
+describes one setup per weapon, and `PreThink` sends that setup (`Rewolf_WeaponSetup`) whenever the
+active weapon object changes, forgetting it on death:
 
-`ClientPutInServer` leaves the player with no team and no class, and CrossPlay's `joinTeam` feature
-holds its spawn until `pev->playerclass` is set. `IGameProfile::PreThink` runs first in every think and owns the bot
-until both are set: `jointeam 5` while `pev->team` is 0 (5 is auto-assign, the smallest team with
-room, `TeamFortress_TeamPutPlayerInTeam`), then the class command. Each send is 1.2 s after the
-last, because `TeamSet` and `ChangeClass` refuse anything inside `m_fNextTeamOrClassChange` (1 s).
-Nothing waits for `VGUIMenu`: the menus only prompt, and the commands work without them. The check
-re-runs every think, so a bot the mod moves back to team 0 or strips of its class simply joins
-again. While joining the bot runs an empty `pfnRunPlayerMove` and is marked `wasDead`, so the usual
-respawn resets happen when it first spawns.
+| weapon | command | effect |
+|---|---|---|
+| gausspistol | `cust_11` | fire type 1, pulse: hitscan to 8192, 1 uranium, 0.1 s (0.25 s after every third shot) |
+| shotgun | `cust_22` | 2 shells a shot, 8 pellets, traced to 2048 |
+| dml | `cust_23` | flight path 3, a straight rocket at 900 u/s |
+
+The other gauss fire types: 2 is a `gauss_bolt` projectile at 1450 u/s for 10 uranium; 3 is a 5° spray
+at 2000 u/s; 4 is the sniper, which needs 20 uranium and a `cust_2GaussPistolSniper` item. The DML's
+default flight path 1 follows the shooter's laser spot and 2 homes; detonation 1 is on impact, 3 a 2 s
+bounce, 4 a wall-mounted trip charge.
+
+**Upgrades are inventory items.** `cust_*` entities (`cust_1GaussPistolFireType` id 31,
+`cust_2MinigunCooled` 23, `cust_2ShotgunShells` 32 ...) sit in item bucket 0. Spawn hands out fists, the
+gauss pistol and the minigun coolers. The table has no rows for them, so the bot ignores them, and ids
+above 31 overflow `pev->weapons`: `crossbot_weapons` prints `MISMATCH` on every Gunman bot.
+
+### The table
+
+Aliases rename themselves in `Spawn`, so the table uses the real classnames: `weapon_mechagun` is
+`weapon_minigun`, `weapon_pistol` is `weapon_gausspistol`, `weapon_mule` is `weapon_dml`,
+`weapon_polarisblade` is `weapon_beamgun`, and `weapon_chemgun` is `weapon_SPchemicalgun` (the maps place
+the latter).
+
+| id | weapon | value | range | handling |
+|---|---|---|---|---|
+| 1 | fists | 0.1 | close | the crowbar row (32 u trace); melee |
+| 14 | beamgun | 0.3 | close | hold, 1 battery, range 512, sticky, no underwater |
+| 16 | dml | 0.4 | long | hold, lead 900, clip 2, splash 250, `WPN_Q_AIM_FEET` |
+| 17 | shotgun | 0.2 | close | hold, target, 2 buckshot, range 2048 |
+| 19 | SPchemicalgun | 0.2 | close | hold, lead 850, gravity 0.5, 1 acid, splash 150 |
+| 28 | minigun | 0.3 | close | hold, target, 1 9mm, sticky |
+| 30 | gausspistol | 0.2 | long | hold, target, 1 uranium, sticky |
+
+- **The beamgun aims itself.** It takes the nearest living client or monster in a ±512 box
+  (`UTIL_EntitiesInBox`), hence range 512.
+- **The chem gun's speed is its pressure slider**, 400 + 150 × pressure; the default 3 gives 850. The
+  shot also shoves the shooter.
+- **Splash radii are estimates**: 250 for the DML (`dmg` 100 at HL's 2.5×) and 150 for the chem gun
+  were not measured.
+- **Left out:** `weapon_dmlGrenade` (id 13, comes with the DML and spends its missiles) and
+  `weapon_aicore` (7). Neither is on the multiplayer maps.
+
+`AmmoEntity` maps each weapon to its pickup, checked against each `ammo_*` entity's `AddAmmo`.
+`ItemPreferred` adds `item_armor`, `weapon_dml` and `weapon_minigun`. There are no ambush or deployable
+weapons, and fists are melee.
+
+## The Specialists (ts_profile.cpp)
+
+`CTSProfile` is The Specialists 3.0 deathmatch (`ts`, `mp.dll`): an HL SDK 2.3 MP game that, like DMC,
+keeps no weapon entities. Everything below was read out of `ts_i686.so` (gcc 2.96 symbols, no field
+names) and checked live on `ts_bikini`. TS's own bot (`addbot`) is in `mp.dll` only, and the Linux
+build says "Bots only in listen servers".
+
+### The inventory is one gun with 38 slots
+
+Every TS player carries one `weapon_tsgun` (`CTSGun`, `m_iId` 16) that fires whichever TS weapon is
+selected. The gamedata has no names for its members, so `ts-manual.json` names the three the bot reads
+(Windows offsets; Linux is +16):
+
+| field | offset | what |
+|---|---|---|
+| `CTSGun::m_iWeapon` | 184 | the selected TS weapon id, 0 = kung fu |
+| `CTSGun::m_rgAmmo` | 196 | `int[16]` reserve per ammo type |
+| `CTSGun::m_rgStatus` | 256 | 38 weapon states of 56 bytes: byte +4 owned, int +8 rounds in the magazine |
+
+`ReadInventory` emits one `BotWeapon` per owned id, plus kung fu, which is always there. Its id is 38,
+because 0 means "none" to the bot; every other id is TS's own (the AMXX `TSW_*` numbering). The gun's
+`m_flNextPrimaryAttack` and `m_fInReload` go to the selected weapon only. The timers are relative
+(`UseDecrement` returns 1). The magazine count was seen above the table's clip after a few kills (an
+AUG at 56, a PDW at 76); the cause was not traced. `pev->weapons` is meaningless, so
+`crossbot_weapons` prints `MISMATCH`.
+
+### Joining is the buy commands
+
+A joining player is an observer until the VGUI spawn menu sends its loadout and `respawn`. The menu
+only sends console commands (`ClientCommand`), so the bot does too. `Respawn` sends them once a second
+while dead, and presses attack as HLDM does:
+
+- `rst_cfg` clears the loadout.
+- `tkw <id>_<attachments> ...` adds weapons (`AddItemToArmament`). For grenades and knives the second
+  number is a count.
+- `tka <ammotype>_<rounds> ...` sets the reserve (`AddAmmoToArmament`, a set, not an add).
+- `respawn` spawns, once the respawn timer has run out.
+
+`TS_Loadout` picks one of eight primary + pistol pairs by player index, each with its reserve and no
+attachments, weighing 35-55. Three of them (AK-47 + MK23, AUG + Glock 18, PDW + Glock 22) were seen
+bought live on the default cvars; the others were not.
+
+### Switching is weapon_<id>
+
+`weapon_<n>` calls `CTSGun::SelectWeapon(n)`, which refuses a weapon the player does not own;
+`weapon_0` is kung fu. Other commands the bot does not use: `firemode`, `drop`, `usepowerup`,
+`lastinv`.
+
+### The table
+
+Every gun is hitscan, `AMMO_CLIP`, one round a shot, and `FIRE_TAP`. TS has per-weapon fire modes
+(the status byte at +6). Semi-auto modes fire only on a fresh press (`m_afButtonPressed`), and a tap
+also drives full auto at its rate. Clip and ammo type come from `s_weapon_info`, which the
+`Write_<weapon>` functions fill at startup (clip at +4, ammo type +8, fire interval +0x18, damage
++0x1c, kind +0x20, weight +0xd0, price +0xd8).
+
+- **Values** scale by class: pistols 0.1-0.2, SMGs 0.25-0.3, shotguns 0.25-0.35, rifles 0.4, the
+  M60 0.45, the Barrett 0.5. Rifles, the Desert Eagle, the Raging Bull and the Contender are long range.
+- **Shotgun ranges** follow the pellet spread: 1024 for the M3 and Mossberg, 768 for the SPAS and
+  USAS, 384 for the sawed-off.
+- **Melee** is kung fu (48 u) and the katana (64 u); `MeleeWeapon` is kung fu.
+- **Left out:** the M61 grenade (24), the throwing knives (25, 35) and the C4 (29). The bot never buys
+  them.
+
+### The rest
+
+- **Ground weapons and ammo are used, not touched** (`CTSGroundWeapon::Use`), so `ClassifyItem`
+  ignores `ts_groundweapon`, `ts_groundammo` and every `weapon_*` / `ammo_*`. `ts_powerup` is touched
+  and is `ITEM_PICKUP`, preferred along with health kits.
+- **No zoom, attachments, stunts or slow motion.** Secondary attack is a melee bash on most guns; it is
+  not in the table.
+- **Fall damage** is assumed to be HL's (`kHlFall`); TS's `FlPlayerFallDamage` was not read.
+
+## Team Fortress Classic (tfc_profile.cpp, tfc_ability.cpp)
+
+TFC is the HL SDK with QuakeC Team Fortress 2.x ported in. The inventory is a normal HL item chain
+(`m_rgpPlayerItems`, `m_pActiveItem`), while everything TF (ammo, grenades, `tfstate`, disguise,
+buildings, goal keys) is a QuakeC field **on `CBaseEntity`** (`tfstate`, `ammo_shells`/`nails`/
+`cells`/`rockets`, `no_grenades_1/2`, `tp_grenades_1/2`, `is_building`, `is_feigning`, `team_no`...).
+Class and team are mirrored into `pev->playerclass` and `pev->team`. `CTFCProfile::Detect` does not
+check `deathmatch`, and neither does `CCSProfile::Detect`.
+
+References are into the decompiled `tfc.c` (`D:\projects\libs\tfc.c`). **Its offsets are not the live
+DLL's**: every field sits exactly 16 bytes past `tfc-win.json` (`ammo_shells` 228 vs 212, `team_no` 312
+vs 296, `m_flTouchableAt` 1164 vs 1148). Match fields by name, never by offset. All TF fields are
+optional gamedata requests, and so is `CFuncTank::m_iszMaster`, which `tfc-win.json` lacks
+(`bot_fun.cpp` skips a negative offset).
+
+### Joining
+
+`ClientPutInServer` leaves the player with no team or class, and CrossPlay's `joinTeam` feature holds
+the spawn until `pev->playerclass` is set. `PreThink` owns the bot until both are set: `jointeam 5`
+(auto-assign to the smallest team with room) while `pev->team` is 0, then the class command, each 1.2 s
+after the last because `TeamSet` and `ChangeClass` refuse inside `m_fNextTeamOrClassChange` (1 s). The
+menus only prompt; the commands work without them. The check runs every think, so a bot moved back to
+team 0 or stripped of its class just rejoins. While joining the bot sends an empty move and is marked
+`wasDead`, so the usual respawn resets run at first spawn.
 
 The third `crossbot_add` argument is a class: `scout sniper soldier demoman medic hwguy pyro spy
-engineer civilian randompc`. Anything else, `*` or nothing is `randompc`. The choice lives in a
-per-edict-index table in `tfc_profile.cpp`, since the profile is a shared static.
+engineer civilian randompc`; anything else, `*` or nothing is `randompc`. The choice lives in a
+per-edict-index table, since the profile is a shared static.
 
-**`randompc` re-rolls on every spawn** (`ChangeClass` 75766, `Spawn` 74997-75229). It sets
-`tfstate |= 8`, and each `Spawn` then draws a class from 1-9 that is not the previous one, not in the
-map's `illegalclasses`, and not spy when `spy_off` is set. `pev->playerclass` always holds the real
-class. Seen live: a `randompc` pyro came back from `crossbot_kill` as a scout.
+- **`randompc` re-rolls every spawn** (`ChangeClass` 75766, `Spawn` 74997-75229): it sets
+  `tfstate |= 8` and each spawn draws a class 1-9 that is not the previous one, not in the map's
+  `illegalclasses`, and not spy under `spy_off`. `pev->playerclass` holds the real class (seen live:
+  a `randompc` pyro came back from `crossbot_kill` as a scout).
+- A class command while classed only sets `nextpc` for the next spawn unless the userinfo key
+  `hud_classautokill` is set. The bot never changes class alive, so it does not set it.
 
-A class command while the player already has a class only sets `nextpc` for the next spawn, unless
-the userinfo key `hud_classautokill` is set; the bot never changes class alive, so it does not set it.
+### Inventory and the table
 
-### Ammo is read from the QuakeC fields
-
-The item walk is `BotWeapons::ReadItems`, shared with the HL path; `ReadInventory` runs it and then
-overwrites `ammo[primaryAmmoType]` from the entity field that weapon draws on (`TFC_AmmoField`).
-`SendAmmoUpdate` (71073) copies those four fields into `m_rgAmmo` only when the client data is
-updated, so `m_rgAmmo` is a mirror at best, and a stale one for a fake client.
-
-The sniper rifle has no `m_fInAttack`. Its aiming state is `tfstate & 0x800` on the player, and
-`ReadInventory` reports that as the rifle's `chargeState`, which is all the shot counter needs to see a
-release.
-
-### The table
+`ReadInventory` runs the shared item walk, then overwrites `ammo[primaryAmmoType]` from the entity
+field that weapon draws on (`TFC_AmmoField`). `SendAmmoUpdate` (71073) only copies those fields into
+`m_rgAmmo` on a client data update, so for a fake client `m_rgAmmo` is stale. The sniper rifle has no
+`m_fInAttack`; its aiming state is `tfstate & 0x800`, reported as the rifle's `chargeState`.
 
 | id | classname | notes |
 | --- | --- | --- |
 | 3, 4, 5, 23 | medikit, spanner, axe, knife | melee, `IsMeleeWeapon`; `MeleeWeapon` is the axe |
-| 6 | sniperrifle | `FIRE_CHARGE`, `WPN_Q_BRACE`, charge 2 s, carry cap 12 s |
+| 6 | sniperrifle | `FIRE_CHARGE`, `WPN_Q_BRACE`, charge 2 s, carry cap 12 s; zoom 20 on secondary (`CTFSniperRifle::SecondaryAttack` sets fov 20), zoomed row is the same shot |
 | 7 | autorifle | hitscan, sticky |
 | 8, 9 | shotgun, supershotgun | clips 8 and 16; the super shotgun spends 2 |
 | 10, 11 | ng, superng | nails at 1000, no gravity (`MOVETYPE_FLYMISSILE`); super spends 2 |
-| 12, 22 | gl, pl | clip 6, `WPN_Q_THROW_ARC`, launch like DMC's (600 forward + 200 up) |
+| 12, 22 | gl, pl | clip 6, `WPN_Q_THROW_ARC`, DMC's launch (600 forward + 200 up) |
 | 13 | flamethrower | bursts at 600, range 300 |
 | 14, 15 | rpg, ic | rockets at 900 and 600, `WPN_Q_AIM_FEET`; the RPG has a clip of 4 |
 | 17 | ac | hitscan, sticky |
-| 20, 21 | tranq, railgun | nails at 1500; the tranq is `RANGE_NONE`: its dart slows for 15s and barely hurts, so it has no ground to prefer and never makes a sniper |
+| 20, 21 | tranq, railgun | nails at 1500; the tranq is `RANGE_NONE` (its dart slows for 15 s and barely hurts, so it prefers no ground and never makes a sniper) |
 
 Speeds come from each projectile's `Spawn` (103660-104076), clip sizes and ammo names from each
 `GetItemInfo`. The pipebomb launcher is worth almost nothing (0.02) because its bombs only go off on
-`detpipe`. `ThrowLaunch` is `DMC_ThrowLaunch`, shared with `dmc_profile.cpp`.
+`detpipe`. `ThrowLaunch` is `DMC_ThrowLaunch`.
 
-**The sniper rifle fires on release and only when aimed.** `ItemPostFrame` (144056) starts aiming
-only while horizontal speed is at most 50, slows the player to 80, grows damage from 50 at 50 per
-second up to 400, and fires on the button release — if the player is on the ground. A release in the
-air prints `#Sniper_cantfire`. `WPN_Q_BRACE` is what stops the bot first.
+- **The sniper rifle fires on release, and only when aimed.** `ItemPostFrame` (144056) starts aiming only
+  at horizontal speed 50 or less, slows the player to 80, grows damage from 50 at 50/s up to 400, and
+  fires on release if on the ground (in the air it prints `#Sniper_cantfire`). `WPN_Q_BRACE` stops the
+  bot first.
+- **The assault cannon does not brace.** Its cone is the constant 0.1 passed to `FireBullets`
+  (`CTFAssaultC::Fire` 138102), with no stance or velocity term. Its slowdown is state-based: the
+  wind-up (`PrimaryAttack` 138185) sets `tfstate |= 0x800`, `TeamFortress_SetSpeed` (74241) caps
+  `maxspeed` at 80, and only `WeaponIdle`, `WindDown` or `Holster` clears it after the spin times out.
+  Releasing between shots gives nothing back.
 
-**The assault cannon does not brace.** Its cone is the constant 0.1 passed to `FireBullets`
-(`CTFAssaultC::Fire` 138102) — no stance term, no velocity term. What it does have is a slowdown, and
-that one is *state*-based, not button-based: the wind-up (`PrimaryAttack` 138185, which needs
-`IN_ATTACK` once) sets `tfstate |= 0x800`, `TeamFortress_SetSpeed` (74241) then caps `maxspeed` at 80,
-and only `WeaponIdle`, `WindDown` or `Holster` clears the bit after the spin times out. Releasing the
-button between shots does not give the speed back, so there is nothing for a bot to game. The row
-carried `WPN_Q_BRACE` on an assumption; it is gone.
-
-### Gamedata
-
-`tfc-win.json` has no `CFuncTank::m_iszMaster`; that request is optional now, and `bot_fun.cpp`
-already skips a negative offset. The TF fields are optional requests too.
-
-### Class abilities (tfc_ability.cpp)
+### Class abilities
 
 `IGameProfile::AbilityRun` is called from `Bot_MoveNav` right after `BotCamp::Track`, before break,
-deploy, fun, combat and camp; returning true owns the frame. The per-bot state is the generic
-`BotAbility::State` (`src/bot/bot_ability.h`), so `src/bot/` names no TFC constant; everything TF
-lives in `src/game/tfc/tfc_ability.cpp`. While a task is active `BotFire::Think` idles with
-`why=ability` and `Bot_ManeuverActive` is true, so the task presses its own buttons and nothing
-else turns the bot. Tasks drive in a straight line (`Drive`, the deploy approach pattern), so each
-one starts only for a target in sight and nearby. `crossbot_ability_status` prints the task, the
-last `why` and per-life-surviving counters.
+deploy, fun, combat and camp; returning true owns the frame. Per-bot state is the generic
+`BotAbility::State` (`src/bot/bot_ability.h`), and everything TF lives in `tfc_ability.cpp`. While a
+task runs, `BotFire::Think` idles with `why=ability` and `Bot_ManeuverActive` is true. Tasks drive in a
+straight line (`Drive`, the deploy approach), so each starts only for a target in sight and near.
+`crossbot_ability_status` prints the task, the last `why` and per-life counters.
 
 | class | what | trigger | commands / buttons |
 | --- | --- | --- | --- |
-| medic | `heal` | a friend under 95% health standing in the medic's own nav area, no enemy engaged; ends when the patient leaves the area and is 64+ away | medikit, attack within 64 |
+| medic | `heal` | a friend under 95% health in the medic's own nav area, no enemy engaged; ends when the patient leaves the area and is 64+ away | medikit, attack within 64 |
 | engineer | `build` | holding a camp spot: sentry (130 cells), else dispenser (100), else exit teleporter (entrance exists, 125). Near its own spawn with sentry and dispenser up: entrance (125) | `build 2` / `build 1` / `build 5` / `build 4` |
-| engineer | `repair` | any building of its own team (`team_no`; its own only when teams are off) below `max_health`, or a sentry not on `sentry3.mdl` with 130 cells; in sight within 700 | spanner, attack within 64 |
-| spy | disguise | teams on, `is_undercover == 0` (2 = in progress, 1 = done), not engaged, not carrying a goal, every 5 s at most | `disguise_enemy <1-7,9>` |
-| all but medic | call | leaving combat (`Engaged` goes false) below 50% health, teams on, not feigning | `saveme` |
+| engineer | `repair` | a building of its own team (`team_no`; its own only when teams are off) below `max_health`, or a sentry not on `sentry3.mdl` with 130 cells; in sight within 700 | spanner, attack within 64 |
+| spy | disguise | teams on, `is_undercover == 0` (2 in progress, 1 done), not engaged, not carrying a goal, every 5 s at most | `disguise_enemy <1-7,9>` |
+| all but medic | call | leaving combat below 50% health, teams on, not feigning | `saveme` |
 | spy | feign | damage taken, chance `1 - health/max`, on the ground, no grenade cooking | `feign` |
-| spy | `stab` | hard/expert only: the sense target is within 300 and faces away (dot < -0.3) | knife, attack within 56; ends if the victim turns (dot > 0.3) |
-| scout | `touch` | a player that *looks* friendly, within 800, in the view cone, closer to an enemy suspicion than to any other friendly-looking player | drives into it; an enemy scout's touch strips a spy's disguise |
+| spy | `stab` | hard/expert only (`backstab`): the sense target within 300 and facing away (dot < -0.3) | knife, attack within 56; ends if the victim turns (dot > 0.3) |
+| scout | `touch` | a player that looks friendly, within 800, in the view cone, closer to an enemy suspicion than to any other friendly-looking player | drives into it; an enemy scout's touch strips a disguise |
 | scout | `disarm` | an enemy `detpack` in sight within 1000 | drives into it; a scout's touch defuses it and scores a frag |
-| demoman | `detpack` | see **Detpacks** below | `detstart N`, then a planned retreat |
+| demoman | `detpack` | see "Detpacks" | `detstart N`, then a planned retreat |
 | demoman | `pipes` | `BotCamp` scared, fewer than 6 own pipes, no friend within 400 of the aim point | pipe launcher, arc-solved toward 70% of the way to the contact (max 500) |
 | demoman | detonate | an own `tf_gl_pipebomb` 150+ from the bot has a live suspicion within 120 and no friend | `detpipe` |
-| all | `pad` | the route's next teleport waypoint is a runtime teleporter within 64 | see below |
+| all | `pad` | the route's next teleport waypoint is a runtime teleporter within 64 | see "Teleporters" |
 
-**A medic answers `saveme`.** TFC's `saveme` plays `speech/saveme1.wav` or `saveme2.wav` through
-`EmitSound`, so `BotManager::OnSound` sees human and bot calls alike and hands them to
-`IGameProfile::NoteSound`, which stamps the caller's slot. For 30 s after a call, while the caller is
-a live friend below max health, `IGameProfile::Patients` lists it and `BotStrategic::Intents` gives a
-medic that carries no payload a rank-4 (override) `HEAL` intent on it. The strategic goal follows the
-patient as it moves, and preempts a held goal too: `RefreshStrategic` now checks `Outranked` before
-its arrival early-out. Once the medic stands in the patient's area, the `heal` task takes over. A
-healed or dead patient drops out of `Patients`, which invalidates the goal.
+Grenades are in `doc/combat.md`, "Off-hand grenades". **Not done**: dismantling a sentry the objective
+moved away from, conc jumping, rocket jumping.
 
-**Building.** The yaw is the camp spot's watch yaw (exit behind it, dispenser beside it), turned to the
-first of eight offsets with a clear 72-unit hull trace, since TFC places the building 64 ahead. The
-bot stands still, faces it, sends `build N` once settled, and expects `is_building` within 1 s; a
-refusal (no metal, no room, already has one) waits 10 s.
+**A medic answers `saveme`.** `saveme` plays `speech/saveme1.wav`/`saveme2.wav` through `EmitSound`, so
+`BotManager::OnSound` sees every call and hands it to `IGameProfile::NoteSound`, which stamps the
+caller. For 30 s, while the caller is a live friend below max health, `IGameProfile::Patients` lists it
+and `BotStrategic::Intents` gives a medic carrying no payload a rank-4 (override) `KIND_HEAL` intent.
+The goal follows the patient and preempts a held goal (`RefreshStrategic` checks `Outranked` before its
+arrival early-out). In the patient's area, the `heal` task takes over; a healed or dead patient drops
+out of `Patients`, invalidating the goal.
 
-**A sentry faces backwards unless you turn it.** Every TFC building is created at
-`AngleMod(owner->pev->angles.y + 180)` (`CreateSentryBase` 83984), so a sentry built while looking
-along the camp yaw watches the engineer instead of the approach, sweeping `yaw ± 50`
-(`CTFSentrygunBase::Finished` 83816). `pev->angles` on the gun never changes afterwards — the sweep
-lives in `m_iRightBound`/`m_iLeftBound`, and `rotatesentry` adds 45° to both, `rotatesentry180` 180°.
-So once `is_building` clears, the build task sends one `rotatesentry180` plus `rotatesentry` × k,
-where `45k = (180 − offset) mod 360` and the offset is whatever the room trace chose (always a
-multiple of 45). Measured on casbah: sweep centre 136 for a camp yaw of 137, and 138 for 137.
+**Building.** The yaw is the camp spot's watch yaw (exit behind, dispenser beside), turned to the first
+of eight offsets with a clear 72-unit hull trace, since TFC places the building 64 ahead. The bot stands
+still, faces it, sends `build N` once settled, and expects `is_building` within 1 s; a refusal (no
+metal, no room, already has one) waits 10 s.
 
-**An engineer works on any building of its team.** `CTFSpanner::AxeHit` (139525) has no owner check —
-it calls `EngineerUse` for anything `IsAlly` says is friendly — so `StartRepair` accepts a building
-whose `team_no` matches, not just `real_owner`. Seen live: `"Sentry_Upgrade_Level_2" against` another
-engineer's sentry.
+**A sentry faces backwards unless turned.** Every building is created at
+`AngleMod(owner->pev->angles.y + 180)` (`CreateSentryBase` 83984), so a sentry built facing the camp
+yaw sweeps `yaw ± 50` at the engineer (`CTFSentrygunBase::Finished` 83816). The gun's `pev->angles`
+never change; the sweep is `m_iRightBound`/`m_iLeftBound`, and `rotatesentry` adds 45° to both,
+`rotatesentry180` 180°. Once `is_building` clears, the task sends one `rotatesentry180` plus
+`rotatesentry` × k, with `45k = (180 − offset) mod 360` for the room-trace offset (a multiple of 45).
+Measured on casbah: sweep centre 136 and 138 for a camp yaw of 137.
+
+**An engineer works on any building of its team.** `CTFSpanner::AxeHit` (139525) calls `EngineerUse`
+for anything `IsAlly` accepts, with no owner check, so `StartRepair` matches `team_no`, not
+`real_owner`.
 
 **Attacking engineers fortify what their team will have to hold.** `IGameProfile::Fortifies` is true
-for an engineer with no sentry; `BotStrategic::Intents` then gives such a bot — if it is not already
-this life's defender — a rank-2 `DEFEND` intent on every site its team *attacks* that needs a payload
-delivered: the rescue point on a CS hostage map, the bomb site on a bomb map, the capture point on a
-TFC flag map. That is where a defend phase will happen. `StartBuild` refuses to plant a sentry at a
-camp spot when such a site exists and the bot's current strategic goal is not a `DEFEND`, which keeps
-sentries off the attack path and out of scared route camps. Maps whose attack sites need nothing
-(dustbowl-style touch captures) keep the old behaviour.
+for an engineer with no sentry; `BotStrategic::Intents` then gives it a rank-2 `KIND_DEFEND` intent on
+every site its team attacks that needs a payload
+delivered: a CS rescue point, a bomb site, a TFC capture point. `StartBuild` refuses a sentry at a camp
+spot when such a site exists and the current strategic goal is not a defend, keeping sentries off the
+attack path and out of scared route camps. Maps with touch captures that need nothing keep the old
+behaviour.
 
-**Feigning is owned by `PreThink`.** A feigning spy has `deadflag == 5`, which `IsDead` reports as
-dead — so other bots ignore it, as intended, and `ThinkOneBot` would run the respawn path for the
-spy itself. `CTFCProfile::PreThink` runs before that check: while feigning it holds the bot with an
-empty move and sends `feign` again (stand up) after 3 s once no enemy within 500 is looking at it
-(dot > 0.8, line of sight), or after 12 s regardless.
+**Feigning is owned by `PreThink`.** A feigning spy has `deadflag == 5`, which `IsDead` reports as dead,
+so other bots ignore it and `ThinkOneBot` would run the respawn path. `CTFCProfile::PreThink` runs
+first: while feigning it holds an empty move and sends `feign` again (stand up) after 3 s once no enemy
+within 500 is looking at it (dot > 0.8, line of sight), or after 12 s regardless.
 
-**Teleporters.** `IGameProfile::RefreshWorld` runs once a second for every loaded game, inside that
-game's context, from `BotManager::StartFrame`. TFC's pairs every `building_teleporter` entrance
-(`CTFTeleporter::m_iType` 4) with its owner's exit (5), both with `m_iState > 0`, and keeps one
-runtime connection per pair through `Nav::AddTeleport` (see `doc/path_planning.md`), with
-`SetTeleportWait` 0 while the entrance is ready (`m_iState == 2`) and 3 s otherwise; pairs that went
-away are removed. The team mask is the owner's team.
+### Teleporters
 
-The game only sends a player who stands on the entrance with velocity exactly 0
-(`TeleporterTouch`, tfc.c:136005); standing on it adds it to the touch list every frame. So the
-`pad` task drives onto the pad at a speed capped by distance, brakes against its own velocity, and
-holds. It ends when the teleport waypoint leaves the route (a teleport resets the path; the log says
-how far from the pad the bot now is), when the connection is unlinked, or after 10 s, which also
-penalizes the connection.
+`RefreshWorld` (once a second, TFC context) pairs every `building_teleporter` entrance
+(`CTFTeleporter::m_iType` 4) with its owner's exit (5), both `m_iState > 0`, and keeps one runtime
+connection per pair through `Nav::AddTeleport` (`doc/path_planning.md`), with `SetTeleportWait` 0
+while the entrance is ready (`m_iState == 2`) and 3 s otherwise. Gone pairs are removed; the team mask
+is the owner's team.
 
-**It gives up the moment the entrance refuses.** A ready entrance moves to `m_iState == 3` (sending)
-on the touch that accepts the player, so once the bot is standing on the entrance (`groundentity`) at
-a speed under 1, the state has 0.3 s to reach 3. If it does not — the pad is recharging, its exit is
-gone, the owner's team is not ours — the task ends with "not teleported", penalizes the connection and
-repaths, instead of standing there for the full 10 s. The 10 s timeout now only covers never reaching
-the pad at all. Seen live: bots waited 1-2 s on the pad and came out 2592 units away.
-`RouteExemptsHit` in `bot_avoid.cpp` exempts a solid within 48 of a route teleport waypoint, or the
-avoid layer would steer around the pad it is meant to stand on.
+The game only sends a player standing on the entrance at exactly zero velocity (`TeleporterTouch`
+136005). So `pad` drives on at a distance-capped speed, brakes against its own velocity and holds. It
+ends when the teleport waypoint leaves the route (a teleport resets the path), when the connection is
+unlinked, or after 10 s, which also penalises the connection.
 
-**A disguised spy is invisible to bots, and holds its fire.** Neither TFC nor CrossPlay hides a spy:
-the disguise only rewrites the client's `model`, `topcolor` and `bottomcolor` keys
-(`TeamFortress_SetSkin` 74390), `pev->team` and `pev->playerclass` still carry the truth, and nothing
-sets `FL_NOTARGET` (TFC's own sentries just skip a player whose `undercover_team` is theirs, 84230).
-So CrossBot hides him instead: `IGameProfile::Disguised` is asked inside `BotSense::NoTarget`, in the
-owner game's context, which covers every place a bot can acquire a target — the sight scan, the
-damage source and the keep-or-drop test — whatever game the watching bot comes from. TFC answers yes
-for `is_undercover == 1` with an `undercover_team` that is not his own and no goal item carried; DMC
-answers yes for `m_iQuakeItems & IT_INVISIBILITY`, so the ring hides a DMC bot the same way. Firing
-drops the disguise in-game (131453), which makes the spy visible again on its own.
-`IGameProfile::HoldFire` keeps the disguised spy out of combat entirely (`BotCombat::Update` exits
-with "disguised", `BotFire::Think` idles), so he walks his route instead of shooting and blowing the
-disguise; being hurt in the last 2 s lifts the hold so a spy who has been seen through fights back.
-Every tier disguises — for easy and normal that is simply a way into enemy territory, since only
-hard and expert take the backstab.
+**It gives up the moment the entrance refuses.** A ready entrance moves to `m_iState == 3` on the touch
+that accepts the player, so once the bot stands on it (`groundentity`) under speed 1, the state has
+0.3 s to reach 3. If not (recharging, exit gone, wrong team) the task ends "not teleported", penalises
+the connection and repaths, instead of standing for 10 s. `RouteExemptsHit` in `bot_avoid.cpp` exempts
+a solid within 48 of a route teleport waypoint, or the avoid layer would steer around the pad.
 
-Spies do not need help with goals: `item_tfgoal_touch` (114802) and `tfgoal_touch` never look at
-`is_undercover`, so a disguised spy can pick up and capture; goals with `goal_result & 0x10` strip the
-disguise themselves (114309). The bot only stops re-disguising while it carries something.
+### Spies
 
-**Detpacks.** `detstart N` clamps the fuse to 5-50 s, freezes the demoman for 3 s while arming
+**A disguised spy is invisible to bots and holds its fire.** Neither TFC nor CrossPlay hides a spy: the
+disguise only rewrites the client's `model`, `topcolor`, `bottomcolor` (`TeamFortress_SetSkin` 74390);
+`pev->team` and `pev->playerclass` keep the truth and nothing sets `FL_NOTARGET` (TFC's sentries skip a
+spy whose `undercover_team` is theirs, 84230). So `IGameProfile::Disguised` is asked inside
+`BotSense::NoTarget` in the owner game's context, covering the sight scan, the damage source and the
+keep-or-drop test for watchers from any game. TFC answers yes for `is_undercover == 1` with an
+`undercover_team` not his own and no goal item. Firing drops the disguise in-game (131453).
+
+`IGameProfile::HoldFire` keeps a disguised spy out of combat (`BotCombat::Update` exits "disguised",
+`BotFire::Think` idles), so he walks his route instead of blowing the disguise; being hurt in the last
+2 s lifts the hold. Every tier disguises; for easy and normal it is just a way into enemy territory,
+since only hard and expert backstab.
+
+Spies need no goal help: `item_tfgoal_touch` (114802) and `tfgoal_touch` ignore `is_undercover`, and
+goals with `goal_result & 0x10` strip the disguise themselves (114309). The bot only stops
+re-disguising while it carries something.
+
+### Detpacks
+
+`detstart N` clamps the fuse to 5-50 s, freezes the demoman for 3 s while arming
 (`TeamFortress_SetDetpack` 23303, `tfstate |= 0x10000`), and refuses within 65 units of a player or
 building, in the air, or with a pack already out. The blast (`DetpackExplode` 22955) triggers every
-`info_tfgoal` with `goal_activation & 2` within 1500 units that it can trace to, and hurts everything
-within 700 for `1400 − d`. An enemy scout defuses it by touching it (22731).
+`info_tfgoal` with `goal_activation & 2` within 1500 units it can trace to, and hurts everything within
+700 for `1400 − d`. An enemy scout defuses it by touch (22731).
 
-`ReadTfc` turns those goals into sites flagged `detpack` (see `doc/goals.md`), and a demoman who can
-set one (`IGameProfile::CanDetpack`: class 4, `ammo_detpack >= 1`, not already arming) gets them at a
-rank above everything else, so the map's detpack objective *is* his objective. The task waits until
-the site is within 1400 and either in sight or the bot is standing on its planned spot, then arms,
-holds still for the 3 s, and walks a planned route to an area at least 800 units away for the rest of
-the fuse — it keeps shooting while retreating. The fuse is the difficulty: easy and normal take the
-longest (50 s), hard and expert take 5 s when something is closing in and 10 s otherwise. On a map
-with no detpack goal at all a scared demoman may instead drop one where he stands, timed so the
-contact arrives as it goes off (`scareDist` over his own `maxspeed`, since the enemy's speed is not
-knowable), which is why the objective maps never spend the pack that way.
+`ReadTfc` turns those goals into sites flagged `detpack` (`doc/goals.md`), and a demoman who can set one
+(`IGameProfile::CanDetpack`: class 4, `ammo_detpack >= 1`, not arming) gets them above everything else.
+The task waits until the site is within 1400 and either in sight or the bot is on its planned spot,
+arms, holds still for 3 s, and walks a planned route to an area at least 800 away for the rest of the
+fuse, shooting as it goes. The fuse is the difficulty: easy and normal take 50 s, hard and expert 5 s
+when something is closing in and 10 s otherwise. On a map with no detpack goal a scared demoman may
+drop one where he stands, timed so the contact arrives as it goes off (`scareDist` over his own
+`maxspeed`; the enemy's speed is unknowable); objective maps never spend the pack that way.
 
-**Not done.** Dismantling a sentry the objective moved away from, conc jumping and rocket jumping.
+### Backpacks and dispensers
 
-### Backpacks and dispensers are gather goals
-
-A TFC resupply pack is an `info_tfgoal` that a touch hands to the AP. The chain is `tfgoal_touch`
-114581 → `ActivateDoResults` 114430 → `APMeetsCriteria` 111796 → `DoResults` 113212 →
+A TFC resupply pack is an `info_tfgoal` that a touch hands to the activating player. The chain is
+`tfgoal_touch` 114581 → `ActivateDoResults` 114430 → `APMeetsCriteria` 111796 → `DoResults` 113212 →
 `IsAffectedBy` 108305 → `Apply_Results` 114047 → `CheckClassStats` 77810. `IsPack` mirrors it:
+
 - `goal_activation & 1`, and not `& 4` (which inverts the criteria);
-- `goal_effects & 3`, so the AP or the AP's team is affected (`& 8` alone means everyone *but* the AP);
-- no `goal_result` bit from `0x4` (ends the round), `0x20` (force respawn) or `0x40` (deletes the
-  engineer's buildings);
+- `goal_effects & 3`, so the player or the player's team is affected (`& 8` alone means everyone but
+  the player);
+- no `goal_result` bit `0x4` (ends the round), `0x20` (force respawn) or `0x40` (deletes the engineer's
+  buildings);
 - `frags <= 0`, no `increase_team`, nothing negative;
-- every criteria field zero: `teamcheck`, the six `if_goal/group_is_*`, `if_item_has(nt)_moved`,
-  `has(nt)_item_from_group` and `items_allowed`. No shipped pack uses any of them. A pack whose
-  criteria fail is not consumed when touched, and `NoteFull` would then ignore *every* `info_tfgoal`;
+- every criteria field zero (`teamcheck`, the six `if_goal/group_is_*`, `if_item_has(nt)_moved`,
+  `has(nt)_item_from_group`, `items_allowed`). No shipped pack uses them, and a pack whose criteria fail
+  is not consumed, which would make `NoteFull` ignore every `info_tfgoal`;
 - and it gives something.
 
-`item_tfgoal` is explicitly *not* an item — flags are strategic payloads. A brush `i_t_g` is always
-`EF_NODRAW` with origin 0, and on the 20 shipped maps the only brush pack is koth_one's 3-hp "cap
-hp", so brush packs are left out. A dump of every pack (around 300) shows point `info_tfgoal`s with
-`g_a=1 g_e=1`, typically 25 health and 50 armour, `wait` 1–60 s, and `team_no` 0, 1 or 2.
+`item_tfgoal` is not an item: flags are strategic payloads. Brush packs are left out (always `EF_NODRAW`
+at origin 0; the only one on the 20 shipped maps is koth_one's 3-hp "cap hp"). A dump of the ~300 packs
+shows point `info_tfgoal`s with `g_a=1 g_e=1`, typically 25 health and 50 armour, `wait` 1-60 s,
+`team_no` 0, 1 or 2.
 
-`PackAdmits` covers the per-player part. It rejects `goal_state` 1 (active, i.e. taken), 3 (removed)
-and 4 (delayed), and `EF_NODRAW`. `team_no` is compared with the player's TFC `team_no`, not
-`pev->team`, which is also correct for a foreign player's CrossPlay copy. `playerclass` is compared
-with 3 for a foreign player, because CrossPlay's Touch fakes soldier.
+`PackAdmits` covers the per-player part: rejects `goal_state` 1 (taken), 3 (removed), 4 (delayed) and
+`EF_NODRAW`; compares `team_no` with the player's TFC `team_no` (correct for a foreign player's copy
+too); compares `playerclass` with 3 for a foreign player, because CrossPlay's Touch fakes soldier.
 
-`PackGain` is what the pack is worth to the player, in units of "one full refill". It is turned into
-seconds by `kNeedWorth` (20, `tfc_ability.cpp`), and `ItemWorth` returns that (see `doc/goals.md`, "Worth: need
-pulls"):
+`PackGain` is the pack's worth in "full refills", turned into seconds by `kNeedWorth` (20) for
+`ItemWorth` (`doc/goals.md`, "Worth: need pulls"):
+
 ```
 1.0  × healthGain/maxHealth × (1 + missing health fraction)
 0.5  × armourGain/maxarmor
@@ -894,497 +908,428 @@ pulls"):
 0.25 × best grenadeGain/cap per type held (2 for nail and MIRV, 3 for conc and caltrop, 4 otherwise)
 0.5  if a demoman with no detpack and the pack gives one
 ```
-`xGain = min(give, max − have)`. For a foreign player, the TFC fields on its copy are not its real ammo,
-so the ammo and grenade terms use the scan's `ammoNeed` instead, and armour uses a max of 100.
-`ItemUsable` is `PackAdmits && PackGain > 0`. The old flat grenade cap of 4 sent soldiers holding two
+
+`xGain = min(give, max − have)`. For a foreign player the TFC fields on its copy are not its real ammo,
+so ammo and grenades use the scan's `ammoNeed` and armour a max of 100. `ItemUsable` is
+`PackAdmits && PackGain > 0`. Per-type grenade caps matter: a flat cap of 4 sends soldiers holding two
 nail grenades after grenade-only packs.
 
-A dispenser is not a pickup but a station: `DispenserTouch` (24095) starts a refill thinker that tops
-the toucher up 0.2 s later and then once a second while they stay within 24 units, giving ammo and
-armour but no health. That is a new `ITEM_STATION` kind, driven by the charger loop in
-`bot_move_nav.cpp`: no `IN_USE`, "in range" means the boxes are touching, and once touching the bot
-stands still and lets the refills run until the value stops climbing. `ChargerValue` for a station is
-the percentage of a bot's ammo and armour capacity it is currently carrying, and `ItemUsable` keeps a
-bot to its own team's dispensers even though TFC would happily refill an enemy.
+A dispenser is a station, `ITEM_STATION`: `DispenserTouch` (24095) starts a thinker that tops the
+toucher up 0.2 s later and then once a second while within 24 units, giving ammo and armour but no
+health. The charger loop in `bot_move_nav.cpp` drives it with no `IN_USE`: "in range" is boxes
+touching, then the bot stands until the value stops climbing. `ChargerValue` is the percentage of ammo
+and armour capacity carried, and `ItemUsable` keeps a bot to its own team's dispensers even though TFC
+would refill an enemy.
 
-### Discarded ammo is a gather goal too
+### Discarded ammo
 
-`discard` (`TeamFortress_Discard` 107478) zeroes the ammo pools the player's class has no weapon for,
-spawns a `CWeaponBox` named `tf_ammobox` and throws it along `v_forward * 400 + v_up * 200` from the
-player's **current `v_angle`**. It gives the box `pev->enemy` = the dropper, `m_flTouchableAt` =
-now + 2 and a 30 s life. When nothing is owed, no box spawns, so there is no point checking the bot's
-ammo first. The engineer's branch also turns spare cells into shells, nails and rockets for the box.
+`discard` (`TeamFortress_Discard` 107478) zeroes the ammo pools the class has no weapon for, spawns a
+`CWeaponBox` named `tf_ammobox` and throws it along `v_forward * 400 + v_up * 200` from the player's
+**current `v_angle`**, with `pev->enemy` = the dropper, `m_flTouchableAt` = now + 2 and a 30 s life.
+With nothing owed no box spawns, so the bot does not check first. The engineer's branch also converts
+spare cells into shells, nails and rockets.
 
 `TASK_DISCARD` is the class-agnostic fallback after the per-class starters in `TFCAbility::Run`. The
-target is the nearest live friend in the bot's nav area whose `playerclass` differs and whose
-`XPlay::OwnerOf` matches the bot's. The owner check is required: a crossplay ally from another game DLL
-has no meaningful `playerclass`. The bot turns until `AimedAt` agrees with the real `v_angle`, because
-that angle is the throw, then sends `discard`. The 60 s cooldown starts when the attempt starts,
-succeed or not. Otherwise a bot whose aim never settles would stand for 1.5 s out of every 2 s. The
-cooldown resets on respawn because `BotAbility::Reset` does not carry it over.
+target is the nearest live friend in the bot's nav area with a different `playerclass` and the same
+`XPlay::OwnerOf` (a foreign ally has no meaningful `playerclass`). The bot turns until `AimedAt` agrees
+with the real `v_angle`, since that angle is the throw, then sends `discard`. The 60 s cooldown starts
+with the attempt, success or not, or a bot whose aim never settles would stand 1.5 s of every 2; it
+resets on respawn (`BotAbility::Reset`).
 
-`CWeaponBox::Touch` (131692) pays out through `GiveTFAmmo` from the box's own `ammo_shells/nails/
-rockets/cells`, the same `CBaseEntity` fields a pack uses, so `ent_ammo*` reads it with no new offsets.
-Touch refuses the toucher in four cases: the box is still in the air, `time < m_flTouchableAt`, the
-toucher is not a live client, or the toucher is holding `IN_ATTACK`. A refused touch leaves the box in
-place, and `NoteFull` would then ignore *every* `tf_ammobox`. `ClassifyItem` therefore only reports a
-box once it is `FL_ONGROUND` and past `m_flTouchableAt`, which is read through
-`CWeaponBox::m_flTouchableAt` in CrossPlay's gamedata. Touch has **no team check**, so `ItemUsable`
-has none either. It refuses only the dropper's own box (`pev->enemy`), then asks `NeedsAmmo` of the
-four pools. The `IN_ATTACK` refusal is not guarded: a bot that touches a box mid-fight still trips
-`NoteFull`.
-
-The `tfc.c` decompile is not the live DLL. Every field it touches sits exactly 16 bytes past the
-offset in `tfc-win.json` (`ammo_shells` 228 vs 212, `team_no` 312 vs 296, `m_flTouchableAt` 1164 vs
-1148). Match its fields by name, never by byte offset.
+`CWeaponBox::Touch` (131692) pays out through `GiveTFAmmo` from the box's `ammo_*` fields, the same
+`CBaseEntity` fields a pack uses. Touch refuses the toucher while the box is in the air, before
+`m_flTouchableAt`, if not a live client, or while it holds `IN_ATTACK`. A refused touch would make
+`NoteFull` ignore every `tf_ammobox`, so `ClassifyItem` reports a box only once it is `FL_ONGROUND` and
+past `CWeaponBox::m_flTouchableAt` (CrossPlay's gamedata). Touch has no team check, so `ItemUsable`
+has none either; it refuses only the dropper's own box (`pev->enemy`) and asks `NeedsAmmo`. The
+`IN_ATTACK` refusal is not guarded: a bot touching a box mid-fight still trips `NoteFull`.
 
 ### Team-only doors, lifts and buttons
 
-TFC runs `APMeetsCriteria` (tfc.c:111796) on almost everything a player activates: `MultiTouch`,
-buttons, `CBaseDoor::DoorActivate`, plat triggers, teleports. A `team_no` (or `teamcheck`) on the
-activator *or* on the door it fires refuses every other team. 2fort's spawn and battlement doors and
-both lifts are all opened by `trigger_multiple` with `team_no`; cz2, dustbowl, flagrun, push, ravelin,
-well, crossover2 and badlands have more of them (badlands puts the team on the door, not the trigger).
+TFC runs `APMeetsCriteria` (111796) on nearly everything a player activates: `MultiTouch`, buttons,
+`CBaseDoor::DoorActivate`, plat triggers, teleports. A `team_no` (or `teamcheck`) on the activator or on
+the door it fires refuses every other team. 2fort's spawn and battlement doors and both lifts are
+opened by `trigger_multiple` with `team_no`; cz2, dustbowl, flagrun, push, ravelin, well, crossover2 and
+badlands have more (badlands puts the team on the door).
 
-navgen knows none of this. The runtime fills it in: `Objectives::ReadTfc` → `StampDetourTeams`
-(objectives.cpp) runs on every objectives refresh. It walks `trigger_multiple`, `trigger_once`,
+navgen knows none of this; the runtime fills it in. `Objectives::ReadTfc` → `StampDetourTeams`
+(`objectives.cpp`) runs on every objectives refresh: it walks `trigger_multiple`, `trigger_once`,
 `func_button` and `func_rot_button`, takes the activator's team, ANDs in the team of whatever its
-`target` names when that has one, and calls `Nav::SetDetourTeams(CenterOf(ent), mask)`, which stamps
-every detour whose `actCenter` lies within 2 units. `func_door` and `func_door_rotating` stamp their
-own team, which covers an unnamed use-only door acting as its own activator. Unrestricted entities
-stamp 0, so when a `teamcheck` flips back the mask clears. `teamcheck` is read live, which is why this
-is not baked into the .nav: avanti, juno and magelli swap attack and defence at run time.
-`crossbot_list_objectives` prints every team-gated detour.
+`target` names, and calls `Nav::SetDetourTeams(CenterOf(ent), mask)`, stamping every detour whose
+`actCenter` is within 2 units. `func_door` and `func_door_rotating` stamp their own team (an unnamed
+use-only door is its own activator). Unrestricted entities stamp 0, so a `teamcheck` flipping back
+clears the mask. `teamcheck` is read live, not baked into the `.nav`, because avanti, juno and magelli
+swap attack and defence at run time. `crossbot_list_objectives` prints every team-gated detour; the
+planner side is in `doc/path_planning.md` (team mask).
 
-The planner side is in `doc/path_planning.md` (team mask). Known limits:
+Known limits, none hit by a shipped map (checked by scanning every `target` in `D:\hlds\tfc\maps`):
 
-- **The door's team is read through one direct `target` only.** A relay or `multi_manager` between
-  the trigger and the door hides the door's team. No shipped map does this.
-- **One activator per detour.** navgen keeps the cheapest service point per entry, whatever team it
-  belongs to. A door with activators for two teams would be gated to whichever one navgen picked. No
-  shipped map has one; the check was a scan of every `target` across `D:\hlds\tfc\maps`.
-- **Disjoint teams read as "everyone".** A team-1 trigger firing a team-2 door can never open it, but
-  the AND comes out 0. No shipped map does this either.
-- **Unnamed team *touch* doors are unguarded.** rock2 (8) and hunted (5) have `func_door`s with
-  `team_no`, no `targetname` and no use-only flag. navgen classifies those `ACT_NONE`, so there is no
-  detour to stamp and every team still plans through them.
+- The door's team is read through one direct `target`; a relay or `multi_manager` in between hides it.
+- One activator per detour: navgen keeps the cheapest service point, whatever its team.
+- Disjoint teams (a team-1 trigger firing a team-2 door) AND to 0, "everyone".
+- Unnamed team *touch* doors (rock2 has 8, hunted 5) are `ACT_NONE` in navgen, so there is no detour to
+  stamp and every team plans through them.
 
-## cs_profile.cpp
+## Counter-Strike (cs_profile.cpp)
 
-`CCSProfile` is Counter-Strike: one profile for `cstrike` and `czero`, derived from `CHLDMProfile`,
-with no `deathmatch` check. `D:\hlds\cstrike\dlls\mp.dll` is a symlink to the ReGameDLL build, so
-`regamedll/dlls/` is the source to read; `czero` runs the retail DLL. The map side — bomb sites,
-hostages, VIP, the planted C4, carriers — was already `Objectives::ReadCs` (see `doc/goals.md`); the
-profile is what lets a bot *be* a CS player. Out of scope: buying, money, radio.
+`CCSProfile` serves `cstrike` and `czero`. `D:\hlds\cstrike\dlls\mp.dll` is a symlink to the ReGameDLL
+build, so `regamedll/dlls/` is the source to read; `czero` runs the retail DLL. The map side (bomb
+sites, hostages, VIP, the planted C4, carriers) is `Objectives::ReadCs` (`doc/goals.md`); the profile
+lets a bot be a CS player. Out of scope: buying, money, radio.
 
 ### Joining answers whichever menu is open
 
 `PreThink` owns the bot until `m_iJoiningState` is `JOINED` (0), and every 1.2 s answers the menu
-`m_iMenu` says is showing: `jointeam <n>` on `Menu_ChooseTeam`/`Menu_IGChooseTeam` (1/2),
-`joinclass <1-4>` on `Menu_ChooseAppearance` (3), nothing otherwise. `READINGLTEXT` (the MOTD) gets
-an `IN_ATTACK` edge. Both commands work with VGUI menus on (client.cpp:3353, 3384).
+`m_iMenu` shows: `jointeam <n>` on `Menu_ChooseTeam`/`Menu_IGChooseTeam` (1/2), `joinclass <1-4>` on
+`Menu_ChooseAppearance` (3), nothing otherwise. `READINGLTEXT` (the MOTD) gets an `IN_ATTACK` edge. Both
+commands work with VGUI menus on (client.cpp:3353, 3384).
 
-**Never send `jointeam` before the game asks.** The first version sent it the moment `m_iTeam` was 0.
-It landed while the player was still in `SHOWLTEXT`, set the team and `Menu_ChooseAppearance`, and
-then `JoiningThink` ran `SHOWLTEXT`→`SHOWTEAMSELECT`→`PICKINGTEAM` and put the menu back to
-`Menu_ChooseTeam`. From then on every `joinclass` came back `#Command_Not_Available`: all bots had a
-team and stayed `PICKINGTEAM` forever, never spawned, and every round ended `Terrorists_Win` two seconds
-in. Re-sending `jointeam` for the team the player is already on is allowed ("switch to the same team
-just to choose a new appearance"), which is what makes following the menu safe.
+**Never send `jointeam` before the game asks.** Sent during `SHOWLTEXT`, it sets the team and the
+appearance menu, then `JoiningThink` moves on to `PICKINGTEAM` and resets the menu to
+`Menu_ChooseTeam`; every `joinclass` then returns `#Command_Not_Available` and the bot never spawns. Re-sending `jointeam`
+for the current team is allowed ("switch to the same team just to choose a new appearance"), which is
+what makes following the menu safe.
 
-The third `crossbot_add` argument is the team: `t`, `ct`, or `*`/nothing for auto (5). After three
-refused `jointeam`s (team full, `mp_limitteams`) the bot asks for auto instead. The model is
-random 1-4, which is valid on both 1.6 and CZ.
-
-`pev->team` is not written by ReGameDLL at all. CrossPlay's `FixProxyTeam` mirrors `m_iTeam` into it,
-reversed (T 1→2, CT 2→1), for native cstrike players exactly as for `valve` ones, so `Teams::TeamOf`
-and `ReadCs` need nothing new. `crossbot_list_objectives` prints both columns.
-
-`Respawn` is an empty move: CS is round-based, and `IN_ATTACK` would only cycle the spectator camera.
+- The third `crossbot_add` argument is the team: `t`, `ct`, or `*`/nothing for auto (5). After three
+  refused `jointeam`s (team full, `mp_limitteams`) the bot asks for auto. The model is random 1-4,
+  valid on 1.6 and CZ.
+- ReGameDLL never writes `pev->team`. CrossPlay's `FixProxyTeam` mirrors `m_iTeam` into it, reversed
+  (T 1→2, CT 2→1), for native and foreign players alike, so `Teams::TeamOf` and `ReadCs` need nothing
+  new. `crossbot_list_objectives` prints both columns.
+- `Respawn` is an empty move: CS is round-based, and `IN_ATTACK` only cycles the spectator camera.
 
 ### The table
 
-`cs_weapons.cpp`, 31 rows indexed by `m_iId` (`weapontype.h:31-65`), `ItemSlots` 6. Semi-automatics
-(pistols, scout, awp, g3sg1, sg550) are `FIRE_TAP`; rifles, SMGs and the m249 `FIRE_HOLD` +
-`WPN_Q_STICKY`. Rifles, snipers and the m249 are `RANGE_LONG`, everything else `RANGE_CLOSE`.
-`hegrenade` is a `WPN_Q_THROW_ARC` weapon and the `AMBUSH_GRENADE`; `ThrowLaunch` is the HL formula
-with CS's rate 6 and cap 750 (`wpn_hegrenade.cpp:184-194`), and gravity 0.55 (`ShootTimed2`).
-`flashbang`, `smokegrenade` and `c4` have value 0 and no modes, so combat never picks them.
+`cs_weapons.cpp`, 31 rows indexed by `m_iId` (`weapontype.h:31-65`), `ItemSlots` 6.
 
-Scopes are `TOGGLE_ZOOM`, and the zoom test is `fov != 0 && fov < 90`, because CS's unzoomed
-`pev->fov` is 90, not 0. aug and sg552 are one-stage (`zoomFov` 55). awp, scout, g3sg1 and sg550 cycle
-90→40→10→90, so `zoomFov` is the first stage and unzooming costs two presses: the existing loop presses
-again while `fov < 90`, one extra `m_flNextSecondaryAttack` at stage two. That ceiling is deliberate and
-has not been measured live; a real two-stage state is the upgrade if bots are seen crawling at 150 u/s.
+- Semi-automatics (pistols, scout, awp, g3sg1, sg550) are `FIRE_TAP`; rifles, SMGs and the m249
+  `FIRE_HOLD` + `WPN_Q_STICKY`. Rifles, snipers and the m249 are `RANGE_LONG`, the rest `RANGE_CLOSE`.
+- `hegrenade` is `WPN_Q_THROW_ARC` and the `AMBUSH_GRENADE`; `ThrowLaunch` is the HL law with CS's rate
+  6 and cap 750 (`wpn_hegrenade.cpp:184-194`), gravity 0.55 (`ShootTimed2`). `flashbang` and
+  `smokegrenade` copy its arc at gravity 0.5 (`doc/combat.md`, "Throwing at a heard enemy"); `c4` has
+  value 0 and no modes.
+- Spread coefficients (`kSpreads`) and penetration (`CS_Bullet`) are described in `doc/combat.md`.
+- Scopes are `TOGGLE_ZOOM` and `Zoomed` is `fov != 0 && fov < 90`, because CS's unzoomed `pev->fov` is
+  90. aug and sg552 are one-stage (`zoomFov` 55). awp, scout, g3sg1 and sg550 cycle 90→40→10→90, so
+  `zoomFov` is the first stage and unzooming takes two presses (the loop presses again while
+  `fov < 90`, one extra `m_flNextSecondaryAttack` at stage two). Not measured live; a real two-stage
+  state is the upgrade if bots are seen crawling at 150 u/s.
 
 ### One weapon per slot
 
 CS refuses a second weapon for a filled slot, so `ItemUsable` refuses it first, or a bot with a rifle
 walks to every rifle on the map. The item's weapon id comes from its classname, from
-`CArmoury::m_iItem` (the `ArmouryItemPack` order, `weapons.h:79`) or from the first item in
+`CArmoury::m_iItem` (the `ArmouryItemPack` order, `weapons.h:79`), or from the first item in
 `CWeaponBox::m_rgpPlayerItems`, and is vetoed when the bot's `m_rgpPlayerItems[slot]` is occupied
 (primary 1, pistol 2, knife 3). Grenades are capped instead: HE 1, flash 2, smoke 1 against
-`m_rgAmmo`. On `fy_pool_day` an armed bot's scan flips the armoury rifles to `no need` after its first
-pickup. The VIP may take loose pistols only, never a weaponbox or armoury (`weapons.cpp:620`, 2695);
-the bomb weaponbox is vetoed for CT, who would otherwise chase it forever. Only entities the bot's own
-game owns are read.
-
-On objective maps this rarely matters: the strategic tier always wins over gathering, so an unarmed
-CT on de_dust2 defends rather than fetches. Gathering runs on objective-free maps and through the
-`PickupPriority` promotion.
+`m_rgAmmo`. The VIP may take loose pistols only, never a weaponbox or armoury (`weapons.cpp:620`,
+2695); the bomb weaponbox is vetoed for CT, who would chase it forever. Only entities the bot's own game
+owns are read. On `fy_pool_day` an armed bot's scan flips the armoury rifles to `no need` after its
+first pickup. On objective maps this rarely matters: the strategic tier wins over gathering, so an
+unarmed CT on de_dust2 defends rather than fetches.
 
 ### The shield
 
 A shield blocks primaries (`m_bOwnsShield`), and dual elites block the shield (`CWShield::Touch`).
-Drawn and lowered is `m_bShieldDrawn`, toggled by `IN_ATTACK2` on any shield-capable weapon.
-`IGameProfile::FireToggle(bot, firing)` is called from `BotFire::Buttons` once the player and weapon
-can act, and returns `IN_ATTACK2` whenever the shield state disagrees with "in combat and not
-firing": up while `BotCombat::Active` and no mode is chosen, down the moment one is, and down again
-when combat ends, because a drawn shield caps the walk at 180 u/s instead of 250. Gate it on the *player's* `m_flNextAttack` too — a freshly deployed
-pistol holds it at 0.75 s, and the first version pressed ~70 times into that window. Seen live on
-`fy_iceworld`: no press until `entered combat`, then raise, lower to shoot, raise between shots, and
-`lowers` right after every `left combat`.
+Raised is `m_bShieldDrawn`, toggled by `IN_ATTACK2` on any shield-capable weapon. `FireToggle` returns
+`IN_ATTACK2` whenever the shield disagrees with "in combat and not firing": up while `BotCombat::Active`
+and no mode is chosen, down once one is, and down when combat ends, because a raised shield caps the
+walk at 180 instead of 250. It is gated on the player's `m_flNextAttack` too: a freshly deployed pistol
+holds it at 0.75 s, and an ungated toggle presses about 70 times into that window. Seen live on fy_iceworld:
+no press before `entered combat`, then raise, lower to shoot, raise between shots, lower after `left
+combat`.
 
 ### Planting
 
-`AbilityRun` starts `BotAbility::TASK_PLANT` when the bot carries C4, is on the ground, has no target
-and `m_signals` state (`CUnifiedSignals`, +4) has `SIGNAL_BOMB`. It selects `weapon_c4`, holds
-`IN_ATTACK|IN_DUCK` with no movement, and stops on success (C4 gone from the inventory, `plants`
-counted in `crossbot_ability_status`), on a target (retry in 3 s), on leaving the zone, or after 5 s.
-Fire idles while the task runs. The generic `KIND_DELIVER` intent is what walks the carrier onto the
-site. Defusing needs no profile code: the planted C4 is an urgent `IN_USE|IN_DUCK` site. Both were seen
-on de_dust2: `Planted_The_Bomb` → `Target_Bombed`, and `Planted_The_Bomb` →
-`Begin_Bomb_Defuse_With_Kit` → `Bomb_Defused`.
-
-Arming and defusing pin `maxspeed` to 1, as does freeze time; see `Bot_Frozen` in `doc/movement.md`.
+`AbilityRun` starts `BotAbility::TASK_PLANT` when the bot carries C4, is on the ground, has no target,
+and `m_signals` (`CUnifiedSignals`, state at +4) has `SIGNAL_BOMB`. It selects `weapon_c4`, holds
+`IN_ATTACK|IN_DUCK` with no movement, and stops on success (C4 gone, `plants` counted in
+`crossbot_ability_status`), on a target (retry in 3 s), on leaving the zone, or after 5 s. The
+`KIND_DELIVER` intent walks the carrier onto the site. Defusing needs no profile code: the planted C4 is
+an urgent `IN_USE|IN_DUCK` site. Both seen on de_dust2 (`Planted_The_Bomb` → `Target_Bombed`, and →
+`Begin_Bomb_Defuse_With_Kit` → `Bomb_Defused`). Arming, defusing and freeze time pin `maxspeed` to 1
+(`Bot_Frozen`, `doc/movement.md`).
 
 ### Testing notes
 
 - `equip.amxx` hands every spawn a random rifle; `amxx pause equip.amxx` gives empty-handed bots.
-- A hostage killed on cs_assault was crossfire, not targeting: the shooter only ever engaged players.
-- `czero` is not verified live. With the retail DLL CrossPlay aborts at map load with `NULL CS
-  gamerules!` in `CheckWinConditions`, before any bot exists, in every layout tried (valve+czero,
-  valve+cstrike+czero, cstrike on the content path only). `czero` is in `teams.cpp`'s team list, which
-  it was missing.
+- A hostage killed on cs_assault was crossfire; the shooter only engaged players.
+- `czero` is not verified live: with the retail DLL CrossPlay aborts at map load with `NULL CS
+  gamerules!` in `CheckWinConditions` in every layout tried (valve+czero, valve+cstrike+czero, cstrike
+  on the content path only).
 
-## dod_profile.cpp
+## Day of Defeat (dod_profile.cpp)
 
-`CDODProfile` is Day of Defeat, derived from `CHLDMProfile`. The server source is the decompiled Linux
-`dod.so` (v1.2f) at `D:\projects\libs\dod.c`; the client, which holds recoil, scope sway and the
-deploy clamp, is `client-dod.c`. The map side (capture areas, TNT, spawns) was already
-`Objectives::ReadDod`. Line numbers below are into `dod.c` unless marked client.
-
-The gamedata needed three `CFuncTank` members made optional: CrossPlay runs DoD as `noTank` and never
-writes them to `dod-win.json`, so the whole game was unsupported. `bot_fun.cpp` already skipped a
-negative tank offset.
+`CDODProfile`. The server source is the decompiled Linux `dod.so` (v1.2f) at `D:\projects\libs\dod.c`;
+the client, which holds recoil, sway and the deploy clamp, is `client-dod.c`. Line numbers are into
+`dod.c` unless marked client. The map side (capture areas, TNT, spawns) is `Objectives::ReadDod`.
+CrossPlay runs DoD as `noTank` and never writes the `CFuncTank` controller fields to `dod-win.json`, so
+those requests are optional (`bot_fun.cpp` skips a negative offset).
 
 ### Joining, and waiting for the wave
 
 The third `crossbot_add` argument is the class: `garand carbine tommy grease spring bar 30cal bazooka
 enfield sten enfields bren piat` (Allies), `k98 k43 mp40 mp44 k98s fg42 fg42_s mg34 mg42 pschreck`
-(Axis), or `random` (the default). The class names the team, so `PreThink` sends `jointeam 1|2` and
-then `cls_<name>`. `random` sends `jointeam 5` and `cls_random`. Commands are resent every 1.2 s until
-`pev->team` is 1 or 2 and `m_iNextClass != -1`, which is the same gate CrossPlay's `joinTeam` uses to
-hold the spawn. After three tries the class becomes `cls_random`. That covers a British class on a US
-map, a para class on a non-para map, and class limits, without parsing `info_doddetect`.
+(Axis), or `random` (default). The class names the team, so `PreThink` sends `jointeam 1|2` then
+`cls_<name>`; `random` sends `jointeam 5` and `cls_random`. Commands repeat every 1.2 s until
+`pev->team` is 1 or 2 and `m_iNextClass != -1` (the gate CrossPlay's `joinTeam` holds the spawn on).
+After three tries the class becomes `cls_random`, which covers a British class on a US map, a para class
+on a non-para map and class limits without parsing `info_doddetect`.
 
-Respawn is automatic and in waves (`RespawnAllies`/`RespawnAxis` 39629). Between death and the wave
-the player is an observer (`iuser1 > 0`), so `IsDead` counts that as dead and `Respawn` is an empty
-move.
+Respawn is in waves (`RespawnAllies`/`RespawnAxis` 39629); between death and the wave the player is an
+observer (`iuser1 > 0`) and `Respawn` is an empty move. That observer has `deadflag == DEAD_NO` and
+positive health, so the `iuser1` test lives in `CHLDMProfile::IsDead`, not a DoD override:
+`g_pGameProfile` is the *asking* bot's profile, and an HL or CS bot must see a DoD teammate in the
+chase cam (which sits on its target's origin) as dead (`doc/movement.md`, "Teammate spacing").
 
-`ApplyAddArg` also sets `cl_autoreload 0` in the userinfo. A missing key means on (93072), and the
-bot's own reload is then the only one.
+`ApplyAddArg` also sets `cl_autoreload 0` in the userinfo (a missing key means on, 93072), so the bot's
+own reload is the only one.
 
 ### The table
 
-`dod_weapons.cpp` has 34 rows. Ids 1-31 are `m_iId`. 32 and 33 are synthetic: the scoped Enfield and
-the scoped FG42 are the plain weapon with `m_iWeaponState & 1` (39409), so `ReadInventory` remaps
-them and the rows keep the real classname for selection.
+`dod_weapons.cpp` has 34 rows. Ids 1-31 are `m_iId`; 32 and 33 are synthetic: the scoped Enfield and
+scoped FG42 are the plain weapon with `m_iWeaponState & 1` (39409), so `ReadInventory` remaps them and
+the rows keep the real classname for selection.
 
-- **Semi-automatics and bolt rifles are `FIRE_TAP`.** DoD latches `m_fInAttack` until the button is
-  released.
-- **Rifles carry `WPN_Q_BRACE`.** Every `PrimaryAttack` adds `accuracy_penalty` to the cone whenever
-  the 3-D speed is over 45. There is no stance term, and nothing grows per shot, so the CS spread
-  gate does not apply. Crouch-walking (73) and prone crawling (50) are both over 45, so bracing has
-  to stop the bot, not just duck it.
-- **The .30cal, MG34 and MG42 are refused by `ModeAvailable` unless deployed**, or unless a camp is
-  about to deploy them. Undeployed they spread 0.2 and cost 15 stamina a shot. An MG gunner on the
-  move therefore fights with its pistol.
-- **Rockets are a hitscan-free lead at 1300 u/s with no gravity.** The real 0.1 made the arc solver
-  refuse every shot. `FireToggle` shoulders the launcher (`IN_ATTACK2`, `m_iWeaponState & 1`) while
-  the bot is firing it, and lowers it otherwise. Firing unshouldered costs a 3 s penalty, and
-  shouldered movement is capped at 50.
-- **Grenades are a `WPN_Q_THROW_ARC` tap**, thrown on release with a fixed 5 s fuse. `ThrowLaunch`
-  is the HL formula with cap 600. The hand grenade is `AMBUSH_GRENADE` and the stick grenade is
-  `AMBUSH_SNARK`: the kinds are only a list of thrown ambush ids.
-- **`chargeState` is forced to 0.** DoD's `m_fInAttack` is the semi-auto latch and would count as
-  charge shots. `throwStart` is read from `CDoDGrenade::m_flStartThrow`, because the `CBaseEntity`
-  field of the same name is shadowed.
+- **Semi-automatics and bolt rifles are `FIRE_TAP`**: DoD latches `m_fInAttack` until release.
+- **Rifles carry `WPN_Q_BRACE`.** Every `PrimaryAttack` adds `accuracy_penalty` to the cone whenever 3-D
+  speed is over 45, with no stance term and nothing growing per shot (so the CS spread gate does not
+  apply). Crouch-walking (73) and prone crawling (50) are both over 45, so bracing must slow the bot.
+  `BraceSpeed` answers 45, and in combat the bot crouches throughout (`BraceCreep`), so it has 73 to
+  shed rather than a run (`doc/combat.md`, "Speed-gated brace").
+- **The .30cal, MG34 and MG42 are refused by `ModeAvailable` unless deployed** (or a camp is about to
+  deploy them): undeployed they spread 0.2 and cost 15 stamina a shot, so a moving gunner uses its
+  pistol.
+- **Rockets lead at 1300 u/s with no gravity**; the real 0.1 made the arc solver refuse every shot.
+  `FireToggle` shoulders the launcher (`IN_ATTACK2`, `m_iWeaponState & 1`) while firing it and lowers it
+  otherwise. Firing unshouldered costs a 3 s penalty; shouldered movement is capped at 50.
+- **Grenades are a `WPN_Q_THROW_ARC` tap**, thrown on release with a fixed 5 s fuse; `ThrowLaunch` is the
+  HL law with cap 600. The hand grenade is `AMBUSH_GRENADE` and the stick grenade `AMBUSH_SNARK` (the
+  kinds are only a list of thrown ambush ids).
+- **`chargeState` is forced to 0**, because DoD's `m_fInAttack` is the semi-auto latch. `throwStart`
+  reads `CDoDGrenade::m_flStartThrow`, since the `CBaseEntity` field of that name is shadowed.
 
-`MeleeWeapon` is the American knife. Axis carry a spade or a German knife, so `bot_break.cpp` falls
-back to any carried `IsMeleeWeapon` id.
-
-Items are map `ammo_*` and dropped `ammo_generic_*` only. `ItemUsable` refuses the other team's
-ammo and your own dropped box. Weapons are never gather goals, because a player holds one primary
-and must drop it to take another.
+`MeleeWeapon` is the American knife; Axis carry a spade or German knife, so `bot_break.cpp` falls back
+to any carried `IsMeleeWeapon` id.
 
 ### Recoil, sway and the deploy clamp are client-side
 
-The server never kicks the view. Bullets go along `v_angle + punchangle`, and firing leaves
-punchangle alone. The client moves the real view angles instead, so the profile does the same
-through `IGameProfile::AdjustView`, which runs in `Bot_UpdateFacing` just before `v_angle` is
-written:
+The server never kicks the view: bullets go along `v_angle + punchangle` and firing leaves punchangle
+alone. The client moves the real view angles, so the profile does too, through `AdjustView`, just
+before `Bot_UpdateFacing` writes `v_angle`:
 
-- **Kick** (client `CHud::GetWeaponRecoilAmount` 40317, `PopRecoil` 40474):
-  - A shot is a drop in the active weapon's clip, seen in `ReadInventory`. That ignores zoom and
-    bipod toggles, which also move the timers.
-  - Each shot replaces the pending kick; it is not added to it.
-  - The kick is spread over 0.1 s: pitch goes up by the table value, and yaw moves by a quarter of it
-    (1.3 for the BAR and Bren) × U(0.8, 1.1) with a random sign.
-  - The multiplier is 0 while a bipod gun is deployed. It is ×0.25 prone, except for the three MGs,
-    and ×0.5 ducking.
-  - Nothing recovers the kick automatically. The aim controller pulls back at the bot's own hand
-    speed, and the fire-ray gate releases the trigger while the muzzle is off the target.
-- **Scope sway** (client `CL_AdjustAngles` 64017): while `m_iFOV` is below 90, pitch changes by
-  2·dt·cos(2t)·A and yaw by dt·cos(t)·A, with A = 0.5 standing, 0.2 ducking and 0.1 prone.
-- **Deploy clamp** (client `IN_MouseMove` 37776): once deployed, yaw stays within ±45° and pitch
-  within ±20° of the angles at deploy time, and the deploy pitch is no higher than −10. The server
-  enforces neither, so without this a deployed bot would swivel freely.
+- **Kick** (client `CHud::GetWeaponRecoilAmount` 40317, `PopRecoil` 40474). A shot is a drop in the
+  active clip seen in `ReadInventory` (zoom and bipod toggles also move the timers, so timers are not
+  used). Each shot replaces the pending kick, spread over 0.1 s: pitch up by the table value, yaw a
+  quarter of it (1.3 for the BAR and Bren) × U(0.8, 1.1) with random sign. The multiplier is 0 with a
+  bipod deployed, ×0.25 prone (except the three MGs) and ×0.5 ducking. Nothing recovers it
+  automatically: the aim controller pulls back at hand speed, and the fire ray releases the trigger
+  while the muzzle is off target.
+- **Scope sway** (client `CL_AdjustAngles` 64017): while `m_iFOV` is under 90, pitch changes by
+  2·dt·cos(2t)·A and yaw by dt·cos(t)·A, A = 0.5 standing, 0.2 ducking, 0.1 prone.
+- **Deploy clamp** (client `IN_MouseMove` 37776): once deployed, yaw stays within ±45° and pitch ±20° of
+  the deploy angles, and deploy pitch is no higher than −10. The server enforces neither.
 
-`Zoomed` reads `m_iFOV`. DoD only mirrors it into `pev->fov` inside `UpdateClientData`.
+`Zoomed` reads `m_iFOV`; DoD only mirrors it into `pev->fov` inside `UpdateClientData`.
 
-A headshot that does not kill sends the victim a ScreenFade: alpha 200, 3 s fade after a 2 s hold
-(`TraceAttack` hitgroup 1, 86590). It uses the same engine message id as every other game's
-ScreenFade, so `BotDaze` blinds the bot as it would for a CS flash. `BlindSeconds` adds the hold to
-the usual third of the fade, which comes to about 3 s without a target and so without firing; see
-`doc/perception.md`. A deterministic check is `crossbot_daze_test <bot> flash 200 3 2`. A real
-headshot fade has not been caught live yet, because bots aim at the body.
+A non-lethal headshot sends the victim a ScreenFade (alpha 200, 3 s fade after a 2 s hold;
+`TraceAttack` hitgroup 1, 86590) with the same engine message as every other game, so `BotDaze` blinds
+the bot as for a CS flash. `BlindSeconds` adds the hold to the usual third of the fade, about 3 s with
+no target and no firing (`doc/perception.md`). `crossbot_daze_test <bot> flash 200 3 2` checks it
+deterministically; a real headshot fade has not been caught live, because bots aim at the body.
 
-### Walking and sprinting
+### Walking, sprinting and deploying
 
-The server clamps speed only to `maxspeed` (600 × stamina factor, and 310 as seen live). The *client*
-chooses the forward speed: `min(stamina, 100) + 120` walking and `+ 230` with `IN_RUN` (client
-`DoDGetSpeed` 63489). Without `IGameProfile::MaxSpeed` a bot would run at 310 all the time.
-`MoveAdjust` sprints (`IN_RUN`) when nothing is engaged, the bot is moving forward on the ground, and
-stamina (`pev->fuser4`) has reached 90. It stops below 70. Sprinting drains 30 a second and walking
-regains 10, and jump height falls once stamina is under 60.
+The server clamps speed only to `maxspeed` (600 × stamina factor, 310 seen live). The **client** picks
+forward speed: `min(stamina, 100) + 120` walking, `+ 230` with `IN_RUN` (client `DoDGetSpeed` 63489).
+Without `MaxSpeed` a bot would run at 310 always. `MoveAdjust` sprints (`IN_RUN`) when nothing is
+engaged, the bot is moving forward on the ground and stamina (`pev->fuser4`) has reached 90, and stops
+below 70. Sprinting drains 30/s, walking regains 10/s, and jump height falls under 60.
 
-### Deploying
+`MoveAdjust` also owns the bipod, because it runs inside every `Bot_RunPlayerMove` while the camp's
+timers keep running. While `BotCamp::HeldBipod` says the held camp spot wants a deploy:
 
-`MoveAdjust` also owns the bipod, because it runs inside every `Bot_RunPlayerMove` and the camp's
-own timers keep running meanwhile. While `BotCamp::HeldBipod` says the held camp spot wants a
-deploy:
-
-1. Stop moving and select the MG.
+1. Stop and select the MG.
 2. On a sandbag spot, press `IN_ATTACK2` once the zone is armed (`vuser1.x == 1`).
 3. On a prone spot, send `sprone`, then press `IN_ATTACK2` once `iuser3 == 1` and the view is within
    20° of the spot's yaw (or an enemy is in sight).
 4. Give up after 5 s.
 
-When nothing wants it deployed any more, it presses `IN_ATTACK2` until folded and sends `sprone`
-until standing, holding the bot still throughout. A deployed MG never auto-reloads (134306), so the
-bot's own `wantReload` is its only reload. marine_bot says undeployed MGs cannot reload at all, but
-`CBipodWeapon::Reload` (139260) has no such gate, and it has not been tested live. How the camp spots are chosen is in
-`doc/goals.md`, "Sandbags and prone camps".
+When nothing wants it any more, it presses `IN_ATTACK2` until folded and sends `sprone` until standing,
+holding the bot still. A deployed MG never auto-reloads (134306), so `wantReload` is its only reload.
+marine_bot says undeployed MGs cannot reload, but `CBipodWeapon::Reload` (139260) has no such gate (not
+tested live). Spot selection is `doc/goals.md`, "Sandbags and prone camps".
 
-### Gathering: one primary, like CS
+### Gathering and dropping ammo
 
-`CDoDTeamPlay::CanHavePlayerItem` (36940) refuses a second weapon of the same group, and every primary
-is in one group, so the rifle slot holds exactly one gun. The pistol cannot be dropped at all.
-`CWeaponBox::Touch` (134576) takes only what fits and all the ammo. So `ClassifyItem` keeps HLDM's
-`weapon_*`/`weaponbox` (`ITEM_WEAPON`) and `ammo_*` (`ITEM_AMMO`) and drops everything else, and
-`ItemUsable` accepts a weapon only for a bot with no primary (`DOD_IsPrimary` against `pev->weapons`).
-`ItemPreferred` is every weapon, so a bot that lost its primary re-arms ahead of other goals. Ammo must
-match the bot's team (`CBasePlayerAmmo::DefaultTouch` 134668) and not be the bot's own drop.
+`CDoDTeamPlay::CanHavePlayerItem` (36940) refuses a second weapon of a group, and every primary is one
+group, so the rifle slot holds one gun; the pistol cannot be dropped. `CWeaponBox::Touch` (134576) takes
+what fits and all the ammo. So `ClassifyItem` keeps HLDM's `weapon_*`/`weaponbox` and `ammo_*` and drops
+the rest; `ItemUsable` accepts a weapon only for a bot with no primary (`DOD_IsPrimary` against
+`pev->weapons`), and ammo only of the bot's team (`CBasePlayerAmmo::DefaultTouch` 134668) and not its
+own drop. `ItemPreferred` is every weapon, so a bot that lost its primary re-arms first.
 
-### Dropping ammo
-
-Every soldier spawns with one generic ammo box (`m_nGenericAmmoCount = 1`, 87086), and `dropammo`
-(`DropGenericAmmo` 90619) throws it 200 u/s along `pev->angles`. It spawns as `ammo_generic_american`,
-`_british` or `_german` with `pev->team` set and the dropper as `owner`, so teammates gather it and the
-dropper ignores it. Every half second a calm bot on the ground looks for the nearest live friendly DoD
-player standing in its own nav area (`AbilityRun`, `TASK_DISCARD`), turns to them with a level view,
-and sends `dropammo` once the view is within 4°. That sets `nextDiscard` a million seconds out, and
-`BotAbility::Reset` clears it at respawn, so it happens once per life. An attempt that times out after
-1.5 s can retry after 10 s.
+Every soldier spawns with one generic ammo box (`m_nGenericAmmoCount = 1`, 87086). `dropammo`
+(`DropGenericAmmo` 90619) throws it 200 u/s along `pev->angles` as `ammo_generic_american`, `_british`
+or `_german`, with `pev->team` set and the dropper as `owner`. Every half second a calm bot on the
+ground looks for the nearest live friendly DoD player in its nav area (`TASK_DISCARD`), turns to them
+with a level view and sends `dropammo` once within 4°. That sets `nextDiscard` a million seconds out
+(cleared by `BotAbility::Reset` at respawn), so it happens once per life; an attempt that times out
+after 1.5 s may retry after 10 s.
 
 ### Bayonet and rifle butt
 
 `RifleMeleeAttack` (31963) is `IN_ATTACK2` on the Garand (5, butt), K98 (10, bayonet), K43 (24, butt)
-and Enfield (25, butt, only unscoped). It does 60 damage along a 64 u trace from the eye. It is used
-the way the TFC spy uses its knife, behind the same `backstab` tier flag (`doc/difficulty.md`): when
-the bot's target is an enemy within 300 u whose view faces away from it (dot ≤ −0.3) and one of those
-rifles is out, `TASK_STAB` sprints at the target's centre (`MoveAdjust` keeps `sprint` on for the
-task) and presses `IN_ATTACK2` inside 56 u once aimed within 4°. It stops when the victim dies, turns
-round (dot > 0.3), gets 400 u away or the weapon changes, or after 4 s. The fire code idles while the
-task runs. SMG and MG classes do not switch to their knife for it.
+and Enfield (25, butt, unscoped only): 60 damage along a 64 u trace from the eye. It is used like the
+TFC spy's knife, behind the `backstab` tier flag (`doc/difficulty.md`): when the target is an enemy
+within 300 u facing away (dot ≤ −0.3) and one of those rifles is out, `TASK_STAB` sprints at the
+target's centre (`MoveAdjust` keeps sprint on) and presses `IN_ATTACK2` inside 56 u once aimed within
+4°. It stops when the victim dies, turns (dot > 0.3), gets 400 u away, the weapon changes, or after 4 s.
+SMG and MG classes do not switch to their knife for it.
 
-### Known gaps
+**Known gaps.** Grenade pickup and throw-back (`+use` on a live `grenade`, 59525), prone for riflemen,
+the BAR/Bren/FG42 bipod outside camps, MG42 heat. Grenade throws have not been seen live.
 
-Grenade pickup and throw-back (`+use` on a live `grenade`, 59525), prone for riflemen, the
-BAR/Bren/FG42 prone bipod outside camps, MG42 heat. Grenade throws have not been seen live yet.
+## Gamedata (gamedata.cpp)
 
-## gamedata.cpp
+The bot's only way into a game DLL's own data. `edict_t::v` (`entvars_t`) is engine-defined and read
+directly; everything else (inventory, clips, ammo, attack timers) lives in private data of a class the
+plugin has no header for. `crossplay/gamedata/<gamedir>-<win|linux>.json` dumps those class layouts,
+and `GameOffsets` holds the byte offsets the bot needs. Under CrossPlay reads go through
+`CBotPrivateData(ent)` (see "CrossPlay hosting"); nothing dereferences `pvPrivateData` directly.
 
-The bot's only way into the game DLL's own data. `edict_t::v` (`entvars_t`) is a shared struct the
-engine defines, so the plugin can read it directly; everything else a `CBasePlayer` knows — the
-inventory, clips, ammo counts, attack timers — lives behind the entity's private data, which is an
-opaque blob of a class the plugin has no header for. `valve-win.json` is a dump of that class layout
-for retail `hl.dll`, and `GameOffsets` is the handful of byte offsets out of it that the bot needs.
-
-Under CrossPlay there is one such blob *per loaded game per edict*, and `edict->pvPrivateData` only
-points at the right one inside a game context. Nothing here dereferences it directly: reads go through
-`CBotPrivateData(ent)`, which resolves `gEntityObjects[currentGame][ent]`. See `CrossPlay hosting` above.
-
-### Offsets are absolute, not per-class
-
-The JSON flattens the inheritance chain: `CBasePlayerItem::m_pPlayer` is 112, `CBasePlayer::m_pActiveItem`
-is 1228, and `CBaseMonster::m_flNextAttack` is 592. Every number is already an offset from the start of
-the object, so reading a base-class field out of a derived object needs no arithmetic — a player object
-is read at 592 for `m_flNextAttack` exactly as a monster would be. That is why `GameOffsets` is a flat
-struct of ints and not a per-class hierarchy.
-
-`CBaseEntity::pev` at 4 is the one offset the plugin hardcodes rather than trusting, because it is the
-offset it needs in order to check that any other offset was right (see `bot_weapons.cpp`). The loader
-still reads it from the file and refuses to run if the file disagrees.
-
-### The format is a bare number per field
+### The format
 
 A class is `{ "baseClass": ..., "fields": { "m_iClip": 104, ... }, "virtualFunctions": ... }`, and a
-field's value is its offset and nothing else — the older dumps wrapped it as `{ "offset", "size",
-"type" }`. `LoadOne` reads only the new shape; a file in the old one fails every required field and
-the game is reported as having no gamedata.
+field's value is its offset and nothing else. `LoadOne` reads only that shape; an older dump that
+wrapped fields as `{ "offset", "size", "type" }` fails every required field.
 
-### Optional fields, and Ricochet's hand-filled ones
+**Offsets are absolute.** The JSON flattens inheritance (`CBasePlayerItem::m_pPlayer` 112,
+`CBasePlayer::m_pActiveItem` 1228, `CBaseMonster::m_flNextAttack` 592), so a base-class field reads at
+the same offset off any derived object. `GameOffsets` is therefore a flat struct of ints.
 
-A `Request` can be `optional`, and a missing optional field stays -1 instead of failing the game. Every
-reader of an optional offset tests it first. Six are optional, because they exist only in some games:
-`ent_fInAttack`, `ent_flStartThrow` and `ent_chargeReady` (Half-Life's client-weapon state parked on
-`CBaseEntity`, which Ricochet's `CBaseEntity` does not have), `rpg_cActiveRockets` (no RPG),
-`plr_iPowerups` (only Ricochet has powerups), and `eagle_iLaserActive` (only OP4 has the Desert Eagle).
+`CBaseEntity::pev` at 4 is hardcoded, because it is what checks every other offset (the round trip in
+`doc/combat.md`, "Validating every item pointer"). The loader still reads it and refuses a file that
+disagrees.
 
-`eagle_iLaserActive` is `CEagle::m_iLaserActive`, an `int` at 200 in retail `opfor.dll` (the
-reconstructed OP4 source has a `bool m_bLaserActive` there instead). It breaks the base-class rule
-exactly the way `rpg_cActiveRockets` does and is gated the same way: `BotWeapons::Read` peeks it only
-for a weapon whose secondary mode carries `WPN_Q_LASER_ON`.
+### Loading
 
-**`ricochet-win.json` was completed by hand.** The generated dump lacked `CBaseEntity::pev` (4),
+`GameData::LoadAll` runs from `GameDLLInit` (`dll_hooks.cpp`): offsets cannot change while a DLL stays
+mapped, and CrossPlay has loaded its games by then. It reads each loaded game's file relative to the
+HLDS working directory (`pfnGetGameDir()` returns the hyper-game outside a context). **That directory is
+CrossPlay's**; nothing here writes it. Results land in `g_gameOffsets[game]`, and
+`GameData::Activate(game)` copies one into `g_offsets`.
+
+Keying by gamedir, not profile, is required: the offsets describe a binary, which the gamedir selects,
+while `CHLDMProfile::Detect` reads `gpGlobals->deathmatch`, which the engine only fills in once a
+server spawns, so profile detection stays at `ServerActivate`.
+
+**A bad read is fatal; a missing file is not.** A wrong offset is a wild read that corrupts silently and
+crashes elsewhere, so once the bot uses an offset there is no degraded mode: the consistency checks in
+`bot_weapons.cpp` go through `GameData::Fatal`, which prints the reason and takes the server down.
+Loading is softer, because CrossPlay routinely loads games CrossBot cannot play: `LoadOne` returns a
+reason (unreadable file, bad JSON, missing required field, `pev` not 4), `LoadAll` prints it and leaves
+that game unloaded, `XPlay::Supported` is false and `crossbot_add` refuses it by name.
+
+### Which fields may be requested
+
+**Base-class fields, plus class-specific fields read only after the caller has proved the class.** The
+general set stops at `CBaseEntity` / `CBasePlayerItem` / `CBasePlayerWeapon` / `CBasePlayer` /
+`CBaseMonster` / `CBaseToggle`. Per-weapon state (`CShotgun`'s own `m_fInReload` shadowing the base
+one) is absent, because reading it means reading a field whose existence depends on which weapon the
+pointer is. Class-specific requests (`CWeaponBox`, `CArmoury`, `CTFTeleporter`, `CFuncTank`,
+`CMultiManager`, `CMultiSource`, `CDoDGrenade`) are read only off entities whose classname the caller
+matched.
+
+Two that look like exceptions:
+
+- **`ent_fInAttack` and `ent_flStartThrow` are not.** The gauss charge state (`CGauss::m_fInAttack`)
+  and the hand grenade's pin timer (`CHandGrenade::m_flStartThrow`) are declared on **`CBaseEntity`**
+  (`dlls/cbase.h`), where the SDK parks prediction state for the client. Every weapon object has both
+  slots, so they are valid on any item pointer. They exist because nothing else observes those actions:
+  `CGauss::StartFire` moves no timer, and the grenade leaves from `WeaponIdle` half a second after
+  `PrimaryAttack`, so `m_flStartThrow` returning to zero is the only sign of the throw. `ent_chargeReady`
+  (`m_chargeReady`, the satchel's state) is the same kind.
+- **`rpg_cActiveRockets` really breaks the rule.** `CRpg::m_cActiveRockets` is at 196 and
+  `CBasePlayerWeapon` ends at 188, so reading it off a crowbar over-reads a smaller allocation. It is
+  needed because `WPN_Q_KEEP_AIMING` has to know when the rocket is gone. **The table gates the read**:
+  `bot_weapons.cpp` peeks it only for a weapon whose spec carries `WPN_Q_KEEP_AIMING`, the same
+  discipline as every other weapon decision. The cost: the gamedata (keyed by gamedir) and the quirk
+  (keyed by profile) must agree which weapon that is. `eagle_iLaserActive` (`CEagle::m_iLaserActive`,
+  an `int` at 200 in retail `opfor.dll`; the reconstructed source has a `bool` there) is gated the same
+  way, by `WPN_Q_LASER_ON`; `m_chargeReady` is filled only for a `WPN_Q_HIDDEN_STATE` mode.
+
+`CRpg::m_fSpotActive`, four bytes below the rocket counter, is not requested even though the same gate
+would make it safe: see "The deployables".
+
+### Optional fields
+
+A `Request` can be optional; a missing optional field stays -1 and every reader tests it first. Fields
+that exist only in some games are optional: Half-Life's client-weapon state on `CBaseEntity`
+(`m_fInAttack`, `m_flStartThrow`, `m_chargeReady`, absent in Ricochet), `rpg_cActiveRockets`,
+`plr_iPowerups` (Ricochet), `eagle_iLaserActive` (OP4), the DMC `m_iQuake*` fields, all TFC fields, the
+CS and DoD player fields (`m_iTeam`, `m_iJoiningState`, `m_iMenu`, `m_signals`, `m_iFOV`,
+`m_flAccuracy`...), and the `CFuncTank` controller fields (DoD runs `noTank`).
+
+**`ricochet-win.json` was completed by hand.** The dump lacked `CBaseEntity::pev` (4),
 `CBasePlayerWeapon::m_fInReload` (116), `CBaseMonster::m_flNextAttack` (232) and `m_hEnemy` (236), and
 `CBasePlayer::m_iPowerups` (1196). They were computed from the Ricochet SDK headers and checked against
-anchors the dump does have: `CBaseToggle` ending at 192, `CEnvExplosion::m_iMagnitude` at 284,
-`CBasePlayer::m_iTargetVolume` at 292, and `m_rgpPlayerItems` 804 + 6 × 4 = `m_pActiveItem` 828.
-`m_iPowerups` has no anchor past `m_rgAmmo` (840) and was walked field by field from there. **A
-regenerated file loses these five**; the first four are required, so Ricochet then reports no gamedata.
+anchors in the dump: `CBaseToggle` ending at 192, `CEnvExplosion::m_iMagnitude` 284,
+`CBasePlayer::m_iTargetVolume` 292, and `m_rgpPlayerItems` 804 + 6 × 4 = `m_pActiveItem` 828.
+`m_iPowerups` was walked field by field from `m_rgAmmo` (840). **A regenerated file loses these five**;
+the first four are required, so Ricochet would then report no gamedata.
 
-### Only fields common to every weapon
+### mon_hEnemy
 
-The rule is that the requested set stops at `CBaseEntity` / `CBasePlayerItem` / `CBasePlayerWeapon` /
-`CBasePlayer` / `CBaseMonster`. Genuinely per-weapon-class state — `CShotgun`'s own `m_fInReload`
-shadowing the base one, for instance — is absent, because reading it means reading a field whose
-existence depends on which weapon the pointer happens to be.
+`CBaseMonster::m_hEnemy` (244 in valve) is who a monster is hunting, and the whole gate on monster
+engagement: a bot fights a monster if and only if this names the bot (`doc/perception.md`). It is an
+`EHANDLE` (`{ edict_t *m_pent; int m_serialnumber; }`), so the read is two peeks, and the serial must
+match `m_pent->serialnumber` or the handle is stale (the `CBotEntHandle::Get` rule). Everything in valve
+with `FL_MONSTER` is a `CBaseMonster` (snarks, tripmines and satchels via `CGrenade`), so `FL_MONSTER`
+plus non-null private data makes the peek legal, and the serial check catches a mod that breaks that.
 
-**Two entries look like they break it. One does not, and one does.**
+- **The read is `IGameProfile::MonsterEnemy`**, because only the mod knows the answer is a field at 244.
+  The bot compares the result with its own edict.
+- **It reads through the monster's own game.** It takes `XPlay::OwnerOf(ent)` and peeks
+  `XPlay::PrivateData(ent, owner)` at `GameData::MonsterEnemyOffset(owner)`, ignoring `CBotPrivateData`
+  and `g_offsets`. Through the bot's lens a foreign monster is a proxy, and a game without the class has
+  a null one: on `cs_monsters` cstrike bots read `enemy=-1` for every valve and gearbox monster at
+  cstrike's offset and walked past monsters shooting at them. The returned edict is engine-global.
+  `test_monster.ps1 -Phase teams` is the witness.
 
-`ent_fInAttack` and `ent_flStartThrow` do not. The gauss charge state reads as `CGauss::m_fInAttack`
-everywhere in the SDK — `DEFINE_FIELD( CGauss, m_fInAttack, ... )` says so — and the handgrenade's pin
-timer reads as `CHandGrenade::m_flStartThrow`, but both declarations are on **`CBaseEntity`**
-(`dlls/cbase.h`), where the SDK parks the grenade, satchel and egon prediction state so the client can
-share the layout. Every weapon object has both slots; only a couple of weapons ever write them. So the
-offsets are valid on any item pointer the walk produces, and reading them needs no knowledge of which
-weapon it is.
+### Fun-goal offsets
 
-Both exist for the same reason: the thing they describe is invisible to every other counter.
-`CGauss::StartFire` moves no attack timer at all. `CHandGrenade::PrimaryAttack` moves no attack timer
-either — it only pulls the pin, and the grenade leaves half a second later from `WeaponIdle`, so
-`m_flStartThrow` falling back to zero is the only observation of the throw there is (see
-`doc/combat.md`, `bot_fire.cpp`).
+The fun tier (`doc/goals.md`, `bot_fun.cpp`) reads brush-entity state that `entvars_t` does not show:
 
-`rpg_cActiveRockets` genuinely breaks the rule. `CRpg::m_cActiveRockets` is at 196 and
-`CBasePlayerWeapon` ends at 188, so reading it off a crowbar is a heap over-read past the end of a
-smaller allocation. It is here because `WPN_Q_KEEP_AIMING` needs to know when the rocket is gone, and
-nothing on a base class knows.
-
-What makes it safe is that **the table gates the read**: `bot_weapons.cpp` consults
-`IGameProfile::GetWeaponSpec` and only peeks at the offset when the spec for that weapon id carries
-`WPN_Q_KEEP_AIMING`. The quirk is the assertion that this pointer is that weapon, which is the same
-discipline every other weapon decision uses. The standing cost is that two differently-keyed files
-have to agree about which weapon that is — the gamedata JSON is keyed by gamedir, the quirk by
-`IGameProfile::Detect` — so a profile that moves the quirk to another weapon has to move the offset
-with it.
-
-The rule is otherwise unchanged, and this is the only exception. `CRpg::m_fSpotActive` sits four bytes
-below the counter and is *not* requested: the same gate would make it safe, but see "The deployables"
-below for why nothing wants it.
-
-### mon_hEnemy, and why the read lives in the profile
-
-`CBaseMonster::m_hEnemy` (offset 244) is who a monster is currently hunting, and it is the whole gate on
-monster engagement: a bot traces and fights a monster if and only if this field names that bot (see
-`doc/perception.md`, `bot_sense.cpp`). It is an `EHANDLE`, which is 8 bytes of `{ edict_t *m_pent; int
-m_serialnumber; }` — so the read is two peeks, and the serial has to match `m_pent->serialnumber` or the
-handle is stale. That is the same rule `CBotEntHandle::Get` applies, and skipping it means resolving a
-recycled edict slot to whatever now lives in it.
-
-It is requested off `CBaseMonster` and read off things that are not obviously monsters. Everything in
-valve that sets `FL_MONSTER` is a `CBaseMonster` descendant — snarks, tripmines and satchels all reach it
-through `CGrenade` — so `FL_MONSTER` plus a non-null `pvPrivateData` is what makes the peek legal, and
-the serial check is what catches it if a mod ever violates that.
-
-**The read is `IGameProfile::MonsterEnemy`, not a helper in `src/bot/`.** "Which entity is this monster
-hunting" is a question only the mod can answer, and `src/bot/` is not allowed to know that the answer is
-a field at 244. The bot layer asks the profile and compares the result to its own edict; a profile for a
-mod with a different monster base class answers differently and nothing in `bot_sense.cpp` changes.
-
-### The fun-goal offsets, and why entvars_t is not enough
-
-The fun goal tier (`doc/goals.md`, `bot_fun.cpp`) added a block of offsets that have nothing to do with
-weapons. They are all on brush entities, not the player, and every one of them exists because the
-question it answers is *not* visible in `entvars_t`:
-
-| offset | class | what it answers |
+| offset | class | answers |
 | --- | --- | --- |
-| `plr_pTank` | `CBasePlayer::m_pTank` | is this bot on a tank right now |
-| `tog_toggleState` | `CBaseToggle::m_toggle_state` | is this button pressed, waiting, or mid-move |
-| `tog_flWait` | `CBaseToggle::m_flWait` | how long before it can be pressed again |
+| `plr_pTank` | `CBasePlayer::m_pTank` | is this bot on a tank |
+| `tog_toggleState` | `CBaseToggle::m_toggle_state` | is this button pressed, waiting, or moving |
+| `tog_flWait` | `CBaseToggle::m_flWait` | how long until it can be pressed again |
 | `btn_fStayPushed` | `CBaseButton::m_fStayPushed` | is it a one-shot latch |
 | `tank_pController` | `CFuncTank::m_pController` | is the gun free |
 | `tank_vecControllerUsePos` | `CFuncTank` | the 30-unit leash origin |
-| `tank_yaw/pitch Center,Range,Rate` | `CFuncTank` | the cone the barrel can cover, and how fast |
+| `tank_yaw/pitch Center,Range,Rate` | `CFuncTank` | the cone the barrel covers, and how fast |
 | `tank_fireRate` | `CFuncTank` | rounds per second |
 | `tank_iszMaster` | `CFuncTank` | which `multisource` unlocks it |
 | `tankctl_pTank` | `CFuncTankControls::m_pTank` | which gun this control brush drives |
-| `mm_cTargets`, `mm_iTargetName` | `CMultiManager` | what this manager actually fires |
+| `mm_cTargets`, `mm_iTargetName` | `CMultiManager` | what this manager fires |
 | `ms_rgTriggered`, `ms_iTotal` | `CMultiSource` | is the master satisfied |
 
-Two of these are load-bearing in a way that is easy to miss.
+- **`tog_toggleState`**: undertow's flood button is `wait 142` and `SF_BUTTON_DONTMOVE`, so nothing
+  geometric or in `pev` distinguishes ready from waiting; without it the bot walks back to a dead
+  button on every repath.
+- **`mm_cTargets` / `mm_iTargetName`**: Worldcraft writes duplicate `multi_manager` keys with `#N`
+  suffixes, so the entity lump shows `strike_pain` and `strike_pain#1` as two targets when they are the
+  on and off edges of one 0.1 s kill window. The engine's array is stripped and delay-sorted.
+- **`CMultiSource::m_iState` does not exist.** `CMultiSource::IsTriggered` (buttons.cpp:214) compares
+  `m_rgTriggered` against `m_iTotal`, and `MasterSatisfied` mirrors it.
 
-**`tog_toggleState`.** Undertow's flood button is `wait 142` *and* `spawnflags 1`
-(`SF_BUTTON_DONTMOVE`) — it does not move when pressed, so there is no geometric or `pev` observation
-that distinguishes "ready" from "waiting out 142 seconds". Without this offset the bot walks back to
-a dead button every time it repaths.
+**The tram needs no offsets.** `FUN_TRAIN` drives subtransit's `func_tracktrain` with nothing added to
+`GameOffsets`, unlike `FUN_TANK`. Adding required requests for fields reachable through `entvars_t`
+would crash every deployment whose gamedata predates them.
 
-**`mm_cTargets` / `mm_iTargetName`.** Worldcraft writes duplicate `multi_manager` keys with `#N`
-suffixes, so parsing the map entity lump gives `strike_pain` and `strike_pain#1` as two different
-targets when they are the on and off edges of one 0.1 s kill window. The engine's array is already
-stripped and delay-sorted; the map text is not.
-
-**`CMultiSource::m_iState` does not exist** and cannot be requested. `CMultiSource::IsTriggered`
-(buttons.cpp:214) reads `m_rgTriggered` against `m_iTotal`, so those are the two offsets, and
-`MasterSatisfied` mirrors that function rather than inventing a state test.
-
-These all obey the base-class rule above without an exception: every one is read off a pointer whose
-classname the caller has already matched, and none of them is a derived field read through a base
-pointer.
-
-### The tram needs no offsets at all
-
-`FUN_TRAIN` (`doc/goals.md`, bot_fun.cpp) drives subtransit's `func_tracktrain` and adds **nothing** to
-`GameOffsets` or `kRequests`. Worth stating explicitly, because the natural assumption from
-`FUN_TANK` — which needed nine — is that a second vehicle needs its own set, and adding fatal request
-entries for fields that turn out to be reachable through `entvars_t` is a self-inflicted crash on any
-deployment whose `gamedata/valve-win.json` predates the change.
-
-| what the tram needs | where it already is |
+| the tram needs | where it is |
 | --- | --- |
 | does the bot hold the controls | `pev->flags & FL_ONTRAIN`, set by `CBasePlayer::PreThink` |
 | is the bot aboard | `pev->groundentity` |
@@ -1393,629 +1338,411 @@ deployment whose `gamedata/valve-win.json` predates the change.
 | controllable at all | `pev->spawnflags & SF_TRACKTRAIN_NOCONTROL` |
 | the route | the `path_track` chain, walked through `target` / `targetname` / `origin` |
 
-`CFuncTrackTrain::m_ppath` and `m_controlMins`/`m_controlMaxs` are the fields one would reach for and
-are deliberately **not** requested. The path is rebuilt from the entity lump instead, and the control
-box is reconstructed from `pev->mins`/`pev->maxs` with `maxs.z += 72`, exactly as `Spawn` computes it.
+`CFuncTrackTrain::m_ppath` and `m_controlMins`/`m_controlMaxs` are deliberately not requested: the path
+comes from the entity lump, and the control box is `pev->mins`/`pev->maxs` with `maxs.z += 72`, as
+`Spawn` computes it.
 
-### A bad read is fatal; a missing file is not
+### Objective offsets belong to the map
 
-A wrong offset is a wild read into another object's memory, which corrupts silently and crashes
-somewhere unrelated. So there is no degraded mode once the bot is *using* an offset: the consistency
-checks in `bot_weapons.cpp` go through `GameData::Fatal`, which prints the reason and takes the server
-down.
+`GameData::LoadMap(gamedir, MapOffsets &)` reads a second request list per game (`kCsRequests`,
+`kDodRequests`, `kTfcRequests`) for the **map owner** only, from `Objectives::DetectMap` at
+`ServerActivate`. They describe the map's entities (a `CAreaCapture`, a `CHostage`), so they are read
+through `XPlay::PrivateData(ent, mapOwner)`, never `g_offsets`, which belongs to whichever bot is
+thinking. A missing field turns objectives off with the reason and path printed.
 
-Loading is the one place that had to soften. CrossPlay routinely loads games CrossBot has no data for,
-and killing the server over `dod` would take `valve` with it. `LoadOne` returns a reason string instead
-of aborting — unreadable file, unparseable JSON, an absent required field, a `pev` that is not 4 — and
-`LoadAll` prints it and leaves that game's flag false. A game without usable gamedata is simply not
-playable: `XPlay::Supported` is false for it, and `crossbot_add` refuses it by name.
+Two layouts to know before adding to these lists: `m_hTargetEnt` and `m_hOwner` are `EHANDLE`s, read
+with the serial check; `sz_RequiredObjectGroup` and `sz_Group` (on `CObject` and DoD's `CBreakable`)
+are inline `char[256]`, not `string_t`, copied out with a length bound. DoD's `CBasePlayer::m_pObject`
+is a raw `CBaseEntity *`, compared against the object's private data, not an `EHANDLE`.
 
-### Objective offsets belong to the map, not the bot
+## Helpers in src/game/
 
-`GameData::LoadMap(gamedir, MapOffsets &)` is a second request list per game — `kCsRequests`,
-`kDodRequests`, `kTfcRequests` — read for the **map owner** only, from `Objectives::DetectMap` at
-`ServerActivate`. They describe entities of the map's game (a `CAreaCapture`, a `CHostage`), so they are
-read through `XPlay::PrivateData(ent, mapOwner)` and never through `g_offsets`, which belongs to whichever
-bot is thinking. A missing field turns objectives off with the reason and the path printed and touches
-nothing else.
+### player_models.cpp
 
-Two layouts are worth knowing before adding to these lists. `m_hTargetEnt` and `m_hOwner` are `EHANDLE`s,
-a pointer then a serial, and are read with the serial check. `sz_RequiredObjectGroup` and `sz_Group` (on both `CObject`
-and DoD's `CBreakable`) are inline `char[256]`, not `string_t`, so they are copied out with a length bound.
+Which player models a game has installed, for HLDM's third `crossbot_add` argument. `PickRandom`,
+`Installed`, `PrintList` and `Forget` are the interface; `CHLDMProfile::ApplyAddArg` is the only caller.
 
-### Loaded at GameDLLInit, one table per loaded game
+A model is a directory under `models/player` holding a `.mdl` of the same name
+(`models/player/gordon/gordon.mdl`), and an `fopen` of that path is the whole test. It checks existence,
+stands in for a directory test (`readdir`'s `d_type` is `DT_UNKNOWN` on plenty of filesystems), and keeps
+CrossPlay's own `crossplay/models/player/` out: its 43 entries are per-game remaps
+(`gordon/gordon_cs4.mdl`, `gordon_dod5.mdl`) with no `gordon.mdl`.
 
-`GameData::LoadAll` runs from `GameDLLInit` (`dll_hooks.cpp`), not from `ServerActivate`: offsets
-cannot change while a game DLL stays mapped, so it parses once per plugin load rather than once per
-map. By then CrossPlay has already loaded its game DLLs, so `gGameDirs` is populated.
+`XPlay::FindMapBsp` does not probe like this: it asks the engine's `IFileSystem::GetLocalPath` for
+`maps/<map>.bsp`, because CrossPlay also mounts each game's `crossplay.smc` `alias` dir (`cstrike` mounts
+`czero`), so `de_fastline_cz` loads from `czero/maps/` with no `czero` game loaded. Probing the game dirs
+is only the fallback when `filesystem_stdio` is not found.
 
-It walks every loaded game and reads `crossplay/gamedata/<gamedir>-<win|linux>.json`, relative to the
-HLDS working directory — the `crossplay` prefix is `pfnGetGameDir()`, which returns the hyper-game
-while no context is active. **That directory is CrossPlay's**; it ships one file per game and nothing
-here writes to it. Results land in `g_gameOffsets[game]`, and `GameData::Activate(game)` copies one
-into the `g_offsets` that all 44 peek sites still read. See `CrossPlay hosting` above.
+A game with no `models/player` falls back to `valve`'s. DMC is why: `dmc/models/` has one flat
+`player.mdl`, and CrossPlay's `crossplay.smc` names HL models in its `dmc` block. Paths are bare gamedir
+names relative to the HLDS working directory. The scan is cached per game and dropped in
+`ServerDeactivate`, so models copied in while running appear on the next map.
 
-Keying by gamedir rather than by `IGameProfile` was already right and is now required. These offsets
-describe a *game binary*, and the gamedir is what selects which binary got loaded — whereas
-`CHLDMProfile::Detect` reads `gpGlobals->deathmatch_`, which the engine only fills in once it spawns a
-server, so profile detection cannot run this early and stays at `ServerActivate`.
+**A bot not wearing what the console said is CrossPlay, not this code.** `crossplay.smc` has a per-game
+whitelist (`games/valve/teams/DEATHMATCH` is `barney;gordon;helmet;zombie;gman`) and clamps anything
+else; valve has 14 models installed, so most picks are pulled back to five. Reading the whitelist
+instead was rejected: scanning keeps CrossBot independent of CrossPlay's config and works on plain
+HLDS.
 
-## player_models.cpp
+### fake_cmd.cpp
 
-Which player models a game has installed, for the third `crossbot_add` argument. `PickRandom`,
-`Installed`, `PrintList` and `Forget` are the whole interface, and `CHLDMProfile::ApplyAddArg` is the
-only caller.
+Makes a fake client issue a console command. `FakeCmd::Run(player, "weapon_9mmAR")` is the interface;
+its one caller is `CHLDMProfile::SelectWeapon`.
 
-A model is a directory under `models/player` holding a `.mdl` of the same name —
-`models/player/gordon/gordon.mdl` — and that probe, an `fopen` in the shape `XPlay::FindMapBsp` uses
-for a bsp, is the entire test. It does three jobs at once. It is the existence check. It stands in
-for a directory test, which matters because `readdir`'s `d_type` is `DT_UNKNOWN` on plenty of
-filesystems and a plain file named `gordon` simply fails to open as `gordon/gordon.mdl`. And it is
-what keeps CrossPlay's own `models/player` out of the list — not a hypothetical:
-`crossplay/models/player/` holds 43 entries, but they are CrossPlay's per-game remaps
-(`gordon/gordon_cs4.mdl`, `gordon_dod5.mdl`) with no `gordon.mdl` beside them, so scanning it yields
-nothing.
+**A client command is the only correct route.** Any command starting `weapon_` goes to
+`CBasePlayer::SelectItem` (`client.cpp:553`), the only path that runs `Holster()` on the old weapon and
+`Deploy()` on the new, sets `m_flNextAttack` to the deploy time and updates client weapon state.
+`pfnClientCommand` sends a command *to* a client, which a fake client does not have. Writing
+`m_pActiveItem` through an offset would skip Holster and Deploy and let the bot fire through a switch a
+human cannot.
 
-A game with no `models/player` of its own falls back to `valve`'s. **DMC is the reason.** It is
-Quake-shaped: `dmc/models/` holds one flat `player.mdl` and no player directory at all. That is not a
-broken install — CrossPlay's `crossplay.smc` names Half-Life models in its `dmc` block, so HL models
-are exactly what a DMC player is expected to wear.
+**The hook is flag-gated.** The game reads its command through the engine's `CMD_ARGV` / `CMD_ARGC` /
+`CMD_ARGS`. `Run` tokenises the string, raises a module-local flag, calls `MDLL_ClientCommand` and lowers
+it; three Metamod pre-hooks on `pfnCmd_Argv` / `pfnCmd_Argc` / `pfnCmd_Args` (in `engine_hooks.cpp`)
+return `MRES_SUPERCEDE` with the fake tokens while the flag is up and `MRES_IGNORED` otherwise. They sit
+on the hot path of every real command, so they are live only inside that one synchronous call, and
+`Run` refuses to re-enter.
 
-Paths are bare gamedir names relative to the HLDS working directory, the same convention
-`FindMapBsp` uses. The scan is cached per game index and dropped in `ServerDeactivate`, so models
-copied in while the server is up are seen on the next map.
+**Classnames are case sensitive.** `SelectItem` compares with `FClassnameIs` (`strcmp`):
+`weapon_9mmAR` works, `weapon_9mmar` silently selects nothing. The table uses exact SDK spellings, and
+`crossbot_weaponspec <name>` proves them against the live entities. For the same reason `Run` drops a
+command too long for its buffer rather than truncating it. `Run` returns whether it dispatched, not
+whether the game acted; `BotFire` watches `BotInventory::activeIndex` instead.
 
-### What CrossPlay does to the answer afterwards
+### give_item.cpp
 
-`crossplay.smc` carries a per-game model whitelist — `games/valve/teams/DEATHMATCH` is
-`barney;gordon;helmet;zombie;gman` — and clamps anything outside it. Valve has 14 models installed,
-so most random picks get pulled back to one of those five, and a server full of bots shows fewer
-distinct looks than the console lines suggest. **A bot not wearing what the console said it picked is
-CrossPlay, not this code.** Reading that whitelist instead of the disk was considered and rejected:
-scanning keeps CrossBot independent of CrossPlay's config format and still works on a plain HLDS.
+`GiveItem::Give(player, classname)` is the game's own `give`: `pfnCreateNamedEntity`, origin set to the
+player's, `SF_NORESPAWN` raised, `pfnSpawn`, `pfnTouch`. There is no `GiveNamedItem`: that is a
+`CBasePlayer` method with no offset, while spawn-and-touch uses the DLL API and works for any classname,
+ammo included. `SF_NORESPAWN` (`1 << 30`, defined locally since the plugin does not include
+`weapons.h`) stops the pickup becoming a permanent extra item.
 
-## fake_cmd.cpp
+It is its own file because its two callers differ: `crossbot_equip` announces every give, and the pin's
+auto-equip fires every half second for several bots and must announce nothing. So `Give` returns a bool
+and prints nothing.
 
-Making a fake client issue a console command. `FakeCmd::Run(player, "weapon_9mmAR")` is the whole
-interface, and its one caller is `CHLDMProfile::SelectWeapon`. Every weapon switch in `src/bot/`
-goes through `IGameProfile::SelectWeapon`, because DMC has no `weapon_` command to send (see
-`dmc_profile.cpp`).
+`GiveItem::Spawn(classname, origin)` is the same without `pfnTouch`: it leaves the entity in the world
+and returns the edict, for `crossbot_spawn` and the monster test's live `monster_snark`s
+(`doc/testing.md`). It checks `pent->free` after `pfnSpawn`, since an entity may remove itself during
+spawn. It takes no owner on purpose: a snark reads `pev->owner` into `m_hOwner` at spawn and treats that
+player differently, which is wrong for a test that wants it to hunt whoever is nearest.
 
-### Why a client command is the only correct route
+### ent_handle.h
 
-`client.cpp:553` — any command whose name begins with `weapon_` goes to
-`CBasePlayer::SelectItem(pcmd)`. That is the only path that runs `Holster()` on the old weapon and
-`Deploy()` on the new one, sets `m_flNextAttack` to the deploy time, and updates the client's weapon
-state. Nothing else in the plugin's reach does.
+**`CBotEntHandle`** is the SDK's `EHANDLE` retargeted at `edict_t`. The serial number is the point: the
+respawn memo outlives its entity by up to a minute and edict slots are recycled, so a raw pointer would
+eventually name an unrelated entity. **`Get()` also checks `ent->free`**, which the SDK does not need (a
+`CBaseEntity` never outlives its edict) but a memo does: a freed edict keeps its serial until reuse.
 
-The two alternatives are both wrong rather than merely inconvenient. `pfnClientCommand` sends a
-command *to* a client, and a fake client has no client to send it to. Writing
-`CBasePlayer::m_pActiveItem` through `GameOffsets` — cheap, since the offset would be one line —
-skips Holster and Deploy entirely: the old weapon is never told it was put away, the new one never
-deploys, and `m_flNextAttack` never gets set, so the bot would fire through a switch that a human
-cannot.
+`CBotPlayerNameOf`, `CBotTargetNameOf` and `CBotIsLivePlayer` (`ent_handle.cpp`) walk
+`pfnPEntityOfEntIndex(1..maxClients)`, shared so "what counts as a live player" has one definition. Use
+`CBotTargetNameOf` in any line that can name a non-player: it returns the netname for a client and the
+classname otherwise, where `CBotPlayerNameOf` prints `?`. `CBotClassOf` is declared here but defined in
+`hldm_profile.cpp`, a wart, since nothing about it is mod-specific.
 
-### The hook is flag-gated and inert everywhere else
+## The weapon table (weapon_spec.h)
 
-The game DLL reads its command through `CMD_ARGV` / `CMD_ARGC` / `CMD_ARGS`, which are engine
-functions. So `Run` tokenises the string, raises a module-local flag, calls `MDLL_ClientCommand`, and
-lowers the flag; three Metamod **pre**-hooks on `pfnCmd_Argv` / `pfnCmd_Argc` / `pfnCmd_Args` return
-`MRES_SUPERCEDE` with the fake tokens while the flag is up and `MRES_IGNORED` otherwise.
+What the bot needs to **operate** a gun, as data. `src/bot/` never names a weapon: it asks
+`IGameProfile::GetWeaponSpec(id)` and gets a `WeaponSpec` describing the modes. The enums carry no
+Half-Life constants, so `src/bot/` may include them.
 
-These three are on the hot path for every real command from every real client on the server, so the
-gating is not an optimisation. They are live only inside the single synchronous `MDLL_ClientCommand`
-call and are a plain passthrough at every other instant. `Run` refuses to re-enter for the same
-reason.
+```
+WeaponSpec: id, classname, clipSize, value, rangeClass, zoomFov, primary, primaryZoomed, secondary
+WeaponMode: fire, aim, toggle, ammo, ammoPerShot, speed, gravity, range, splash,
+            chargeFull, chargeMax, quirks
+```
 
-This is also why `engine_hooks.cpp` now installs anything at all in the **pre** table, which until
-this change was memset to zero and returned.
-
-### The classname is case sensitive
-
-`SelectItem` compares with `FClassnameIs`, which is `strcmp`. `weapon_9mmAR` works and `weapon_9mmar`
-silently selects nothing — no error, no return value, the bot simply keeps holding what it had. The
-classnames in `hldm_weapons.cpp` are the exact SDK spellings and `crossbot_weaponspec <name>` is what
-proves it, by joining each spec against `CBotClassOf` on the live weapon entity.
-
-For the same reason `Run` **drops** a command that would not fit its buffer rather than truncating
-it: a truncated classname is indistinguishable from a working one at the call site.
-
-`Run` returns whether it dispatched, not whether the game did anything. Nothing downstream should
-trust it as confirmation — `BotFire` watches `BotInventory::activeIndex` change instead.
-
-## give_item.cpp
-
-`GiveItem::Give(player, classname)` is the game's own `give`, four calls long: `pfnCreateNamedEntity`,
-origin set to the player's, `SF_NORESPAWN` raised, `pfnSpawn`, `pfnTouch`. There is no
-`GiveNamedItem` anywhere in the plugin and there should not be — that is a `CBasePlayer` method behind
-`pvPrivateData` with no offset for it, whereas spawn-and-touch goes through the DLL API Metamod
-already hands us and works for any classname the mod defines, ammo boxes included.
-
-It lives in its own file rather than in `commands.cpp` because it now has two callers with opposite
-needs: `crossbot_equip` announces every give on the console, and the pin's auto-equip fires every half
-second for six bots and must announce nothing. So `Give` returns a bool and prints nothing, and the
-console command keeps its own message at the call site.
-
-`SF_NORESPAWN` is `1 << 30` and is set so the spawned pickup does not become a permanent extra item on
-the map. It is defined locally rather than pulled from the SDK header because the plugin does not
-include `weapons.h`.
-
-`GiveItem::Spawn(classname, origin)` is the same call sequence without the `pfnTouch`: it leaves the
-entity standing in the world instead of handing it to anyone, and returns the edict so the caller can
-report it. It exists for `crossbot_spawn` and the monster test, which needs live `monster_snark`s and
-cannot get them from the bots (see `doc/testing.md`, `test_monster.ps1`). It checks `pent->free` after
-`pfnSpawn`, because a mod entity is free to remove itself during spawn and the caller would otherwise
-be handed a dead edict.
-
-It takes no owner. A snark reads `pev->owner` into `m_hOwner` during spawn and then treats that player
-differently, which is exactly wrong for a test that wants it to hunt whoever is nearest — so the
-parameter is absent rather than defaulted, and anything that genuinely needs an owned entity should add
-it deliberately.
-
-## ent_handle.h
-
-### CBotEntHandle
-`EHANDLE` from `hlsdk/dlls/cbase.cpp`, retargeted at `edict_t` because the plugin has no
-`CBaseEntity`. The serial number is the whole point: the respawn memo outlives the entity it names
-by up to a minute, and edict slots are recycled, so a raw pointer would eventually resolve to an
-unrelated entity that happened to reuse the slot.
-
-**`Get()` checks `ent->free` as well as the serial number**, which the HLSDK original does not. It
-does not need to — a `CBaseEntity` never outlives its edict — but a memo entry does, and a freed
-edict keeps its old serial number until the slot is reused.
-
-### CBotPlayerNameOf / CBotTargetNameOf / CBotIsLivePlayer
-
-Two one-liners in `ent_handle.cpp`, for walking `pfnPEntityOfEntIndex(1..maxClients)`. They lived as
-statics in `commands.cpp` until the aim gaze scaffold needed the same scan from `bot_aim.cpp`; they are
-here rather than duplicated because a second copy of "what counts as a live player" is exactly the kind
-of thing that silently diverges.
-
-`CBotClassOf` is declared alongside them but defined in `hldm_profile.cpp`, which is a wart — nothing
-about it is mod-specific.
-
-`CBotTargetNameOf` is the one to use in any line that can name a non-player. It returns the netname for a
-client and the classname for everything else, because `v.netname` on a monster is empty and
-`CBotPlayerNameOf` renders that as `?` — which is what every combat log line said about a snark before
-monsters could be fought at all.
-
-## weapon_spec.h
-
-What the bot needs in order to *operate* a gun, as data rather than code. `src/bot/` never names a
-Half-Life weapon: it asks `IGameProfile::GetWeaponSpec(id)` with the `m_iId` that `BotWeapons::Read`
-already pulled out of the inventory, and gets back a `WeaponSpec` describing both firing modes. The
-enums here carry no Half-Life constants, which is what lets `bot/` include them.
-
-### The one criterion for a field
-
-**Does it tell the bot how to operate this gun?** Facts the bot can already observe at runtime, and
-facts that only matter when *choosing* between guns, are deliberately absent. The rejected-fields list
-below is part of the design, not an oversight — several of those look obviously useful and are not.
-
-Operating a gun decomposes into three independent questions, one enum each: how to drive the button
-(`WeaponFire`), where to point (`WeaponAim`), and what persistent state the press flips
+**The one criterion for a field: does it tell the bot how to operate this gun?** Facts observable at
+runtime, and facts that only matter when choosing between guns, are left out; the rejected list at the
+end is part of the design. Operating decomposes into three questions, one enum each: how to drive the
+button (`WeaponFire`), where to point (`WeaponAim`), what persistent state the press flips
 (`WeaponToggle`).
 
-### value is the one field that fails the criterion on purpose
+### value, rangeClass and zoomFov fail the criterion on purpose
 
-`value` says nothing about how to operate the gun. By the rule above it belongs nowhere near this
-struct, and `cycleTime` was rejected in as many words for being useful only to "rank guns you are
-*not* holding, which is selection".
+None says how to operate the gun. Each is a judgement about the mod that no runtime observation can
+supply, and it belongs next to the weapon rather than in a second table keyed by `m_iId` that could
+drift out of sync.
 
-It is here anyway because it answers a question no runtime observation can. It has two readers, and
-they want the same number for different reasons:
+**`value`** has two readers:
 
-- `EvaluateCombat` asks how dangerous the bot is *in total*, to decide whether to go looking for a
-  fight — see above and `doc/goals.md`, "Carefulness". That is a property of the whole inventory.
-- `BotFire`'s weapon selection asks which of the guns in the bag is worth holding. That is ranking guns
-  you are *not* holding, which is precisely what the rejected list said this table would not do.
+- `EvaluateCombat`: how dangerous the bot is in total (`doc/goals.md`, "Carefulness").
+- Weapon selection: which gun in the bag is worth holding (`doc/combat.md`, "Selection"). Clip,
+  reserve, cycle time and range say whether a weapon *works*, never whether it is worth holding; a bot
+  with a full glock and a full gauss would see no reason to prefer either.
 
-The second reader is a deliberate reversal, made when selection moved to score-then-rarity (see
-`doc/combat.md`, "Selection takes the best gun it has, and the rarest of those"). The earlier position was
-that the live inventory could answer selection on its own. It cannot: everything observable at runtime
-— clip, reserve, cycle time, range — says whether a weapon *works*, and nothing says whether it is
-worth holding. A bot with a full glock and a full gauss sees two working weapons and no reason to
-prefer either. Desirability is a judgement about the mod, which is what this table is for, and the only
-honest place to record what one weapon contributes is next to the weapon. The alternative is a second
-table keyed by `m_iId` sitting beside this one, which is the same data with an extra way to fall out of
-sync.
+HLDM's ladder: 0.5 gauss, egon, crossbow; 0.3 RPG and MP5; 0.2 shotgun, hornetgun, python; 0.1
+everything else. It sums to 3.3, so `arms` saturates at about two good weapons; a sum reaching 1 only
+with the full arsenal would mean bots almost never hunt. **The coarseness is load-bearing.** Selection
+keeps only the top score and breaks the rest on rarity, so unique values would make one weapon always
+win. Three weapons share 0.5 and six share 0.1, leaving rarity room to act. More precision would make
+bots less varied, not more accurate.
 
-### rangeClass and zoomFov fail it the same way, for the same reason
+**`rangeClass`** is `RANGE_CLOSE`, `RANGE_LONG`, or `RANGE_NONE` (no opinion: empty slots, Ricochet's
+disc, TFC's tranq). `Bot_RangeBias` turns it into a routing weight, so a shotgun accepts tighter ground
+and a crossbow the reverse (`doc/goals.md`, "Range bias"). Its two thresholds are cvars, because what
+counts as long is a property of the map.
 
-`rangeClass` is `RANGE_CLOSE` or `RANGE_LONG`, or `RANGE_NONE` for "no opinion": the table's empty slots,
-Ricochet's disc and TFC's tranq. It says nothing about operating the gun; it says what ground the gun wants, which
-is a judgement about the mod that no runtime observation supplies. `Bot_RangeBias` turns it into a
-routing weight, so a bot holding a shotgun accepts a longer route through tighter ground and a bot
-holding a crossbow does the reverse (`doc/goals.md`, "Range bias"). Its two thresholds are cvars, not
-table fields, because the distance that counts as "long" is a property of the map, not of the gun.
+**`zoomFov`** is the scope's fov (40 python, 20 crossbow, 0 without `TOGGLE_ZOOM`). The toggle says a zoom
+exists; this says how tight, so `BotCamp` can check whether a camp spot's arc fits in the scope. A
+non-zero `zoomFov` also makes the weapon a camper gun (`BotFire::CampWeapon`, `doc/goals.md`). It is
+on `WeaponSpec`, not `WeaponMode`, because a weapon has one scope.
 
-`zoomFov` is the scope's field of view in degrees -- 40 on the python, 20 on the crossbow, 0 for
-everything without `TOGGLE_ZOOM`. `WeaponMode::toggle` already says a zoom *exists*; this says how
-tight it is, which is what lets `BotCamp` ask whether the arc a camp spot has to sweep actually fits
-inside the scope instead of guessing at a distance threshold. It sits on `WeaponSpec` rather than
-`WeaponMode` because a weapon has one scope, not one per firing mode.
+### WeaponFire: FIRE_TAP is bot intent
 
-The numbers are a coarse ladder, not damage figures: 0.5 for gauss, egon and crossbow, 0.3 for RPG and
-MP5, 0.2 for shotgun, hornetgun and python, 0.1 for everything else. They sum to 3.3 across the table,
-so `arms` saturates at two good weapons rather than requiring the full arsenal — deliberate, because a
-bot holding gauss and egon is already as willing to hunt as it will ever be, and a sum that only
-reached 1.0 with every weapon would mean bots essentially never chased.
+There is one `ItemPostFrame` in the HLSDK. No weapon overrides it or reads `m_afButtonPressed`, and
+`ITEM_FLAG_NOAUTOFIRE` does not exist in this SDK. The dispatcher is level-triggered on `pev->button`,
+so **every Half-Life weapon is mechanically full auto**; the python only feels semi-auto because its
+cycle is 0.75 s. (`IN_ATTACK2` also short-circuits `IN_ATTACK` there; see `doc/combat.md`.)
 
-The coarseness serves the second reader too, and there it is load-bearing rather than merely
-sufficient. Selection filters to the single best score and breaks the remainder on rarity, so a ladder
-of unique values would turn the choice into a lookup: one weapon would always win and the bot would
-never vary. The ties are what leave rarity room to act — three weapons share 0.5 and six share 0.1, so
-in most inventories the score filter narrows the field without deciding it. Adding precision to these
-numbers would make bots *less* varied, not more accurate.
+So `FIRE_TAP` means "the bot must not hold this button", for two reasons:
 
-### Why FIRE_TAP is bot intent, not an SDK requirement
+- Holding a **toggle** flips it again every cycle (python and crossbow secondary, RPG secondary).
+- Holding a **hand grenade** cooks it. `PrimaryAttack` pulls the pin; the grenade leaves from
+  `WeaponIdle`, reached only through the "no fire buttons down" branch. Held, it never throws, and past
+  three seconds `ShootTimed` gets a fuse under 0.1 s, **zeroes the velocity** and drops it at your feet.
 
-There is exactly one `ItemPostFrame` in the HLSDK (`dlls/weapons.cpp`). No weapon overrides it, no
-weapon reads `m_afButtonPressed`, and `ITEM_FLAG_NOAUTOFIRE` does not exist in this SDK at all. The
-dispatcher is level-triggered on `pev->button`, so **every Half-Life weapon is mechanically full
-auto** — the python only feels semi-auto because its cycle time is 0.75s.
+It is not redundant with anything in the SDK; do not delete it. Other games' semi-automatics are taps
+for their own reasons (DoD latches `m_fInAttack`; CS pistols).
 
-So `FIRE_TAP` never means "the weapon requires a release". It means the bot must not hold this button.
-There are **two** reasons a bot must not, and the table uses the same value for both:
+**`FIRE_HOLD` is not the opposite**: it only means "may hold", which is true of the shotgun, python,
+crossbow, RPG and snark alike. What separates spraying from placing shots is cycle time, recorded as
+`WPN_Q_STICKY`.
 
-- Holding a **toggle** flips it again every cycle. Python and crossbow secondary, RPG secondary.
-- Holding a **handgrenade** cooks it. `PrimaryAttack` pulls the pin and returns; the grenade only
-  leaves from `WeaponIdle`, which `ItemPostFrame` reaches solely through its "no fire buttons down"
-  branch. Hold the button and it never throws at all — and past three seconds `ShootTimed` gets a fuse
-  under 0.1s, **zeroes the velocity**, and drops it at your feet.
+**`FIRE_CHARGE`** fires on release after a hold that is worth something; only the gauss charge grows
+while held. The hand grenade looks like the same shape but its hold buys nothing and costs everything,
+so it is `FIRE_TAP`, and the half second between press and throw is the engine's.
 
-Anyone comparing this table against the SDK will find no mechanism behind `FIRE_TAP` and be tempted to
-delete it. It is not redundant.
+### WeaponAim: AIM_TARGET vs AIM_LEAD is "is the travel time zero"
 
-**And `FIRE_HOLD` is not the opposite of it.** It means only "the bot may hold this button", which is
-equally true of the shotgun, the python, the crossbow, the RPG and the snark. If full auto is the
-mechanism everywhere, then what separates a weapon you *spray* from one you *place shots with* is not
-in this enum at all — it is cycle time. `WPN_Q_STICKY` below is where that lands.
+Not "what leaves the muzzle". A crowbar, a shotgun and an egon beam all mean "point at the target", so
+melee, hitscan and beam are one value; reach is `range`, continuous damage is `FIRE_HOLD`.
 
-`FIRE_CHARGE` is the inverse: releasing is what fires, deliberately, after a hold that is worth
-something. `ItemPostFrame` reaches `WeaponIdle()` the same way, but only the gauss has a charge that
-grows while held. The handgrenade *looks* like the same shape and is not, because its hold buys
-nothing and costs everything; it is `FIRE_TAP`, and the half-second between the press and the throw is
-the engine's, not the bot's.
-
-**`IN_ATTACK2` short-circuits `IN_ATTACK`** in that same dispatcher — the secondary test is an `if`
-and the primary is its `else if`. A bot that sets both bits fires only secondary, every time.
-
-### AIM_TARGET vs AIM_LEAD is "is the travel time zero"
-
-Not "what comes out of the muzzle". A crowbar, a shotgun and an egon beam all produce one instruction
-— point at the target — so melee, hitscan and beam are a single value. The crowbar's reach is `range`;
-the egon's continuous damage is `FIRE_HOLD`.
-
-Homing weapons are `AIM_LEAD`, not `AIM_TARGET`, because the flight time is real and a consumer may
-want it. What they are *not* is led: `WPN_Q_HOMING` says the projectile steers itself, and
-`bot_fire.cpp` spends that by skipping the solve entirely (see below). The aim value records the
-physics; the quirk records what a consumer should do about it, and here they disagree on purpose.
-
-The RPG is the exception that stays `AIM_TARGET`. Its rocket chases the nearest visible `laser_spot`,
-which sits wherever the bot is pointing right now, so it is tracked rather than led. "Keep pointing
-after you fire" is a duration, not a place, so it is `WPN_Q_KEEP_AIMING`.
+- **Homing weapons are `AIM_LEAD`**, because the flight time is real; `WPN_Q_HOMING` then tells the
+  consumer not to lead. The aim value records physics, the quirk records handling.
+- **The RPG stays `AIM_TARGET`.** Its rocket chases the `laser_spot` wherever the bot points now, so it
+  is tracked, not led. "Keep pointing after you fire" is `WPN_Q_KEEP_AIMING`.
+- `AIM_SURFACE` is a placement (tripmine); `AIM_NONE` is no aim at all (satchel primary, zoom-only
+  modes).
 
 ### gravity is effective, not pev->gravity
 
-`pev->gravity` is a multiplier on `sv_gravity` — 0.5 is 400 u/s squared at 800 — and the table does
-not pre-multiply it, because the multiplier is what belongs to the weapon.
+`pev->gravity` multiplies `sv_gravity` (0.5 is 400 u/s² at 800); the table stores the multiplier, which
+belongs to the weapon. The 800 is `PmSim::kGravity`; `sv_gravity` and `sv_stepsize` (the hardcoded 18
+in `navgen::kStepHeight`) are treated as settings nobody moves. Moving them breaks jumps and lobs, a
+trade taken deliberately.
 
-The 800 is now `PmSim::kGravity`, a constant. `sv_gravity` used to be read once, in `Bot_Physics`, and
-nothing reads it any more; `sv_stepsize` never was, and has always been the hardcoded 18 in
-`navgen::kStepHeight` and its siblings. Both are treated as settings nobody moves. Anyone who moves
-them gets a bot that jumps and lobs by the wrong numbers, which is a trade taken deliberately.
+**Two rows are parabolas, and not the same parabola:**
 
-**Two rows in this table are parabolas, and they are not the same parabola**, which matters because a
-consumer reading `gravity != 0` as "ballistic" would still get half of them wrong:
+- **MP5 secondary**: `CGrenade::ShootContact` at `forward * 800`, `pev->gravity = 0.5`, `ExplodeTouch`
+  on anything, no inherited velocity. An elevation solve describes it exactly.
+- **Hand grenade**: a launch where direction and speed are one parameter (`WPN_Q_THROW_ARC`), and it
+  **bounces**, on a fuse started at the pin pull. A solve finds where it lands; it explodes one to two
+  seconds of rolling later.
 
-- **MP5 secondary** is the real one. `CGrenade::ShootContact` at `forward * 800`, `pev->gravity = 0.5`,
-  `ExplodeTouch` on anything it meets, and explicitly *no* inherited velocity — the SDK comment says
-  so. An elevation solve describes it exactly, and `bot_fire.cpp` solves it.
-- **Handgrenade** is the other real one, but on a launch that is one parameter rather than two — see
-  `WPN_Q_THROW_ARC` below — and it **bounces** rather than detonating, on a fuse that started at the
-  pin pull. A solve finds where it lands; where it explodes is one to two seconds of rolling later.
-- **Satchel** is not a projectile. `CSatchel::Throw` spawns a `monster_satchel` that lands and waits;
-  the damage comes from a *later* radio press.
-- **RPG carries no gravity in this table at all any more**, and the row used to say `250 / 0.5`. Both
-  numbers were true for 0.4 seconds and misleading for the rest, so the row now reads `speed 2000,
-  gravity 0`. What the launch really does is worth writing down, because it is the reason no clearance
-  check follows from it:
+Not parabolas:
 
-  `CRpgRocket::Spawn` tilts the launch 30 degrees above the aim and throws at 250 on `MOVETYPE_BOUNCE`
-  with `pev->gravity = 0.5`. For a level aim that is `vz = 250 sin 30 = 125` against `g = 400`, so the
-  hump is `125^2 / 800 ~= 19.5` units and it is over in 0.31s. The muzzle sits at
-  `GetGunPosition() + up * -8`, about `z + 20` on a 72-unit player, so **the whole excursion peaks
-  below head height**. A rocket cannot bury itself in a ceiling a player can stand under, which is why
-  `bot_fire.cpp` treats the RPG as plain guided direct fire and never simulates the lob.
-
-  Then `IgniteThink` switches to `MOVETYPE_FLY` and `FollowThink` accelerates it toward 2000 while
-  steering at the laser spot. **It does not then run out.** The doc used to claim it self-detonates
-  below 1500 u/s about 1500 units out; the decay is `velocity * 0.2 + target * speed * 0.798`, and
-  `0.2 + 0.798 = 0.998`, so an aligned rocket loses 0.2% per 0.1s tick and needs some fourteen seconds
-  — around 28,000 units — to fall under 1500. `SV_Physics_Bounce` skips `SV_AddGravity` for
-  `MOVETYPE_FLY` and applies no air friction, so nothing else slows it either. The rocket cruises
-  until it hits geometry, and `range 0` in the row is literal.
-
-Damage falls off linearly from the blast to zero at `splash`, and **the thrower is not excluded** —
-`CGrenade::Explode` clears `pev->owner` before calling `RadiusDamage`. That is why a bot needs a rule
-about where its own shell lands, not merely where the enemy is.
+- **Satchel**: `CSatchel::Throw` spawns a `monster_satchel` that lands and waits for a later radio press.
+- **RPG** (`speed 2000, gravity 0`). `CRpgRocket::Spawn` tilts the launch 30° above the aim and throws
+  at 250 on `MOVETYPE_BOUNCE` with gravity 0.5: for a level aim `vz = 125` against `g = 400`, a hump of
+  about 19.5 units over 0.31 s from a muzzle at about `z + 20`, **peaking below head height**, so it
+  cannot bury itself in a ceiling a player stands under, and `bot_fire.cpp` treats it as guided direct
+  fire. Then `IgniteThink` switches to `MOVETYPE_FLY` and `FollowThink` accelerates toward 2000 while
+  steering at the spot. **It does not run out**: the decay is `velocity * 0.2 + target * speed * 0.798`,
+  0.2% per 0.1 s tick, about 14 s (28,000 units) to fall below 1500, and `MOVETYPE_FLY` gets no gravity
+  or friction. `range 0` is literal.
 
 **The table deliberately disagrees with the SDK in three rows.** The crossbow bolt sets
-`pev->gravity = 0.5` *and* `pev->movetype = MOVETYPE_FLY`; MOVETYPE_FLY does not apply gravity, so the
-bolt flies dead straight and that 0.5 only takes effect after `BoltTouch` mutates the movetype. The
-hornet is the same, both modes. All three carry gravity 0 here. Copying `pev->gravity` verbatim would
-make the bot aim low with the flattest-shooting weapon in the game.
+`pev->gravity = 0.5` and `MOVETYPE_FLY`, which ignores gravity until `BoltTouch` changes the movetype;
+the hornet is the same in both modes. All three carry gravity 0; copying `pev->gravity` would make the
+bot aim low with the flattest-shooting weapon in the game.
 
-Three more shapes a single `speed` float cannot hold, all recorded as quirks:
+Damage falls off linearly to zero at `splash`, and **the thrower is not excluded**: `CGrenade::Explode`
+clears `pev->owner` before `RadiusDamage`. Hence the bot's "closer to them than to me" rule.
 
-- The handgrenade's throw speed is pitch-dependent: `flVel = (90 - angThrow.x) * 4` capped at 500,
-  over a pitch remapped so that looking straight down still throws. Level aim gives the 400 in the
-  table; `WPN_Q_THROW_ARC` says that number is only the level-aim case.
+Shapes a single `speed` cannot hold, all quirks:
+
+- The hand grenade's speed depends on pitch (below); 400 is the level-aim case.
 - The crossbow bolt halves to 1000 underwater (`WPN_Q_SLOW_IN_WATER`).
-- The RPG's 2000 is a cap it reaches about 0.9s after leaving the tube, not a muzzle speed — see the
-  launch breakdown above. It is guided, so it is never led, and no consumer of `speed` needs the curve.
+- The RPG's 2000 is a cap reached about 0.9 s after launch; it is guided, so nothing needs the curve.
+- Velocity inheritance is inconsistent: the hand grenade, satchel, snark and RPG add the player's
+  velocity, the MP5 grenade explicitly does not. Hence `WPN_Q_INHERIT_VEL`.
 
-**The throw law is five numbers and it is not in this table.** Direction and speed are one parameter:
+### The throw law
+
+Direction and speed are one parameter:
 
     angThrow.x = -10 + view.x * ((view.x < 0) ? 80 : 100) / 90
     flVel      = min(500, (90 - angThrow.x) * 4)
 
-Five coefficients, one weapon. They live behind `IGameProfile::ThrowLaunch`, which maps the pitch the
-bot is holding to the elevation and speed the grenade leaves at, and `CHLDMProfile` implements it. The
-alternative was five floats on all 42 rows, or five magic numbers in `src/bot/`; the interface that
-already hides every other game-specific fact was the right shelf. `WPN_Q_THROW_ARC` is what selects
-it, so a mode without the quirk gets `false` and no consumer has to know which weapon it is.
+Five coefficients for one weapon. They live behind `IGameProfile::ThrowLaunch` (`CHLDMProfile`;
+CS changes the rate and cap, DMC and TFC have their own launcher law). The alternative was five floats
+on every row or magic numbers in `src/bot/`. `WPN_Q_THROW_ARC` selects it, so no consumer needs to know
+which weapon it is. The solve is `doc/combat.md`, "The coupled throw solve".
 
-**Velocity inheritance is inconsistent** and changes the launch vector: the handgrenade, satchel,
-snark and RPG all add the player's own velocity, and the MP5 grenade explicitly does not. Hence
-`WPN_Q_INHERIT_VEL` rather than a blanket assumption either way.
+### WPN_Q_HOMING: the thing aims itself
 
-### WPN_Q_HOMING means the thing aims itself
+Hornetgun primary and the snark. The red hornet launches at 300, accelerates and steers every think,
+so its 600 is an effective figure for a curve. What follows is not a wider tolerance but **no lead at
+all**: `bot_fire.cpp` aims at the target and fires inside a wide cone, so `speed` and `gravity` stop
+mattering for the aim.
 
-Hornetgun primary and the snark carry it. The RED hornet launches at 300, accelerates, and steers
-toward its target every think — so the 600 in the `speed` column is an effective figure for a
-projectile whose real speed is a curve, and no single float could be more honest than that.
+The **snark is not a projectile**: `CSqueak::PrimaryAttack` traces 20-64 units ahead, spawns a
+`monster_snark` there, tosses it at `forward * 200 + player velocity`, and it hunts on its own legs. 200
+u/s is slower than a 320 u/s player, so a lead iteration would diverge rather than merely err.
 
-The quirk exists because a consumer cannot recover "this thing corrects itself" from any other field,
-and what follows from it is not a wider tolerance but **no lead at all**. `bot_fire.cpp` skips the
-solve, aims at the target, and fires when the target is anywhere inside a wide cone. See a target,
-click, hope. That is what these weapons are for, and it is why `speed` and `gravity` stop mattering
-for them: no trajectory was computed, so nothing can bend one.
+Hornet **secondary** does not carry it: the orange dart flies straight at 1200 and is led like a bolt.
+That two modes of one weapon differ is why quirks are per mode.
 
-The **snark is not a projectile in the first place**. `CSqueak::PrimaryAttack` traces 20 to 64 units
-ahead, spawns a `monster_snark` at the trace endpoint, throws it at `forward * 200 + player velocity`,
-and the thing hunts on its own legs. The `200` and the `0.5` describe the toss, not a flight. Worse
-for anyone tempted to lead it: 200 u/s is *slower* than a 320 u/s player, so the usual lead iteration
-is not a contraction and diverges rather than merely erring. `WPN_Q_HOMING` is the only honest row
-for it.
+The quirk does not excuse `gravity`, which still earns the uphill veto: a snark thrown above the eye
+lands short and walks back. `splash` rejects no mode; every `splash > 0` mode is judged on where it
+lands. The snark's splash is 0.
 
-Hornetgun **secondary** does not carry it: the ORANGE dart flies straight at 1200 and never tracks,
-so it is led like a crossbow bolt. The two modes of one weapon differing here is the reason this is a
-mode-level quirk.
+### WPN_Q_STICKY: a cycle time without storing one
 
-What the quirk deliberately does **not** excuse is `gravity`, which still earns the uphill veto in
-`bot_fire.cpp`: a thrown snark aimed above the thrower's eye lands short and walks back, which is a
-fact about where you are standing rather than about the solve.
-
-`splash` used to reject a homing mode outright, and no longer rejects anything. Self-damage is now a
-gate rather than a category: every mode with `splash > 0` has its predicted impact tested against
-"closer to them than to me", so a weapon that steers itself is judged on where it lands like any
-other. The snark's splash is 0 regardless.
-
-### WPN_Q_STICKY names a cycle time without storing one
-
-Every weapon is full auto, so "is this a sprayer" is purely a question of how fast the cycle is. The
-SDK ladder has an obvious cliff in it:
+Every weapon is full auto, so "is this a sprayer" is a question of cycle speed, and HL's ladder has a
+cliff:
 
 | mode | cycle | |
 |---|---|---|
-| MP5 primary, hornetgun secondary | 0.10s | sticky |
-| gauss primary, glock secondary | 0.20s | sticky |
-| egon primary, hornetgun primary | 0.25s | sticky |
-| glock primary | 0.30s | sticky |
-| shotgun, python, crossbow primary | 0.75s | not |
-| MP5 secondary, RPG, shotgun secondary | 1.0s+ | not |
+| MP5 primary, hornetgun secondary | 0.10 s | sticky |
+| gauss primary, glock secondary | 0.20 s | sticky |
+| egon primary, hornetgun primary | 0.25 s | sticky |
+| glock primary | 0.30 s | sticky |
+| shotgun, python, crossbow primary | 0.75 s | not |
+| MP5 secondary, RPG, shotgun secondary | 1.0 s+ | not |
 
-`WPN_Q_STICKY` marks the seven at or under 0.30s. It tells `bot_fire.cpp` that the trigger may stay
-down through a frame the crosshair is not on the target — see `doc/combat.md` — and it is the only
-consumer.
+`WPN_Q_STICKY` marks the seven HL modes at or under 0.30 s (other games mark their automatics); it lets
+`bot_fire.cpp` keep the trigger down through frames the crosshair is off target (`doc/combat.md`, "The
+sticky trigger"). It is a quirk, not a `cycleTime` field: the live `nextPrimaryAttack` is
+authoritative, and what the bit records is the *judgement* that 0.30 is where spraying stops being
+sensible. A number compared against a threshold hidden in `src/bot/` would bury the judgement and
+imply false precision.
 
-**It is a quirk and not a `cycleTime` field, deliberately.** `cycleTime` is in the rejected-fields
-table below and stayed rejected when this was written, for the reason given there: the live
-`nextPrimaryAttack` on the weapon in hand is authoritative, so a table copy of it would be a second
-source of truth for something already known. What this bit records is not the number — it is the
-*judgement* that 0.30 is where spraying stops being sensible. Storing the number and comparing it to a
-threshold hidden in `src/bot/` would put the judgement somewhere nobody would look for it, and would
-imply a precision the choice does not have.
+Gauss primary sets no weapon timer (only `m_flTimeWeaponIdle` and the player's `m_flNextAttack`), so
+its 0.20 is the player timer's. Hornetgun primary is also homing, whose 20° cone passes almost every
+frame, so sticky is nearly a no-op there; it is set because the table describes the weapon, not the
+code path.
 
-Two consequences worth knowing. **Gauss primary sets no weapon timer at all** — `CGauss::PrimaryAttack`
-moves `m_flTimeWeaponIdle` and the player's `m_flNextAttack`, nothing else — so its 0.20s is the
-player timer's, and no shot counter that watches `nextPrimaryAttack` will ever see a gauss primary
-shot. And **hornetgun primary is also `WPN_Q_HOMING`**, whose 20-degree cone already passes almost
-every frame, so the sticky bit on that one row is close to a no-op. It is set anyway, because the
-table describes the weapon rather than the code path that happens to consume it.
+### Ammo fields
 
-### Why ammo is a field when the inventory already has counts
+`WeaponAmmo` looks derivable from the inventory's ammo types and is not: "secondary fire spends
+secondary ammo" is false for the shotgun (spends the clip), crossbow (both modes spend bolts) and gauss
+(both spend uranium). Without it the bot cannot tell whether `IN_ATTACK2` will do anything.
 
-`BotWeapon` carries `primaryAmmoType`, `secondaryAmmoType` and the counts, so `WeaponAmmo` looks
-derivable. It is not. "Secondary fire spends secondary ammo" is false for the shotgun (spends the
-clip), the crossbow (both modes spend bolts) and the gauss (both spend uranium). Without this field
-the bot cannot answer whether pressing IN_ATTACK2 will do anything at all.
+`ammoPerShot` is what one press costs: 1 everywhere except shotgun secondary (2 from the clip) and
+gauss primary (2 uranium), so a bot with one shell does not press secondary forever. The egon and the
+charging gauss have no discrete shot: the egon burns 1 every 0.2 s while held, the gauss 1 every 0.1 s
+while spinning up, and both carry the per-tick cost of 1. A consumer budgeting ammo multiplies by the
+hold time; `chargeFull` is the only hint (`ShotCost` in `doc/combat.md`).
 
-`ammoPerShot` is 1 everywhere except shotgun secondary (2 from the clip) and gauss primary (2
-uranium). It exists so a bot holding one shell does not press IN_ATTACK2 forever against a weapon that
-will never fire.
+### primaryZoomed: zoom is not a fire mode
 
-### primaryZoomed, and why zoom is not a fire mode
-
-Zoomed crossbow primary in **multiplayer** does not fire a bolt — it calls `FireSniperBolt()`, a plain
-traceline for a flat 120 damage. Same button, same weapon, and the aim requirement flips from
-`AIM_LEAD` to `AIM_TARGET`. That is the whole reason zoom is a `WeaponToggle` with its own mode slot
-rather than a `bool`: it has to be able to change what the *primary* does.
-
-`primaryZoomed.fire == FIRE_NONE` means "no override", so the consumer stays one line and no weapon is
-special-cased in `bot/`:
+Zoomed crossbow primary in **multiplayer** calls `FireSniperBolt()`, a traceline for a flat 120: same
+button, but the aim flips from `AIM_LEAD` to `AIM_TARGET`. So zoom is a `WeaponToggle` with its own mode
+slot rather than a bool. `primaryZoomed.fire == FIRE_NONE` means no override, keeping the consumer one
+line:
 
     const WeaponMode &m = (zoomed && spec->primaryZoomed.fire) ? spec->primaryZoomed : spec->primary;
 
-Zoom state is free to read: both toggles write `m_pPlayer->pev->fov`, which is engine-side, so no
-gamedata offset is involved. `pev->fov != 0` is the whole test — which is also why the specific FOV
-values (20 crossbow, 40 python) are *not* stored.
+Zoom state comes from `IGameProfile::Zoomed`, which reads engine-side `pev->fov` by default, so no
+offset is needed.
 
-### The deployables, and the one toggle that needs no code
+### The deployables
 
-`WPN_Q_HIDDEN_STATE` marks a mode whose behaviour depends on private state, and after the handgrenade
-and RPG work it is the last door in `BotFire::Supported` other than a `WeaponToggle` and an aim of
-`AIM_NONE` or `AIM_SURFACE`. Three modes carry it, for two different reasons.
+`WPN_Q_HIDDEN_STATE` marks a mode whose behaviour depends on private state; `BotFire::Supported`
+rejects it, and `bot_deploy.cpp` drives those weapons itself.
 
-**The satchel, both modes.** Primary is three different actions on `m_chargeReady` — throw at 0,
-radio-detonate at 1, inert at 2 — and *secondary branches on the same field*, which is why it carries
-the quirk too rather than being held out by luck. Every branch of primary ends in `CSatchel::Throw()`,
-and what that throws is a `monster_satchel`: a **mine** that lands, waits, and only hurts anyone when
-the radio is pressed later. Throwing without being able to press the radio is worse than not throwing,
-so the state and the throw are one feature and neither ships alone.
+**The satchel, both modes.** Primary is three actions on `m_chargeReady`: throw at 0, radio-detonate at
+1, inert at 2; secondary branches on the same field. What it throws is a mine that only hurts when the
+radio is pressed later, so the state and the throw are one feature. `m_chargeReady` is on `CBaseEntity`
+beside `m_flStartThrow`, `m_fInAttack` and `m_fireState`, requested as `ent_chargeReady` and filled only
+for a `WPN_Q_HIDDEN_STATE` mode. `bot_deploy.cpp` needs the real field twice: the **throw** is confirmed
+by `m_chargeReady == 1` (the satchel is 80 units downrange before a position check could find it), and
+**detonation** is refused unless it is 1, or the bot would throw a second satchel meaning to blow the
+first. Inferring it from live `monster_satchel`s is close but wrong: `AddToPlayer` resets the field on
+pickup while old charges are still out and owned by the same edict.
 
-`m_chargeReady` is **not** a `CSatchel` field. It is on `CBaseEntity` alongside `m_flStartThrow`,
-`m_fInAttack` and `m_fireState`, so reading it cost the offset rule nothing — it is requested now,
-as `ent_chargeReady`, because `bot_deploy.cpp` needs it. `BotWeapons::Read` fills it only for a mode
-carrying `WPN_Q_HIDDEN_STATE`, the same gate `rpg_cActiveRockets` sits behind, so the satchel is the
-only weapon it is ever read from.
-
-It is read for two different questions and both need the real field rather than a guess. The
-**throw** is confirmed by `m_chargeReady == 1`, because a satchel is 80 units downrange before any
-position check could find it. The **detonation** is refused unless `m_chargeReady == 1`, because
-primary means three different things depending on it, and a bot that guessed wrong would throw
-another satchel when it meant to blow one up. Inferring the state from live `monster_satchel`
-entities is close but not equal: `AddToPlayer` resets the field to 0 on pickup while the old charges
-are still in the world and still owned by the same edict.
-
-`WPN_Q_HIDDEN_STATE` still rejects both satchel modes in `BotFire::Supported`, and that has not
-changed. The quirk means "this mode's behaviour depends on private state", which is exactly why the
-firing path must not touch it; `bot_deploy.cpp` reads the state instead and drives the weapon itself.
-
-**RPG secondary** toggles `CRpg::m_fSpotActive`, and here the quirk earns its keep by keeping the bot
-away from a button it must never press. `CRpg::Spawn` sets `m_fSpotActive = 1`, so **the laser is on
-for the whole life of every RPG a bot holds**, and secondary fire would only turn it off. `TOGGLE_LASER`
-is therefore handled entirely by never pressing it: `Supported` rejects `toggle != TOGGLE_NONE`, and
-`WPN_Q_HIDDEN_STATE` says the same thing a second way.
-
-That is why `m_fSpotActive` is not in `GameOffsets` even though `rpg_cActiveRockets` four bytes above
-it now is. The gate that makes the counter safe would make the flag safe. Knowing the flag would only
-let the bot press a button it is forbidden to press, to restore a state that was never lost. The one
-case it would help — a human toggles the spot off and a bot picks the weapon up — leaves the rocket
-flying along its launch aim, which mostly still arrives.
+**RPG secondary** toggles `CRpg::m_fSpotActive`, and the quirk keeps the bot off a button it must never
+press. `CRpg::Spawn` sets the spot on, so **the laser is on for the life of every RPG**, and secondary
+would only turn it off. `TOGGLE_LASER` is handled by never pressing (`Supported` rejects toggles too).
+That is why `m_fSpotActive` is not in `GameOffsets`: the bot could only use it to press a forbidden
+button. If a human turns the spot off and a bot picks the weapon up, the rocket flies along its launch
+aim, which mostly still arrives.
 
 ### The OP4 quirks
 
-Four bits arrived with Opposing Force. Each says how to operate one weapon, and none is a type tag.
+Each says how to operate one weapon; none is a type tag.
 
-- **`WPN_Q_LASER_ON`** (Eagle secondary): keep this toggle on. The RPG laser starts on and the table
-  handles it by never pressing; the Eagle laser starts **off**, and on is the mode worth having
-  (0.001 spread instead of 0.1, at a 0.5 s cycle instead of 0.22). The primary row describes laser-on,
-  which is why it is not sticky. `Buttons` presses IN_ATTACK2 while the gated
-  `eagle_iLaserActive` reads 0 — once per weapon object, since holstering keeps the flag.
+- **`WPN_Q_LASER_ON`** (Eagle secondary): keep this toggle on. The Eagle laser starts **off**, and on is
+  the mode worth having (spread 0.001 instead of 0.1, at a 0.5 s cycle instead of 0.22). The primary row
+  describes laser-on, so it is not sticky. `Buttons` presses `IN_ATTACK2` while the gated
+  `eagle_iLaserActive` reads 0, once per weapon object, since holstering keeps the flag.
 - **`WPN_Q_SPINUP`** (displacer primary): the shot leaves `chargeFull` seconds after the press, aimed
-  wherever the player looks *then*. `chargeFull` keeps its meaning of "seconds the press takes to
-  pay off"; `ShotCost` still only multiplies for `FIRE_CHARGE`, so the 20-uranium cost is untouched.
-  `WPN_Q_KEEP_AIMING` could not be reused, because it gates a read of `CRpg::m_cActiveRockets` that
+  wherever the player looks then. `ShotCost` only multiplies for `FIRE_CHARGE`, so the 20-uranium cost is
+  untouched. `WPN_Q_KEEP_AIMING` could not be reused: it gates a read of `CRpg::m_cActiveRockets` that
   would land in unrelated memory on a `CDisplacer`.
-- **`WPN_Q_AIM_FEET`** (displacer primary): aim at the ground under the target. A direct hit on a
-  player teleports them and does no damage (`CDisplacerBall::BallTouch`); the 250 comes from the splash
-  when the ball hits geometry beside them.
-- **`WPN_Q_BRACE`** (M249 primary): stop and duck to fire. The M249 is the only HL or OP4 weapon whose
-  cone depends on stance, and it reads the *button bits*: `IN_DUCK` 3°, any move button 15°,
-  otherwise 6°. See `doc/combat.md`.
+- **`WPN_Q_AIM_FEET`** (displacer primary, also DMC and TFC rockets): aim at the ground under the
+  target. A direct displacer hit only teleports (`CDisplacerBall::BallTouch`); the 250 is splash.
+- **`WPN_Q_BRACE`** (M249 primary, and other games' stance- or speed-sensitive guns): stop and duck to
+  fire (`doc/combat.md`, "Brace").
 
-`WPN_Q_INHERIT_VEL` is no longer rejected on a plain arc: the spore grenade is the first row with both,
-and `bot_fire.cpp` now solves that case in the thrower's frame.
+`WPN_Q_INHERIT_VEL` on a plain arc is solved in the thrower's frame (the spore grenade); `WPN_Q_TEAM_UNSAFE`
+marks throwables that hurt or blind friends (`doc/combat.md`).
 
 ### Rejected fields
 
-Each of these is a true fact about the weapon that fails the criterion above. They are listed so they
-do not get re-proposed:
+True facts that fail the criterion, listed so they are not re-proposed:
 
 | Rejected | Why |
 |---|---|
-| `MELEE` / `HITSCAN` / `BEAM` as separate aim values | One instruction between them. Reach is `range`, sustained fire is `FIRE_HOLD`. |
-| `HOMING` as its own aim value | The flight time is still real and still worth recording, so the aim value stays `AIM_LEAD`. What a homing weapon needs is a *handling* difference — do not solve, point and click — and that is `WPN_Q_HOMING`. |
-| `cycleTime` | The live `nextPrimaryAttack` on the weapon in hand is authoritative. A table value only helps rank guns you are *not* holding, and `value` already carries that ranking at the coarseness selection needs — a second, finer axis would only give the two something to disagree about. |
-| `zoomFov` | `pev->fov != 0` answers "am I zoomed". 20 vs 40 changes no handling decision. |
+| `MELEE` / `HITSCAN` / `BEAM` aim values | One instruction between them. Reach is `range`, sustained fire is `FIRE_HOLD`. |
+| `HOMING` aim value | The flight time is real, so the aim stays `AIM_LEAD`; the handling difference is `WPN_Q_HOMING`. |
+| `cycleTime` | The live `nextPrimaryAttack` is authoritative. Ranking unheld guns is `value`'s job at the coarseness selection needs, and the sticky trigger needs the judgement about the cliff, which is `WPN_Q_STICKY`. Raised twice, rejected twice. |
 | a `needsSurface` quirk | Redundant with `AIM_SURFACE`. |
 | an `exhaustible` quirk | The inventory walk runs every frame; the bot sees the weapon disappear. |
-| a `regenAmmo` quirk | Same — the bot sees the hornet count climb. Whether to wait or switch is selection. |
+| a `regenAmmo` quirk | The bot sees the hornet count climb; waiting or switching is selection. |
 | a `selfDamage` quirk | Redundant with `splash > 0`. |
-| a `selfPush` quirk | The gauss jump is a movement capability, not a firing instruction. |
-| the throw-law coefficients | Five floats on every one of 42 rows to describe one weapon's pitch-to-speed curve. `WPN_Q_THROW_ARC` names the law and `IGameProfile::ThrowLaunch` implements it. |
-| a `guided` quirk | Redundant with `WPN_Q_KEEP_AIMING`. The reason you must keep pointing *is* that the projectile follows where you point. |
-| `cycleTime`, reconsidered | Raised again by the sticky trigger, which needs to know which weapons spray. Still rejected: the live timer is authoritative, and what the bot actually needs is the judgement about where the cliff is, not the number. `WPN_Q_STICKY` records the judgement. |
+| a `selfPush` quirk | The gauss jump is movement, modelled in `bot_gauss.cpp`. |
+| throw-law coefficients | Five floats on every row for one weapon's curve; `WPN_Q_THROW_ARC` + `ThrowLaunch`. |
+| a `guided` quirk | Redundant with `WPN_Q_KEEP_AIMING`: you keep pointing because the projectile follows. |
 
-Spread cones, pellet counts, damage values and projectile lifetimes are likewise not fields. Some are
-noted below because they were expensive to establish, but they belong to the accuracy and selection
-layers when those land.
+Spread cones, pellet counts, damage and projectile lifetimes are not fields either; some are noted
+below because they were expensive to establish. `zoomFov` is a field despite failing the criterion,
+for the camp scope check (see above).
 
-## hldm_weapons.cpp
+## The Half-Life table (hldm_weapons.cpp)
 
-A flat `WeaponSpec[16]` indexed by `m_iId`, and nothing else. Indexing by the id the inventory walk
-already produces makes the lookup free and keeps every string compare out of it.
+`kHLDMWeapons[16]` indexed by `m_iId`, so the lookup is free and needs no string compares.
 
-**The table carries multiplayer values throughout**, because `CHLDMProfile` is a deathmatch profile
-and several weapons differ:
+**It carries multiplayer values throughout**, because `CHLDMProfile` is a deathmatch profile:
 
 | | multiplayer | single player |
 |---|---|---|
-| gauss full charge | 1.5s | 4s |
-| MP5 cone | 3 degrees | 6 degrees |
+| gauss full charge | 1.5 s | 4 s |
+| MP5 cone | 3° | 6° |
 | shotgun pellets | 4 / 8 | 6 / 12 |
-| egon ammo drain | 1 per 0.2s | 1 per 0.1s |
-| hornet lifetime | 3.5s | 5.0s |
+| egon ammo drain | 1 per 0.2 s | 1 per 0.1 s |
+| hornet lifetime | 3.5 s | 5.0 s |
 | python zoom | works | returns immediately |
 | crossbow zoomed primary | hitscan | still a bolt |
 
-The MP5 cone is worth care: the branch guarded by `if (!IsMultiplayer())` takes
-`VECTOR_CONE_6DEGREES`, so multiplayer gets the *narrower* 3 degrees. The comments inside that
-function are swapped relative to the code.
+- **The MP5 cone**: the `if (!IsMultiplayer())` branch takes `VECTOR_CONE_6DEGREES`, so multiplayer
+  gets the *narrower* 3°. The SDK's comments in that function are swapped relative to the code.
+- **The gauss spin-up** burns one uranium every 0.1 s in multiplayer (0.3 s single player), so a full
+  1.5 s charge costs 16 (one to start plus fifteen), not 6. Burning stops at full charge
+  (`m_flNextAmmoBurn = 1000`), so **holding a charged gauss is free**, which is why a bot can carry one.
+- **Splash** is `RadiusDamage`'s `flDamage * 2.5`: with retail `skill.cfg`, 250 for the RPG, M203
+  grenade and hand grenade (100 damage), 375 for the satchel (150).
+- **MP5 secondary carries `WPN_Q_NO_UNDERWATER`**, primary does not: `CMP5::SecondaryAttack` tests
+  `waterlevel == 3` first and plays the empty sound. Nothing checks a field until something drives it.
 
-The gauss spin-up has the same shape and is worth the same care. `CGauss::SecondaryAttack` burns one
-uranium every **0.1s in multiplayer** and 0.3s in single player, so a 1.5s full charge costs 16 — one
-to start the spin plus fifteen — and not the 6 the single-player figure implies. `ammoPerShot` is 1
-because that is the per-tick cost; a consumer that wants a full charge multiplies. Burning stops dead
-at full charge (`m_flNextAmmoBurn = 1000`), so **holding a charged gauss is free**, which is the whole
-reason a bot can carry one between fights.
+**Two holes, both real.** `WEAPON_CHAINGUN` is id 5 with no entity in retail, and slot 0 is
+`WEAPON_NONE`. `HLDM_WeaponSpec` returns null for both, so the dump shows 14 weapons in 16 slots and a
+fully equipped player's `pev->weapons` reads `0xffde`, bit 5 clear.
 
-`splash` radii come from `RadiusDamage`, which uses `flDamage * 2.5`. With retail `skill.cfg` that is
-250 for the RPG, the M203 grenade and the handgrenade (100 damage each), and 375 for the satchel
-(150).
-
-MP5 **secondary** carries `WPN_Q_NO_UNDERWATER` even though primary does not. `CMP5::SecondaryAttack`
-tests `waterlevel == 3` before anything else and plays the empty sound; primary fires happily. The
-quirk was missing from the row until the mode became reachable, which is the usual way a table entry
-gets checked — nothing reads a field until something drives it.
-
-### ammoPerShot means per press, except where there is no press
-
-For every weapon that fires discretely, `ammoPerShot` is what one trigger pull costs. The egon and the
-charging gauss have no discrete shot: the egon burns 1 uranium every 0.2s for as long as the button is
-held, and the gauss burns 1 every 0.1s while spinning up. Both carry 1, which is the per-tick cost, not
-a per-press one. A consumer that budgets ammo before committing has to multiply by the time it intends
-to hold, and `chargeFull` is the only hint the table gives about that duration.
-
-### Two holes, both real
-
-`WEAPON_CHAINGUN` is id 5 in the SDK header and has no entity in retail Half-Life, so slot 5 is empty.
-Slot 0 is `WEAPON_NONE`. `HLDM_WeaponSpec` returns null for both, which is how the console dump ends
-up showing 14 weapons across 16 slots — and why `pev->weapons` on a fully equipped player reads
-`0xffde`, with bit 5 clear.
-
-### The lookup validates its own index
-
-`HLDM_WeaponSpec` returns null when `spec.id != id`, not merely when the row is empty. A flat array
-indexed by id has exactly one interesting failure — a row in the wrong slot — and that failure would
-otherwise hand back a confidently wrong weapon. `crossbot_weaponspec` with no argument walks the raw
-slots instead and prints `TABLE BROKEN` for any mismatch, so the condition is visible rather than
-merely survived.
-
-The other half of that check is `crossbot_weaponspec <name>`, which compares each spec's `classname`
-against `CBotClassOf` on the live weapon entity. Getting an id wrong is the one mistake this file can
-make, and a live join is the only thing that catches it.
-
+**The lookup validates its own index.** `HLDM_WeaponSpec` returns null when `spec.id != id`, not only
+for an empty row: a row in the wrong slot would otherwise return a confidently wrong weapon.
+`crossbot_weaponspec` with no argument walks the raw slots and prints `TABLE BROKEN` on any mismatch;
+`crossbot_weaponspec <name>` compares each spec's `classname` against `CBotClassOf` on the live weapon
+entity, the only thing that catches a wrong id.

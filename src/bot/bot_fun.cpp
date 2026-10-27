@@ -9,6 +9,7 @@
 #include <string>
 
 #include "../game/game_profile.h"
+#include "../game/cvars.h"
 #include "../game/gamedata.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
@@ -1387,14 +1388,14 @@ namespace BotFun
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_fun");
+	cvar_t *cvar = CBotCvar("crossbot_fun");
 	return !cvar || cvar->value != 0.f;
 }
 
 bool DebugEnabled()
 {
 #if BOT_VLOG_ON
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_fun_debug");
+	cvar_t *cvar = CBotCvar("crossbot_fun_debug");
 	return cvar && cvar->value != 0.f;
 #else
 	return false;

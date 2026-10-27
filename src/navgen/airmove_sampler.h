@@ -27,6 +27,7 @@ struct PhysicsParams
 struct AirmoveSampleParams
 {
 	float samplesPerUnit = 1.0f;
+	float reverseSeedDensity = 8.0f;
 	float inset = 2.0f;
 	float lift = 1.0f;
 	float edgeProbe = 8.0f;
@@ -41,6 +42,9 @@ struct AirmoveSampleParams
 	float maxSimulationTime = 6.0f;
 	unsigned int seed = 0x5EEDBEEFu;
 	size_t threadCount = 0;
+	bool checkArcTrace = false;
+	int dumpPairA = -1;
+	int dumpPairB = -1;
 };
 
 struct AirmoveTrajectory
@@ -125,11 +129,16 @@ public:
 
 	PmSim::PmTraceFn TraceFn() const;
 	PmSim::PmPushFn PushFn() const;
+	PmSim::PmArcFn ArcFn() const;
+	double SafeArcTime(const Vec3 &start, const Vec3 &vel, double gravity, double maxTime) const;
 	const PmSim::PmPhysics &Physics() const { return m_pmPhysics; }
 
 private:
 	AirmoveTrajectory Fly(PmSim::PmSimulator &sim, AirmoveTrajectory &result, bool airborne,
-		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust) const;
+		const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust, bool coast) const;
+	AirmoveTrajectory FlyChecked(const Vector &origin, const Vector *velocity, float yawDegrees,
+		float commandedSpeed, bool jump, const AirmoveTrajectory &start, const std::vector<Area> &areas,
+		int sourceArea, int &landingArea, double navZAdjust) const;
 
 	const BspFile &m_bsp;
 	int m_headnode;

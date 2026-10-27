@@ -91,10 +91,14 @@ struct PlacedMine
 struct State
 {
 	bool active = false;
+	bool ordered = false;
 	Phase phase = PHASE_NONE;
 
 	Spot spot;
 	DeployKind kind = DEPLOY_TRIPMINE;
+	Spot pending;
+	DeployKind pendingKind = DEPLOY_TRIPMINE;
+	bool pendingDuck = false;
 
 	int prevWeaponId = 0;
 	float startTime = 0.f;
@@ -120,6 +124,8 @@ struct State
 
 	std::vector<Memo> memo;
 };
+
+constexpr float kBeamGuardPad = 24.f;
 
 enum BeamBlock : unsigned char
 {
@@ -154,11 +160,15 @@ void HullExtents(int hull, Vector &mins, Vector &maxs);
 bool BeamMeetsHull(const Beam &beam, const Vector &at, int hull, float &zLo, float &zHi,
 	float pad = 0.f);
 
-BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead);
+BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead, const Beam **hit = NULL);
 
 bool Active(const CBot &bot);
 
 void TryStart(CBot &bot, const Nav::NavMesh &mesh);
+
+bool Reserve(CBot &bot, const Nav::NavMesh &mesh, const char *item, Vector &stand, const char *&why);
+
+void StartReserved(CBot &bot);
 
 bool Run(CBot &bot);
 

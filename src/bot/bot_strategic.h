@@ -67,9 +67,7 @@ struct State
 	std::vector<Memo> memo;
 
 	float spawnTime = 0.f;
-	bool defender = false;
 	float overrideDrop = 0.f;
-	Vector lastOrigin;
 };
 
 bool Enabled();
@@ -82,9 +80,12 @@ bool ValidFor(const CBot &bot, edict_t *ent, int payload);
 
 bool ResolvePoint(const Nav::NavMesh &mesh, const Vector &origin, uint32_t &areaId, Vector &point);
 
+bool IntentPoint(const CBot &bot, edict_t *ent, int kind, Vector &point);
+
 void Intents(const CBot &bot, std::vector<Intent> &out);
 
-void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Candidate> &out);
+void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
+	std::vector<BotGoal::Candidate> &out);
 
 void Prioritize(std::vector<BotGoal::Candidate> &cands);
 

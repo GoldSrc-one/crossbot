@@ -7,10 +7,12 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <unordered_set>
 #include <utility>
 
+#include "arc_math.h"
 #include "hull_defs.h"
 #include "nav_format.h"
 #include "nav_math.h"
@@ -29,6 +31,41 @@ using PmSim::kGroundTraceDist;
 using PmSim::kJumpImpulse;
 
 constexpr double kWorldBoundsSlop = 64.0;
+constexpr double kArcCheckLandingSlop = 1.0;
+
+struct ArcCheckStats
+{
+	std::mutex lock;
+	size_t flights = 0;
+	size_t outcomeMismatches = 0;
+	size_t landingMoved = 0;
+	double maxLandingMove = 0.0;
+	double maxFlightTimeDelta = 0.0;
+};
+
+ArcCheckStats g_arcCheck;
+
+void CompareFlights(const AirmoveTrajectory &coasted, int coastedArea, const AirmoveTrajectory &stepped,
+	int steppedArea)
+{
+	std::lock_guard<std::mutex> guard(g_arcCheck.lock);
+	++g_arcCheck.flights;
+	if (coasted.landed != stepped.landed || coasted.grabbedLadder != stepped.grabbedLadder ||
+		coastedArea != steppedArea)
+	{
+		++g_arcCheck.outcomeMismatches;
+		return;
+	}
+
+	Vec3 a = coasted.landed ? coasted.landingPos : coasted.ladderPos;
+	Vec3 b = stepped.landed ? stepped.landingPos : stepped.ladderPos;
+	double move = (a - b).Length();
+	if (move > kArcCheckLandingSlop)
+		++g_arcCheck.landingMoved;
+	g_arcCheck.maxLandingMove = std::max(g_arcCheck.maxLandingMove, move);
+	g_arcCheck.maxFlightTimeDelta = std::max(g_arcCheck.maxFlightTimeDelta,
+		std::fabs(static_cast<double>(coasted.flightTime - stepped.flightTime)));
+}
 
 struct AirmoveSample
 {
@@ -41,6 +78,7 @@ struct AirmoveSample
 	uint32_t seq = 0;
 	int worldIndex = 0;
 	int modeIndex = 0;
+	bool base = true;
 };
 
 bool SampleOrderLess(const AirmoveSample &a, const AirmoveSample &b)
@@ -127,6 +165,7 @@ constexpr double kMinFitScale = 1.0;
 constexpr double kGateSigmas = 1.0;
 constexpr double kMinGateSigma = 1.0;
 constexpr int kGateProbes = 9;
+constexpr int kReversePhase = 2;
 
 double LerpYaw(double a, double b, double t)
 {
@@ -673,6 +712,39 @@ PmSim::PmPushFn PM_MoveSimulator::PushFn() const
 	};
 }
 
+PmSim::PmArcFn PM_MoveSimulator::ArcFn() const
+{
+	const PM_MoveSimulator *self = this;
+	return [self](const Vector &start, const Vector &vel, float gravity, float maxTime)
+	{
+		return static_cast<float>(self->SafeArcTime(Vec3(start.x, start.y, start.z), Vec3(vel.x, vel.y, vel.z),
+			gravity, maxTime));
+	};
+}
+
+double PM_MoveSimulator::SafeArcTime(const Vec3 &start, const Vec3 &vel, double gravity, double maxTime) const
+{
+	TraceResult arc = TraceHullArcWithEntities(m_bsp, m_headnode, m_blockers, start, vel, gravity, maxTime);
+	if (arc.allsolid || arc.startsolid)
+		return 0.0;
+
+	double safe = maxTime * arc.fraction;
+	Vec3 probe(start.x, start.y, start.z - kGroundTraceDist);
+	TraceResult low = TraceHullArcWithEntities(m_bsp, m_headnode, m_blockers, probe, vel, gravity, safe);
+	if (low.allsolid || low.startsolid)
+		return 0.0;
+	safe *= low.fraction;
+
+	if (m_ladders)
+		for (const BlockingVolume &vol : *m_ladders)
+			safe = ArcMath::ArcEnterBox(start, vel, gravity, vol.mins, vol.maxs, safe);
+	if (m_pushes)
+		for (const PushVolume &vol : *m_pushes)
+			safe = ArcMath::ArcEnterBox(start, vel, gravity, vol.volume.mins, vol.volume.maxs, safe);
+
+	return safe;
+}
+
 Vec3 PM_MoveSimulator::PushAt(const Vec3 &origin) const
 {
 	Vec3 total(0.0, 0.0, 0.0);
@@ -758,13 +830,10 @@ AirmoveTrajectory PM_MoveSimulator::Simulate(const Vec3 &launchPos, float yawDeg
 	result.exitSpeed = commandedSpeed;
 	result.exitYaw = yawDegrees;
 	result.jumped = jump;
-	landingArea = -1;
 
-	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics, PushFn());
-	sim.Begin(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
-		static_cast<float>(launchPos.z)), yawDegrees, commandedSpeed, jump);
-
-	return Fly(sim, result, false, areas, sourceArea, landingArea, navZAdjust);
+	return FlyChecked(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
+		static_cast<float>(launchPos.z)), nullptr, yawDegrees, commandedSpeed, jump, result, areas, sourceArea,
+		landingArea, navZAdjust);
 }
 
 AirmoveTrajectory PM_MoveSimulator::SimulateAirborne(const Vec3 &launchPos, const Vec3 &velocity,
@@ -775,24 +844,57 @@ AirmoveTrajectory PM_MoveSimulator::SimulateAirborne(const Vec3 &launchPos, cons
 	result.launchPos = Vec3(launchPos.x, launchPos.y, launchPos.z + navZAdjust);
 	result.exitSpeed = commandedSpeed;
 	result.exitYaw = yawDegrees;
-	landingArea = -1;
 
-	PmSim::PmSimulator sim(TraceFn(), m_pmPhysics, PushFn());
-	sim.BeginAirborne(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
-		static_cast<float>(launchPos.z)),
-		Vector(static_cast<float>(velocity.x), static_cast<float>(velocity.y),
-			static_cast<float>(velocity.z)), yawDegrees, commandedSpeed);
+	Vector vel(static_cast<float>(velocity.x), static_cast<float>(velocity.y), static_cast<float>(velocity.z));
+	return FlyChecked(Vector(static_cast<float>(launchPos.x), static_cast<float>(launchPos.y),
+		static_cast<float>(launchPos.z)), &vel, yawDegrees, commandedSpeed, false, result, areas, sourceArea,
+		landingArea, navZAdjust);
+}
 
-	return Fly(sim, result, true, areas, sourceArea, landingArea, navZAdjust);
+AirmoveTrajectory PM_MoveSimulator::FlyChecked(const Vector &origin, const Vector *velocity, float yawDegrees,
+	float commandedSpeed, bool jump, const AirmoveTrajectory &start, const std::vector<Area> &areas,
+	int sourceArea, int &landingArea, double navZAdjust) const
+{
+	auto fly = [&](bool coast, int &area)
+	{
+		AirmoveTrajectory result = start;
+		area = -1;
+		PmSim::PmSimulator sim(TraceFn(), m_pmPhysics, PushFn());
+		if (velocity)
+			sim.BeginAirborne(origin, *velocity, yawDegrees, commandedSpeed);
+		else
+			sim.Begin(origin, yawDegrees, commandedSpeed, jump);
+		return Fly(sim, result, velocity != nullptr, areas, sourceArea, area, navZAdjust, coast);
+	};
+
+	AirmoveTrajectory result = fly(true, landingArea);
+	if (m_params.checkArcTrace)
+	{
+		int steppedArea = -1;
+		AirmoveTrajectory stepped = fly(false, steppedArea);
+		CompareFlights(result, landingArea, stepped, steppedArea);
+	}
+	return result;
 }
 
 AirmoveTrajectory PM_MoveSimulator::Fly(PmSim::PmSimulator &sim, AirmoveTrajectory &result, bool airborne,
-	const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust) const
+	const std::vector<Area> &areas, int sourceArea, int &landingArea, double navZAdjust, bool coast) const
 {
 	double peakZ = sim.Origin().z;
+	PmSim::PmArcFn arcFn = coast ? ArcFn() : nullptr;
 
 	while (sim.Time() < m_params.maxSimulationTime)
 	{
+		Vector before = sim.Origin();
+		Vector beforeVel = sim.Velocity();
+		int coasted = sim.Coast(arcFn, m_params.maxSimulationTime - sim.Time());
+		if (coasted > 0)
+		{
+			airborne = true;
+			peakZ = std::max(peakZ, ArcMath::ArcPeakZ<double>(before.z, beforeVel.z, m_pmPhysics.gravity,
+				coasted * static_cast<double>(sim.FrameTime())));
+		}
+
 		if (!sim.Step())
 			return result;
 
@@ -872,6 +974,7 @@ struct WorkItem
 	int modeIndex = 0;
 	bool seeded = false;
 	int edgeSamples = 0;
+	int baseSamples = 0;
 	uint64_t seed = 0;
 	uint64_t id = 0;
 };
@@ -1087,8 +1190,10 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 					for (size_t e = 0; e < edges->size(); ++e)
 					{
 						const LaunchEdge &edge = (*edges)[e];
-						int edgeSamples = static_cast<int>(std::lround(
-							edge.length * static_cast<double>(params.samplesPerUnit)));
+						double density = static_cast<double>(params.samplesPerUnit);
+						if (request.phase == kReversePhase)
+							density *= static_cast<double>(params.reverseSeedDensity);
+						int edgeSamples = static_cast<int>(std::lround(edge.length * density));
 						if (edgeSamples <= 0)
 							continue;
 
@@ -1100,6 +1205,8 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 						item.modeIndex = modeIndex;
 						item.seeded = !request.seed.empty();
 						item.edgeSamples = edgeSamples;
+						item.baseSamples = static_cast<int>(std::lround(
+							edge.length * static_cast<double>(params.samplesPerUnit)));
 						item.seed = EdgeSeed(params.seed, request.phase, area.id, modeIndex, e);
 						perRequest[r].push_back(item);
 					}
@@ -1230,6 +1337,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 						record.seq = static_cast<uint32_t>(s) * 2u + static_cast<uint32_t>(variant);
 						record.worldIndex = item.worldIndex;
 						record.modeIndex = item.modeIndex;
+						record.base = s < item.baseSamples;
 
 						local.bins[BinFor(mode.duckHull, jump)][key].samples.push_back(record);
 						local.sourceAreas.insert(area.id);
@@ -1347,7 +1455,7 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 
 			EnumRequest request;
 			request.areaIndex = static_cast<size_t>(to);
-			request.phase = 2;
+			request.phase = kReversePhase;
 			request.seed.push_back(seed);
 			reverse.push_back(request);
 		}
@@ -1457,10 +1565,25 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		return true;
 	};
 
+	auto baseCloud = [](const BinEntry &full, BinEntry &part)
+	{
+		part.samples.clear();
+		for (const AirmoveSample &s : full.samples)
+		{
+			if (!s.base)
+				continue;
+			if (part.samples.empty() || BetterTrajectory(s.traj, part.best))
+				part.best = s.traj;
+			part.samples.push_back(s);
+		}
+		return !part.samples.empty() && part.samples.size() < full.samples.size();
+	};
+
 	std::map<long long, bool> emitted;
 	size_t unfitted = 0;
 	size_t gateDropped = 0;
 	size_t gateShrunk = 0;
+	size_t baseRescued = 0;
 	for (int bin = 0; bin < kBinCount; ++bin)
 	{
 		for (const std::pair<const long long, BinEntry> &entry : out.bins[bin])
@@ -1468,28 +1591,56 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 			if (emitted.count(entry.first))
 				continue;
 
-			const AirmoveTrajectory &traj = entry.second.best;
+			BinEntry base;
+			const BinEntry *clouds[2] = {&entry.second, baseCloud(entry.second, base) ? &base : nullptr};
+
+			int pairA = static_cast<int>(entry.first / 1000000LL);
+			int pairB = static_cast<int>(entry.first % 1000000LL);
+			bool dumpPair = pairA == params.dumpPairA && pairB == params.dumpPairB;
 
 			MergedConnection conn;
-			conn.areaA = static_cast<int>(entry.first / 1000000LL);
-			conn.areaB = static_cast<int>(entry.first % 1000000LL);
-			conn.pointA = traj.launchPos;
-			conn.pointB = traj.landingPos;
-			if (!BuildSampledGates(entry.second, conn))
+			const BinEntry *used = nullptr;
+			bool fitted = false;
+			bool shrunk = false;
+			for (int c = 0; c < 2; ++c)
 			{
-				++unfitted;
-				continue;
+				const BinEntry *cloud = clouds[c];
+				if (!cloud)
+					continue;
+
+				MergedConnection attempt;
+				attempt.areaA = pairA;
+				attempt.areaB = pairB;
+				attempt.pointA = cloud->best.launchPos;
+				attempt.pointB = cloud->best.landingPos;
+				bool gates = BuildSampledGates(*cloud, attempt);
+				bool lands = gates && verifyGate(cloud->samples.front(), attempt, shrunk);
+				if (dumpPair)
+					std::printf("  airmove pair %d->%d bin %d %s cloud: %zu samples, gate %s%s\n", pairA, pairB,
+						bin, c == 0 ? "full" : "base", cloud->samples.size(),
+						gates ? "fitted" : "not fitted", gates ? (lands ? ", lands" : ", fails re-simulation") : "");
+				if (!gates)
+					continue;
+				fitted = true;
+				if (!lands)
+					continue;
+
+				conn = attempt;
+				used = cloud;
+				break;
 			}
 
-			bool shrunk = false;
-			if (!verifyGate(entry.second.samples.front(), conn, shrunk))
+			if (!used)
 			{
-				++gateDropped;
+				++(fitted ? gateDropped : unfitted);
 				continue;
 			}
+			if (used != &entry.second)
+				++baseRescued;
 			if (shrunk)
 				++gateShrunk;
 
+			const AirmoveTrajectory &traj = used->best;
 			emitted.emplace(entry.first, traj.duckHull);
 			conn.connType = crossbot_nav::CONN_AIRMOVE;
 			conn.connFlags = crossbot_nav::CONN_FLAG_ONE_WAY;
@@ -1520,14 +1671,14 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 		"%zu pairs [stand drop %zu, stand jump %zu, duck drop %zu, duck jump %zu] -> %zu connections "
 		"(%zu crouch-only, %zu drops seeded a climb back under %.0f units, "
 		"%zu dropped for too few samples to fit a gate, %zu dropped and %zu shrunk by gate "
-		"re-simulation)\n",
+		"re-simulation, %zu fitted from the base-density cloud)\n",
 		physics.gravityMultiplier,
 		out.simulated, params.samplesPerUnit, areas.size(), out.sourceAreas.size(),
 		out.bins[kBinStandDrop].size() + out.bins[kBinStandJump].size() +
 			out.bins[kBinDuckDrop].size() + out.bins[kBinDuckJump].size(),
 		out.bins[kBinStandDrop].size(), out.bins[kBinStandJump].size(),
 		out.bins[kBinDuckDrop].size(), out.bins[kBinDuckJump].size(), emitted.size(), crouchOnly,
-		reverseSeeds, maxJumpHeight, unfitted, gateDropped, gateShrunk);
+		reverseSeeds, maxJumpHeight, unfitted, gateDropped, gateShrunk, baseRescued);
 
 	std::printf("  air move sampling on %zu threads: %.1fs launch-edge scan + %.1fs simulation "
 		"(slowest bin %.1fs, fastest %.1fs)\n",
@@ -1538,6 +1689,18 @@ void ProbeAirMoves(const BspFile &bsp, const HullContext &duckHull, const HullCo
 	if (pushSeedEdges > 0)
 		std::printf("  %zu push-field launch edges seeded across %zu areas\n", pushSeedEdges,
 			pushSeedAreas);
+
+	if (params.checkArcTrace)
+	{
+		std::lock_guard<std::mutex> guard(g_arcCheck.lock);
+		const ArcCheckStats &s = g_arcCheck;
+		std::printf("  arc trace check: %zu flights coasted vs stepped, %zu changed outcome (landed, ladder or "
+			"area), %zu landed more than %.0f unit apart, max landing move %.3f, max flight time delta %.4fs\n",
+			s.flights, s.outcomeMismatches, s.landingMoved, kArcCheckLandingSlop, s.maxLandingMove,
+			s.maxFlightTimeDelta);
+		g_arcCheck.flights = g_arcCheck.outcomeMismatches = g_arcCheck.landingMoved = 0;
+		g_arcCheck.maxLandingMove = g_arcCheck.maxFlightTimeDelta = 0.0;
+	}
 }
 
 }

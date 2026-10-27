@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include "area_merger.h"
 #include "blocking_entities.h"
 #include "bsp_file.h"
 #include "leaf_extractor.h"
@@ -29,6 +30,9 @@ bool HasPlane(const std::vector<Plane> &planes, const Plane &plane);
 double Distance2DToWinding(const Winding &w, double x, double y);
 
 bool PointInSolid(const BspFile &bsp, int headnode, const std::vector<BlockingVolume> &blockers, const Vec3 &p);
+
+size_t TagBarrierFloors(const BspFile &bsp, int headnode, const std::vector<PassableVolume> &passables,
+	std::vector<Area> &areas);
 
 const Face *LowestFloorFace(const Polytope &poly);
 

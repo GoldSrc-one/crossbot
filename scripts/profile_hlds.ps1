@@ -4,6 +4,7 @@ param(
     [string[]]$Games = @("valve"),
     [int]$Port = 29020,
     [int]$WarmupSeconds = 25,
+    [int]$BootSeconds = 60,
     [int]$ProfileSeconds = 60,
     [double]$PerfInterval = 10,
     [double]$SpikeMs = 3,
@@ -65,7 +66,7 @@ $inner = 'waitfor /t 36000 cbstdin{0} | "{1}" {2} 1>"{3}" 2>"{4}"' -f `
 Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $inner) `
     -WorkingDirectory $HLDSDir -NoNewWindow | Out-Null
 
-$deadline = (Get-Date).AddSeconds(60)
+$deadline = (Get-Date).AddSeconds($BootSeconds)
 $ready = $false
 while ((Get-Date) -lt $deadline) {
     $probe = & "$PSScriptRoot\rcon.ps1" -Port $Port -Command "echo crossbot_ready" -FirstTimeoutMs 1000 | Out-String
@@ -78,14 +79,14 @@ $found = Get-CimInstance Win32_Process -Filter "Name='hlds.exe'" -ErrorAction Si
 $proc = if ($found) { Get-Process -Id (@($found)[0].ProcessId) -ErrorAction SilentlyContinue } else { $null }
 
 if (-not $ready -or -not $proc) {
-    if ($proc) { Stop-Process -Id $proc.Id -Force }
+    if ($proc) { & "$scriptDir\test_server_stop.ps1" -Id $proc.Id | Out-Null }
     throw "server did not come up; see $logFile"
 }
 Write-Host "profile_hlds: server up, pid $($proc.Id)"
 
 $probe = Invoke-CbRcon $Port "crossbot_perf"
 if ($probe -notmatch 'crossbot_perf"?\s+is') {
-    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+    if (-not $proc.HasExited) { & "$scriptDir\test_server_stop.ps1" -Id $proc.Id | Out-Null }
     throw "crossbot_perf cvar not registered -- rebuild with: build.bat -DCROSSBOT_PERF=ON"
 }
 
@@ -122,7 +123,7 @@ $cacheStats = Invoke-CbRcon $Port "crossbot_airmove_cache_stats"
 if ($cacheStats) { Write-Host $cacheStats.Trim() }
 
 Write-Host "profile_hlds: stopping server"
-if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+& "$scriptDir\test_server_stop.ps1" -Id $proc.Id | Out-Null
 Start-Sleep -Seconds 2
 
 Write-Host "profile_hlds: server log   $logFile"

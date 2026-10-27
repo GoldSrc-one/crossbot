@@ -2,8 +2,10 @@
 #include <meta_api.h>
 
 #include <algorithm>
+#include <cfloat>
 
 #include "bot_fire.h"
+#include "../game/cvars.h"
 #include "bot_move.h"
 #include "bot.h"
 #include "bot_aim.h"
@@ -36,6 +38,7 @@ namespace
 	}
 
 	constexpr float kSelectInterval = 0.5f;
+	constexpr float kOrderSize = 16.f;
 	constexpr float kIdleSelectInterval = 3.f;
 	constexpr float kCombatMemory = 3.f;
 	constexpr float kStickyWindow = 0.5f;
@@ -804,6 +807,18 @@ namespace
 		TraceResult tr;
 		TRACE_LINE(eye, eye + dir * range, ignore_monsters, pEdict, &tr);
 		float reach = tr.flFraction * range;
+		edict_t *pane = tr.pHit;
+		if (reach < entry && pane && g_engfuncs.pfnIndexOfEdict(pane) > 0 && pane->v.takedamage != DAMAGE_NO &&
+			pane->v.health > 0.f && pane->v.rendermode != kRenderNormal)
+		{
+			TraceResult past;
+			TRACE_LINE(tr.vecEndPos, eye + dir * range, ignore_monsters, pane, &past);
+			if (reach + past.flFraction * (range - reach) >= entry)
+			{
+				reach = entry;
+				fire.lastReason = "glass";
+			}
+		}
 		if (reach < entry)
 		{
 			if (!BotDiff::Wallbang() || !g_pGameProfile->Penetrates(bot, fire.weaponId, eye, dir, entry))
@@ -1019,6 +1034,37 @@ namespace
 		return AttackButton(fire.mode);
 	}
 
+	float SpreadLimit(const BotFire::State &fire, const Vector &eye)
+	{
+		float fit = BotDiff::SpreadFit();
+		if (fit <= 0.f || !fire.haveSize)
+			return -1.f;
+
+		float dist = (fire.aimPoint - eye).Length();
+		if (dist < 1.f)
+			return -1.f;
+
+		return fit * std::min(fire.targetSize.x, fire.targetSize.y) * 0.5f / dist;
+	}
+
+	bool BraceFooting(const edict_t *pEdict)
+	{
+		return (pEdict->v.flags & FL_ONGROUND) != 0 && pEdict->v.movetype != MOVETYPE_FLY &&
+			pEdict->v.waterlevel < 2;
+	}
+
+	bool BraceHold(CBot &bot, const BotWeapon &w, const WeaponMode &m, const Vector &eye)
+	{
+		edict_t *pEdict = bot.pEdict;
+		if ((m.quirks & WPN_Q_BRACE) == 0 || !BraceFooting(pEdict))
+			return false;
+
+		float speed = 0.f;
+		if (!g_pGameProfile->BraceSpeed(pEdict, w.id, w.priv, SpreadLimit(bot.fire, eye), speed))
+			return false;
+		return pEdict->v.velocity.Length2D() > speed;
+	}
+
 	bool SpreadHold(CBot &bot, const BotWeapon &w, const Vector &eye, bool onTarget)
 	{
 		BotFire::State &fire = bot.fire;
@@ -1026,17 +1072,12 @@ namespace
 		if (fire.spreadUntil > now && fire.spreadUntil - now < kSpreadMaxWait)
 			return true;
 
-		float fit = BotDiff::SpreadFit();
-		if (!onTarget || fit <= 0.f || !fire.haveSize || w.clip == fire.spreadClip)
+		if (!onTarget || w.clip == fire.spreadClip)
 			return false;
 
-		float dist = (fire.aimPoint - eye).Length();
-		if (dist < 1.f)
-			return false;
-
-		float half = std::min(fire.targetSize.x, fire.targetSize.y) * 0.5f;
+		float limit = SpreadLimit(fire, eye);
 		float ready = 0.f;
-		if (!g_pGameProfile->SpreadWide(bot.pEdict, w.id, w.priv, fit * half / dist, ready))
+		if (limit <= 0.f || !g_pGameProfile->SpreadWide(bot.pEdict, w.id, w.priv, limit, ready))
 			return false;
 
 		float lo = 0.f, hi = 0.f;
@@ -1053,7 +1094,7 @@ namespace BotFire
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_fire");
+	cvar_t *cvar = CBotCvar("crossbot_fire");
 	return cvar && cvar->value != 0.f;
 }
 
@@ -1227,6 +1268,9 @@ bool WeaponArmed(const BotInventory &inv, const BotWeapon &w)
 bool ModeViable(CBot &bot, const BotWeapon &w, const WeaponMode &m, bool strict)
 {
 	if (!Supported(m))
+		return false;
+
+	if (BotDirective::MeleeOnly(bot) && g_pGameProfile && !g_pGameProfile->MeleeOnlyAllows(w.id))
 		return false;
 
 	if (g_pin[0] && g_pGameProfile)
@@ -1418,6 +1462,22 @@ int SnipeWeapon(CBot &bot)
 		}
 	}
 	return bestId;
+}
+
+bool CampWeapon(CBot &bot)
+{
+	if (g_pGameProfile && g_pGameProfile->CanDeploy(bot.pEdict))
+		return true;
+
+	const BotInventory &inv = bot.inventory;
+	for (int i = 0; i < inv.count; ++i)
+	{
+		const BotWeapon &w = inv.weapons[i];
+		const WeaponSpec *spec = g_pGameProfile ? g_pGameProfile->GetWeaponSpec(w.id) : nullptr;
+		if (spec && spec->zoomFov > 0.f && WeaponViable(bot, w))
+			return true;
+	}
+	return false;
 }
 
 static int ReloadDeficit(CBot &bot, const BotWeapon &w)
@@ -2091,6 +2151,88 @@ static bool ThrowIntent(CBot &bot, const BotWeapon *active, bool holding, bool h
 	return true;
 }
 
+static bool OrderedShot(CBot &bot, const BotWeapon *active, bool holding)
+{
+	State &fire = bot.fire;
+	if (fire.orderId == 0)
+		return false;
+	if (gpGlobals->time > fire.orderUntil)
+	{
+		fire.orderId = 0;
+		return false;
+	}
+
+	fire.targetSize = Vector(kOrderSize, kOrderSize, kOrderSize);
+	fire.haveSize = true;
+	fire.heard = false;
+	fire.idleReloadId = 0;
+
+	const Vector &point = fire.orderPoint;
+	Vector eye = bot.pEdict->v.origin + bot.pEdict->v.view_ofs;
+	float dist = (point - eye).Length();
+	float rise = point.z - eye.z;
+	fire.lastRange = dist;
+	fire.friendCloser = FriendCloser(bot.pEdict, point);
+
+	if (!active || active->id != fire.orderId)
+	{
+		if (!holding && gpGlobals->time >= fire.nextSelectTime)
+		{
+			const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(fire.orderId);
+			fire.nextSelectTime = gpGlobals->time + kSelectInterval;
+			Idle(fire, "ordered-select");
+			if (spec)
+				g_pGameProfile->SelectWeapon(bot.pEdict, *spec);
+		}
+		fire.lastReason = "ordered-select";
+		return true;
+	}
+
+	bool triedBoth = false;
+	if (!TryKeep(bot, *active, point, Vector(0.f, 0.f, 0.f), eye, dist, rise, holding, false, triedBoth))
+	{
+		if (!holding)
+			Idle(fire, "ordered-blocked");
+		return true;
+	}
+
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(active->id);
+	const WeaponMode *m = spec ? ModeOf(*spec, fire.mode, false) : nullptr;
+	if (!holding && m && IsThrow(*m))
+		Intend(fire, active->id, point, Vector(0.f, 0.f, 0.f), false);
+	fire.lastReason = "ordered";
+	return true;
+}
+
+bool Order(CBot &bot, int weaponId, const Vector &point, float until, const char *&why)
+{
+	State &fire = bot.fire;
+	if (!Enabled() || !g_pGameProfile)
+	{
+		why = "firing is off";
+		return false;
+	}
+	if (!g_pGameProfile->GetWeaponSpec(weaponId))
+	{
+		why = "unknown weapon";
+		return false;
+	}
+	fire.orderId = weaponId;
+	fire.orderPoint = point;
+	fire.orderUntil = until;
+	return true;
+}
+
+void CancelOrder(CBot &bot)
+{
+	bot.fire.orderId = 0;
+}
+
+int Shots(const CBot &bot)
+{
+	return bot.fire.shots;
+}
+
 void Think(CBot &bot)
 {
 	State &fire = bot.fire;
@@ -2121,7 +2263,7 @@ void Think(CBot &bot)
 		return;
 	}
 
-	if (g_pGameProfile->HoldFire(bot))
+	if (g_pGameProfile->HoldFire(bot) || BotDirective::HoldFire(bot))
 	{
 		fire.idleReloadId = 0;
 		Idle(fire, "disguised");
@@ -2204,6 +2346,9 @@ void Think(CBot &bot)
 		BotAim::ReadPredicted(bot, BotAim::Delay(bot), basePoint, &baseVel);
 
 	if (fire.throwId != 0 && ThrowIntent(bot, active, holding, haveTarget, basePoint, baseVel))
+		return;
+
+	if (!haveTarget && OrderedShot(bot, active, holding))
 		return;
 
 	if (!haveTarget)
@@ -2494,6 +2639,16 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 				stickyable = false;
 				fire.lastReason = "spread";
 			}
+			bool braceHeld = !charge && (onTarget || stickyable) && BraceHold(bot, w, *m, eye);
+			if (braceHeld && !fire.braceHolding)
+				++fire.braceWaits;
+			fire.braceHolding = braceHeld;
+			if (braceHeld)
+			{
+				onTarget = false;
+				stickyable = false;
+				fire.lastReason = "brace";
+			}
 		}
 	}
 
@@ -2533,13 +2688,27 @@ unsigned short Buttons(CBot &bot, const Vector &angles)
 	return AttackButton(fire.mode);
 }
 
-bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly)
+bool BraceCreep(const CBot &bot)
+{
+	if (!g_pGameProfile || bot.camp.holding || !BotCombat::Active(bot))
+		return false;
+
+	const BotInventory &inv = bot.inventory;
+	if (inv.activeIndex < 0 || inv.activeIndex >= inv.count)
+		return false;
+
+	const WeaponSpec *spec = g_pGameProfile->GetWeaponSpec(inv.weapons[inv.activeIndex].id);
+	return spec && (spec->primary.quirks & WPN_Q_BRACE) != 0;
+}
+
+bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly, float &cap)
 {
 	State &fire = bot.fire;
 	bool was = fire.bracing != 0;
 	fire.bracing = 0;
 	duck = false;
 	stanceOnly = false;
+	cap = 0.f;
 
 	if (fire.throwId != 0 && (buttons & IN_JUMP) == 0)
 		return true;
@@ -2563,8 +2732,12 @@ bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly)
 		return false;
 
 	edict_t *pEdict = bot.pEdict;
-	if ((pEdict->v.flags & FL_ONGROUND) == 0 || pEdict->v.movetype == MOVETYPE_FLY ||
-		pEdict->v.waterlevel >= 2)
+	if (!BraceFooting(pEdict))
+		return false;
+
+	float limit = SpreadLimit(fire, pEdict->v.origin + pEdict->v.view_ofs);
+	bool gated = g_pGameProfile->BraceSpeed(pEdict, w.id, w.priv, limit, cap);
+	if (gated && cap == FLT_MAX)
 		return false;
 
 	float timer = (fire.mode == MODE_SECONDARY) ? w.nextSecondaryAttack : w.nextPrimaryAttack;
@@ -2583,13 +2756,14 @@ bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly)
 	}
 
 	PmSim::PmPhysics physics = Bot_DrivePhysics(pEdict);
-	Vector flat(pEdict->v.velocity.x, pEdict->v.velocity.y, 0.f);
-	float stop = NavPlan::StopTime(flat.Length(), physics.groundFriction * physics.friction,
-		physics.stopSpeed);
+	float friction = physics.groundFriction * physics.friction;
+	float speed = pEdict->v.velocity.Length2D();
+	float stop = speed > cap ? NavPlan::StopTime(speed, friction, physics.stopSpeed) -
+		NavPlan::StopTime(cap, friction, physics.stopSpeed) : 0.f;
 	if (wait > stop)
 		return false;
 
-	if (gpGlobals->time >= fire.braceTraceTime)
+	if (!gated && gpGlobals->time >= fire.braceTraceTime)
 	{
 		Vector eye = pEdict->v.origin + pEdict->v.view_ofs;
 		if ((pEdict->v.flags & FL_DUCKING) == 0)
@@ -2601,7 +2775,7 @@ bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly)
 		fire.braceTraceTime = gpGlobals->time + kBraceTraceInterval;
 	}
 
-	duck = fire.braceDuckClear;
+	duck = !gated && fire.braceDuckClear;
 	fire.bracing = duck ? 1 : 2;
 	if (!was)
 		++fire.braces;

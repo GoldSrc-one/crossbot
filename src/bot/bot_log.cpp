@@ -1,4 +1,5 @@
 #include "bot_log.h"
+#include "../game/cvars.h"
 
 #ifdef CROSSBOT_VERBOSE
 
@@ -15,7 +16,7 @@ bool Enabled()
 {
 	static cvar_t *cvar = nullptr;
 	if (!cvar)
-		cvar = g_engfuncs.pfnCVarGetPointer("crossbot_verbose");
+		cvar = CBotCvar("crossbot_verbose");
 	return cvar && cvar->value != 0.f;
 }
 

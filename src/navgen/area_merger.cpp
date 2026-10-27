@@ -1428,7 +1428,6 @@ MergeResult MergeAreas(const std::vector<ExtractedLeaf> &leaves, const std::vect
 
 		for (int i = 0; i < n; ++i)
 		{
-			// Footprints whose XY boxes do not overlap intersect in zero area, so the claim cannot pass.
 			if (!mergedBounds.OverlapsXY(leafFootprintBounds[static_cast<size_t>(i)], 0.0))
 				continue;
 

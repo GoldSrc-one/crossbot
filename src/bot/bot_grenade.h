@@ -13,6 +13,10 @@ struct State
 {
 	int slot = -1;
 	bool scared = false;
+	bool ordered = false;
+	int orderSlot = -1;
+	Vector orderPoint;
+	float orderUntil = 0.f;
 	float primeTime = 0.f;
 	float releaseTime = 0.f;
 	float pin = 0.f;
@@ -44,6 +48,12 @@ bool Enabled();
 void Run(CBot &bot, Vector &angles);
 
 void Reset(CBot &bot);
+
+bool Order(CBot &bot, int slot, const Vector &point, float until, const char *&why);
+
+void CancelOrder(CBot &bot);
+
+int Throws(const CBot &bot);
 
 void PrintStatus(const CBot &bot);
 

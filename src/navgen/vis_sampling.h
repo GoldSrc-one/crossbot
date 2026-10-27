@@ -20,12 +20,15 @@ struct TraceCounters
 	size_t blockerTraces = 0;
 };
 
+constexpr double kSightBlockOpacity = 0.5;
+
 struct VisBlockerBox
 {
 	int headnode = -1;
 	Vec3 origin;
 	Vec3 mins;
 	Vec3 maxs;
+	const SightCoverage::Grid *coverage = nullptr;
 };
 
 inline Vec3 DirFromAngles(double yawDeg, double pitchDeg)
@@ -54,20 +57,31 @@ inline std::vector<VisBlockerBox> BuildVisBlockerBoxes(const std::vector<Blockin
 		box.origin = vol.origin;
 		box.mins = vol.mins;
 		box.maxs = vol.maxs;
+		box.coverage = vol.coverage;
 		boxes.push_back(box);
 	}
 
 	return boxes;
 }
 
-// The blocker half of Occluded, for callers that traced the world already (SegmentsBlockedBatch).
 inline bool BlockersOccluded(const HullTree &hull, const std::vector<VisBlockerBox> &blockers,
 	const Vec3 &a, const Vec3 &b, TraceCounters &counters)
 {
+	double clear = 1.0;
 	for (const VisBlockerBox &blocker : blockers)
 	{
 		if (!SegmentHitsBox(a, b, blocker.mins, blocker.maxs))
 			continue;
+
+		if (blocker.coverage)
+		{
+			float fa[3] = { static_cast<float>(a.x), static_cast<float>(a.y), static_cast<float>(a.z) };
+			float fb[3] = { static_cast<float>(b.x), static_cast<float>(b.y), static_cast<float>(b.z) };
+			clear *= blocker.coverage->Clear(fa, fb, static_cast<float>((1.0 - kSightBlockOpacity) / clear));
+			if (clear < 1.0 - kSightBlockOpacity)
+				return true;
+			continue;
+		}
 
 		++counters.blockerTraces;
 		if (SegmentBlocked(hull, blocker.headnode, a - blocker.origin, b - blocker.origin))

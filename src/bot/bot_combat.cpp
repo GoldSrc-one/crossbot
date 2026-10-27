@@ -3,7 +3,8 @@
 
 #include <math.h>
 
-#include "../game/game_profile.h"
+#include "../game/game_profile.h"
+#include "../game/cvars.h"
 #include "../game/teams.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
@@ -418,7 +419,7 @@ namespace
 
 bool BotCombat::Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_combat");
+	cvar_t *cvar = CBotCvar("crossbot_combat");
 	return !cvar || cvar->value != 0.f;
 }
 
@@ -440,7 +441,7 @@ bool BotCombat::Dueling(const CBot &bot)
 bool BotCombat::DebugEnabled()
 {
 #if BOT_VLOG_ON
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_combat_debug");
+	cvar_t *cvar = CBotCvar("crossbot_combat_debug");
 	return cvar && cvar->value != 0.f;
 #else
 	return false;
@@ -543,6 +544,12 @@ void BotCombat::Update(CBot &bot)
 		return;
 	}
 
+	if (BotDirective::HoldFire(bot))
+	{
+		Exit(bot, "holding fire");
+		return;
+	}
+
 	Seed(bot);
 
 	edict_t *seen = bot.sense.target.Get();
@@ -603,14 +610,7 @@ void BotCombat::Update(CBot &bot)
 		return;
 
 	if (seen)
-	{
 		Enter(bot, seen, "sight", EnemySees(bot, seen));
-		return;
-	}
-
-	edict_t *hurt = DamageSource(bot.pEdict);
-	if (hurt)
-		Enter(bot, hurt, "damage", true);
 }
 
 bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
@@ -697,6 +697,9 @@ bool BotCombat::Run(CBot &bot, const Nav::NavMesh &mesh)
 			}
 		}
 	}
+
+	if (edict_t *enemy = st.enemy.Get())
+		Bot_ClearLineOfFire(bot, moveDir, drive, enemy->v.origin);
 
 	if ((pEdict->v.flags & FL_DUCKING) != 0)
 		drive /= PmSim::kDuckingMultiplier;

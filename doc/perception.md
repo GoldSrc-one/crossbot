@@ -1,35 +1,35 @@
 # Perception: sensing and aiming
 
-How the bot sees and where it looks: hearing, vision, suspicion, the aim hand and its delay queue.
-What it does about what it sees is `doc/combat.md`; what it wants otherwise is `doc/goals.md`.
+How the bot sees and where it looks: the aim hand and its delay queues, hearing, vision, suspicion, and
+being dazed. What it does about what it sees is `doc/combat.md`; what it wants otherwise is
+`doc/goals.md`; the per-tier numbers are `doc/difficulty.md`.
 
 ## bot_aim.cpp
 
-Everything the bot looks at goes through one function. `bot.desiredAngles` is the request, written by six
-sites across `bot_move_nav.cpp` plus `BotSense::ApplyLook`; `Bot_UpdateFacing` is the only writer of `pev->v_angle` anywhere in the
-plugin, and every drive branch calls it exactly once per frame and threads its return value into both
-`Bot_DecomposeMove` and `pfnRunPlayerMove`. Aim is therefore fully decoupled from movement: the view can
-point anywhere without disturbing where the bot walks, because the wish direction is world-space and gets
-reprojected onto whatever yaw was actually commanded that frame.
+Everything the bot looks at goes through one function. `bot.desiredAngles` is the request, written by the
+drive branches in `bot_move_nav.cpp`, the camp, fun, deploy, break and directive runners, and
+`BotSense::ApplyLook`.
+`Bot_UpdateFacing` is the only per-frame writer of `pev->v_angle` (`TeleportAllBots` resets it), and every
+drive branch calls it exactly once per frame and threads its result into both `Bot_DecomposeMove` and
+`pfnRunPlayerMove`.
 
-### Why the flat turn rate had to go
-
-The original controller stepped toward `desiredAngles` at a flat 300 deg/s, pitch and yaw clamped
-independently. It turned at full speed from the first frame and stopped dead on the last one. Nothing
-holding a mouse does that, and it was the single most obvious tell that a bot was not a player.
+Aim is therefore decoupled from movement: the wish direction is world-space and is reprojected onto
+whatever yaw was actually commanded that frame, so the view can point anywhere without changing where
+the bot walks.
 
 ### Hand space, not angle space
 
-The integrator state (`BotAim::State::yawVel`, `pitchVel`) is **not** angular velocity. It is hand velocity,
-in degrees per second at a reference 90 degree FOV. Angles are converted in and out of it with
-`s = fov / 90` (`pev->fov <= 0` means default, which is the normal case -- nothing else in the plugin reads
-or writes `fov` today).
+The controller replaced a flat 300 deg/s turn that started at full speed and stopped dead, the most
+obvious tell that a bot was not a player. It models a hand on a mouse instead.
 
-This is what makes zoom correct for free. A scope shrinking FOV from 90 to 20 means the same mouse movement
-now covers 4.5x less angle, so the bot needs 4.5x more hand travel to make the same turn and gets there 4.5x
-slower. Doing it in hand space means that when the scope snaps, hand velocity is untouched -- the hand keeps
-its physical speed -- and the angular velocity drops on its own. Had the state been angular, the FOV change
-would have been a velocity discontinuity needing its own special case.
+The integrator state (`BotAim::State::yawVel`, `pitchVel`) is **hand** velocity, in degrees per second at a
+reference 90° FOV, not angular velocity. Angles convert with `s = fov / 90` (`pev->fov <= 0` means
+default, the normal case).
+
+This makes zoom correct for free. A scope going from 90 to 20 means the same hand movement covers 4.5x
+less angle, so the same turn needs 4.5x more hand travel and takes longer. When the scope snaps, hand
+velocity is untouched and the angular velocity drops by itself. An angular state would have needed a
+special case for the velocity discontinuity.
 
 ### The control law
 
@@ -41,243 +41,174 @@ Per axis, time-optimal with a saturating acceleration:
     a        = clamp( (v_target - v) / dt, +/-aMax )
     v += a * dt ;  angle += v * s * dt
 
-The envelope term is the whole model. It is the velocity of a body decelerating at `aMax` that arrives at
-the target with zero velocity, so following it gives the accelerate-then-decelerate profile without any
-explicit phase switching: far from target the required acceleration exceeds `aMax` and the clamp saturates,
-near it the envelope takes over and brakes.
+The envelope is the whole model: the speed of a body that decelerates at `aMax` and arrives with zero
+velocity. Following it gives accelerate-then-brake with no phase switching: far from the target the
+clamp saturates, near it the envelope brakes.
 
-### Why the envelope carries a step correction
+**The step correction makes it frame-rate independent.** The continuous optimum `sqrt(2 * aMax * |e|)`
+assumes braking starts the instant the envelope is touched, when in fact it starts up to a frame later.
+At 2880 deg/s² it overshoots a 180 by 3.6° at 100 fps, 5.9° at 60 and **12.4° at 30**, which makes aim
+accuracy a function of server load (the error scales with `aMax * dt`). The `+ step^2 / 4` and
+`- step / 2` invert the *discrete* stopping distance instead: overshoot stays below 0.7° at every frame
+rate tested, and convergence is faster (a 180 at 60 fps takes 0.467 s against the continuous form's
+0.617 s at 2880) because nothing is spent recovering. Deliberate aim error has to be the only source of overshoot, or it cannot
+be tuned.
 
-The obvious form is `sqrt(2 * aMax * |e|)`, the continuous-time optimum. Sampled at a finite frame rate it
-overshoots badly, because it assumes braking begins the instant the envelope is touched when in fact it
-begins up to a full frame later. Measured at 2880 deg/s^2, the plain form overshoots a 180 by 3.6 degrees at
-100fps, 5.9 at 60fps and **12.4 at 30fps** -- and the framerate dependence is the real problem, because it
-makes aim accuracy a function of server load. At the shipped 4500 it is worse still, since the error scales
-with `aMax * dt`.
+**`|e| / dt` is a dead-beat clamp**: any error small enough to close in one step does. Deleting it is the
+obvious way to make the bot less surgical, and it does not work. With the step correction the envelope
+linearises near zero to `2e/dt`, twice the dead-beat speed (`sqrt(2ae + s^2/4) - s/2 <= 2e/dt` with
+`s = a*dt` reduces to `0 <= 4e^2/dt^2`), so a step lands on `-e` and no further. There is no limit
+cycle; without the clamp the ring-down stalls around `aMax * dt^2 / 8`: 0.056° at 100 fps, 0.156° at 60,
+1.41° at the `kMaxFrameTime` clamp. That is frame-rate coupling again, so the clamp stays.
 
-The `+ step^2 / 4` under the root and the `- step / 2` outside it invert the *discrete* stopping distance
-rather than the continuous one. That drops overshoot below 0.7 degrees at every frame rate tested, and it
-converges *faster* despite braking earlier (0.617s to 0.467s for a 180 at 60fps, at 2880), because none of the budget
-is spent recovering from an overshoot. This matters beyond tidiness: deliberate over/undershoot is a planned
-feature, and it has to be the only source of overshoot or it cannot be tuned.
-
-The `|e| / dt` term is a dead-beat clamp. Capping the target velocity at "the speed that lands exactly this
-frame" makes any error small enough to close in one step close in one step.
-
-It is worth being precise about what it buys, because the obvious way to make the bot less surgical is to
-delete it and that turns out not to work. The "bang-bang limit-cycles at roughly `aMax * dt^2`" claim
-applies to the **plain** `sqrt(2 a |e|)` envelope. With the discrete correction above, the envelope
-linearises near zero to `2e/dt` -- exactly twice the dead-beat speed -- so a step lands on `-e` and no
-further. Squaring out `sqrt(2ae + s^2/4) - s/2 <= 2e/dt` with `s = a*dt` reduces to `0 <= 4e^2/dt^2`, which
-holds for every `e > 0`, with equality only in the limit. So there is no limit cycle at all: dropping the
-clamp gives a ring-down that decays quickly at first and stalls around `aMax * dt^2 / 8` -- 0.056 degrees at
-100fps, 0.156 at 60, 1.41 at the `kMaxFrameTime` clamp. That is frame-rate coupled in a controller whose
-entire envelope design exists to not be, so the clamp stays.
-
-`kMaxHandSpeed` is a hand speed ceiling. It is near-inert at the current constants, since the largest
-reachable error is 180 degrees and that only peaks at 720 deg/s, but it is the knob for a bot whose hand
-should be slower than its acceleration allows.
+**`kMaxHandSpeed` is the hand-speed ceiling**, the knob for a hand slower than its acceleration allows.
 
 ### Where the constants come from
 
-These are the normal tier; `turnScale` multiplies all three. `kMaxAccelYaw` is 3000 deg/s^2, the CS zbot's
-hand-tuned figure, and `kMaxAccelPitch` is 2000: vertical mouse travel is the awkward direction for a human
-wrist. For a symmetric accelerate-then-decelerate turn the peak speed is `sqrt(a * t)`, and `kMaxHandSpeed`
-is set from it: `sqrt(3000 * 90) = 520 deg/s`, so a 90 degree yaw flick just touches the ceiling.
+These are the normal tier; `turnScale` (`crossbot_turn_scale`) multiplies all three.
 
-**The ceiling is now a clip on purpose.** Anything bigger than 90 cruises at 520 in the middle, so a 180
-takes about 0.52s instead of the 0.35s pure acceleration would give, and the time grows linearly rather than
-with the square root past that point. A 90 of yaw is about 0.35s, a 90 of pitch about 0.42s (peak 424, under
-the ceiling). Big turnarounds being slow is the human shape -- a wrist re-centres, it does not spin faster.
+| constant | value | why |
+| --- | --- | --- |
+| `kMaxAccelYaw` | 3000 deg/s² | the CS zbot's hand-tuned figure |
+| `kMaxAccelPitch` | 2000 deg/s² | vertical travel is the awkward direction for a wrist |
+| `kMaxHandSpeed` | 520 deg/s | `sqrt(3000 * 90)`: a symmetric turn peaks at `sqrt(a * t)`, so a 90° yaw flick just touches it |
 
-History: the first cut was 2880 (180 in 0.5s), raised to 4500 (180 in 0.4s, ceiling 1200 deliberately
-unreached) because 0.5s measurably slowed `test10_doorbutton` -- see below. The present constants put the
-180 back past 0.5s, so that map is the one to watch on the nav sweep.
+**The ceiling clips on purpose.** Anything over 90° cruises at 520 in the middle, so a 180 takes about
+0.52 s rather than the 0.35 s pure acceleration would give, and time grows linearly past 90° instead of
+with the square root. A 90° yaw takes about 0.35 s, a 90° pitch about 0.42 s (peak 424). Slow big
+turnarounds are the human shape: a wrist re-centres, it does not spin faster.
 
-### The cost at the aim gates
+**The cost is at the aim gates.** Below the crossover `4 * 300^2 / aMax` (120° at 3000) the controller is
+*slower* than a flat 300 deg/s limit, because it spends the start of the turn accelerating: a 6°
+correction goes from 20 ms to 73 ms. Two places zero drive until the view has converged and so feel it:
+the ladder gate (`kLadderAimTolerance`, 6°) and the activation gate (`kActivationAimTolerance`, 8°).
 
-Below about 80 degrees of error at the old 4500 (120 at today's 3000; the crossover is `4 * 300^2 / aMax`) the controller is *slower* than the old
-flat 300 deg/s rate, because it spends the start of the turn accelerating. A 6 degree correction goes from
-20ms to 73ms. The places that care are the two that **zero drive until the view has converged**: the ladder
-gate (`kLadderAimTolerance`, 6 degrees) and the activation gate (`kActivationAimTolerance`, 8 degrees).
+`test10_doorbutton` is the map to watch on the nav sweep. Goal-arrival time over isolated repeat runs:
 
-`test10_doorbutton` is the map that feels it. Isolated repeat runs, goal-arrival time:
-
-| controller | 8.1s | 11.1s |
-|---|---|---|
+| controller | 8.1 s | 11.1 s |
+| --- | --- | --- |
 | old flat 300 deg/s | 8 of 8 | 0 |
-| aMax 2880 (180 in 0.5s) | 0 | 2 of 2 |
-| aMax 4500 (180 in 0.4s) | ~7 of 16 | ~9 of 16 |
+| aMax 2880 (180 in 0.5 s) | 0 | 2 of 2 |
+| aMax 4500 (180 in 0.4 s) | ~7 of 16 | ~9 of 16 |
 
-**Read that table with the quantization in mind.** `test_nav_goal.ps1` polls for arrival on a grid -- the
-observed times are 2.0, 5.0, 8.1, 11.1 -- so consecutive buckets are ~3s apart and a run that misses the
-8.1s poll by a tenth of a second reports 11.1s. The real slowdown is well under a second; the table measures
-which side of a threshold the bot lands on, not how much time it lost. Raising the acceleration moved it
-back across that threshold about half the time.
+`test_nav_goal.ps1` polls arrival on a ~3 s grid (2.0, 5.0, 8.1, 11.1), so the table shows which side of a
+poll the bot lands on, not how much time it lost; the real slowdown is well under a second. Today's 3000
+puts the 180 back past 0.5 s. Every run of this map, on every controller, logs exactly one
+`mid-route repath (stalled)` before the button and one `avoid side func_door_rotating`; neither comes from
+the aim model or separates fast runs from slow.
 
-Two things that look like they explain this and do **not**: every run on this map, on *every* controller
-including the original, logs exactly one `mid-route repath (stalled)` at the route reversal in front of the
-button and exactly one `avoid side func_door_rotating`. Neither is caused by the aim model, and neither
-discriminates the fast runs from the slow ones.
+### Edge cases
 
-For calibration when reading sweep numbers: `test45_slopes2` looked like a 5.2s-to-8.1s regression in the
-parallel sweep and was not one -- the old controller measures 8.1s in isolation too, and the 5.2s came from
-a run at `-MaxParallel 6`. The general rule for this suite: a single parallel-sweep number proves nothing,
-and neither does a two-run isolated sample when the metric is bucketed. Repeat until the distribution is
-visible.
-
-### dt is clamped
-
-The old first-order ramp could survive a raw `gpGlobals->frametime`: the worst a hitch did was let it snap
-further than intended, bounded by the remaining error. A second-order integrator has memory, so a hitch
-feeds a huge `dt` into both the acceleration and the position step and flings the view. `dt` is clamped to
-[1/1000, 1/20], the same defensive range `Bot_Physics` uses.
-
-### Pitch clamp and velocity reset
-
-Pitch is clamped to +/-89 to avoid gimbal lock, and `pitchVel` is zeroed when it hits the stop -- otherwise
-velocity winds up against the limit and the view stays pinned for several frames after the target comes
-back into range. `TeleportAllBots` zeroes both velocities alongside the `v_angle` reset for the same reason.
-Everything else is covered by `bot = CBot()`, since `BotAim::State` is default-initialized.
+- **`dt` is clamped to [1/1000, 1/20]**, the same range `Bot_Physics` uses. A second-order integrator has
+  memory, so a raw `gpGlobals->frametime` hitch would feed a huge `dt` into both the acceleration and the
+  position step and fling the view.
+- **Pitch is clamped to ±89** (`kPitchLimit`) and `pitchVel` is zeroed at the stop. Otherwise velocity
+  winds up against the limit and pins the view for several frames after the target comes back in range.
+- **Resets.** `TeleportAllBots` zeroes both velocities with the `v_angle` reset for the same reason.
+  Respawn is covered by `bot = CBot()`, since `BotAim::State` is default-initialised.
 
 ### crossbot_aim_test
 
 `crossbot_aim_test <bot> <yawDelta> [pitchDelta]` commands a flick relative to the bot's current view and
-prints the time to settle within 0.5 degrees plus the peak hand speed. It exists because there is otherwise
-no way to check the 180-in-0.5s claim against the running server.
+prints the time to settle within 0.5° (`kTestSettleTolerance`) and the peak hand speed. It is the only way
+to check the turn times against the running server.
 
-The test angles are an **override**, not a write to `desiredAngles`: navigation rewrites `desiredAngles`
-every frame, so a plain write would be stomped before the next frame. The override releases itself after 3
-seconds and the bot goes back to whatever it was looking at.
+- **It is an override**, not a write to `desiredAngles`, which navigation rewrites every frame. It releases
+  after 3 s and the bot returns to whatever it was looking at.
+- **Settle also requires hand speed below 150 deg/s** (`kTestSettleSpeed`). With gain overshoot a view
+  flying through the target at 200+ deg/s can sit inside the band for one frame; genuine arrival runs
+  about 50 deg/s at typical frame rates. It is a threshold, not a proof: a small, slow overshoot can slip
+  under it, so read the spread over many flicks (`scripts/test_aim_error.ps1`).
 
-Expected at the normal tier with `crossbot_aim_gain 0`: `180 0` settles in about 0.5s at a peak of 520 deg/s
-(the ceiling), `90 0` in about 0.35s peaking just under 520, and `0 90` in about 0.42s at a peak near 424. The
-spread is the frame rate -- lower fps settles slower. Peak hand speed is the more stable number and the
-better thing to check: it is set by the constants, not the sampling. With the gain mismatch on, the test
-is one of the two places it applies, so settle times grow a reaction-time tail; pin it to 0 to check the
-controller alone.
+Expected at the normal tier with `crossbot_aim_gain 0`: `180 0` settles in about 0.5 s peaking at 520
+(the ceiling), `90 0` in about 0.35 s just under 520, `0 90` in about 0.42 s near 424. The spread is the
+frame rate; peak hand speed is set by the constants and is the better number to check. The gain mismatch
+applies during the test, so pin it to 0 to check the controller alone.
 
 ### The reaction delay queue
 
-Everything above is the motor half: how fast the hand can move once it decides to. The queue is the
-perception half: the bot acts on what it saw `crossbot_aim_delay` seconds ago, never on the present frame.
-Default 0.25s, clamped to [0, 0.5]. Human simple visual reaction is roughly 200-250ms; 0.5s is
-choice-reaction territory and reads as sluggish, so the clamp is a usable range rather than a safety rail.
+The controller is the motor half. The queue is the perception half: the bot acts on what it saw one
+reaction time ago, never on the present frame. `BotAim::Delay(bot)` is rolled per engagement from the
+difficulty tier's range (`doc/difficulty.md`), or is exactly `crossbot_aim_delay` when that is pinned
+(≥ 0), and is clamped to [0, 0.5] (`kMaxDelay`). Human simple visual reaction is roughly 200-250 ms; 0.5 s
+is choice-reaction territory and reads as sluggish.
 
-`BotAim::State` carries a 256-slot ring of `{ time, point }`. 256 rather than 128 because 128 slots at
-250fps only spans 0.512s, right on the boundary of the maximum delay.
+`BotAim::State` carries a 256-slot ring (`kDelaySlots`) of `{ time, point, velocity }`: 128 slots at
+250 fps span only 0.512 s, right at the maximum delay.
 
-**Slots hold a world point, not angles**, and the write extrapolates only the *target*:
+**The write extrapolates only the target:** `push { now, targetPoint + targetVelocity * delay }`, and only
+if that lead point traces clear (see "The lead point is traced before it is queued").
 
-    push { now, targetPoint + targetVelocity * delay }
+**The read** takes the newest slot older than `now - delay`, interpolates it with the next newer one so the
+served delay is exact rather than quantised to a frame, and only then converts to angles, from the bot's
+**actual current eye**, in `ApplyLook`.
 
-The push is conditional: that predicted point is traced first, and a lead that has already crossed into
-geometry is dropped rather than queued. See `### The lead point is traced before it is queued` under
-`## bot_sense.cpp`.
+The extrapolation is the point. At `T` the bot records where the target will be at `T + delay`, and reads
+it back at `T + delay`: at constant velocity it is aimed exactly at the target despite acting on old
+information. Only *acceleration*, a change of direction, produces error, which is the human signature: a
+good player tracks steady movement and is beaten by the direction change, not the speed.
 
-The read takes the newest slot older than `now - delay`, linearly interpolates it with the next newer one
-so the served delay is exact regardless of frame rate rather than quantized to a frame, and only then
-converts to angles -- from the bot's **actual current eye**, in `ApplyLook`.
-
-The extrapolation is the entire point. At time `T` the bot records where the target will be at `T + delay`.
-At `T + delay` it reads that back. If the target moved at constant velocity over the window the prediction
-was exact, and the bot is aimed exactly at it despite acting on quarter-second-old information. Only
-*acceleration* -- a target changing direction -- produces error. That is the human signature being modelled:
-a good player tracks steady movement perfectly and gets beaten by the change of direction, not by the speed.
-
-The bot's own motion is deliberately **not** extrapolated, and neither is its aiming velocity. Where the bot
-is standing is known exactly at read time, so predicting it would replace a fact with a guess; and turning
-the view does not move the eye, so it never enters the geometry at all.
+The bot's own motion is **not** extrapolated, and neither is its view velocity. Where it stands is known
+exactly at read time, and turning does not move the eye.
 
 ### The two queue edges are the behaviour, not error handling
 
-**Underflow.** When a target has just been acquired the ring holds nothing older than `delay`, so the read
-fails and the queue writes nothing -- the bot keeps whatever `desiredAngles` the navigation branch set. It
-therefore sits perfectly still for a full reaction time and *then* flicks. The obvious alternative, falling
-back to the oldest slot, would snap the head to truth the instant a target appears, which is exactly zero
-reaction time. The silent quarter second before anything moves is the most human artifact the whole system
-produces, and it costs nothing.
+- **Underflow.** A freshly acquired target has nothing older than `delay`, so the read fails and the bot
+  keeps whatever `desiredAngles` navigation set: it sits still for a full reaction time and *then* flicks.
+  Falling back to the oldest slot would snap to truth instantly, zero reaction time. The silent quarter
+  second is the most human artifact in the system, for free.
+- **Drain.** On losing sight the bot stops writing but keeps reading, so it tracks a vanished target for
+  exactly `delay`, then stops, because its input is that stale.
 
-**Drain.** On losing line of sight the bot stops *writing* but keeps *reading*. It therefore continues
-tracking a target that has already left view, for exactly `delay`, and then stops -- because its input is
-`delay` stale and it does not know yet. Also free: it falls out of the ring rather than being coded.
-
-The ring is cleared on acquiring a target, on teleport, and on respawn (the last via `bot = CBot()`).
-Clearing on acquire is what makes the reaction time apply to every reacquisition, not just the first.
-
-**The drain did not actually work until firing needed it.** `UpdateVision` compared the new target
-against the old and cleared on any difference, and *losing* a target is a difference — so the ring was
-wiped on the same frame line of sight broke and there was no drain at all, only the suspicion fallback
-in `ApplyLook`. The test is now `best && best != sense.target.Get()`: clear when a different live
-target is acquired, never when one is lost. Reacquiring the same enemy after a gap still clears,
-because the handle was set to null in between, so the reaction delay is still paid every time.
-Nothing above this paragraph changed — the behaviour it described is simply true now.
+The ring is cleared on acquiring a *different* target (`best && best != sense.target.Get()`), on teleport
+(`TeleportAllBots`) and on respawn (`bot = CBot()`). Never clear on *losing* a target: losing is a
+difference too, and clearing then wiped the ring on the frame sight broke, so there was no drain at all.
+Reacquiring the same enemy after a gap still clears, because the handle went null in between, so the
+reaction delay is paid every time.
 
 ### What feeds the queue
 
-`BotSense::Update` does, once per frame, from the slot in `Bot_MoveNav` that `UpdateGaze` used to hold.
-See `## bot_sense.cpp` below for the whole producer. The contract the queue cares about is one
-`PushDelaySlot` per frame while a target is held *and its lead point comes back clear*, the target
-extrapolated forward by `crossbot_aim_delay`, and `ClearDelayQueue` on acquiring a *different* target.
+`BotSense::Update`, once per frame from `Bot_MoveNav` (see `## bot_sense.cpp`). The contract: one
+`PushDelaySlot` per frame while a target is held *and its lead point is clear*, extrapolated by the
+delay, and `ClearDelayQueue` on acquiring a different target.
 
-The one thing that did change is what point gets pushed. It is no longer the target's eye but a randomly
-chosen hitbox bone, re-picked every frame. The queue therefore stores points that jitter over the enemy's
-body, and the acceleration-limited controller in `Bot_UpdateFacing` is what averages them back down -- it
-is already a low-pass filter, so no explicit smoothing was added. The visible result is a head that settles
-near body centre while the underlying samples wander, which is both what a human does and what makes a
-partially-hidden enemy still trackable.
-
-`ClearDelayQueue` keys on the target *entity*, not the bone. Keying it on the sample point would clear the
-ring every frame and destroy the reaction delay entirely.
-
-### Slots also hold velocity
-
-Beside the point, and interpolated the same way. The reader is `BotFire`, which needs the target's
-velocity to lead a projectile, and needs it as **perceived** rather than as it is right now — a lead
-computed from live velocity would give a bot with a quarter-second reaction time perfect prediction.
-`ReadDelayed` takes it as an optional out pointer, so `ApplyLook`, which only wants the point, is
-unchanged. See `## bot_fire.cpp` in `doc/combat.md` for what the composition means.
+- **The pushed point is a hitbox bone**, re-picked at random every frame, not the eye. The samples jitter
+  over the body and the acceleration-limited controller averages them, being a low-pass filter already,
+  so the head settles near body centre and a partly hidden enemy stays trackable.
+- **`ClearDelayQueue` keys on the entity, not the bone.** Keyed on the sample point it would clear every
+  frame and destroy the delay.
+- **Slots hold velocity too**, interpolated the same way, for `BotFire`'s projectile lead. It needs the
+  *perceived* velocity: a lead from live velocity would give a bot with a reaction time perfect
+  prediction. `ReadDelayed` takes it as an optional out pointer. See `## bot_fire.cpp` in
+  `doc/combat.md`.
 
 ### Why slots hold points and not angles
 
-Slots held `{ time, yaw, pitch }` first, which forced the write to guess where the *bot itself* would be one
-reaction time later and bake that guess into the stored angles. The guess only holds while the bot moves at
-constant velocity. A bot that jumps, gets stopped by `BotAvoid`, rides an elevator or repaths inside the
-delay window breaks it, and the recalled angles are then right about *where the target is* and wrong about
-*where the bot is looking from*. That is parallax error, worst at close range where a small positional error
-subtends a large angle -- which is exactly the range where aim decides fights. It is also unattributable: it
-lands in `err` mixed together with genuine target misprediction, so neither number can be read cleanly.
+Angle slots had to bake in a guess of where the *bot* would be a reaction time later, which breaks when
+the bot jumps, is stopped by `BotAvoid`, rides a lift or repaths within the window. The result is parallax
+error, worst at close range where aim decides fights, and it lands in `err` mixed with genuine target
+misprediction so neither can be read.
 
-Storing the point deletes that term rather than modelling it. The bot's eye enters once, at read time, as
-its true present value, so there is nothing left to mispredict. Where the prediction would have been right
-the two forms are identical; where it would have been wrong, only the angle form was wrong. The target-side
-extrapolation -- the half that actually models human lead -- is untouched.
-
-The cost is a `LosAngles` call moved from the write to the read, which is the same call either way, and a
-three-float lerp in place of a two-float one that also had to take yaw the short way round. The one real
-consequence is that `LosAngles` can now fail at *read* time, when the recalled point sits on the bot's own
-eye. `ApplyLook` falls through to the suspicion blend there and leaves `servedDelay` at zero rather than
-claiming a serve it did not make.
+A point slot deletes that term: the eye enters once, at read time, at its true value. Where the angle
+form's guess was right the two agree; where it was wrong, only the angle form was wrong. The cost is a
+`LosAngles` call moved from write to read and a three-float lerp instead of a two-float one with yaw
+wrap. `LosAngles` can now fail at read time, when the recalled point sits on the bot's own eye; `ApplyLook`
+then falls through to the suspicion blend and leaves `servedDelay` at zero rather than claiming a serve.
 
 ### The bot sees its own view late
 
-The target queue makes the bot see the *enemy* a reaction time late. It still read its own `v_angle` live,
-so the hand was surgical about where it was pointing. The view queue fixes the other half: the controller
-and the trigger both act on what the bot saw of its own view `BotAim::Delay(bot)` ago, the same reaction
-time the target queue uses.
+The target queue makes the bot see the *enemy* late. The view queue makes it see its own view late: the
+controller and the trigger act on what the bot saw of its own view `BotAim::Delay(bot)` ago. The only
+deliberate motor error is the gain mismatch below (the earlier hand noise, a mouse-count tremor, an idle
+sine drift and a random brake multiplier, is gone).
 
-The hand noise this replaced -- a mouse-count quantum with a speed floor (the tremor), an idle sine drift,
-and a random multiplier on the deceleration envelope (the brake) -- has been deleted. The only deliberate
-motor error left is the gain mismatch below.
+**A pure delay cannot drive this controller.** Feeding `view(t - d)` to `StepAxis` breaks the dead-beat
+term: a 6° error closes in one frame, the stale view keeps reporting 6° for a quarter second, and the hand
+flicks another 6° every frame. A slow proportional controller would survive (stable while
+`gain * d < pi/2`) but a 180 would take most of a second.
 
-**A pure delay cannot drive this controller.** Feeding `view(t - d)` into `StepAxis` breaks the dead-beat
-term outright. A 6 degree error closes in one frame, and then the stale view keeps reporting 6 degrees
-for the next quarter second, so the hand flicks another 6 every frame and oscillates far past the
-target. A slow proportional controller would survive it (stable while `gain * d < pi/2`), but that makes
-a 180 take most of a second.
-
-**So the bot keeps an efference copy**, the way a brain does. It knows what it told its hand to do, and
-only learns from its eyes what it did *not* command. Per frame, in `Bot_UpdateFacing`:
+**So the bot keeps an efference copy**, as a brain does: it knows what it told its hand, and learns from
+its eyes only what it did *not* command. Per frame, in `Bot_UpdateFacing`:
 
     own      += commanded step (post pitch clamp, pre AdjustView)
     push       { now, off = v_angle - own, punchangle }
@@ -285,70 +216,63 @@ only learns from its eyes what it did *not* command. Per frame, in `Bot_UpdateFa
     seen      = own + off
     error     = desired - seen ;  step applied to the real v_angle
 
-`off` is the disturbance: everything that moved the view without the hand. With no disturbance it is
-constant and `seen == v_angle` exactly, so turning, the nav gates and `crossbot_aim_test` are untouched at
-any delay. What the bot sees late is the disturbances: `AdjustView` (DoD recoil kick, scope sway, bipod
-clamp), anything else writing `v_angle`, and `punchangle`.
+`off` is the disturbance, everything that moved the view without the hand. With none it is constant and
+`seen == v_angle`, so turning, the nav gates and `crossbot_aim_test` are untouched at any delay. What the
+bot sees late is `AdjustView` (DoD recoil kick, scope sway, bipod clamp), anything else writing `v_angle`,
+and `punchangle`.
 
-**The slot stores the offset, not the view and the copy separately.** Differencing two absolute
-accumulators across the window needs an unwrapped yaw, and an unwrapped float yaw loses precision over a
-long life. The offset only changes on disturbances, so `own` and `off` can both stay wrapped.
-
-**The pitch clamp counts as commanded.** The stop is on screen, so the bot knows about it. Counting it
-as a disturbance would make the bot believe it was still pitching past 89 for a quarter second.
-
-**The trigger reads it too.** `Bot_RunPlayerMove` hands `aim.perceived` (seen plus this frame's step) to
-`BotFire::Buttons`, and `RayOnTarget` / `ArcOnTarget` add `aim.perceivedPunch` instead of the live
-`punchangle`. A spraying bot therefore keeps pulling the trigger on a crosshair that has already
-kicked off target, and stops a reaction time after the kick rather than on the same frame. Movement does
-not read it: `Bot_DecomposeMove`, the nav aim gates and `AimWithinCone` stay on the real view, because
-they are physics and stance rather than hand and trigger.
-
-The ring is cleared in `TeleportAllBots` and on respawn (`bot = CBot()`), the same as the target ring.
-Recoil *compensation* is not modelled. The controller still steers `v_angle` and ignores the punch, and
-the perceived punch is what a compensation step would read.
+- **The slot stores the offset**, not view and copy separately: differencing two absolute accumulators
+  needs an unwrapped yaw, which loses float precision over a long life. The offset changes only on
+  disturbances, so both stay wrapped.
+- **The pitch clamp counts as commanded.** The stop is on screen, so the bot knows; as a disturbance it
+  would believe it was still pitching past 89 for a quarter second.
+- **The trigger reads it too.** `Bot_RunPlayerMove` passes `aim.perceived` (seen plus this frame's step)
+  to `BotFire::Buttons`, and `RayOnTarget` / `ArcOnTarget` add `aim.perceivedPunch` instead of the live
+  `punchangle`. A spraying bot keeps firing on a crosshair that has already kicked off target and stops a
+  reaction time later. Movement does not: `Bot_DecomposeMove`, the nav aim gates and `AimWithinCone` use
+  the real view, being physics and stance.
+- The ring is cleared in `TeleportAllBots` and on respawn, as the target ring is.
+- Recoil *compensation* is not modelled: the controller ignores the punch. The perceived punch is what a
+  compensation step would read.
 
 ### The efference copy is wrong on purpose
 
-With the hand noise all at 0, the efference copy is a Smith predictor with a perfect plant model: `own`
-advances by exactly what the hand did, so the bot never misses except through the target queue. A real
-predictor's error is model mismatch, and that is the error this adds. On each flick both axes draw a gain,
-and the hand moves `step * gain` while `own` still advances by the commanded `step`:
+With a perfect copy, `own` advances by exactly what the hand did and the bot never misses except through
+the target queue: a Smith predictor with a perfect plant model. A real predictor's error is model
+mismatch, and that is what this adds. On each flick both axes draw a gain, and the hand moves
+`step * gain` while `own` advances by the commanded `step`:
 
     gain  = 1 + s * (u * 1.5 - 1),   u uniform [0, 1)   ->   [1 - s, 1 + s/2]
     v_angle += step * gain ;  own += step
 
-The difference lands in `off = v_angle - own`, which is exactly the disturbance channel the view queue
-already carries. So the bot believes it arrived, sees the miss one reaction time later, and makes a
-correction. That is a real undershoot, which shaping the deceleration cannot produce (braking early only
-lands softly and slower): the aim point is right, the hand's belief about where it went is wrong. It is proportional to the movement (the Fitts
-shape again), the correction gets its own gain on the re-trigger, and the loop converges because each
-reaction time the remaining offset rate is multiplied by `-(gain - 1)`. `kMaxGainSpread` caps `s` at 0.5,
-well inside the `|gain - 1| < 1` stability bound.
+The difference lands in `off`, the channel the view queue already carries. The bot believes it arrived,
+sees the miss one reaction time later, and corrects. That is a real undershoot, which shaping the brake
+cannot produce (braking early only lands softly): the aim point is right and the hand's belief is wrong.
+It is proportional to the movement (Fitts' shape), the correction draws its own gain, and the loop
+converges because each reaction time multiplies the remaining offset rate by `-(gain - 1)`.
+`kMaxGainSpread` caps `s` at 0.5, well inside `|gain - 1| < 1`.
 
-The range is biased low because the primary submovement of a human aimed movement usually undershoots.
-`s` is `crossbot_aim_gain`: easy 0.25, normal 0.15, hard 0.10, expert 0.05, so a normal bot can land a
-90 degree flick up to 13.5 degrees short or 6.75 degrees long.
+- **Biased low**, because the primary submovement of a human aimed movement usually undershoots. `s` is
+  `crossbot_aim_gain` (easy 0.25, normal 0.15, hard 0.10, expert 0.05), so a normal bot can land a 90°
+  flick up to 13.5° short or 6.75° long.
+- **A flick is what `UpdateGain` detects**: combined error above `kFlickMinError` (3°) *and* grown by more
+  than `kFlickGrowth` (0.5) since last frame. A converging movement's error falls monotonically, so it
+  never re-triggers; a new target does, and so does the bot's own miss pushing the error back up, so the
+  correction gets an independent gain. The axes draw independently, since humans miss to the side as
+  well as along the movement.
+- **Only with a target, or during `crossbot_aim_test`.** Gains reset to 1 otherwise: the nav aim gates
+  hold drive until the view converges, so a mismatched nav turn would cost a reaction time at every ladder
+  and button.
+- **The pitch clamp is still commanded**: on a frame that hits the stop `own` advances by the real step,
+  so a stop overshot through gain does not leave the bot believing it is still pitching.
 
-**A flick is what `UpdateGain` detects:** the combined error is above `kFlickMinError` (3 degrees) *and*
-grew by more than `kFlickGrowth` (0.5) since last frame. A converging movement's error falls monotonically,
-so nothing retriggers; a genuinely new target does, and so does the bot's own miss pushing the error back
-up through the threshold, so the correction gets its own independent gain. Both axes draw independently,
-because a shared gain would make every miss land along the movement's own line, and humans miss to the
-side too. `crossbot_aim_status` prints the pair, and a frozen value on a bot idling on a stationary
-target is the correct reading: the error never grows past 3 degrees, so it never redraws.
+`crossbot_aim_status` prints the pair. A frozen value on a bot idling on a still target is correct: the
+error never grows past 3°, so it never redraws.
 
-**Only with a target, or during `crossbot_aim_test`.** Gains reset to 1 otherwise. The nav aim gates hold
-drive until the view converges, so a mismatched nav turn would cost a reaction time at every ladder and
-button. The test is included so the error can be measured.
-
-**The pitch clamp is still commanded.** On a frame that hits the stop, `own` advances by the real step,
-so a stop overshot through gain does not leave the bot believing it is still pitching.
-
-Measured with `test_aim_error.ps1 -Gains 0,0.15`, normal tier, eight flicks per cell, `crossfire`:
+Measured with `test_aim_error.ps1 -Gains 0,0.15`, normal tier, eight flicks per cell, crossfire:
 
 | gain | flick | settle min | avg | max | peak |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 0 | 180 0 | 0.479 | 0.485 | 0.494 | 520 |
 | 0 | 90 0 | 0.308 | 0.339 | 0.487 | 512 |
 | 0 | 0 90 | 0.041 | 0.340 | 0.389 | 382 |
@@ -356,893 +280,886 @@ Measured with `test_aim_error.ps1 -Gains 0,0.15`, normal tier, eight flicks per 
 | 0.15 | 90 0 | 0.291 | 0.593 | 0.820 | 515 |
 | 0.15 | 0 90 | 0.489 | 0.780 | 0.908 | 417 |
 
-The mean moves up by about one reaction time (normal's 0.30), which is the correction submovement, and
-the resting error stays 0. The pitch row's low minimum and peak are the 89 degree stop cutting the flick
-short when the test starts from a non-level view, not the controller.
+The mean rises by about one reaction time (normal's 0.30 s), the correction submovement, and the resting
+error stays 0. The pitch row's low minimum and peak are the 89° stop cutting the flick short when the test
+starts from a non-level view.
 
 ### crossbot_aim_status
 
-Prints, per bot: the sense target, which bone it is currently sampling, ring occupancy, how much history
-the ring holds, the delay actually served, hand speed, and `err` -- the angle between the bot's real
-`v_angle` and the true present-time angles to its target.
+Per bot: the sense target, the bone it is sampling, ring occupancy and history span, the delay actually
+served, hand speed, `err`, `seen`, `perr`, `gain` and `leadblk`.
 
-`seen` is the bot's belief about its own view and `perr` is the angle between `seen + perceivedPunch` and
-`v_angle + punchangle`. `perr` must read 0 whenever nothing but the hand moves the view, at any delay,
-once the gain mismatch is accounted for: with a target held and `crossbot_aim_gain` above 0 it is the
-mismatch the bot has not seen yet, and it drains to 0 within a reaction time of the view coming to rest.
-`gain` prints the pair drawn on the last flick.
-Under fire it is nonzero even at `crossbot_aim_delay 0`, because the punch it compares against is one
-`pfnRunPlayerMove` newer (the shot and the pmove decay both land after the read). A nonzero `perr` at idle
-with no recoil means the efference copy is missing a step.
+- **`err`** is the angle between the real `v_angle` and the true present-time angles to the target. It
+  separates "correctly delayed" from "delayed and also wrong", which look identical when spectating. At
+  delay 0 it is the controller's own tracking error. At a nonzero delay it should stay flat while the
+  target moves at constant velocity and spike only on reversals; a large `err` under steady motion means
+  the extrapolation or the read index is wrong.
+- **`err` has a floor that grows as range closes.** `AnglesToTarget` measures to the eye while the bot aims
+  at a random hitbox bone, every bone sits below the eye, and the same spread subtends more up close. At
+  point blank, where `test_sense.ps1` converges its bots, it is tens of degrees and almost pure negative
+  pitch. That is the bone sampling working. Read `err` for its *trend* across a delay sweep at fixed
+  range, never its value.
+- **`seen`** is the bot's belief about its own view. **`perr`** is the angle between
+  `seen + perceivedPunch` and `v_angle + punchangle`: 0 whenever only the hand moves the view, at any
+  delay. With a target and `crossbot_aim_gain` above 0 it is the mismatch not yet seen, draining to 0
+  within a reaction time of the view coming to rest. Under fire it is nonzero even at delay 0, because the
+  punch it compares against is one `pfnRunPlayerMove` newer. Nonzero at idle with no recoil means the
+  efference copy is missing a step.
+- **`gain`** is the pair drawn on the last flick.
+- **`leadblk`** is the lead-veto count ("The lead point is traced before it is queued").
 
-`err` is the number that decides whether any of this works, and it is why the command exists at all.
-Spectating cannot distinguish "correctly delayed" from "delayed and also wrong": both look like a head
-lagging behind a target. `err` separates them. At `crossbot_aim_delay 0` it is the controller's own tracking
-error with no queue involved, which is the baseline. At 0.25 it should still be flat whenever the
-target is moving at constant velocity, and spike only on direction reversals. A large `err` under steady
-target motion means the extrapolation or the read index is wrong, not that the delay is working.
-
-**`err` no longer bottoms out at zero.** `AnglesToTarget` measures against the target's eye, while the bot
-is aiming at a randomly chosen hitbox bone. The difference between those two points is a standing floor,
-and it is a floor that *grows as the range closes* -- the same bone spread subtends a wider angle up close,
-and every bone sits below the eye, so the residual is almost pure negative pitch. At the point-blank range
-`test_sense.ps1` converges the bots to, it is tens of degrees. That floor is the bone sampling working, not
-a defect, and it is why `err` is no longer a number to read absolutely. Read the shape across the delay
-sweep instead: the thing that would still be a real extrapolation bug is `err` *trending* with
-`crossbot_aim_delay` at a fixed range.
-
-`scripts/test_sense.ps1` drives exactly this: two bots on `crossfire`, sense on, sweeping the delay while
-polling the command. The nav sweep cannot substitute for it -- `test_nav_goal.ps1` spawns a single bot, and
-with line-of-sight gating a lone bot never has a target, so the sweep can only ever prove the feature is
-inert when switched off.
-
-Measured on `crossfire`, both bots converged on one spawn and idling:
+Measured on crossfire, two bots converged on one spawn and idling:
 
 | `crossbot_aim_delay` | served | ring |
-|---|---|---|
+| --- | --- | --- |
 | 0.000 | 0.000 | fills to 256/256 |
 | 0.250 | 0.250 | fills to 256/256 |
 | 0.500 | 0.500 | fills to 256/256 |
 
-`served` tracking the request exactly is the interpolated read working: without the lerp it would quantize
-to whole frames and drift with the frame rate. A `served` of 0.000 at a nonzero delay is not a defect
-either -- it is the underflow silence, caught in the second or so after a re-acquire while the ring refills.
-
-`err` is deliberately absent from that table. The script converges the bots to hold line of sight, and that
-is also where the hitbox-bone spread subtends its widest angle: every bone sits below the eye that
-`AnglesToTarget` measures against, so err runs to tens of degrees and is almost pure negative pitch. That is
-geometry, not tracking error.
-
-**What the static phase does not prove.** Both bots are *stationary*, so `velocity * delay` is zero and the
-extrapolation is never exercised -- it proves the ring, the read index and the interpolation, not the
-prediction. Constant-velocity tracking has to be checked by hand, by joining and strafing at a steady speed;
-see `doc/testing.md`. Roaming bots are not a substitute: `crossfire` has no stretch long enough to hold a
-constant velocity, and the roam phase mixes genuine target acceleration with the gate suppression pointing
-the bot at a ladder. err there has been seen anywhere between 2 and 48 degrees across runs, with no way to
-attribute any of it -- it is not a number to compare against a previous run.
+`served` matching the request exactly is the interpolated read working; without the lerp it would
+quantise to frames and drift with frame rate. A `served` of 0.000 at a nonzero delay is the underflow
+silence, caught in the second after a re-acquire. The static phase proves the ring, the read index and
+the interpolation, not the prediction: still bots have no velocity to extrapolate. Constant-velocity
+tracking is checked by hand (`doc/testing.md`, `scripts/test_sense.ps1`).
 
 ### The RNG is per bot and seeded from the entity index
 
-`RandomUnit` is a plain LCG on `BotAim::State`, not `RANDOM_FLOAT`. Two reasons. It does not consume the
-shared engine RNG, which the game uses for weapon spread. More importantly it is seeded from
-`pfnIndexOfEdict` alone, so a given bot draws the same sequence on every run of a map -- the nav sweep stays
-reproducible, which matters more here than usual, because the measurement discipline this work needed
-(`doc/testing.md`) already has enough sources of run-to-run noise without aim error adding another.
-
-### The settle gate had to learn about overshoot
-
-`UpdateTest` previously reported settle on the first frame inside `kTestSettleTolerance`. With overshoot in
-play (a gain above 1), a view flying through the target at 200+ deg/s on its way past can land inside that band for one frame
-and report a settle that never happened. It now also requires hand speed below `kTestSettleSpeed` (150
-deg/s), which is above the ~50 deg/s the dead-beat term produces on genuine arrival at typical frame rates
-and well below flythrough speed.
-
-This is a threshold, not a proof: an overshoot small enough to cross the target slowly can still slip under
-it. Read the spread across many flicks rather than any single number, which is what
-`scripts/test_aim_error.ps1` exists to produce.
+`RandomUnit` is a plain LCG on `BotAim::State`, not `RANDOM_FLOAT`. It does not consume the engine RNG,
+which the game uses for weapon spread, and it is seeded from `pfnIndexOfEdict` alone, so a bot draws the
+same sequence on every run of a map and the nav sweep stays reproducible (`doc/testing.md` has enough
+run-to-run noise already).
 
 ## bot_sense.cpp
 
-What the bot knows about the world and how it found out. Three inputs -- vision, heard sounds and playback
-events, and damage taken -- feed one per-bot ring of suspicions, and two outputs come back out: an aim
-target pushed into the delay queue, and a look direction for when there is no target.
+What the bot knows about the world and how it found out. Three inputs (vision; heard sounds and playback
+events; damage taken) feed one per-bot table of suspicions, and two outputs come out: an aim target
+pushed into the delay queue, and a look direction for when there is no target.
 
-`crossbot_sense` gates the whole thing. `crossbot_sense_decay` (default 5s) is the only other knob; the
-view cone (90 degrees) and vision range (4096) are constants, because they are geometry rather than policy.
+`crossbot_sense` gates the whole thing; `crossbot_sense_decay` (default 5 s) is the only other knob. The
+view cone (90°) and range (`kViewRange`, 4096) are constants: geometry, not policy.
 
-### The engine hooks were dead code
+### The engine hooks
 
-`GetEngineFunctions` and `GetEngineFunctions_Post` had existed in `engine_hooks.cpp` since the beginning,
-correctly written, and Metamod had never once called them: `meta_api.cpp` left slots 7 and 8 of
-`META_FUNCTIONS` at `NULL`. Filling a table entry alone does nothing. If a sound hook ever appears to be
-silent, check those two slots first.
+`pfnEmitSound` and `pfnPlaybackEvent` are hooked in the engine **post** table (`engine_hooks.cpp`) and
+return `MRES_IGNORED`. Post, as for item touches, because a pre hook also fires when another plugin
+supersedes the call and the sound never plays.
 
-Both tables are now `memset` plus assignment by member name. They used to be ~160 bare `NULL,` entries
-each, positional against a 158-member struct; `pfnEmitSound` is member 29 and `pfnPlaybackEvent` is member
-123, and counting to those by hand is a defect waiting to happen.
-
-Both hooks are in the **post** table and return `MRES_IGNORED`. Post for the same reason item detection is
-post: a pre hook fires even when another plugin returns `MRES_SUPERCEDE` and the sound never actually
-plays, which would record something that did not happen.
-
-The hooks fan out through `BotManager::OnSound` / `OnEvent`, which loop `g_bots` inline. The work per bot
-is a distance compare and a ring push, so there is no deferred sound queue -- unlike foxbot, whose
-`BotSoundSense` does waypoint route-distance queries inside the engine callback.
+- **Metamod must be handed the tables.** `meta_api.cpp` fills slots 7 and 8 of `META_FUNCTIONS`
+  (`GetEngineFunctions`, `GetEngineFunctions_Post`); with them `NULL` the hooks are dead code. If a sound
+  hook seems silent, check those first.
+- **Both tables are `memset` plus assignment by member name**, never ~160 positional `NULL,` entries
+  against a 158-member struct (`pfnEmitSound` is member 29, `pfnPlaybackEvent` 123).
+- **No deferred queue.** The hooks fan out through `BotManager::OnSound` / `OnEvent`, which loop `g_bots`
+  inline; per bot it is a distance compare and a table push. (foxbot's `BotSoundSense` instead runs
+  waypoint route queries inside the engine callback.)
 
 ### Sounds carry no position, and the origin is not v.origin
 
-`pfnEmitSound` passes an entity and nothing else spatial. The engine derives the position as the emitter's
-bbox centre, so `EntitySoundOrigin` does the same: `origin + (mins + maxs) * 0.5`. For brush entities --
-doors, lifts, breakables -- `v.origin` is `(0,0,0)` and using it would put every door sound at the map
-origin.
+`pfnEmitSound` passes an entity and nothing else spatial. The engine places the sound at the emitter's
+bbox centre, so `EntitySoundOrigin` does the same, `origin + (mins + maxs) * 0.5`. For brush entities
+(doors, lifts, breakables) `v.origin` is `(0,0,0)`, which would put every door at the map origin.
 
-Audible radius follows the engine's own spatialization, which is inaudible past a 1000-unit nominal clip
-distance scaled by attenuation:
+Audible radius follows the engine's spatialisation, inaudible past a 1000-unit clip distance
+(`kSoundClipDist`) scaled by attenuation:
 
     attenuation <= 0  ->  audible everywhere (ATTN_NONE)
     otherwise         ->  radius = 1000 * volume / attenuation
 
-`ATTN_NORM` (0.8) at full volume is about 1250 units, `ATTN_STATIC` (1.25) is 800, `ATTN_IDLE` (2.0) is
-500. GoldSrc does not occlude sound, so a plain distance test is faithful and no trace is needed.
+`ATTN_NORM` (0.8) at full volume is about 1250 units, `ATTN_STATIC` (1.25) 800, `ATTN_IDLE` (2.0) 500.
+GoldSrc does not occlude sound, so a distance test is faithful and needs no trace.
 
-`sample` is never inspected. Two filters replace it, both chosen off a dump of what actually arrives on
-`crossfire`: drop `volume <= 0`, and drop `common/null.wav`. Between them those catch every stop-sound and
-silence command, which were a quarter of all traffic. **`CHAN_STATIC` is deliberately kept** even though it
-is nominally the looping-ambient channel -- in practice HL brush entities emit door and lift sounds on it,
-and those are among the few genuinely interesting world sounds on a deathmatch map.
+`sample` is never inspected. Two filters, chosen from a dump of real crossfire traffic: drop
+`volume <= 0`, and drop `common/null.wav`. Together they catch every stop-sound and silence command, a
+quarter of all traffic. **`CHAN_STATIC` is kept**: HL brush entities emit door and lift sounds on it, among
+the few interesting world sounds on a deathmatch map.
 
 ### Footsteps arrive through pmove, not through pfnEmitSound
 
-Hooking `pfnEmitSound` sees zero footsteps, and the reason is not that footsteps are client-side. They are
-emitted server-side like anything else -- they just take a different road into the engine.
+Footsteps are emitted server-side, but by a road `enginefuncs_t` cannot reach. `SV_StartSound` has two
+entries: `pfnEmitSound`, and `PM_SV_PlaySound`, which the engine hangs off `pmove->PM_PlaySound`.
+Everything pmove emits goes the second way: footsteps, ladder steps, water wade and slosh, jump landings,
+fall grunts. (`PM_PlayStepSound`'s `!pmove->runfuncs` early-out never trips on a server: `SV_SetupMove` sets
+`runfuncs = TRUE` right before `pfnPM_Move`.)
 
-There are two entry points into `SV_StartSound`. `pfnEmitSound` is one of them, and it is the only one the
-`enginefuncs_t` table can reach. The other is `PM_SV_PlaySound`, which the engine hangs off
-`pmove->PM_PlaySound` and pmove calls directly. Everything pmove emits -- footsteps, ladder steps, water
-wade and slosh, jump landings, fall grunts -- goes down that second road and is invisible to the
-enginefuncs hook.
+So `pfnPM_Move` is hooked pre and post: pre saves `ppmove->PM_PlaySound` and swaps in a trampoline, post
+restores the original. The trampoline calls the original, then feeds `BotManager::OnSound` with the moving
+player's edict, so footsteps are ordinary `SUSP_SOUND` entries under every existing filter.
 
-`PM_PlayStepSound` does have a `!pmove->runfuncs` early-out, but it never trips on a server: `SV_SetupMove`
-sets `runfuncs = TRUE` unconditionally, immediately before calling `pfnPM_Move`.
+- **There is no persistent install.** The engine reassigns `PM_PlaySound` on every `SV_RunCmd`, so the swap
+  can only live inside `pfnPM_Move`. (jk_botti installs "permanently" and in effect re-installs every call.)
+- **The identity guard `ppmove->PM_PlaySound != PM_PlaySoundHook` is load-bearing.** A double install saves
+  the trampoline as its own original and the first footstep recurses until the stack dies.
+- **`ppmove->player_index` is 0-based**; the edict index is `+ 1`. Off by one, every footstep is
+  plausibly and wrongly attributed to the neighbouring player.
+- The install is skipped when `crossbot_sense` is 0; the post restore is guarded on the identity check, so
+  flipping the cvar mid-frame cannot strand the pointer.
 
-So the hook goes on the callback itself. `pfnPM_Move` is hooked both pre and post: pre saves
-`ppmove->PM_PlaySound` and swaps in a trampoline, post puts the original back. The trampoline calls the
-original first and then feeds `BotManager::OnSound` with the moving player's edict, so footsteps land in
-the suspicion list as ordinary `SUSP_SOUND` entries and every existing filter and the attenuation-radius
-test apply unchanged.
-
-Three things make this the only workable shape:
-
-- **The engine reassigns `PM_PlaySound` on every `SV_RunCmd`**, so there is no such thing as a persistent
-  install. Inside `pfnPM_Move` is the only place the swap can live. (jk_botti installs "permanently" and
-  restores at unload; because of the reassignment its pre-hook is in fact re-installing every single call,
-  which is the same thing written less obviously.)
-- **The identity guard `ppmove->PM_PlaySound != PM_PlaySoundHook` is load-bearing.** Without it a double
-  install saves the trampoline as its own original and the first footstep recurses until the stack dies.
-- **`ppmove->player_index` is 0-based** -- the edict index is `+ 1`. Getting this wrong misattributes every
-  footstep to the neighbouring player, which looks entirely plausible and is entirely wrong.
-
-The install is skipped when `crossbot_sense` is 0, so that path stays free; the post restore is guarded on
-the identity check instead, so flipping the cvar mid-frame cannot strand the pointer.
-
-`pm_shared` never calls `PM_PlaybackEventFull`, so there is no matching blind spot on the event side --
-`pfnPlaybackEvent` really is the only road for events.
+`pm_shared` never calls `PM_PlaybackEventFull`, so `pfnPlaybackEvent` really is the only road for events.
 
 ### What footsteps are worth, without a single tuning constant
 
-The volume pmove passes is already graded, and the existing `1000 * volume / attenuation` radius turns it
-straight into a hearing distance. Everything below is read out of `pm_shared.c` and confirmed against a
-live dump of 85 step sounds from two bots on `crossfire`:
+pmove already grades the volume, and `1000 * volume / attenuation` turns it into a hearing distance. Read
+from `pm_shared.c` and confirmed against 85 live step sounds from two bots on crossfire:
 
-| Sound | Volume | Audible at (ATTN_NORM) |
-|---|---|---|
-| Running step, concrete/metal/tile/grate/slosh | 0.50 | ~625 |
-| Running step, dirt | 0.55 | ~690 |
-| Running step, vent | 0.70 | ~875 |
-| Ladder step | 0.35 | ~440 |
-| Wading into water | 0.65-1.0 | ~810-1250 |
-| Jump launch, and landing by fall speed | 0.5 / 0.85 / 1.0 | ~625-1250 |
-| Fall-pain grunt (`CHAN_VOICE`, hard landing only) | 1.0 | ~1250 |
+| sound | volume | audible at (ATTN_NORM) |
+| --- | --- | --- |
+| running step, concrete/metal/tile/grate/slosh | 0.50 | ~625 |
+| running step, dirt | 0.55 | ~690 |
+| running step, vent | 0.70 | ~875 |
+| ladder step | 0.35 | ~440 |
+| wading into water | 0.65-1.0 | ~810-1250 |
+| jump launch, and landing by fall speed | 0.5 / 0.85 / 1.0 | ~625-1250 |
+| fall-pain grunt (`CHAN_VOICE`, hard landing only) | 1.0 | ~1250 |
 
-Two engine rules come along for free and are worth knowing because they are behaviour, not detail:
+Two engine rules come with it:
 
-- **Walking is silent in multiplayer.** Any step with horizontal speed `<= 220` is dropped outright. This
-  is the real rule that foxbot approximates by hand with a velocity threshold, having had no way to reach
-  it. It also means a bot that wants to move quietly already has a mechanism -- move slower -- and nothing
-  in `bot_move_nav.cpp` uses it yet.
+- **Walking is silent in multiplayer.** Steps at horizontal speed `<= 220` are dropped outright; foxbot
+  approximates this by hand. A bot that wants to move quietly can just move slower (CS creeps at 130; see
+  `doc/goals.md`, `bot_camp.cpp`).
 - **`sv_footsteps 0` disables the whole sense** from outside the plugin, since the gate is inside
-  `PM_PlayStepSound`. If footsteps ever appear to have stopped working, check that first.
+  `PM_PlayStepSound`. Check it first if footsteps stop.
 
-A bot does not hear its own steps: `OnSound` already skips the emitting entity. Note that this means the
-nav sweep, which spawns a single bot, is completely unaffected by any of this.
+A bot does not hear its own steps (`OnSound` skips the emitter), so the one-bot nav sweep is unaffected.
 
 ### Events come from pInvoker, never from the origin argument
 
-`pfnPlaybackEvent`'s `origin` is `(0,0,0)` for essentially all weapon fire -- the engine fills it in from
-`pInvoker->v.origin` when `FEVENT_ORIGIN` is unset. Reading the argument would put every gunshot at the map
-origin.
+`pfnPlaybackEvent`'s `origin` is `(0,0,0)` for essentially all weapon fire; the engine fills it from
+`pInvoker->v.origin` when `FEVENT_ORIGIN` is unset.
 
-Filters: `pInvoker` must be a live player, and `FEV_HOSTONLY` is dropped as per-client viewmodel cosmetics.
-`FEV_CLIENT` needs no filter, as those never reach the server. There is no radius test -- a gunshot in HL
-is `LOUD_GUN_VOLUME` class and is meant to carry.
-
-There is deliberately no `pfnPrecacheEvent` index-to-name table. jk_botti keeps one for per-weapon
-loudness; a player-invoked non-`FEV_HOSTONLY` event is essentially always weapon fire in HLDM, and the
-table is per-map bookkeeping for a refinement nothing uses yet.
+- `pInvoker` must be a live player, and `FEV_HOSTONLY` (per-client viewmodel cosmetics) is dropped.
+  `FEV_CLIENT` events never reach the server.
+- No radius test: a gunshot is `LOUD_GUN_VOLUME` class and meant to carry.
+- No `pfnPrecacheEvent` index-to-name table (jk_botti keeps one for per-weapon loudness): a player-invoked
+  non-host-only event is essentially always weapon fire in HLDM, and nothing would use the refinement.
 
 ### Damage must be read before Bot_RunPlayerMove
 
-The trigger is `pev->dmg_take != 0`, and the position is `EntitySoundOrigin(pev->dmg_inflictor)`.
+The trigger is `pev->dmg_take != 0`; the position is `EntitySoundOrigin(pev->dmg_inflictor)`.
 
-The ordering is the whole trick. `dmg_take` is zeroed by `CBasePlayer::UpdateClientData`, which runs inside
-`PlayerPostThink` -- and for a fakeclient the only thing that runs `PlayerPostThink` is the bot's own
-`pfnRunPlayerMove`, the last action of its think. So the field accumulates over exactly the window from the
-previous frame's `RunPlayerMove` to this frame's `BotSense::Update`, and other players' bullets always land
-inside that window because they are fired during *their* think. Move the read after `Bot_RunPlayerMove` and
-it reads zero essentially always.
+Ordering is the whole trick. `dmg_take` is zeroed by `CBasePlayer::UpdateClientData` inside
+`PlayerPostThink`, and for a fakeclient only the bot's own `pfnRunPlayerMove`, the last act of its think,
+runs that. So the field accumulates from the previous frame's `RunPlayerMove` to this frame's
+`BotSense::Update`, and other players' bullets always land in that window because they fire during
+*their* think. Read after `Bot_RunPlayerMove`, it is essentially always zero.
 
-`dmg_inflictor` is never cleared by anything, so on its own it answers "who hit me" and not "was I hit". It
-is only meaningful read in the same breath as a non-zero `dmg_take`.
-
-The blind spot is damage taken during the bot's own pmove -- fall damage, walking into a `trigger_hurt` --
-which `UpdateClientData` clears before the next update sees it. Those are self- and world-inflicted and the
-inflictor filter discards them anyway.
+- `dmg_inflictor` is never cleared, so alone it answers "who hit me", not "was I hit"; read it only beside
+  a non-zero `dmg_take`.
+- Damage during the bot's own pmove (fall damage, a `trigger_hurt`) is cleared before the next read. It is
+  self- or world-inflicted and the inflictor filter would discard it anyway.
 
 ### Vision spends at most two tracelines per bot
 
-It used to spend one per candidate. `UpdateVision` traced line of sight to every live player that passed
-range and the view cone, every frame, with no throttle, stagger or cache, and of the expensive kind:
-`dont_ignore_monsters` makes the engine walk the entity list. `pfnGetBonePosition` rode along at the same
-rate. The gates that should have bounded this do not: 4096 units covers all of crossfire, and a 90-degree
-cone rejects half the server.
-
-Measured on crossfire with 32 bots, the mean in-cone candidate count (`cands` in
-`crossbot_sense_status`) is **6.18**, with a tail to 15 -- so the old scan cost about 198 perception
-traces per frame across the server, not the 992 the worst case suggests. After the change `ZONE_SN_LOS`
-reports **51.6 traces/frame over ~30.5 active bots, or 1.69 per bot**, and that figure already includes
-the lead trace below. Roughly a fourfold cut, and the tail is what it really removes: the bot in the
-middle of a firefight was the one paying 15.
-
-The scan pass now spends no traces at all. It keeps the same gates in the same order and its only job is to
-**choose**, by weighted reservoir (`acc += w; if (RandomUnit(...) * acc < w) pick = ent;` -- the idiom from
-`bot_fire.cpp`, single-pass and needing no storage). The weight is
+The scan pass spends no traces. It applies the gates (`Candidate`, range, cone) and **chooses** one
+candidate by weighted reservoir (`acc += w; if (RandomUnit(...) * acc < w) pick = ent;`, the single-pass
+idiom from `bot_fire.cpp`), weighted
 
 ```
 (dot(theirViewDir, dirFromThemToUs) + 1) / dist
 ```
 
-so a bot spends its one discretionary trace on someone close *and* looking at it -- the person about to
-shoot. Then at most two traces run:
+so the discretionary trace goes to someone close *and* looking at the bot: the one about to shoot. Then at
+most two `dont_ignore_monsters` traces run:
 
-1. **The incumbent**, if it passed the gates. That is `BotCombat::Enemy` if combat is active, else last
-   frame's `sense.target`. The bot re-checks the enemy it is already fighting before looking for another.
-2. **The weighted pick**, only if there was no incumbent or the incumbent came back occluded.
+1. **The incumbent**, if it passed the gates: `BotCombat::Enemy` when combat is active, else last frame's
+   `sense.target`. The bot re-checks its current enemy before looking for another.
+2. **The pick**, only with no incumbent or an occluded one.
 
-`kViewRange` and the cone are unchanged, and the lead trace below is unchanged, so the per-bot budget is
-1-2 `dont_ignore_monsters` traces plus 0-1 world-only.
+With the lead trace below, the budget is 1-2 `dont_ignore_monsters` traces plus 0-1 world-only per bot.
 
-**The incumbent still has to pass `Candidate`, range and the cone.** It is not traced from outside the view
-cone -- skipping the gates for it would let a bot see and shoot an enemy standing directly behind it. A bot
-that turns away from its enemy drops `sense.target` exactly as it always did; combat's own five-second
-persistence is what carries the enemy across the gap, not vision.
+**Why:** the alternative, one trace per in-cone candidate every frame, is expensive: `dont_ignore_monsters` makes
+the engine walk the entity list (`pfnGetBonePosition` rode along at the same rate). The gates do not bound
+it: 4096 units covers all of crossfire and the cone rejects only half the server. With 32 bots on
+crossfire the mean in-cone count (`cands`) is **6.18** with a tail to 15, about 198 traces per frame;
+`ZONE_SN_LOS` reads **51.6 traces/frame over ~30.5 active bots, 1.69 per bot**, lead trace included. The
+tail is what it removes: a bot mid-firefight would pay 15.
 
-**`Incumbent` reads last frame's combat enemy.** `BotSense::Update` runs before `BotCombat::Update`, which
-in turn reads this frame's `sense.target`. The one-frame lag is deliberate and stable, but a reader who
-assumes same-frame coherence will misread the loop; the `sense.target` fallback is what covers the frame
-before combat has entered.
+- **The incumbent still passes `Candidate`, range and the cone.** Untested from outside the cone it would
+  let a bot shoot an enemy directly behind it. A bot that turns away drops `sense.target`; combat's own
+  five-second persistence carries the enemy across the gap, not vision.
+- **`Incumbent` reads last frame's combat enemy**, since `BotSense::Update` runs before
+  `BotCombat::Update`, which reads this frame's `sense.target`. The lag is deliberate and stable; the
+  `sense.target` fallback covers the frame before combat has entered.
+- **Use `pfnAngleVectors` for the target's facing, never `MAKE_VECTORS`**, which writes
+  `gpGlobals->v_forward` while it still holds *this* bot's forward and would rotate the bot's own cone to
+  each candidate in turn. And read `v.v_angle` without flipping pitch: unlike `pev->angles` (which
+  `bot_deploy.cpp` negates for a tripmine) it is already the true view angle; flipped, every bot would
+  prefer targets facing away.
 
-`visionCands` is how many players passed range and cone — how many tracelines the old
-every-candidate scan would have spent — and `visionKeep` says which of the at most two traces won.
-`visionKeep` alone is one frame, so the cumulative `keeps[]` tally carries the same claim across polls:
-during a duel it should read incumbent nearly every frame, and a run of fresh picks means the lock is broken.
+`crossbot_sense_status` reports `cands` (`visionCands`: players that passed range and cone, what the old
+scan would have traced) and `keep` (`visionKeep`: which of the two traces won this frame). `keep` is one
+frame, so the cumulative `keeps=inc:,new:` tally carries the claim across polls: during a duel it should read incumbent nearly every frame,
+and a run of fresh picks means the lock is broken.
 
-**Use `pfnAngleVectors` for the target's facing, never `MAKE_VECTORS`.** The latter writes
-`gpGlobals->v_forward`, which the function is still holding as *this* bot's forward. Clobbering it mid-loop
-would rotate the bot's own view cone to each candidate's facing in turn -- a bug that would look like
-erratic acquisition, not like an aliasing error. And read `v.v_angle` without flipping pitch: it is already
-the true view angle, unlike `pev->angles`, which is why `bot_deploy.cpp` negates x when it reads a
-tripmine's orientation. Copying that flip here would make every bot prefer targets facing *away* from it.
+Consequences, all intended:
+
+- **`sense.target` means "the one I traced and saw"**, not "nearest visible". A bot keeps fighting a
+  mid-range enemy while someone closer runs past, which reads as commitment instead of snap-to-nearest
+  twitch. `bot_fire`, `bot_combat`, `bot_fun` and `bot_deploy` inherit it.
+- **`SUSP_SIGHT` is pushed for at most one entity per frame.** The active enemy is the incumbent, traced
+  every frame it is in the cone, so `BotSense::Senses` keeps combat open; everyone else enters the table
+  through sound, damage and events.
+- **Acquisition is probabilistic.** A bot facing N enemies draws one per frame, so first contact takes a
+  frame or two: invisible at 100 Hz, about 0.1-0.2 s at `sys_ticrate 10`. With four bots and combat off,
+  bots hold a target on 27% of frames, and `keep=new` is well under 1% of samples, because a pick wins only
+  on the first frame of an engagement. A target lost mid-commit runs a grenade throw to its 1.5 s safety
+  cap, so `test_fire.ps1`'s zero-tolerance `capped` check on `weapon_handgrenade` is the assertion most
+  likely to feel this (once in three runs, one cap per 35 throws).
+- **`(dot + 1)` gives an exactly back-turned target weight zero**, for *acquisition only*: once acquired,
+  the incumbent path traces regardless of facing. The residual is spotting someone running directly away
+  in silence, which footsteps generally cover. The tuning point, if needed, is an additive floor in
+  `gaze`; it deliberately has no cvar.
 
 ### Teammates never reach the trace budget
 
-`Candidate` rejects anything `Teams::Attackable` says this bot may not shoot -- see `doc/games.md`,
-`teams.cpp`, for what that means and why it is a no-op on a deathmatch map. The gate goes here rather
-than downstream because "do the POV checks only for enemies" is both the behaviour and the cheaper
-arrangement: a rejected player never enters the weighted reservoir, never costs one of the two
-tracelines, and never becomes `sense.target`. Everything that shoots reads `sense.target` or
-`sense.enemy` and nothing else, so one gate covers `bot_fire.cpp`, the ambush, the duel, the cover
-shuffle and the func_tank in `bot_fun.cpp` at once, and none of them needed an edit.
+`Candidate` rejects anything `Teams::Attackable` says this bot may not shoot (`doc/games.md`,
+`teams.cpp`; a no-op on a deathmatch map). Gating here is both the behaviour and the cheap arrangement: a
+rejected player never enters the reservoir, never costs a trace, never becomes `sense.target`. Everything
+that shoots reads `sense.target` or `sense.enemy`, so one gate covers `bot_fire.cpp`, the ambush, the duel,
+the cover shuffle and the func_tank in `bot_fun.cpp`.
 
-**Unknown is rejected too, not just a match.** A player whose team reads zero is not shot at while
-teams are active. The bot only ever engages a confirmed enemy; the case where nobody has a team is
-handled one level up, by `Teams::Active` falling back to today's behaviour for the whole bot.
+- **Unknown is rejected too.** A player whose team reads zero is not shot at while teams are active. The
+  case where nobody has a team is handled a level up, by `Teams::Active` falling back for the whole bot.
+- **Teammates never reach the suspicion table.** `Push` drops anything `Teams::Of` calls `REL_FRIEND`, for
+  every source. Recorded, every friendly footstep landed in the PLAYER tier and outranked everything in
+  `LookDirection` (on fy_snow the gaze spent its life on teammates), and `BotGauss::Scared` counted a
+  nearby friend as a threat.
+- **The filter is `== REL_FRIEND`, never `!Attackable`.** A door, lift or breakable reads `REL_UNKNOWN`,
+  which `Attackable` rejects while teams are active, so the `Attackable` form would silently delete every
+  world sound on a team map. `REL_FRIEND` matches only a confirmed teammate or what one owns (grenades,
+  satchels, snarks inherit the owner's team through `TeamOf`, as do the bot's own). On a deathmatch map,
+  with `crossbot_teams 0`, or before the bot has a team, `Of` answers `REL_UNKNOWN` and nothing is dropped.
 
-**Teammates never reach the suspicion table either.** `Push` drops anything `Teams::Of` calls
-`REL_FRIEND`, for every source at once -- sound, event, damage and sight. It used to record them on
-the theory that a head turning toward a friend's footsteps looks right. With one friend it does; with
-a CS team it does not. Every friendly step lands in the PLAYER tier, which outranks everything else in
-`LookDirection`, so on `fy_snow` the gaze spent its whole life on teammates. The same entries also
-made `BotGauss::Scared` count a friend nearby as a threat.
-
-**The filter is `== REL_FRIEND`, never `!Attackable`.** A door, lift or breakable has team zero and
-reads `REL_UNKNOWN`, which `Attackable` rejects while teams are active -- so the `Attackable` form
-would silently delete every world sound on a team map. `REL_FRIEND` only ever matches a confirmed
-teammate, or something a teammate owns: their grenades, satchels and snarks inherit the owner's team
-through `TeamOf`, and so do the bot's own. On a deathmatch map, with `crossbot_teams 0`, or before the
-bot has a team, `Of` answers `REL_UNKNOWN` and nothing is dropped.
-
-The table drives an attack in exactly one place, the satchel, which is still gated separately in
-`NearestLive`. Camping reads teams a second time for the friend-in-view calm straight off the player
-list, not the table, and that read never aims or shoots, so the one-attack-gate claim still holds.
+The table drives an attack in one place, the satchel, which `NearestLive` gates separately. Camping's
+friend-in-view calm reads teams straight from the player list and never aims or shoots.
 
 ### Teammate hurt (`SUSP_ALLY`)
 
-A teammate losing health is the one way a friend reaches the table, and it enters as the *attacker*, not the
-friend. `BotSense::RefreshAllies` runs once per frame beside `RefreshMonsters`, compares each client's
-`v.health` with last frame's, and keeps the victims whose health fell (a respawn raises health, so it never
-counts). Each bot then runs `UpdateAllyHurt`: for every hurt `REL_FRIEND` that is not itself, resolve the
-attacker with `BotCombat::Attacker` (the half of `DamageSource` that does not need `dmg_take`, safe here only
-because it is read next to a real health drop) and `Push` it at the **victim's** position. Fall damage,
-`trigger_hurt` and friendly fire resolve to no attacker and push nothing. There is no range or line-of-sight
-gate: every teammate feels it. The entry is a `Coned` source like sound, so `ConeWeight` scales its score.
-It is gaze only; combat still needs `sense.target`. `crossbot_sense_status` reports it as `ally:`.
+A teammate losing health is the one way a friend reaches the table, and it enters as the *attacker*.
+`BotSense::RefreshAllies` runs once per frame beside `RefreshMonsters`, compares each client's `v.health`
+with last frame's, and keeps the victims whose health fell (a respawn raises it, so never counts). Each bot
+then runs `UpdateAllyHurt`: for every hurt `REL_FRIEND` other than itself, it resolves the attacker with
+`BotCombat::Attacker` (the half of `DamageSource` that needs no `dmg_take`, safe only beside a real health
+drop) and pushes it at the **victim's** position.
+
+- Fall damage, `trigger_hurt` and friendly fire resolve to no attacker and push nothing.
+- No range or line-of-sight gate: every teammate feels it.
+- It is a coned source like sound, so `ConeWeight` scales it. It steers the gaze only; combat still needs
+  `sense.target`. `crossbot_sense_status` reports it as `ally:`.
 
 ### Monsters are candidates only while they are hunting us
 
-The scan used to run `1 .. maxClients` and nothing else, and `Candidate` demanded `FL_CLIENT` on top of
-that. Between them, a monster could never become `sense.target`, never become `combat.enemy` and never be
-shot at -- so bots walked past snarks that were actively eating them. A monster still reached the
-suspicion table through sound, damage and events, which steered the gaze and did nothing else.
+A second loop runs after the client loop over a **shared per-frame monster list**:
+`BotSense::RefreshMonsters` scans the edicts once per frame in `BotManager::StartFrame` and keeps the first
+64 (`kMaxMonsters`) that are live, have private data, carry `FL_MONSTER` and are damageable. One scan per
+server, not per bot, which is the point of the list. (Before it, a monster could never become
+`sense.target` or `combat.enemy`, and bots walked past snarks that were eating them.)
 
-A second loop now runs after the client loop, over a **shared per-frame monster list**:
-`BotSense::RefreshMonsters` scans the edict array once per frame in `BotManager::StartFrame`, keeping the
-first 64 entities that are live, have private data, carry `FL_MONSTER`, and are damageable. One scan per
-frame for the whole server, not one per bot -- a per-bot scan of `maxEntities` is the thing this list
-exists to avoid.
+**The gate is one question: is its `CBaseMonster::m_hEnemy` us?** `MonsterCandidate` asks
+`g_pGameProfile->MonsterEnemy(ent) == bot.pEdict` plus a liveness test. A snark hunting someone else is
+ignored, and so is every tripmine, satchel and grenade: `CGrenade` descendants with `FL_MONSTER` and a null
+`m_hEnemy`. The bot answers threats to itself and does not go hunting.
 
-The gate on that list is a single question: **is its `CBaseMonster::m_hEnemy` us?** `MonsterCandidate`
-asks `g_pGameProfile->MonsterEnemy(ent) == bot.pEdict` and nothing else beyond a liveness test. A snark
-hunting someone else is ignored; so is every tripmine, satchel and grenade, all of which are `CGrenade`
-descendants carrying `FL_MONSTER` and a null `m_hEnemy`. This is deliberately narrower than "shoot
-monsters": the bot answers threats to itself and does not go hunting.
+**With teams on, a hostile monster need not be hunting *us*.** `MonsterCandidate` asks `Teams::Of` first:
+another non-zero team is a candidate outright, our team never is, and only `REL_UNKNOWN` (every monster on
+a deathmatch map, and in any mod that leaves `pev->team` alone) falls back to the `m_hEnemy == us` rule.
+An owned monster inherits its owner's team, so an enemy's snark is engaged and a teammate's is not.
 
-**The budget does not change.** Monsters are drawn into the *same* weighted reservoir as players and
-compete for the same single discretionary trace, so the per-bot cost is still 1-2 `dont_ignore_monsters`
-traces plus 0-1 world-only. Their gaze term is a fixed `kMonsterGaze = 2.f`, the maximum the player branch
-can produce, because a monster whose `m_hEnemy` is us is facing us by construction. `v.v_angle` and
-`v.fov` are meaningless on a monster and are never read for one -- the same reason `EnemySees` short
-circuits in `bot_combat.cpp`.
+**A null `m_hEnemy` is still a hard reject.** Grenades, satchels and tripmines inherit a team from
+`pev->owner`, so the team test alone would shoot enemy ordnance on the floor. Requiring `MonsterEnemy` to
+name *someone* keeps them out, since only a real `CBaseMonster` sets it. The rule is "a hostile monster
+hunting anyone", not "anything hostile".
 
-**The trace goes to the box centre, not a bone.** `SamplePoint` returns `EntitySoundOrigin` for anything
-without `FL_CLIENT` and never builds a bone set for it. A snark is an 8-unit cube with a zero `view_ofs`,
-so the eye fallback would aim at its feet and the bone cache would fill with models nothing else samples.
+- **The budget does not change.** Monsters join the same reservoir as players and compete for the same
+  discretionary trace. Their gaze term is a fixed `kMonsterGaze = 2`, the player branch's maximum, since a
+  monster hunting us faces us by construction. `v.v_angle` and `v.fov` are meaningless on a monster and
+  are never read (as `EnemySees` short-circuits in `bot_combat.cpp`).
+- **The trace goes to the box centre, not a bone.** `SamplePoint` returns `EntitySoundOrigin` for anything
+  without `FL_CLIENT` and builds no bone set: a snark is an 8-unit cube with zero `view_ofs`, so the eye
+  fallback would aim at its feet.
+- **The list is emptied by `ResetBoneCache`**, misnamed but the right call site: that is where both map
+  transitions flush per-map entity caches, and edict pointers must not survive one. `StartFrame` refreshes
+  it only when a bot exists, and `crossbot_monsters` refreshes before printing.
 
-The list is emptied by `ResetBoneCache`, which is the wrong name for it and the right call site:
-that is where the two map transitions already flush per-map entity caches, and edict pointers must
-not survive one. Nothing reads the list without bots on the server anyway, since `StartFrame` only
-refreshes it when a bot exists and `crossbot_monsters` refreshes before it prints.
-
-`monSeen`, `monMine`, `monTraces` and `monHits` are cumulative per bot and readable in
-`crossbot_sense_status`. They separate the three ways this can fail: no monsters in the list, monsters in
-the list that never name us, and monsters that name us but whose traces never land.
-
-**With teams on, a hostile monster does not have to be hunting *us*.** `MonsterCandidate` asks
-`Teams::Of` first: a monster on a different non-zero team is a candidate outright, one on our team
-never is, and only `REL_UNKNOWN` -- which is every monster on a deathmatch map, and every monster in a
-mod that leaves `pev->team` alone -- falls back to the `m_hEnemy == us` rule above. A monster carrying
-an owner inherits that owner's team, so an enemy's snark is engaged and a teammate's is not.
-
-**A null `m_hEnemy` is still a hard reject, and it has to be.** Tripmines, satchels and hand grenades
-are all `CGrenade` descendants carrying `FL_MONSTER`, and they all inherit a team from `pev->owner` --
-so the team test alone would have bots shooting at enemy ordnance lying on the floor. Requiring
-`MonsterEnemy(ent)` to name *someone* keeps them out, because only a real `CBaseMonster` ever sets it.
-The widening is therefore "a hostile monster hunting anyone" rather than "anything hostile", which is
-also the honest reading of engaging it before it turns on us.
-
-#### Four consequences, all intended
-
-- **`sense.target` no longer means "nearest visible".** It means "the one I traced and saw". The old strict
-  nearest-wins rule is gone, so a bot can keep fighting a mid-range enemy while someone closer runs past.
-  That is the point of the incumbent rule and reads as commitment rather than the old snap-to-nearest
-  twitch. `bot_fire`, `bot_combat`, `bot_fun` and `bot_deploy` all inherit it.
-- **`SUSP_SIGHT` is pushed for at most one entity per frame**, where every visible player used to get one.
-  The case that matters is unaffected: the active enemy *is* the incumbent and is traced every frame it is
-  in the cone, so `BotSense::Senses` keeps holding combat open. Everyone else still enters the table
-  through sound, damage and events. The PLAYER tier in `LookDirection` thins out, which is the same
-  direction the one-entry-per-entity change already took.
-- **Acquisition is probabilistic.** A bot facing N enemies draws one per frame instead of testing all N, so
-  first contact takes a frame or two rather than being guaranteed. The incumbent lock holds afterwards, so
-  this is invisible at 100 Hz and about 0.1-0.2s at `sys_ticrate 10`. `test_fire.ps1` is the gate on it.
-  The measurable cost is a small drop in the fraction of frames on which a bot is holding a target: with
-  four bots and combat off it reads 27%, and `keep=new` is well under 1% of samples because a pick only
-  wins on the *first* frame of an engagement and the incumbent holds every frame after. Downstream, a
-  target lost mid-commit is what makes a grenade throw run to its 1.5s safety cap, so
-  `test_fire.ps1`'s zero-tolerance `capped` check on `weapon_handgrenade` is the assertion most likely to
-  feel this; it was seen firing once in three runs at one cap per 35 throws.
-- **`(dot + 1)` gives an exactly-back-turned target weight zero.** This gates *acquisition only* -- once
-  acquired, the incumbent path traces the enemy regardless of facing, so an enemy that turns and runs stays
-  tracked. The residual is spotting someone already running directly away who has made no noise, which
-  footsteps generally cover. If that ever reads wrong in game, the fix is an additive floor in `gaze`;
-  this is the tuning point, and it deliberately has no cvar.
+`mon=list:,seen:,mine:,trc:,hit:` in `crossbot_sense_status` (`monSeen`, `monMine`, `monTraces`,
+`monHits`, cumulative per bot) tells the three failures apart: no monsters in the list, monsters that never name us, and monsters that name us
+but whose traces never land.
 
 ### Vision samples a hitbox bone, not the eye
 
-Per traced player, in this order: range, then a 3D cone test, then a bone position, then the trace. The
-order is cost -- `pfnGetBonePosition` runs a full `SV_StudioSetupBones` on every single call, one skeleton
-setup per bone, so it goes last and only for the one or two candidates that survived selection.
+Per traced player, in cost order: range, a 3-D cone test, a bone position, then the trace.
+`pfnGetBonePosition` runs a full `SV_StudioSetupBones` per call, so it goes last and only for the one or
+two candidates that survived selection.
 
-The cone is a genuine 3D dot against `v_forward`, not foxbot's yaw-only `FInViewCone`, which lets a bot see
-targets directly above it. Half-angle is `fov / 2`, so a symmetric cone against the *horizontal* FOV --
-slightly generous vertically, since HL's vertical FOV at 4:3 is nearer 74 degrees. Accepted rather than
-building a real frustum.
-
-The trace is `dont_ignore_monsters`, and that is mandatory, not stylistic: with `ignore_monsters` the trace
-passes straight through players and `tr.pHit == ent` can never be true.
-
-The sample point is a bone drawn at random from the set of bones that carry a hitbox. Sampling all of
-`0..numbones` instead would include helper bones -- the `Bip01` root sits at the feet, and weapon and blend
-bones sit off the body -- which drag the averaged aim point down and make visibility flicker on floor
-geometry. Every bone that owns a hitbox is a point that can actually be shot.
-
-Two engine caveats. `pfnGetBonePosition`'s `rgflAngles` out-parameter is **never written**; it is passed
-`nullptr` here and only the origin is ever read. That is also why hitbox *centres* are not used, since
-transforming `bbmin`/`bbmax` into world space would need the bone's rotation. And stock GoldSrc only
-bounds-checks `iBone` under `#ifdef REHLDS_FIXES`, so an out-of-range index is an out-of-bounds read on
-vanilla HLDS -- the bone set is built from `numhitboxes` and every index checked against `numbones`.
+- **The cone is a true 3-D dot against `v_forward`**, not foxbot's yaw-only `FInViewCone`, which sees
+  targets directly overhead. Half-angle `fov / 2` against the horizontal FOV is slightly generous
+  vertically (HL's vertical FOV at 4:3 is nearer 74°); accepted instead of a real frustum.
+- **The trace must be `dont_ignore_monsters`**; with `ignore_monsters` it passes through players and
+  `tr.pHit == ent` is never true.
+- **The sample is a random bone that owns a hitbox.** All of `0..numbones` would include helper bones (the
+  `Bip01` root at the feet, weapon and blend bones off the body), which drag the aim point down and flicker
+  visibility on floor geometry.
+- **Engine caveats.** `pfnGetBonePosition`'s `rgflAngles` out-parameter is never written, so `nullptr` is
+  passed and hitbox *centres* are not used (they would need the bone's rotation). Stock GoldSrc
+  bounds-checks `iBone` only under `REHLDS_FIXES`, so the bone set is built from `numhitboxes` with every
+  index checked against `numbones`.
 
 ### The lead point is traced before it is queued
 
-The queue write pushes `bestPoint + targetVelocity * delay` -- where the target is predicted to be one
-reaction time from now. For a long time nothing checked that this predicted point was anywhere a bullet
-could reach. At the default 0.25s and full run speed the lead runs to about 80 units, so it crosses into a
-wall roughly a whole reaction time before the target does, and a bot leading someone into cover spent the
-entire drain window aimed at brickwork.
+The queue write pushes `bestPoint + targetVelocity * delay`. At the default delay and full run speed the
+lead is about 80 units, so it crosses into a wall roughly a reaction time before the target does. So the
+lead is traced from the bot's real eye, and the slot is pushed only if it comes back clear; a blocked lead
+pushes nothing.
 
-So the lead is traced, from the bot's real current eye, and the slot is pushed only if it comes back clear.
-A blocked lead pushes nothing at all.
+- **It gates the queue write and nothing else.** Perception still traces the raw bone point, so
+  `SUSP_SIGHT` and target selection are untouched. Tracing the lead *instead* would let an occluded lead
+  null `best`, and its return next frame would fire `ClearDelayQueue` and wipe the ring: with 80-unit leads
+  and a random bone, that flickers at every doorway and costs a reaction delay of silence each time. It
+  costs one trace per bot per frame, since the write is once, for the winner.
+- **It is `ignore_monsters`**, unlike the perception trace. It asks whether the predicted point is inside
+  or behind world geometry; another player or the target's own body 80 units short must not suppress it,
+  and under `dont_ignore_monsters` the target would be `tr.pHit` most of the time. Brush entities still
+  block: a closed door is a wall. It is the same flag and question as the fire-side trace in
+  `BotFire::Buttons`.
+- **It is skipped when the lead is the sample point**: a still target, or a delay of 0. That keeps
+  `test_sense.ps1`'s static phase identical to a build without it, a regression check for the rest of the
+  queue.
 
-**It gates the queue write and nothing else.** The perception trace above still runs against the raw bone
-point, so `SUSP_SIGHT` and target selection are untouched. Pointing that one trace at the lead instead --
-the obvious version -- would let an occluded lead null out `best`, and when it returned the next frame
-`best != sense.target.Get()` would fire `ClearDelayQueue` and wipe the whole ring. With 80-unit leads and a
-hitbox bone redrawn at random every frame, that flickers at every doorway and railing, and each flicker
-costs a full reaction delay of silence. Gating only the write also costs one trace per bot per frame,
-because the write happens once, for the winner.
+Nothing is pushed in place of a vetoed lead. The ring drains, and if the block outlasts the delay the read
+underflows and `ApplyLook` falls through to the suspicion blend, which points at the last `SUSP_SIGHT`:
+the target's real last-seen position, at the corner. `ReadDelayed` interpolates on time, so a hole in the
+history is a longer span and the served point slides across it smoothly when writes resume.
 
-**The flags differ from the perception trace, deliberately.** This one is `ignore_monsters`; the one above
-is `dont_ignore_monsters` and has to be, or `tr.pHit == ent` could never be true. The two ask different
-questions. Perception asks *can I see this player*. The lead trace asks *is this predicted point inside or
-behind world geometry* -- another player, or the target's own body, standing between the eye and a point 80
-units past it must not suppress the lead, and under `dont_ignore_monsters` the target itself would be
-`tr.pHit` most of the time. Brush entities still block, which is right: a closed door is a wall. It is the
-same flag and the same question as the fire-side trace in `BotFire::Buttons`.
+`crossbot_aim_status` and `crossbot_sense_status` both report `leadblk`, the vetoes since spawn: a count,
+because a two-second poll would almost never catch a one-frame flag.
 
-**The trace is skipped when the lead is the sample point**, which covers both a stationary target and
-`crossbot_aim_delay 0`. That is not only an optimisation -- it is what makes `test_sense.ps1`'s static phase
-provably unchanged, since two motionless bots produce no lead, which keeps that phase usable as a regression
-check for everything else in the queue.
+### Notice delay: seeing is not noticing
 
-Nothing is pushed in place of a vetoed lead. The ring drains, and if the block outlasts `delay` the read
-underflows and `ApplyLook` falls through to the suspicion blend, which points at the last `SUSP_SIGHT`
-entry -- the target's real last-seen position, at the corner. `ReadDelayed` needs no help with the gap: it
-interpolates on time, so a hole in the write history is just a longer span, and the served point slides
-across it smoothly when writes resume rather than jumping.
+A clean trace does not make a target. The traced entity (`seen`) first fills a per-bot notice meter, and
+becomes `best` only when full. Without it an enemy at the cone's edge 3000 units away was spotted as
+fast as one dead centre at point blank, and a re-peek round a wall was instant.
 
-Both `crossbot_aim_status` and `crossbot_sense_status` report `leadblk`, a per-bot count of vetoes since
-spawn. A count rather than a current-frame flag because a two-second poll would almost never catch the flag
-set, and the thing worth verifying is that the veto fires at all.
+The time to notice is set in screen terms, normalised to fov 90:
+
+    factor = tan(theta) / tan(fov/2)        on-screen offset: 0 at the crosshair, 1 at the edge
+    small  = dist * tan(fov/2)              inverse on-screen size; at fov 90 this is just dist
+    need   = factor * small * scale / 1000  =  dist * tan(theta) * scale / 1000   seconds
+
+**The fov cancels**: zoom pushes an enemy toward the edge and enlarges it by the same factor, so zoom
+changes only what fits in the cone, which the cone test already handles. At scale 1: 45° off-axis at
+1000 units takes 1 s, 10° takes 0.18 s, dead centre is instant at any range. `theta` is measured to the
+sampled bone, so a bone just outside the cone gets a large but finite `need`.
+
+`scale` is `BotDiff::NoticeScale()`: `crossbot_notice`, or the tier (easy 1.5, normal 1.0, hard 0.75,
+expert 0.5). `crossbot_notice 0` makes acquisition instant.
+
+**One meter per enemy, draining, not resetting.** `sense.notices` holds `kNoticeSlots` (8)
+`{ ent, progress, need }`:
+
+    the entity seen this frame:  progress += dt / need     (need 0 -> 1), clamp 1; best iff progress == 1
+    every other slot:            progress -= dt / kNoticeForget (2 s); at 0 the slot is freed
+
+- A new enemy takes a free slot, else evicts the lowest progress; a slot whose handle died reads as free.
+  Eight is far more than a 90° cone holds at 32 players.
+- Everything not seen this frame drains, including enemies in the cone that were not traced; freezing them
+  would leave an untraced enemy half-noticed forever.
+- The incumbent is no exception. While held the meter sits at 1; out of sight it drains, and a re-peek
+  after `t` seconds must refill `t / kNoticeForget * need`. A re-peek where the bot is already looking (the
+  suspicion look points at the last `SUSP_SIGHT`, the corner) has a small `theta` and is fast; one far
+  off-axis is slow. Two seconds is under combat's five, so the face is forgotten before combat lets go.
+- Per-enemy slots matter: with one slot, tracing enemy B while A was occluded wiped A's memory and A's
+  re-peek paid in full.
+
+**The enemy closest to noticed takes the pick slot.** Of the non-incumbent candidates that pass the gates
+and have a slot, the highest progress skips the reservoir and becomes `pick` outright. Otherwise the
+reservoir would spread the one discretionary trace over every candidate, each meter filling on a fraction
+of frames and draining on the rest. An occluded favourite drains to zero within `progress * 2 s` and frees
+the pick. The budget is unchanged: incumbent first, then the pick.
+
+**`SUSP_SIGHT` is pushed only for `best`**, not on every clean trace: an enemy seen but not yet noticed
+would otherwise pull the gaze toward itself and give away exactly what the delay hides.
+
+**Cloaked enemies are traced one frame in five.** `IGameProfile::Cloaked`, asked in the owner game's
+context (only DMC answers yes, for the ring), gates both traces through `Glimpse`: unless the entity is
+already `sense.target`, the trace runs only when `RandomUnit < kCloakSeeChance` (0.2), and a skipped roll is
+an unseen frame. The meter fills at `0.2 / need` and drains at `0.8 / kNoticeForget`, so only an enemy with
+`need` under about 0.5 s, near the crosshair, is ever noticed. Once noticed he is traced every frame until
+the first obstructed trace clears `sense.target`. `crossbot_sense_status` prints `cloak=<skips>/<rolls>`
+per watching bot; on crossfire, two DMC bots roaming and one holding the ring, it read 707/867 (81.5%), and
+0/0 without the ring or for the holder.
+
+Notice is detection and the delay is reaction, so they stack: the meter fills, `best` is a new target, the
+queue clears, and the underflow silence follows. Being blinded (`BotDaze::Blind`), `crossbot_sense 0` and
+respawning clear the whole table.
+
+`test_sense.ps1` and `test_fire.ps1` take `-Notice <scale>` for A/B (`-Notice 0` is instant). Over four
+150 s four-bot crossfire duels the delay did not starve combat: sticky shots 38 and 31 with it on, 12 and
+19 off. With per-enemy slots the same probe read shots 300/263, sticky 27/52 and target held on 45/37 polls
+with it on, against shots 141/132, sticky 40/12 and 20/25 polls off.
+
+### Shadows: light and background scale the meter
+
+A traced entity is also judged on its lighting and what it stands against, both sampled from the map's
+lightmaps through `Nav::LightMap` (`src/nav/nav_light.cpp`):
+
+    Lt  = light under the target:  Sample(origin, origin - 2048z)
+    Lb  = what is behind it:       Sample(bonePoint, bonePoint + losDir * kViewRange)
+    vis = clamp(max(Lt, |Lt - Lb|) / kLitLevel, 0, 1)
+    need = dist * (tan(theta) + kShadowAxis * (1 - vis)) / vis * scale / 1000
+
+`Lt` is the downward light point the client lights that player's model with; `Lb` is the first world face
+on the bot's sightline past the target. A lit target scores 1, and so does a dark silhouette against a lit
+wall, through the contrast term; only dark on dark is slow. At `vis = 1` this is the formula above, so a
+lit map behaves as before. `kShadowAxis` (0.25) stops a shadowed enemy dead centre being instant: at
+`vis = 0.25` and 1000 units, centre takes 0.75 s and 45° off takes 4.75 s. `kLitLevel` is 64.
+
+- **Zero is invisible.** `vis == 0` turns `seen` back into nothing: the slot drains and a held target is
+  lost as if occluded. `darkDrops` (`dark=` in `crossbot_sense_status`) counts those frames.
+- **The engine cannot answer this.** `pfnGetEntityIllum` returns `v.light_level` for a client, which a
+  fakeclient never fills (`pfnRunPlayerMove` carries no light level), and 128 for everything else on a
+  dedicated server. So the plugin reads the live BSP from the path `XPlay::FindMapBsp` finds on
+  `ServerActivate` and walks the node tree like the engine's `RecursiveLightPoint`. A map with no lighting
+  lump is fullbright; a failed `Load` leaves `vis` at 1.
+- **Compare in the lightmap's own space.** RAD gamma-encodes (qrad and ZHLT `-gamma` 0.5, VHLT about 0.55),
+  so a byte is roughly `256 * linear^gamma`, close to perceived lightness, and an absolute difference is a
+  fair contrast. A linear ratio blows up near zero (light 2 against 1 reads as full contrast while
+  invisible). Styles are scaled in stored space as the engine does. Clients' own `brightness`/`gamma` are
+  not modelled.
+- **Light styles** come from a `pfnLightStyle` post hook, so a switched-off light is dark. Styles are set
+  while entities spawn, before `ServerActivate`, so the table clears only on deactivate. The sample takes
+  the pattern character at `time * 10`, as the engine animates it.
+- **Effects override the samples.** `EF_DIMLIGHT` (flashlight), `EF_BRIGHTLIGHT` and `EF_MUZZLEFLASH` make
+  the target lit; a sky or water face (`TEX_SPECIAL`) reads 255, so an enemy on a skyline is a silhouette.
+
+`crossbot_sense_status` prints `light=<Lt>/<Lb>/<vis>` for the last traced entity. On crossfire open ground
+reads 190-207, dim corners 24-60, and a dim target on a dim wall `light=24/46/0.37`.
+
+The bots' own preference for dark ground is baked by navgen (`doc/navgen.md`, *Visibility*).
+
+### What the bot sees through
+
+`TRACE_LINE` answers the sight question wrongly both ways: it skips every `SOLID_NOT` entity, so bots saw
+through `func_illusionary` foliage and walls and through `.mdl` props (`env_model`, which is how stock DoD
+maps place bushes, ferns, grass and trees, and zero-size `cycler_sprite`, which the engine's area-link cull
+skips); and it stops on every solid entity, so glass `func_wall` and `func_breakable` blinded bots.
+`BotSight::Clarity` (`bot_sight.cpp`) replaces it wherever the bot *looks*: `TraceVisible`, the lead veto,
+`FriendInView`, the item-taken check, the brain's `Sees`, and `crossbot_monsters`. Fire, blast and arc
+traces stay physical: a bullet does not care how a wall is drawn.
+
+**Coverage is rasterised, not guessed from `renderamt`.** `src/nav/sight_coverage.cpp`, shared verbatim
+with navgen, draws each model's textured triangles at 1 unit per pixel, multiplies transmittance per pixel
+by `1 - alpha` (`renderamt / 255`; a `{` texel of index 255 is a hole in TransAlpha mode, as is a
+`STUDIO_NF_MASKED` texel; additive and glow draw nothing), and averages 32x32 blocks. A cell's alpha is the
+chance that a 32-unit body behind it is hidden. Back faces are culled as the engine culls them (brush
+winding agrees with the plane normal on 2326 of 2334 faces of dod_forest). Each model is drawn from 34
+directions (`kViewCount`): rings of 16 at the horizon and 8 at ±45°, plus straight up and down.
+
+**Models are cut into 256-unit chunks** (`kChunkSize`). A lookup takes the nearest of the 34 views and reads
+the cell where the sightline crosses the plane through the chunk's centre, with error of chunk depth times
+the view's angular error. A brush entity can be several disjoint parts, and chained foliage walls sharing
+vertices make one connected part 3000 units across; cutting every model on a grid anchored at its own
+minimum (triangles clipped, `st` interpolated) bounds both at about one and a half cells. A model's chunks
+are grouped under the entity, and one box test rejects the group, which keeps 250 occluders cheap per
+trace.
+
+**Models live in model space; the entity moves them.** An instance applies `pev->origin` and `pev->angles`
+(brush rotation is the engine's rotated-hull basis; studio pitch is negated as `StudioSetUpTransform`
+does), re-placed whenever either changes, so doors and trains track. Brush vertices of an ORIGIN-brush
+entity are stored relative to it, which the same transform restores. Studio models use the entity's
+`sequence` at frame 0 with `body` and `skin`; animation is ignored.
+
+**Occluders are chosen once, at `ServerActivate`**, from the live edicts: a model that is not a client,
+monster or `MOVETYPE_FOLLOW` attachment, not `EF_NODRAW`, with render opacity above 0; and either a brush
+model that is `SOLID_NOT` or not `kRenderNormal`, or a `.mdl` with `MOVETYPE_NONE` that is `SOLID_NOT` or
+zero-size. Entities spawned later are not covered, and a held weapon never hides its owner.
+
+**Clarity** is the product of `1 - alpha` over everything crossed. A trace that hits a solid occluder
+multiplies by its coverage and restarts from the hit point skipping that entity, up to four panes
+(`kMaxPanes`); a restart point is on a surface, so never inside the bot's own hull. The world, or a solid
+non-occluder, gives 0. Then every non-solid occluder whose box the segment crosses multiplies in. There is
+no cutoff: an opaque cell is 255, so alpha is exactly 1 and clarity exactly 0.
+
+**Clarity scales the notice meter; it does not gate it.** It multiplies into `vis`, so an enemy behind a
+half-covering bush takes twice as long to notice, and `kShadowAxis` keeps dead centre from being instant. A
+held target stays held behind near-opaque cover, since a held meter sits at 1, as for shadow. The fire
+gate stays physical, with one addition: a blocking breakable that is not `kRenderNormal` counts as a shot
+when nothing else stops the ray, because bullets break glass. Unbreakable glass holds fire.
+
+**The build runs on a worker thread and is cached.** `BotSight::Build` describes the occluders on the main
+thread and hands the unique `(model, sequence, body, skin, render)` keys to a worker, which looks them up in
+the cache, rasterises only what is missing, and appends it. `StartFrame` adopts the result when done; until
+then `Clarity` is the plain trace. dod_forest builds in under 4 s cold and loads in 0.03 s warm.
+
+**One append-only cache file for every map and model.** `addons/crossbot/coverage.cov` is a magic and
+`SightCoverage::kFormatVersion`, then records of `{uint32 size, uint16 keyLen, key, chunks}`. The key
+carries its own validity, so nothing is invalidated in place:
+
+    b|<bsp checksum>|*N|rendermode|renderamt
+    s|<game dir>|<.mdl+T.mdl crc>|<model path>|sequence|body|skin|rendermode|renderamt
+
+A recompiled map or edited model stops matching its old records, which stay as dead weight. A studio model
+is stored once for every map that places it (dod_charlie reused six of dod_forest's); the checksum costs
+one read of each `.mdl` per map load.
+
+- **Safe for several servers at once.** A reader holds a shared OS lock for the whole read (`LockFileEx`,
+  or `flock` on Linux) and a writer an exclusive one. Readers walk records by their size prefix, skip
+  without loading every key the map does not use, and stop at a short or malformed tail. A writer
+  appends under its lock, and truncates and starts over if the header is missing or another version, so a
+  format bump needs no manual cleanup. Two servers building one model at once both append it; readers keep
+  the first. Verified with dod_forest and dod_charlie started together.
+- **After a read, seek before writing.** C leaves a write directly after a read on the same stream
+  undefined, and the MSVC CRT silently drops it: every append to an existing file vanished while the
+  summary said "cache written". `AppendCache` seeks to the end after the header check and after a
+  truncation.
+
+Wads and models are read from the BSP's game directory (`<bsp dir>/..`), falling back to `valve`, where
+DoD's `halflife.wad` lives; a missing texture draws opaque and is named once in the build summary.
+
+`crossbot_coverage 0` turns it all off for A/B runs. `crossbot_monsters` lists the occluders,
+`crossbot_sight` measures one sightline, and `crossbot_sense_status` prints `clar` and
+`cov=<partial>/<blocked>/<traces>`.
+
+Measured on dod_forest with `crossbot_sight`: 16 horizontal 440-unit lines through each model's centre at
+20, 50 and 80% of its height, keeping only lines the plain traceline calls clear (all clarity 1 with
+coverage off). Mean clarity with coverage on:
+
+| occluder | low | mid | top |
+| --- | --- | --- | --- |
+| `arc_bush.mdl` (two instances) | 0.06 / 0.03 | 0.01 / 0.02 | 0.02 / 0.07 |
+| `arc_fern.mdl` (two instances) | 0.48 / 0.26 | 0.41 / 0.62 | 0.84 / 0.97 |
+| `func_illusionary *4`, TransAlpha foliage | 0.31 | 0.31 | 0.83 |
+
+A 180-unit bush hides nearly everything, a fern is dense at the base and open in the fronds, and an
+alpha-tested foliage brush lets about a third through.
 
 ### The bone cache and when it flushes
 
-`g_boneSets` is a file-static array of 64 entries, map-scoped rather than per-bot. 64 rather than one per
-player model so the same cache serves monster models if perception ever extends past players; the whole
-table is under 3 KB.
-
-The key is `v.modelindex`, not the header pointer. Modelindex is stable for the life of a map, and a player
-changing model with `setinfo model` lands on a different modelindex and therefore a different slot.
+`g_boneSets` is a file-static array of 64 entries (`kMaxBoneSets`), map-scoped, not per bot; the table is
+under 3 KB. The key is `v.modelindex`, stable for the life of a map; `setinfo model` lands on a different
+modelindex and slot.
 
 It flushes:
 
-- on `ServerActivate` -- the only flush actually required, since modelindex-to-model mapping is rebuilt per
-  map and every entry is meaningless afterwards;
+- on `ServerActivate`, the one flush actually required, since the modelindex-to-model mapping is rebuilt
+  per map;
 - on `ServerDeactivate`, so nothing survives a level change;
-- per entry, opportunistically: each lookup compares the stored `studiohdr_t*` against the current
-  `pfnGetModelPtr`, and rebuilds in place if they differ. GoldSrc's model cache can free and reload studio
-  extradata under memory pressure, and this makes that self-healing rather than something to detect.
+- per entry, opportunistically: each lookup compares the stored `studiohdr_t*` with the current
+  `pfnGetModelPtr` and rebuilds if they differ, which makes GoldSrc freeing and reloading studio extradata
+  under memory pressure self-healing.
 
-Never on a timer and never per bot -- the set of bones a model has does not change while it is loaded.
+Never on a timer and never per bot: a loaded model's bones do not change.
 
-### One entry per entity, and why it stopped being a ring
+### One entry per entity
 
-The list used to append. Sound, event and damage entries each took a fresh slot, and only `SUSP_SIGHT` was
-deduplicated per entity. The reasoning was that an enemy firing while moving leaves a trail of positions,
-which is real information about their direction of travel -- and it is, but the price was that **the
-trail outvoted the head**. A visible enemy is one entry; the same enemy running away lays down a footstep
-entry every ~0.3s, so within the 5-second window they hold fifteen votes at fifteen different points and
-the weighted mean is dragged backwards along the way they came. An elevator cycling in a shaft did the
-same thing for free. Footsteps did not create this defect, but they made it constant.
+The suspicion table holds exactly one slot per entity. `Push` overwrites the slot whose live handle
+matches the emitter, else appends if there is room, else reuses the entry with the smallest `time`. Nothing
+votes twice however much noise it makes, so where the bot faces stops depending on emission rate.
 
-Now every entity gets exactly one slot. `Push` looks for a live handle matching the emitter, overwrites it
-in place if it finds one, appends if there is room, and otherwise reuses the entry with the smallest
-`time`. Nothing can vote twice no matter how much noise it makes, and the direction the bot faces stops
-being a function of emission rate.
+**Why not a trail of entries:** a running enemy lays a footstep every ~0.3 s, fifteen votes at fifteen
+points in the 5 s window, which dragged the weighted mean back along the way they came while a visible
+enemy got one vote. A lift cycling in a shaft did the same.
 
-The dedup key is a `CBotEntHandle`, not an entity index. That matters at exactly one moment: a breakable
-is destroyed and something else is later allocated into the same edict slot. Under an index it would
-inherit the old entry and its stale position; the handle's serial number makes `Is` return false across
-that boundary, so the new entity gets a new slot and the orphan is unmatchable and ages out.
-
-`head` is gone, and that deletion is forced rather than tidy. Every read used to walk backwards from
-`head` and `break` at the first zero-weight entry, which was only ever valid because appending kept the
-ring in time order. Overwriting a slot's `time` in place destroys that order, so a `break` would silently
-truncate the list at the first stale entry -- the one failure mode here that looks like it works. Every
-scan now runs `[0, count)` and uses `continue`. With one entry per entity the live set is a handful, so
-scanning the array costs less than the ring ever did.
-
-`count` is a high-water mark of distinct entities seen, not a queue depth. Eviction only begins after 256
-distinct entities, and since decayed and orphaned entries are by definition the oldest, it reclaims those
-long before it touches anything live.
+- **The key is a `CBotEntHandle`, not an index.** When a breakable is destroyed and something else takes
+  its edict slot, the handle's serial makes `Is` false, so the new entity gets a new slot and the orphan
+  ages out instead of being inherited.
+- **Every scan runs `[0, count)` with `continue`.** Overwriting `time` in place destroys time order, so a
+  backward walk that `break`s at the first stale entry would silently truncate the list, the one failure
+  here that looks like it works. With one entry per entity the live set is a handful.
+- **`count` is a high-water mark of distinct entities** (`kSuspicionSlots`, 256), not a queue depth.
+  Eviction starts only after 256 distinct entities and reclaims decayed and orphaned entries first, since
+  they are oldest.
 
 ### Where the bot looks when it has no target
 
-Reading an entry goes through `LiveWeight`, and every scan in the file uses it -- tier selection,
-accumulation, both refine passes, `LiveCount`, `Freshest`. One choke point is the design: a second
-liveness test that disagreed with the first is how a tier gets selected and then contributes nothing.
+Every read of an entry goes through `LiveWeight`: tier selection, accumulation, `LiveCount`, `Freshest`.
+One choke point is the design: a second liveness test that disagreed is how a tier gets chosen and then
+contributes nothing. `LiveWeight` drops an entry whose entity is gone, drops a dead player or monster, and
+otherwise returns `Falloff(age)`. The handle check stops gibs and broken breakables steering the bot; the
+dead check stops it staring at a corpse for five seconds after a kill.
 
-`LiveWeight` drops an entry whose entity is gone, drops a player or monster that is dead, and otherwise
-returns `Falloff(age)`. The handle check is what makes gibs and destroyed breakables stop
-steering the bot; the dead check is what stops it staring at a corpse for the five seconds after a kill.
+**The dead check is only for players and monsters.** `IsDead` is
+`deadflag != DEAD_NO || health <= 0 || iuser1 > 0`, and a `func_door` or `func_train` has `health == 0`.
+Applied to `KIND_OTHER` it would discard all map machinery and leave the fallback tier permanently empty,
+with no test noticing because the player tier still works.
 
-### Recency falls off exponentially
+#### Recency falls off exponentially
 
     h = decay / 4                                     // 1.25 s at the default 5 s
     Falloff(age) = (2^(-age/h) - 1/16) / (15/16)      // age < decay, else 0
 
-The `1/16` is `2^-4`, the value at `age == decay`, subtracted and renormalised so the curve lands on
-exactly zero there. That keeps "live" meaning `age < decay`, which every liveness reader -- camp scare,
-grenade, satchel, TFC pipes, the combat hold in `Senses`, `LiveCounts` -- depends on and did not change.
-1 s old is 0.55, 2.5 s is 0.23, 4 s is 0.05.
+The `1/16` is `2^-4`, the value at `age == decay`, subtracted and renormalised so the curve hits zero
+exactly there. "Live" still means `age < decay`, which every liveness reader (camp scare, grenade, satchel,
+TFC pipes, the combat hold in `Senses`, `LiveCounts`) depends on. 1 s old is 0.55, 2.5 s is 0.23, 4 s is
+0.05. Linear falloff never separated anyone in a fight: a running or shooting player pushes every 0.3 s or
+every shot, so every noisy entity sat near 1.0 and the cone alone decided. The exponential makes a contact
+quiet for a second worth half of one still talking.
 
-**Linear falloff never separated anyone in a fight.** A running player pushes a footstep every 0.3 s and
-a shooting one pushes an event every shot, so every entity making noise sat within a few percent of 1.0
-and the cone term alone decided the vote. The exponential makes a contact that went quiet a second ago
-worth half of one that is still talking, which is the separation the vote needs.
+#### The tier vote
 
-**The dead check is scoped to players and monsters on purpose.** `IsDead` is
-`deadflag != DEAD_NO || health <= 0`, and a `func_door` or `func_train` has `health == 0`. Applying it to
-`KIND_OTHER` would silently discard every piece of map machinery from the list and leave the fallback tier
-permanently empty -- and nothing in the test suite would say so, because the player tier would still work.
+The vote picks **one tier** and ignores the rest: players if any are live, else monsters, else everything
+else. The enum order is the priority order, so this is a `min`. A player entry decayed to 0.1 still beats a
+door at 1.0, so the bot glances at the fading contact instead of snapping to the lift; the tier filter runs
+before `bestWeight` for that reason.
 
-Then the vote picks **one tier and ignores the rest**: players if any are live, else monsters, else
-everything else. The enum order is the priority order so this is a `min` and not a switch. The point is
-that a player entry decayed to weight 0.1 still beats a door at 1.0 -- the bot glances at the fading
-contact instead of snapping to the lift. That is why the tier filter runs before `bestWeight` rather than
-after it.
+**A monster hunting us votes at the player tier.** `Suspicion::hunting` is set in `Push` for a monster
+whose `m_hEnemy` is this bot, and `Tier(entry)` returns `KIND_PLAYER` for it; otherwise any live player
+contact, even at 0.1, would keep the head off the snark eating the bot. The flag sits beside `kind` rather
+than overwriting it, so `kinds=p:,m:,o:` in `crossbot_sense_status` still counts what it says and `hunt=`
+reports the promotion.
 
-**A monster that is hunting us votes at the player tier.** `Suspicion` carries a `hunting` flag, set in
-`Push` when the entry is a monster whose `m_hEnemy` is this bot, and `Tier(entry)` returns `KIND_PLAYER`
-for it. Without this the rest of the monster work is nearly inert: a bot with any live player contact --
-including one decayed to 0.1 -- would never turn its head toward the snark eating it, because the tier
-vote would have discarded the monster entry before scoring began. Tracing a monster you never look at
-buys nothing.
+#### Nothing is averaged: the winner is one entry, chosen by cone
 
-The flag is stored beside `kind` rather than overwriting it, so `kinds=p:,m:,o:` in
-`crossbot_sense_status` still counts what it says it counts and `hunt=` reports the promotion separately.
-Writing `KIND_PLAYER` into `kind` would have been one line fewer and would have made the status line lie.
-
-### Nothing is averaged: the winner is one entry, chosen by cone
-
-Within the winning tier every live entry is scored per sense, and the entry keeps its best sense:
+Within the winning tier every live entry is scored per sense, keeping its best:
 
     score = max over s of  Falloff(now - sourceTime[s]) * (s is DAMAGE or SIGHT ? 1 : ConeWeight(vantage, dir))
 
-and the **single highest scorer wins outright**. There is no vector sum, no mean-shift refinement and no
-degenerate-mean fallback any more -- all three existed to make averaging survive threats on opposite
-sides, and an argmax does not have that problem to solve. `authority` is the winning sense's recency
-alone, so the cone data decides *which* entry the bot looks at and never how hard it commits to
-looking: a fresh contact from an unwatched direction still commands a full turn.
+and the **single highest scorer wins**. No vector sum, mean-shift or degenerate-mean fallback: those
+existed to make averaging survive threats on opposite sides, which an argmax does not need.
+`authority` is the winner's recency alone, so the cone data picks *which* entry and never how hard the bot
+commits: a fresh contact from an unwatched direction still commands a full turn.
 
-**Damage and sight skip the cone.** The cone is a prior on where threats usually come from, which is
-the right discount for a sound. Being hit, or having traced someone, is not a guess, and discounting it
-is how bots came to ignore a player shooting them in the back: the attacker scored 0.15 while any bot
-running down the main cone scored near 1.0. There are no per-sense multipliers on top -- sound and
-gunfire are already held back by the cone, and that turned out to be enough of a handicap.
+- **Damage and sight skip the cone.** The cone is a prior on where threats come from, right for a sound.
+  Being hit or having traced someone is not a guess; coned, an attacker in the back scored 0.15 against
+  near 1.0 for anyone down the main cone, and bots ignore being shot from behind. Damage does not enter
+  combat (`doc/combat.md`), so this turn is the bot's whole reaction to an unseen attacker. There are no
+  per-sense multipliers on top: the cone is handicap enough for sound and gunfire.
+- **Each entry keeps a time per sense, `sourceTime[SUSP_COUNT]`**, while `time`, `source` and `pos` still
+  mean "the latest push" for every other reader. Needed because the attacker's own gunshot lands on the
+  same entry a frame after each hit; with only `source` the hit would fall back under the cone every other
+  frame. `Push` zeroes the array when a slot changes owner.
 
-**Each entry carries a time per sense, `sourceTime[SUSP_COUNT]`.** There is still one entry per entity
-and `time`, `source` and `pos` still mean "the latest push", so every other reader is untouched. The
-array exists because the attacker's own gunshot lands on the same entry a frame after each hit: with only
-`source`, the hit would be overwritten by an event and fall back under the cone every other frame. `Push`
-zeroes the array whenever a slot changes owner.
-
-`ConeWeight` reads the bot's blended vantage signature (`nav_vantage.cpp`), which says which cones
-everything with line of sight to this spot arrives through:
+`ConeWeight` reads the bot's blended vantage signature (`nav_vantage.cpp`), the cones through which
+everything with line of sight to this spot arrives:
 
     rel  = watch[k].amount / watch[0].amount        // watch is amount-descending, so rel in (0,1]
     best = max over k of  rel * max(0, dot(dir, watchDir[k]))
     return kVantageConeFloor + (1 - kVantageConeFloor) * best
 
-**Normalising against the strongest cone, not the sum, is what keeps the scale honest.** A dead-on hit on
-the main cone scores 1.0 whether the spot has one cone or four. Dividing by the sum would cap a four-cone
-spot at 0.25 and the floor would swamp every real hit on it.
+- **Normalise to the strongest cone, not the sum.** A dead-on hit on the main cone scores 1.0 whether the
+  spot has one cone or four; dividing by the sum would cap a four-cone spot at 0.25 under the floor.
+- **`kVantageConeFloor = 0.15` makes it a bias, not a blindfold.** A noise from a direction nothing arrives
+  from keeps 15% of its weight and can win once the main sightline goes quiet. (On its own 15% of a fresh
+  hit loses to any main-cone contact younger than about 2.9 s, which is why damage skips the cone.)
+- The point is the wall-staring case: without the cone, a noise behind the bot with no sightline drags the
+  mean into the wall. With it, the noise simply loses.
+- With no vantage data (an old map, `--no-vantage`, or `crossbot_vantage 0`) `ConeWeight` returns 1 and the
+  freshest live entry in the winning tier wins.
 
-`kVantageConeFloor = 0.15` is the whole reason this is a bias and not a blindfold. An entry the map says
-nothing ever arrives from still keeps 15% of its recency weight, so a noise from an unwatched direction
-can still win once everything down the main sightline has gone quiet. It no longer carries the
-shot-in-the-back case -- damage skips the cone for that -- and on its own it never could: 15% of a fresh
-hit loses to any contact down the main cone younger than about 2.9 s.
-
-The point is the wall-staring case: a noise behind the bot in a direction with no sightline used to drag
-the averaged mean into the wall between it and everything else. Now it simply loses.
-
-With no vantage data -- an old map, `--no-vantage`, or `crossbot_vantage 0` -- `ConeWeight` returns 1 and
-this degenerates to "the freshest live entry in the winning tier wins", which is the old behaviour minus
-the averaging.
-
-`ApplyLook` then blends, rather than overriding:
+`ApplyLook` then blends rather than overrides:
 
     desiredAngles.yaw = base.yaw + shortWay(want.yaw - base.yaw) * authority
     desiredAngles.pitch = base.pitch + (want.pitch - base.pitch) * authority
 
-`base` is whatever `desiredAngles` already holds -- path facing at the walk site, the last commanded angles
-at the idle sites. At `authority == 0` the write is a no-op and the behaviour is bit-identical to having no
-sense system at all, which is what keeps the nav sweep honest. As the freshest suspicion ages, the head
-drifts back onto the path by itself instead of snapping.
-
-An aim target always wins: if `ReadDelayed` serves a point, `ApplyLook` aims at it and returns before any
-of the above.
+`base` is whatever `desiredAngles` holds: the path facing at the walk site, the last commanded angles at
+idle sites. At `authority == 0` the write is a no-op, bit-identical to no sense system, which keeps the nav
+sweep honest. As the suspicion ages the head drifts back onto the path instead of snapping. An aim target
+always wins: if `ReadDelayed` serves a point, `ApplyLook` aims at it and returns first.
 
 ### When there is no suspicion at all, the vantage field drives the head
 
-`ApplyLook`'s `authority == 0` branch used to level the pitch and leave the yaw alone. It now calls
-`ApplyVantageLook`, which splits on whether a path is running:
+At `authority == 0`, `ApplyLook` calls `ApplyVantageLook`, which splits on whether a path is running:
 
-- **No path** -- write `watch[0]`'s yaw and pitch. That is the direction most of the sightlines into this
-  spot arrive from, so a bot standing still is watching the way it is most likely to be shot from.
-- **Path running** -- `desiredAngles.y` at this point is the path yaw, freshly written from the next
-  waypoint in `bot_move_nav.cpp`. Pick the watch direction closest to it in yaw; snap to it if it is
-  within `kVantagePathSnap = 60` degrees, otherwise keep the path yaw and level the pitch. So a bot
-  rounding a corner is already looking down the corridor rather than at its own next waypoint.
+- **No path:** write `watch[0]`'s yaw and pitch, the direction most sightlines into this spot arrive from,
+  so a standing bot watches the way it is most likely to be shot from.
+- **Path running:** `desiredAngles.y` is the path yaw toward the next waypoint. Take the watch direction
+  closest to it in yaw, and snap to it within `kVantagePathSnap` (60°); otherwise keep the path yaw and
+  level the pitch. A bot rounding a corner is already looking down the corridor.
 
-**The 60-degree clamp is not cosmetic: yaw is the movement basis.** `Bot_DecomposeMove` flattens to yaw
-alone, so an unbounded snap turns every corridor into a sideways strafe. The clamp buys the head-turn
-without giving up forward drive.
+- **The 60° clamp is not cosmetic: yaw is the movement basis.** `Bot_DecomposeMove` flattens to yaw, so an
+  unbounded snap turns every corridor into a sideways strafe.
+- **Both branches write absolutely, not through the `authority` blend.** At idle sites `base` is the
+  previous frame's output, so a blend compounds and the head freezes wherever it drifted (see the ratchet
+  below).
+- The blend is refreshed every `kVantageInterval` (0.1 s) per bot from its eye: the field is smooth and a
+  bot does not move far in 100 ms.
+- `crossbot_vantage 0` skips the refresh, so the blend is empty, `ConeWeight` returns 1 and this branch
+  falls through to `desiredAngles.x = 0`. That switches off everything the field does, for the nav-sweep
+  A/B, but is not a full revert: the argmax replaced averaging unconditionally.
+- **Senses outrank the vantage look.** Map machinery (doors, chargers, item respawns) pushes `SUSP_SOUND`
+  constantly, and a live `KIND_OTHER` entry at 0.1 still takes the head off the vantage direction, because
+  it is a real sense and this is the fallback.
 
-**Both branches write absolutely, not through the `authority` blend, and that is deliberate** -- see the
-ratchet note below. `base` is the previous frame's own output at the idle call sites, so a blend there
-compounds and the head freezes wherever it drifted to. An absolute write cannot ratchet.
+`crossbot_vantage_status` reports which branch won per bot as `look=`: `disabled`, `gated`, `aim`,
+`predict`, `gauss`, `sense`, `camp`, `back-check`, `vantage-idle`, `vantage-path`, `vantage-offpath` or
+`no-vantage`. It is the only reliable way to tell them apart from outside.
 
-The blend itself is refreshed once every `kVantageInterval = 0.1` s per bot from the bot's eye position,
-not per frame; the field is a smooth spatial function and a bot does not move far in 100 ms.
+### The gate veto
 
-`crossbot_vantage 0` skips the refresh entirely, so the blend is empty, `ConeWeight` returns 1 and this
-branch falls through to the old `desiredAngles.x = 0`. That switches off everything the vantage field
-does, which is what the nav-sweep A/B needs -- but it is **not** a full revert to the pre-field runtime,
-because the argmax replaced the averaging unconditionally and does not depend on the cvar.
+`ApplyLook` does nothing while any waypoint in `waypointIndex .. +2` needs a ladder, an air-move launch, a
+lift ride, a button use or a trigger touch. Without that lookahead the bot reaches a gate with its head
+turned and pays the full `kLadderAimTolerance` / `kActivationAimTolerance` latch cost, the controller's one
+real cost.
 
-**Senses outrank the vantage look, and on a busy map that matters more than it sounds.** The tier vote
-falls through to `KIND_OTHER`, and map machinery -- doors, chargers, item respawns -- pushes `SUSP_SOUND`
-entries constantly. A live `KIND_OTHER` entry at weight 0.1 still takes the head away from the vantage
-direction, because it is a real sense and this is the fallback. `crossbot_vantage_status` reports which
-branch actually won per bot (`look=sense` / `vantage-idle` / `vantage-path` / `vantage-offpath` /
-`gated`), which is the only reliable way to tell them apart from outside.
-
-### The gate veto survived from the gaze scaffold
-
-`ApplyLook` refuses entirely when any waypoint in `waypointIndex .. +2` needs a ladder, an airmove launch,
-an elevator ride, a button use or a trigger touch. Without that lookahead the bot arrives at a gate with
-its head turned and pays the full `kLadderAimTolerance` / `kActivationAimTolerance` latch cost, which is the
-controller's one real cost.
-
-It is also still **opt-in**, applied at five sites in `bot_move_nav.cpp` and never on the branches where
-the view drives the movement. Opt-in fails safe -- a missed site means no looking around there. Opt-out
-would fail dangerous, since a missed site breaks a ladder.
+It is **opt-in**, called at each walk and idle site in `bot_move_nav.cpp` and never on branches where the
+view drives the movement. Opt-in fails safe: a missed site means no looking around there. Opt-out would
+fail dangerous: a missed site breaks a ladder.
 
 ### Two gaps worth knowing about
 
-**A bot with nothing in its cone and no suspicion used to never turn.** This is now solved, and the
-solution is the Parabot one rather than the foxbot one. Parabot scored the four compass directions per
-map cell by how much of the map is visible that way, weighted by where players historically died, then
-swept the head around the winner. navgen's vantage field is that measurement done properly -- an actual
-traced visibility signature per sampled eye position rather than four compass buckets -- and
-`ApplyVantageLook` points the head at its `watch[0]`. Foxbot's cheap version (random yaw every 1-3s,
-rejected unless a 200-unit trace is clear) was the alternative and is not needed.
+**A bot with nothing in its cone and no suspicion would never turn.** navgen's vantage field solves this
+the Parabot way, done properly: Parabot scored four compass directions per map cell by how much was visible
+and where players died, then swept the head round the winner; the vantage field is a traced visibility
+signature per sampled eye position, and `ApplyVantageLook` points the head at `watch[0]`. foxbot's cheap
+version (random yaw every 1-3 s, rejected unless a 200-unit trace is clear) is not needed.
 
-The sweep exists now, at hard and expert only. `BotDiff::BackCheck` gives `ApplyLook` a period, and a
-weighted-random pick over `watch[0..3]` by `amount` turns the head to one of them for 0.4s before the
-ordinary logic takes it back. A pick within 60 degrees of where the bot already means to look is
-rejected and the period spent, so the glance is always at something the bot was *not* watching. At
-normal and easy the head still goes to `watch[0]` and stays there. See `bot_difficulty.cpp` in `doc/difficulty.md` for
-why it sits above the suspicion blend rather than inside this function, and for the measured rates.
+At hard and expert there is also a sweep: `BotDiff::BackCheck` gives `ApplyLook` a period, and a
+weighted-random pick over `watch[0..3]` by `amount` turns the head there for 0.4 s (`kBackCheckHold`)
+before the ordinary logic takes it back. A pick within 60° of where the bot already means to look is
+rejected and the period spent, so the glance is always somewhere it was not watching. At normal and easy
+the head goes to `watch[0]` and stays. `doc/difficulty.md`, `bot_difficulty.cpp`, has why it sits above
+the suspicion blend and the measured rates.
 
-Footsteps narrow the remaining gap. A running enemy is heard at ~625 units regardless of facing, so a bot
-turns round on its own as soon as anyone moves nearby. The uncovered case is the enemy who is stationary
-or walking, since below 220 units/s they emit nothing at all -- and a bot facing its main sightline is
-much better positioned for that case than one facing a wall.
+Footsteps narrow what is left: a running enemy is heard at ~625 units regardless of facing. The uncovered
+case is a stationary or walking enemy (silent below 220 units/s), and a bot facing its main sightline is
+far better placed for that than one facing a wall.
 
-**Pitch is levelled, and the suspicion pitch is clamped, for a reason.** When `ApplyLook` finds no target,
-no live suspicion and no usable vantage direction it writes `desiredAngles.x = 0` rather than leaving the
-angles alone -- and the vantage branches sidestep the same trap by writing absolutely. Without that the
-blend ratchets: `base` is the previous frame's output, so each frame moves further toward the suspicion and
-nothing ever moves it back — when the authority decays to zero the head simply freezes wherever it got to.
-A door sound in a shaft below the bot was enough to leave two bots permanently staring at the floor at
-about 70 degrees of pitch, which also put each other outside their view cones so neither could ever
-reacquire. Levelling is safe at the walk site because navigation always commands pitch 0 there; pitch is
-purely a look concern. The `kLookPitchLimit` clamp of 45 degrees bounds how far a very close suspicion can
-crank the head in the first place, and does not apply to a real aim target, which needs the full range to
-aim at someone below.
+**Pitch is levelled, and the suspicion pitch is clamped.** With no target, no live suspicion and no usable
+vantage direction, `ApplyLook` writes `desiredAngles.x = 0` instead of leaving the angles alone (the vantage
+branches avoid the same trap by writing absolutely). Otherwise the blend ratchets: `base` is the previous
+output, each frame moves further toward the suspicion and nothing moves it back, so when authority decays
+the head freezes where it got to. A door sound in a shaft once left two bots staring at the floor at about
+70° of pitch, out of each other's cones for good. Levelling is safe at the walk site because navigation
+always commands pitch 0 there. `kLookPitchLimit` (45°) bounds how far a close suspicion can crank the head;
+it does not apply to a real aim target, which needs the full range.
 
 ### crossbot_sense_status
 
-Per bot: the aim target and the bone currently sampled, the remembered enemy and how stale that
-sighting is, live suspicion count broken out by kind, which tier won the vote, the freshest entry with
-its source and age and position, the look direction with its authority and how many entries survived
-the cone refinement, and cumulative push counts per source.
+Per bot: the aim target and its sampled bone, the remembered enemy and its age, live suspicions by kind,
+the winning tier, the freshest entry with source, age and position, the look direction with its authority
+and entry count, and cumulative push counts per source. Fields that need reading:
 
-`target=` against `enemy=` is the pair that shows the memory doing its job. They agree while the bot
-can see someone; `target=- enemy=Sense2 enemyAge=1.8s` is the whole point of the feature, and
-`enemy=-` returning after `enemyAge` passes `crossbot_sense_decay` is the record expiring on schedule.
-
-`kept` is now simply the live entry count in the winning tier, not a mean-shift survivor count -- the
-direction is one entry's, so there is nothing to survive.
-
-`kinds` against `tier` is the second pair, and it is the one assertion worth automating: `tier` must read
-`PLAYER` whenever `kinds=p:` is nonzero. `test_sense.ps1` checks exactly that on every poll.
-
-`fresh=` is the freshest entry *overall*, not the freshest in the winning tier, so `tier=PLAYER` next to
-`fresh=SOUND ent=148` is correct and not a contradiction -- a door was heard more recently than the
-player, and lost anyway.
-
-`pushed=` exists because dedup destroyed the old way of proving a source fires. With one entry per entity
-an enemy's `DAMAGE` entry is overwritten by their own `SIGHT` entry inside the same `BotSense::Update`,
-so `fresh=` reads `SIGHT` almost always and `DAMAGE` essentially never. `test_fire.ps1` used to sample
-this command four times per poll to work around that; the counters are cumulative, so one poll cannot
-miss a source that fired between polls, and the sampling loop is gone.
+- **`target=` against `enemy=`**: they agree while the bot can see someone. `target=- enemy=Sense2
+  enemyAge=1.8s` is the memory working, and `enemy=-` returning once `enemyAge` passes
+  `crossbot_sense_decay` is the record expiring on schedule.
+- **`notice=<count>:<name>:<progress>/<need>s`**: live slots, then the highest-progress one; `need` is the
+  full-fill time at the angle and range last seen. Progress climbing with `target=-` is an enemy being
+  noticed; falling is the meter draining.
+- **`kinds` against `tier`**, the assertion worth automating: `tier` must read `PLAYER` whenever `kinds=p:`
+  is nonzero. `test_sense.ps1` checks it every poll.
+- **`fresh=`** is the freshest entry *overall*, so `tier=PLAYER` beside `fresh=SOUND ent=148` is correct: a
+  door was heard more recently than the player and lost anyway.
+- **`kept`** is the live entry count in the winning tier.
+- **`pushed=`** counts pushes per source, cumulatively. With one entry per entity an enemy's `DAMAGE` entry
+  is overwritten by their `SIGHT` within one `BotSense::Update`, so `fresh=` almost never shows `DAMAGE`;
+  only the counters prove a source fires.
+- `cands`, `keep=`/`keeps=inc:,new:`, `pushed=...ally:`, `mon=`, `hunt=`, `leadblk`, `cloak=`, `light=`,
+  `dark=`, `clar`, `cov=`: see the sections above.
 
 ### crossbot_vantage_status
 
-`crossbot_vantage_status` with no arguments reports the loaded field (point count, spacing, resolved
-grid cell and dimensions, `maxExposure`, and the cvar) and then, per bot, the blend at its own eye:
-neighbours used, distance to the nearest, `exposure` raw and as a fraction of the map maximum,
-every merged watch direction, and a drive line giving `view=` (actual `v_angle`),
-`desired=` (what the look code commanded this frame), `look=` (which branch produced it) and the
+With no arguments it reports the loaded field (point count, spacing, resolved grid cell and dimensions,
+`maxExposure`, the cvar) and then, per bot, the blend at its eye: neighbours used, distance to the nearest,
+`exposure` raw and as a fraction of the map maximum, every merged watch direction, and a drive line with
+`view=` (actual `v_angle`), `desired=` (what the look code commanded), `look=` (which branch) and the
 waypoint index.
 
-`crossbot_vantage_status <x> <y> <z>` blends at a world point instead. **This is the round-trip test:**
-at a stored vantage's exact position the distance-0 neighbour dominates the IDW, so the output must be
-that vantage's own record back -- watch yaws, pitches, spreads and normalised amounts all matching. It is
-the cheapest way to prove the loader, the grid and the angular merge are all correct at once.
+`crossbot_vantage_status <x> <y> <z>` blends at a world point instead. **This is the round-trip test:** at
+a stored vantage's exact position the distance-0 neighbour dominates the IDW, so the output must be that
+vantage's own record (watch yaws, pitches, spreads and normalised amounts). It proves the loader, the grid
+and the angular merge at once.
 
-`desired=` next to the watch list is what makes the look behaviour checkable from outside. On a
-`look=vantage-path` sample the commanded yaw *and* pitch equal one of the listed watch directions
-exactly, because the branch writes the direction rather than blending toward it. Two caveats when reading
-it: the blend printed here is recomputed at print time, so on a moving bot it can be one sample ahead of
-the one `ApplyLook` used, and `look=vantage-offpath` prints pitch 0 with the path yaw, which is the
-60-degree clamp refusing the snap rather than a missing match.
+`desired=` next to the watch list makes the look checkable: on a `look=vantage-path` sample the commanded
+yaw *and* pitch equal one listed watch direction exactly. Two caveats: the blend is recomputed at print
+time, so on a moving bot it can be one sample ahead of the one `ApplyLook` used; and `look=vantage-offpath`
+prints pitch 0 with the path yaw, which is the 60° clamp refusing the snap.
 
 ### The enemy handle outlives the sight of it
 
-`sense.target` is not memory. `UpdateVision` writes `sense.target.Set(best)` unconditionally, `best`
-included when it is null, so the handle drops the frame line of sight breaks. That is correct for what
-it feeds -- aim and the trigger -- and useless for deciding where to walk.
+`sense.target` is not memory: `UpdateVision` writes `sense.target.Set(best)` every frame, null included, so
+it drops the frame sight breaks. That suits aim and the trigger, and is useless for deciding where to walk.
 
-`sense.enemy` is the memory. It is written from the same site as `target` whenever a target is visible
-and survives the loss: handle, position, and the time it was recorded. It is dropped only when the
-entity is gone, when the entity is dead, or when the record is older than `crossbot_sense_decay` --
-the same three tests `LiveWeight` applies to a suspicion, because it is the same question.
+`sense.enemy` is the memory. It is written from the same site whenever a target is visible and survives
+the loss: handle, position, and time. It drops only when the entity is gone or dead, or the record is
+older than `crossbot_sense_decay`, the three tests `LiveWeight` applies to a suspicion.
 
-**The position stored is `v.origin`, not `bestPoint`.** `bestPoint` is a randomly chosen hitbox bone
-and can be a hand held out over a ledge; `v.origin` is at the feet, which is what `FindAreaExact` can
-resolve to a nav area. A bone-derived goal resolves to no area, or to the wrong one, in exactly the
-cases where the enemy is somewhere interesting.
-
-**It is deliberately refreshed only by sight.** Sound, gunfire and damage from that same enemy keep
-updating its `Suspicion` slot and keep steering the head, but they do not move the remembered
-position. So the bot walks to where it last *saw* someone rather than where it last heard a footstep,
-and the goal holds still while it walks there.
+- **The stored position is `v.origin`, not `bestPoint`.** A bone can be a hand out over a ledge; the feet
+  resolve with `FindAreaExact`, exactly in the cases where the enemy is somewhere interesting.
+- **It is refreshed only by sight.** Sound, gunfire and damage from the same enemy update its `Suspicion`
+  slot and steer the head, but do not move the remembered position: the bot walks to where it last *saw*
+  someone, and the goal holds still while it walks.
 
 ### Sense reports, it does not decide
 
-`sense.enemy` used to reach forward into navigation: `ForgetEnemy` cleared `bot.goalIsEnemy` and reset
-the path, and a sight-loss edge armed a `rescore` flag that `Bot_MoveNav` consumed by dropping the
-goal. Both are gone. Sense answers questions and owns nothing downstream; `BotCombat` reads the
-answers and makes every transition (`doc/combat.md`, `bot_combat.cpp`).
+Sense answers questions and owns nothing downstream; `BotCombat` reads the answers and makes every
+transition (`doc/combat.md`, `bot_combat.cpp`). Nothing in sense touches the goal or the path.
 
-`Senses(bot, ent)` is the one question the table could not answer before: is there still *any* live
-entry pointing at this entity? Sight, sound, damage and events all count, so a bot that can hear its
-enemy has not lost it. Entries expire on `crossbot_sense_decay` in the same sweep every other reader
-uses, which is what makes this "have I lost every trace of it" rather than "did I ever see it".
+`Senses(bot, ent)` asks whether any live entry still points at this entity. Sight, sound, damage and events
+all count, so a bot that can hear its enemy has not lost it. Entries expire on `crossbot_sense_decay` in
+the same sweep every reader uses, so this means "have I lost every trace of it".
 
-`bot.sense` is not covered by anything that resets on death, so `BotSense::OnRespawn` clears the enemy
-alongside `BotItems::OnRespawn`, `BotFire::Reset` and `BotCombat::OnRespawn`.
+`bot.sense` is not reset by anything on death, so `BotSense::OnRespawn` clears the enemy alongside
+`BotItems::OnRespawn`, `BotFire::Reset` and `BotCombat::OnRespawn`.
 
 ## bot_daze.cpp
 
-Flash grenades and concussion grenades, both learned the way a real client learns them: from the user
-message the game DLL addresses to the player. Nothing else in the plugin reads network messages.
+Flash and concussion grenades, learned the way a client learns them: from the user message the game DLL
+addresses to the player. Nothing else in the plugin reads network messages.
 
 ### The message hook
 
 `engine_hooks.cpp` hooks `pfnRegUserMsg`, `pfnMessageBegin`, `pfnWriteByte`, `pfnWriteShort` and
-`pfnMessageEnd`, all post. `pfnRegUserMsg` records the ids of `ScreenFade` and `Concuss` as they are
-registered. The engine does not dedupe by name alone: under valve+cstrike+tfc, `ResetHUD`, `Battery`
-and `StatusValue` each hold two ids, apparently where the games disagree on size. `ScreenFade` (96)
-and `Concuss` (156) come out as one id each. A game registering `ScreenFade` with a different size
-would overwrite the stored id and blind only that game's victims; `crossbot_usermsgs` shows it.
-`MessageBegin` arms capture only for `MSG_ONE` / `MSG_ONE_UNRELIABLE` to one of our bots, and only for
-those two ids. Every write hook returns on a single branch while capture is disarmed, which is the
-whole cost on the common path.
+`pfnMessageEnd`, all post. `pfnRegUserMsg` records the ids of `ScreenFade` and `Concuss` as they register.
+`MessageBegin` arms capture only for `MSG_ONE` / `MSG_ONE_UNRELIABLE` to one of our bots and only for those
+two ids; every write hook returns on one branch while disarmed, which is the whole cost on the common path.
 
-**The recipient test is `BotManager::FindBot`, never `FL_FAKECLIENT`.** CS wipes that flag on every
-spawn (`doc/games.md`, *Rules*), so the first version of this hook processed a cstrike bot's
-flashbangs for its first life and silently dropped every one after its first respawn -- while
-`crossbot_daze_test`, which bypasses the hook, kept passing. The id compare runs first -- two integer
-compares against the two cached ids -- so every message that is not one of ours is rejected before
-`FindBot` walks `g_bots`.
-
-Only bytes and shorts are hooked because those are the only field types the two messages use. A third
-message with any other field type must hook those writers too, or its field indices will be wrong.
-
-The ids come only from the hook, so the plugin must be loaded before the game DLLs register -- true for
-`plugins.ini` at startup, false for a later `meta load`. `crossbot_usermsgs` says which case applies.
-
-The handlers touch `CBot` fields and `gpGlobals->time` and nothing else, so they need no game context.
+- **The recipient test is `BotManager::FindBot`, never `FL_FAKECLIENT`.** CS clears that flag on every spawn
+  (`doc/games.md`, *Rules*), so a flag test handles a cstrike bot's flashbangs for its first life only,
+  while `crossbot_daze_test`, which bypasses the hook, keeps passing. The two id compares run first, so a
+  message that is not ours never reaches `FindBot`'s walk of `g_bots`.
+- **Ids are per name, and may collide across games.** Under valve+cstrike+tfc, `ResetHUD`, `Battery` and
+  `StatusValue` each hold two ids (the games disagree on size); `ScreenFade` (96) and `Concuss` (156) get one
+  each. A game registering `ScreenFade` with a different size would overwrite the stored id and blind only
+  that game's victims; `crossbot_usermsgs` shows it.
+- **The ids come only from the hook**, so the plugin must load before the game DLLs register: true for
+  `plugins.ini` at startup, false for a later `meta load`. `crossbot_usermsgs` says which.
+- Only bytes and shorts are hooked, the only field types the two messages use. A third message with other
+  field types must hook those writers too, or its field indices are wrong.
+- The handlers touch `CBot` fields and `gpGlobals->time` only, so they need no game context.
 
 ### ScreenFade
 
-10 bytes: `duration` and `holdTime` as 4.12 fixed-point shorts (`seconds = value / 4096`),
-`fadeFlags`, then r, g, b, a. The hook sees the `int` the game DLL passed, before the engine truncates
-it, and masks to 16 bits.
+10 bytes: `duration` and `holdTime` as 4.12 fixed-point shorts (`seconds = value / 4096`), `fadeFlags`, then
+r, g, b, a. The hook sees the `int` the game passed, before engine truncation, and masks to 16 bits.
 
-A fade blinds only when `a >= 200` and `FFADE_MODULATE` is clear. 200 is CS's minimum flash alpha
-(`RadiusFlash` sends 255 facing the grenade, 200 facing away), and it is what keeps HL's charged-gauss
-self-fade -- orange, alpha 128 -- from blinding every bot that fires one. A map `env_fade` at full
-alpha does blind bots; the screen really is covered.
+**A fade blinds only when `a >= 200` and `FFADE_MODULATE` is clear.** 200 is CS's minimum flash alpha
+(`RadiusFlash` sends 255 facing the grenade, 200 facing away), and it keeps HL's charged-gauss self-fade
+(orange, alpha 128) from blinding every bot that fires one. A full-alpha map `env_fade` does blind bots:
+the screen really is covered.
 
-Blindness lasts `kBlindScale * duration`, 0.33: ReGameDLL's `PlayerBlind` calls
-`Blind(fadeTime * 0.33, ...)` for its own bots, so a bot is blind for a third of the time a human's
-screen stays white. Point blank and facing the grenade that is 12s of fade and 4s of blindness. A
-second flash extends to whichever ends later. That formula is `IGameProfile::BlindSeconds`'s default,
-and it is looked up on the *bot's* game (`XPlay::ProfileFor(bot.gameDll)`), because the handler runs
-outside any game context. DoD overrides it to `hold + scale * duration`. Its only full-alpha fade is a
-headshot's (alpha 200, dark red, 3 s fade after a 2 s hold, dod.c:86590), and the hold is time the
-screen really is covered, so a headshot victim stays blind for about 3 s.
+**Duration is `IGameProfile::BlindSeconds`**, looked up on the *bot's* game
+(`XPlay::ProfileFor(bot.gameDll)`), because the handler runs outside any game context. The default is
+`kBlindScale * duration`, 0.33, after ReGameDLL's own bots (`PlayerBlind` calls
+`Blind(fadeTime * 0.33, ...)`): blind for a third of the time a human's screen stays white, so 4 s of
+blindness from 12 s of point-blank fade. A second flash extends to whichever ends later. DoD overrides it to
+`hold + scale * duration`: its only full-alpha fade is a headshot's (alpha 200, dark red, 3 s fade after a
+2 s hold, dod.c:86590), and the hold is time the screen really is covered, so a headshot blinds for about
+3 s.
 
-While blind, `BotSense::Update` skips `UpdateVision` and clears `target`, `targetBone`, `visionCands`
-and `visionKeep`, emptying the delay queue every frame -- the same cleanup as
-`crossbot_sense 0` except that **`sense.enemy` survives**. A flashed bot still knows someone was
-there. Sound, events and damage reach the suspicion list outside `UpdateVision`, so the bot keeps
-turning toward noise.
+**While blind:**
 
-`BotCombat::Run` also drives while blind, with or without an open fight. The exposure shuffle never
-reads the enemy, so a blind bot drops its goal and walks toward cover exactly as a fighting one does,
-and `DuelDrive` declines for want of an enemy. `combat.active` is not touched, so
-`crossbot_combat_status` still answers whether there is a fight. When blindness ends with no fight,
-`Run` releases the drive and zeroes `nextSelectTime`, as `Exit` does. Under `crossbot_combat 0` the
-blind drive is off as well, because `Update` calls `Exit` every frame there and the goal would be
-dropped again on each one.
-
-**The queue is emptied every frame of blindness, not just on the edge.** `BotFire`'s `haveTarget` is
-`BotAim::ReadPredicted`, and that falls back to extrapolating from the newest queued slot for up to
-`kPredictHorizon` (1 s) whenever `predictLatched && combat.active`. Clearing only when
-`sense.target` was live -- the first version -- left every bot flashed in the gap between sightings
-with its slots intact, so it kept firing accurately for over a second after going blind. With the
-queue emptied each frame nothing can serve a target, `BotFire` reads `no-target`, and the shooting
-stops for the whole blindness. `BotFire` itself is still untouched; it simply has nothing to aim at.
+- `BotSense::Update` skips `UpdateVision` and clears `target`, `targetBone`, `visionCands` and `visionKeep`,
+  as `crossbot_sense 0` does, except that **`sense.enemy` survives**: a flashed bot still knows someone was
+  there. Sound, events and damage still reach the suspicion table, so it keeps turning toward noise.
+- **The delay queue is emptied every frame**, not just on the edge. `BotFire`'s `haveTarget` is
+  `BotAim::ReadPredicted`, which extrapolates from the newest slot for up to `kPredictHorizon` (1 s)
+  whenever `predictLatched && combat.active`; clearing only on the edge left a bot flashed between
+  sightings firing accurately for over a second. With the queue empty, `BotFire` reads `no-target` and
+  stops for the whole blindness, untouched itself.
+- `BotCombat::Run` drives, with or without an open fight: the exposure shuffle never reads the enemy, so a
+  blind bot drops its goal and walks toward cover, and `DuelDrive` declines for want of an enemy.
+  `combat.active` is not touched, so `crossbot_combat_status` still says whether there is a fight. When
+  blindness ends with no fight, `Run` releases the drive and zeroes `nextSelectTime`, as `Exit` does. Under
+  `crossbot_combat 0` the blind drive is off too, since `Update` calls `Exit` every frame there.
 
 ### Concuss
 
-One byte. A TFC client stores it in `v_idlescale`, and `V_AddIdle` adds
-`scale * sin(t * cycle) * level` to the rendered view: pitch cycle 1 level 0.3, yaw cycle 2 level
-0.3, and roll, which a bot does not have, dropped. `Bot_UpdateFacing` adds the same to its desired
-angles before the controller runs, so the hand controller smooths it into a wander and
-`Bot_DecomposeMove` makes the bot walk crooked for free. `t` is absolute time, as on the client.
+One byte. A TFC client stores it in `v_idlescale`, and `V_AddIdle` adds `scale * sin(t * cycle) * level` to
+the rendered view: pitch cycle 1 level 0.3, yaw cycle 2 level 0.3, and roll, which a bot lacks, dropped.
+`Bot_UpdateFacing` adds the same to its desired angles before the controller, which smooths it into a
+wander, and `Bot_DecomposeMove` makes the bot walk crooked for free. `t` is absolute time, as on the client.
 
-TFC's server, decompiled: `TeamFortress_Concuss` sets the value to 100 for 15s, or 7s for a medic;
-each think recomputes `100 * remaining / duration`, and a message goes out whenever that integer
-changes. About 100 bytes arrive, the last one zero, and the bot tracks the latest -- there is nothing
-to model. At 100 the sway is ±30 degrees on both axes.
+TFC's server (`TeamFortress_Concuss`, decompiled) sets the value to 100 for 15 s, or 7 s for a medic; each
+think recomputes `100 * remaining / duration` and sends a message whenever that integer changes. About 100
+bytes arrive, the last zero, and the bot tracks the latest. At 100 the sway is ±30° on both axes.
 
-On a client the sway is cosmetic and the real aim is untouched; a human misaims because what they see
-is moving. Applying it to the bot's actual angles is the same miss, taken directly.
-
-Respawn resets the whole state.
+On a client the sway is cosmetic and real aim is untouched; a human misaims because what they see moves.
+Applying it to the bot's actual angles is the same miss, taken directly. Respawn resets the whole state.

@@ -21,6 +21,7 @@ public:
 	const char *AmmoEntity(int weaponId, WeaponAmmo pool) const override;
 
 	int MeleeWeapon() const override;
+	bool MeleeOnlyAllows(int id) const override;
 	int AmbushWeapon(AmbushKind kind) const override;
 	int DeployWeapon(DeployKind kind) const override;
 	const char *DeployEntity(DeployKind kind) const override;

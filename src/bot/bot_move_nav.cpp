@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdarg>
+#include <cstdio>
 
 #include "bot_move_nav.h"
+#include "../game/cvars.h"
 #include "bot_move.h"
 #include "bot_aim.h"
 #include "bot_fire.h"
@@ -24,6 +26,7 @@
 #include "bot_log.h"
 #include "bot_perf.h"
 #include "bot_strategic.h"
+#include "../game/crossplay.h"
 #include "../game/game_profile.h"
 #include "../nav/nav.h"
 #include "../nav/nav_math.h"
@@ -43,6 +46,7 @@ namespace
 	}
 
 	constexpr float kFullDrive = 1000.f;
+	constexpr float kFriendDeathHp = 100.f;
 	constexpr float kAimVelocitySpeed = 20.f;
 	constexpr int kHullPoint = 0;
 	constexpr int kHullHuman = 1;
@@ -124,8 +128,10 @@ namespace
 	{
 		BOTPERF_SCOPE(ZONE_PLANTRACES);
 		NavPlan::PlanTraceContext traces;
-		traces.standTrace = Bot_EngineTraceFn(pEdict, kHullHuman);
-		traces.duckTrace = Bot_EngineTraceFn(pEdict, kHullDuck);
+		traces.standTrace = Bot_WorldTraceFn(pEdict, kHullHuman, true);
+		traces.duckTrace = Bot_WorldTraceFn(pEdict, kHullDuck, true);
+		traces.standArc = Bot_WorldArcFn(pEdict, kHullHuman, true);
+		traces.duckArc = Bot_WorldArcFn(pEdict, kHullDuck, true);
 		{
 			BOTPERF_SCOPE(ZONE_PUSHFIELDS);
 			traces.standPush = Bot_PushFields(kHullHuman);
@@ -135,7 +141,7 @@ namespace
 		traces.gravityMultiplier = Bot_GravityMultiplier(pEdict);
 		if (const Nav::NavMesh *mesh = Nav::Get())
 			traces.waterSurfaces = &Nav::WaterSurfaces(*mesh);
-		g_airmoveCache.SetVerify(g_engfuncs.pfnCVarGetFloat("crossbot_airmove_verify") > 0.f);
+		g_airmoveCache.SetVerify(CBotCvarFloat("crossbot_airmove_verify") > 0.f);
 		traces.airmoveCache = &g_airmoveCache;
 		return traces;
 	}
@@ -165,9 +171,13 @@ namespace
 	constexpr float kTeleportJumpThreshold = 150.f;
 
 	constexpr float kMineSafeRadius = 375.f;
+	constexpr float kAvoidAimMin = 1.f;
 	constexpr float kRepathInterval = 2.f;
+	constexpr float kPlanBudgetMs = 6.f;
 	constexpr int kStallRepathLimit = 3;
 	constexpr float kStallEscapeDistance = 64.f;
+	constexpr int kStuckGiveUpLimit = 3;
+	constexpr float kStuckWindow = 15.f;
 	constexpr float kEtaSafetyMargin = 1.6f;
 	constexpr float kProgressEpsilon = 8.f;
 	constexpr float kMoveButtonDeadzone = 0.01f;
@@ -2088,13 +2098,14 @@ namespace
 		bot.lastProgressS = 0.f;
 		bot.stallRepaths = 0;
 		bot.nextRepathTime = 0.f;
+		bot.search.reset();
 	}
 
 	void WriteTraceLog(CBot &bot)
 	{
 		if (bot.traceLog.empty())
 			return;
-		const char *path = CVAR_GET_STRING("crossbot_trace_path");
+		const char *path = CBotCvarString("crossbot_trace_path");
 		FILE *f = fopen(path, "w");
 		if (f)
 		{
@@ -2168,6 +2179,27 @@ namespace
 			bot.estimatedArrivalTime += extra / physics.maxSpeed;
 	}
 
+	int EnteredConnection(const CBot &bot, const Nav::NavMesh &mesh, uint32_t prevId, const Nav::Area &cur)
+	{
+		size_t areaSteps = std::min(bot.plannedAreaPath.size(), bot.plannedConnPath.size() + 1);
+		for (size_t k = 1; k < areaSteps; ++k)
+		{
+			if (bot.plannedAreaPath[k] == cur.id)
+				return static_cast<int>(bot.plannedConnPath[k - 1]);
+		}
+
+		for (uint32_t idx : cur.connIndices)
+		{
+			if (idx >= mesh.conns.size())
+				continue;
+			const Nav::Connection &c = mesh.conns[idx];
+			bool joins = (c.areaA == prevId && c.areaB == cur.id) || (c.areaB == prevId && c.areaA == cur.id);
+			if (joins && crossbot_nav::ConnAllowsDirection(c.connFlags, c.areaA, prevId))
+				return static_cast<int>(idx);
+		}
+		return -1;
+	}
+
 	void RewardEnteredConnection(CBot &bot, uint32_t enteredId)
 	{
 		if (bot.visitedAreaPath.empty())
@@ -2199,45 +2231,125 @@ namespace
 		return "?";
 	}
 
-	bool Repath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict)
+	enum RepathResult
+	{
+		REPATH_FAILED,
+		REPATH_PENDING,
+		REPATH_DONE
+	};
+
+	void RevengeLosScan(const Nav::NavMesh &mesh, const Vector &eye, const Vector &fwd, float radius,
+		float cosFov, std::vector<bool> &blocked, int &walkConns, int &traced, int &blockedCount, double &ms)
+	{
+		blocked.assign(mesh.conns.size(), false);
+		float radiusSq = radius * radius;
+		walkConns = 0;
+		traced = 0;
+		blockedCount = 0;
+		auto t0 = std::chrono::steady_clock::now();
+
+		for (size_t i = 0; i < mesh.conns.size(); ++i)
+		{
+			if (i >= mesh.planConns.size() || mesh.planConns[i].connType != crossbot_nav::CONN_WALK)
+				continue;
+			++walkConns;
+
+			Vector c = NavPlan::ConnectionCrossing(mesh.planAreas, mesh.planConns[i]);
+			c.z += 29.f;
+
+			Vector delta = c - eye;
+			float distSq = DotProduct(delta, delta);
+			if (distSq > radiusSq || distSq < 1.f)
+				continue;
+			float dist = sqrtf(distSq);
+			if (DotProduct(delta * (1.f / dist), fwd) < cosFov)
+				continue;
+
+			++traced;
+			TraceResult tr;
+			TRACE_LINE(eye, c, ignore_monsters, nullptr, &tr);
+			if (tr.flFraction >= 1.f && !tr.fStartSolid)
+			{
+				blocked[i] = true;
+				++blockedCount;
+			}
+		}
+
+		ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	}
+
+	RepathResult Repath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict)
 	{
 		bool freshAttempt = bot.waypoints.empty();
 
-		const Nav::Area *startArea = Nav::FindAreaNearest(mesh, pEdict->v.origin);
-		const Nav::Area *goalArea = Nav::FindAreaNearest(mesh, bot.goalPoint);
-		if (!startArea || !goalArea)
-			return false;
+		if (bot.search && (&bot.search->search->Mesh() != &mesh || bot.searchGoal != bot.goalPoint))
+			bot.search.reset();
 
-		Vector clampedGoal = bot.goalPoint;
-		clampedGoal.x = std::max(goalArea->mins.x, std::min(goalArea->maxs.x, clampedGoal.x));
-		clampedGoal.y = std::max(goalArea->mins.y, std::min(goalArea->maxs.y, clampedGoal.y));
-		clampedGoal.z = std::max(goalArea->mins.z, std::min(goalArea->maxs.z, clampedGoal.z));
+		if (!bot.search)
+		{
+			BOTPERF_SCOPE(ZONE_RP_PLAN);
+			const Nav::Area *startArea = Nav::FindAreaNearest(mesh, pEdict->v.origin);
+			const Nav::Area *goalArea = Nav::FindAreaNearest(mesh, bot.goalPoint);
+			if (!startArea || !goalArea)
+				return REPATH_FAILED;
 
-		BotBreak::PhaseThrough phaseBreakables;
+			Vector clampedGoal = bot.goalPoint;
+			clampedGoal.x = std::max(goalArea->mins.x, std::min(goalArea->maxs.x, clampedGoal.x));
+			clampedGoal.y = std::max(goalArea->mins.y, std::min(goalArea->maxs.y, clampedGoal.y));
+			clampedGoal.z = std::max(goalArea->mins.z, std::min(goalArea->maxs.z, clampedGoal.z));
 
-		NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
-		bot.pushFields = traces.standPush;
-		NavPlan::PlanStats planStats;
-		float careful = Bot_Carefulness(bot);
-		NavPlan::RangeBias range = Bot_RangeBias(bot);
-		std::chrono::steady_clock::time_point planBegin = std::chrono::steady_clock::now();
-		BotPerf::Enter(BotPerf::ZONE_RP_PLAN);
-		Nav::PlannedPath path = Nav::PlanPath(mesh, startArea->id, goalArea->id, pEdict->v.origin,
-			clampedGoal, &traces, &planStats, careful, range, Bot_FallDamage(bot));
-		BotPerf::Leave(BotPerf::ZONE_RP_PLAN);
-		float planMs = std::chrono::duration<float, std::milli>(
-			std::chrono::steady_clock::now() - planBegin).count();
+			NavPlan::PlanTraceContext traces = MakePlanTraces(pEdict);
+			bot.pushFields = traces.standPush;
+
+			NavPlan::RevengeLos los;
+			const NavPlan::RevengeLos *losPtr = nullptr;
+			if (bot.goal.stop.revenge && BotGoal::RevengeEnabled())
+			{
+				los.eye = bot.revenge.eye;
+				los.forward = bot.revenge.aimForward;
+				los.cosFov = BotGoal::RevengeFovCos();
+				los.radius = BotGoal::RevengeLosRadius();
+				losPtr = &los;
+			}
+
+			auto job = std::make_shared<Nav::PlanJob>();
+			job->search = std::make_unique<Nav::PathSearch>(mesh, startArea->id, goalArea->id, pEdict->v.origin,
+				clampedGoal, &traces, Bot_Carefulness(bot), Bot_RangeBias(bot), Bot_FallDamage(bot), &bot.hurt,
+				losPtr);
+			Nav::SubmitPlan(job);
+			bot.search = std::move(job);
+			bot.searchGoal = bot.goalPoint;
+			bot.searchClampedGoal = clampedGoal;
+			bot.searchStartArea = startArea->id;
+		}
+
+		if (!bot.search->done.load(std::memory_order_acquire))
+			return REPATH_PENDING;
+
+		std::shared_ptr<Nav::PlanJob> job = std::move(bot.search);
+		Nav::PlannedPath &path = job->path;
+		const NavPlan::PlanStats &planStats = job->stats;
+		Vector clampedGoal = bot.searchClampedGoal;
+		uint32_t startAreaId = bot.searchStartArea;
+		float planMs = job->workMs;
 		if (!path.found)
 		{
-			BOT_VLOG("CrossBot: %s found no route area %u -> %u from (%.1f,%.1f,%.1f) to (%.1f,%.1f,%.1f) | "
-				"search %zu areas/%zu sims, %zu air moves rejected\n",
-				bot.name, startArea->id, goalArea->id, pEdict->v.origin.x, pEdict->v.origin.y,
-				pEdict->v.origin.z, clampedGoal.x, clampedGoal.y, clampedGoal.z, path.expansions,
-				path.airmovesTried, path.airmovesRejected);
-			return false;
+			BOT_VLOG("CrossBot: %s found no route area %u -> (%.1f,%.1f,%.1f) | search %zu areas/%zu sims, "
+				"%zu air moves rejected in %.1fms\n",
+				bot.name, startAreaId, clampedGoal.x, clampedGoal.y, clampedGoal.z, path.expansions,
+				path.airmovesTried, path.airmovesRejected, planMs);
+			return REPATH_FAILED;
 		}
 
 		bot.plannedRangeClass = Bot_RangeClass(bot);
+
+		if (path.losTraced > 0)
+		{
+			cvar_t *dbg = CBotCvar("crossbot_revenge_debug");
+			if (dbg && dbg->value != 0.f)
+				BOT_VLOG("CrossBot: %s revenge LOS: %zu traced, %zu blocked, plan %.1fms\n",
+					bot.name, path.losTraced, path.losBlocked, planMs);
+		}
 
 		bot.waypoints = std::move(path.waypoints);
 		bot.waypointIndex = 0;
@@ -2252,9 +2364,7 @@ namespace
 		bot.avoid.detourHit = 0;
 		bot.avoid.detourExpire = 0.f;
 
-		BotPerf::Enter(BotPerf::ZONE_RP_PROFILE);
-		bot.followProfile = NavPlan::BuildPathProfile(bot.waypoints, traces.physics, &traces);
-		BotPerf::Leave(BotPerf::ZONE_RP_PROFILE);
+		bot.followProfile = std::move(job->profile);
 		bot.trackState = NavFollow::TrackState();
 		bot.lastProgressS = 0.f;
 		BotOppo::OnRepath(bot);
@@ -2273,7 +2383,7 @@ namespace
 			bot.pathStartTime = gpGlobals->time;
 			bot.estimatedArrivalTime = gpGlobals->time + bot.followProfile.totalTime * kEtaSafetyMargin;
 			bot.visitedAreaPath.clear();
-			bot.visitedAreaPath.push_back(startArea->id);
+			bot.visitedAreaPath.push_back(startAreaId);
 
 			BOT_VLOG("CrossBot: Repath start=(%.1f,%.1f,%.1f) goal=(%.1f,%.1f,%.1f) waypoints=%zu "
 				"airmoves=%zu simulated/%zu rescaled/%zu runup-ext/%zu respeeded/%zu kept/%zu retracted/%zu retract-kept/%zu rejected | search %zu areas/%zu sims "
@@ -2286,7 +2396,7 @@ namespace
 				planStats.airmovesRespeedKept, planStats.airmovesRetracted,
 				planStats.airmovesRetractKept,
 				path.airmovesRejected, path.expansions, path.airmovesTried, planMs,
-				careful, WeaponRangeName(bot.plannedRangeClass), range.Weight(),
+				Bot_Carefulness(bot), WeaponRangeName(bot.plannedRangeClass), Bot_RangeBias(bot).Weight(),
 				path.routeSeconds, path.routeScore,
 				bot.followProfile.segs.size(), bot.followProfile.totalLength,
 				bot.followProfile.totalTime, bot.followProfile.cornersArced,
@@ -2342,7 +2452,7 @@ namespace
 				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.waypoints.size(),
 				path.areaPath.size(), bot.followProfile.totalTime, penalizedOnRoute);
 		}
-		return true;
+		return REPATH_DONE;
 	}
 
 	bool RepathDue(const CBot &bot)
@@ -2350,16 +2460,48 @@ namespace
 		return bot.nextRepathTime > 0.f && bot.nextRepathTime <= gpGlobals->time;
 	}
 
+	float g_planFrameTime = -1.f;
+	float g_planFrameMs = 0.f;
+
+	bool PlanBudgetSpent()
+	{
+		return g_planFrameTime == gpGlobals->time && g_planFrameMs >= kPlanBudgetMs;
+	}
+
+	struct PlanBudgetCharge
+	{
+		std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
+		~PlanBudgetCharge()
+		{
+			if (g_planFrameTime != gpGlobals->time)
+			{
+				g_planFrameTime = gpGlobals->time;
+				g_planFrameMs = 0.f;
+			}
+			g_planFrameMs += std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - begin).count();
+		}
+	};
+
 	bool TryRepath(CBot &bot, const Nav::NavMesh &mesh, edict_t *pEdict, const char *why)
 	{
 		BOTPERF_SCOPE(ZONE_REPATH);
-		if (!bot.waypoints.empty())
+		PlanBudgetCharge charge;
+		if (!bot.waypoints.empty() && !bot.search)
 		{
 			BOT_VLOG("CrossBot: %s mid-route repath (%s) at (%.1f,%.1f,%.1f) wp %zu/%zu\n",
 				bot.name, why, pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z,
 				bot.waypointIndex, bot.waypoints.size());
 		}
-		if (!Repath(bot, mesh, pEdict))
+		RepathResult result = Repath(bot, mesh, pEdict);
+		if (result == REPATH_PENDING)
+		{
+			BotSense::ApplyLook(bot);
+			Vector angles = Bot_UpdateFacing(bot);
+			RunIdleMove(bot, angles);
+			return false;
+		}
+		if (result == REPATH_FAILED)
 		{
 			WriteTraceLog(bot);
 			BotGoal::OnRepathFailed(bot);
@@ -2378,6 +2520,32 @@ void Bot_FaceDir(CBot &bot, const Vector &dir)
 	if (flat > 0.0001f || fabsf(dir.z) > 0.0001f)
 		bot.desiredAngles = Vector(-atan2f(dir.z, flat) * (180.f / kPiF),
 			atan2f(dir.y, dir.x) * (180.f / kPiF), 0.f);
+}
+
+void Bot_RevengeLosProbe(const Vector &eye, float yaw)
+{
+	const Nav::NavMesh *mesh = Nav::Get();
+	if (!mesh)
+	{
+		SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+		return;
+	}
+
+	Vector fwd, right, up;
+	g_engfuncs.pfnAngleVectors(Vector(0.f, yaw, 0.f), fwd, right, up);
+
+	std::vector<bool> blocked;
+	int walkConns, traced, blockedCount;
+	double ms;
+	float radius = BotGoal::RevengeLosRadius();
+	RevengeLosScan(*mesh, eye, fwd, radius, BotGoal::RevengeFovCos(), blocked, walkConns, traced,
+		blockedCount, ms);
+
+	char msg[256];
+	snprintf(msg, sizeof(msg),
+		"CrossBot revenge LOS probe @ (%.0f,%.0f,%.0f) yaw %.0f r=%.0f: %d walk conns, %d traced, "
+		"%d blocked in %.2fms\n", eye.x, eye.y, eye.z, yaw, radius, walkConns, traced, blockedCount, ms);
+	SERVER_PRINT(msg);
 }
 
 void Bot_DriveTo(CBot &bot, const Vector &angles, const Vector &to, bool stop,
@@ -2438,7 +2606,8 @@ bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector 
 	if (frameTime > 0.f)
 		physics.frameTime = frameTime;
 
-	PmSim::PmSimulator sim(Bot_EngineTraceFn(pEdict, hull), physics, Bot_PushFields(hull));
+	PmSim::PmSimulator sim(Bot_WorldTraceFn(pEdict, hull), physics, Bot_PushFields(hull));
+	PmSim::PmArcFn arc = Bot_WorldArcFn(pEdict, hull);
 
 	if (velocity)
 		sim.BeginAirborne(origin, *velocity, yaw, speed);
@@ -2451,6 +2620,14 @@ bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector 
 	bool airborne = false;
 	while (sim.Time() < maxSeconds)
 	{
+		Vector from = sim.Origin();
+		Vector vel = sim.Velocity();
+		int coasted = sim.Coast(arc, maxSeconds - sim.Time());
+		for (int k = 1; k <= coasted; ++k)
+			out.points.push_back(ArcMath::ArcPos(from, vel, physics.gravity, physics.frameTime * static_cast<float>(k)));
+		if (coasted > 0)
+			airborne = true;
+
 		if (!sim.Step())
 			break;
 
@@ -2519,6 +2696,51 @@ bool Bot_PenalizeCurrentConnection(CBot &bot)
 	}
 
 	return false;
+}
+
+void Bot_NoteHurt(CBot &bot)
+{
+	float now = gpGlobals->time;
+	bot.hurt.Decay(now);
+
+	float health = std::max(bot.pEdict->v.health, 0.f);
+	float lost = bot.hurtLastHealth - health;
+	bot.hurtLastHealth = health;
+	if (lost <= 0.f || bot.hurtConn < 0)
+		return;
+
+	uint32_t conn = static_cast<uint32_t>(bot.hurtConn);
+	bot.hurt.Add(conn, false, lost, now);
+	BOT_VLOG("CrossBot: %s hurt %.0f hp on conn %u, total %.0f hp in %d slots\n",
+		bot.name, lost, conn, bot.hurt.Total(conn, false), bot.hurt.count);
+}
+
+void Bot_NoteFriendDeath(CBot &friendBot, const CBot &dead)
+{
+	if (dead.hurtAreaId < 0 || friendBot.plannedAreaPath.size() < 2)
+		return;
+
+	const std::vector<uint32_t> &path = friendBot.plannedAreaPath;
+	uint32_t area = static_cast<uint32_t>(dead.hurtAreaId);
+	std::vector<uint32_t>::const_iterator from = path.begin();
+	if (friendBot.currentAreaId >= 0)
+	{
+		std::vector<uint32_t>::const_iterator here = std::find(path.begin(), path.end(),
+			static_cast<uint32_t>(friendBot.currentAreaId));
+		if (here != path.end())
+			from = here + 1;
+	}
+	std::vector<uint32_t>::const_iterator last = path.end() - 1;
+	if (from >= last || std::find(from, last, area) == last)
+		return;
+
+	float now = gpGlobals->time;
+	friendBot.hurt.Add(area, true, kFriendDeathHp, now);
+	bool busy = Bot_ManeuverActive(friendBot);
+	BOT_VLOG("CrossBot: %s reroutes around area %u where %s died, %.0f hp there%s\n",
+		friendBot.name, area, dead.name, friendBot.hurt.Total(area, true), busy ? ", on its next plan" : "");
+	if (!busy)
+		ResetPath(friendBot);
 }
 
 void Bot_ResetAirmoveCache()
@@ -2664,6 +2886,12 @@ void Bot_MoveNav(CBot &bot)
 		BOTPERF_SCOPE(ZONE_FINDAREA);
 		curArea = Nav::FindAreaNearest(*mesh, pEdict->v.origin);
 	}
+	if (curArea && static_cast<int>(curArea->id) != bot.hurtAreaId)
+	{
+		bot.hurtConn = bot.hurtAreaId >= 0
+			? EnteredConnection(bot, *mesh, static_cast<uint32_t>(bot.hurtAreaId), *curArea) : -1;
+		bot.hurtAreaId = static_cast<int>(curArea->id);
+	}
 	bot.currentAreaId = curArea ? static_cast<int>(curArea->id) : -1;
 
 	if (bot.hasLastOrigin && !bot.rideActive && !bot.fun.aboard &&
@@ -2693,7 +2921,7 @@ void Bot_MoveNav(CBot &bot)
 		BotCombat::Update(bot);
 	}
 
-	if (BotCombat::Active(bot) && BotDiff::CombatInterrupt() && BotCombat::DamageSource(pEdict))
+	if (BotDiff::CombatInterrupt() && BotCombat::DamageSource(pEdict))
 		Bot_BailManeuver(bot, "took fire");
 
 	BotCamp::Track(bot);
@@ -2734,6 +2962,11 @@ void Bot_MoveNav(CBot &bot)
 			return;
 	}
 
+	if (BotDirective::Run(bot, *mesh))
+		return;
+
+	BotGoal::RefreshStrategic(bot, *mesh);
+
 	if (BotCamp::Run(bot))
 		return;
 
@@ -2758,7 +2991,6 @@ void Bot_MoveNav(CBot &bot)
 
 	{
 		BOTPERF_SCOPE(ZONE_ITEM_SELECT);
-		BotGoal::RefreshStrategic(bot, *mesh);
 		if (!bot.hasGoal && !BotGoal::Select(bot, *mesh))
 		{
 			BotSense::ApplyLook(bot);
@@ -2808,6 +3040,27 @@ void Bot_MoveNav(CBot &bot)
 			"giving up on the goal\n", bot.name, bot.stallRepaths,
 			pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z);
 		bot.stallRepaths = 0;
+
+		if (bot.stuckGiveUps > 0 && gpGlobals->time - bot.stuckTime <= kStuckWindow &&
+			(pEdict->v.origin - bot.stuckOrigin).Length() <= kStallEscapeDistance)
+		{
+			++bot.stuckGiveUps;
+		}
+		else
+		{
+			bot.stuckGiveUps = 1;
+			bot.stuckOrigin = pEdict->v.origin;
+		}
+		bot.stuckTime = gpGlobals->time;
+
+		if (bot.stuckGiveUps >= kStuckGiveUpLimit)
+		{
+			BOT_VLOG("CrossBot: %s is stuck at (%.1f,%.1f,%.1f) after %d give-ups, killing itself\n", bot.name,
+				pEdict->v.origin.x, pEdict->v.origin.y, pEdict->v.origin.z, bot.stuckGiveUps);
+			bot.stuckGiveUps = 0;
+			XPlay::InGame(bot.gameDll, [&bot] { MDLL_ClientKill(bot.pEdict); });
+		}
+
 		BotGoal::OnBlocked(bot, "repeated stalls");
 		BotSense::ApplyLook(bot);
 		Vector angles = Bot_UpdateFacing(bot);
@@ -2815,9 +3068,16 @@ void Bot_MoveNav(CBot &bot)
 		return;
 	}
 
-	if (bot.waypoints.empty() || forcedRepath || stalled)
+	if (bot.waypoints.empty() || forcedRepath || stalled || bot.search)
 	{
-		if (stalled && !forcedRepath)
+		if (PlanBudgetSpent())
+		{
+			BotSense::ApplyLook(bot);
+			Vector angles = Bot_UpdateFacing(bot);
+			RunIdleMove(bot, angles);
+			return;
+		}
+		if (stalled && !forcedRepath && !bot.search)
 		{
 			if (bot.stallRepaths == 0 || (pEdict->v.origin - bot.stallOrigin).Length() > kStallEscapeDistance)
 			{
@@ -2848,7 +3108,7 @@ void Bot_MoveNav(CBot &bot)
 #if BOT_VLOG_ON
 	{
 		BOTPERF_SCOPE(ZONE_TRACELOG);
-		if (bot.traceLog.size() < 100000 && CVAR_GET_STRING("crossbot_trace_path")[0])
+		if (bot.traceLog.size() < 100000 && CBotCvarString("crossbot_trace_path")[0])
 			bot.traceLog.push_back(pEdict->v.origin);
 	}
 #endif
@@ -3082,9 +3342,8 @@ void Bot_MoveNav(CBot &bot)
 	if (BotAvoid::Enabled())
 	{
 		BOTPERF_SCOPE(ZONE_AVOID);
-		Vector pathDir = Norm2D(follow.aimPoint - pEdict->v.origin);
-		if (pathDir.x == 0.f && pathDir.y == 0.f)
-			pathDir = moveDir;
+		Vector toAim = follow.aimPoint - pEdict->v.origin;
+		Vector pathDir = toAim.Length2D() > kAvoidAimMin ? Norm2D(toAim) : moveDir;
 		avoid = BotAvoid::Update(bot, *mesh, pathDir, physics);
 	}
 
@@ -3126,6 +3385,8 @@ void Bot_MoveNav(CBot &bot)
 
 	if (bot.bunnyAirborne && (pEdict->v.flags & FL_ONGROUND) == 0)
 		BunnyAirSteer(bot, moveDir, drive);
+
+	moveDir = Bot_ClearLineOfSight(bot, moveDir, wp->point);
 
 	float fmove = 0.f, smove = 0.f;
 	Bot_DecomposeMove(angles.y + pEdict->v.punchangle.y, moveDir, drive, fmove, smove);

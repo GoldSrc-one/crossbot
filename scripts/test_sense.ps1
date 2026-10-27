@@ -1,11 +1,14 @@
 param(
     [string]$Map = "crossfire",
+    [string]$Game = "valve",
+    [int]$Coverage = -1,
     [int]$Port = 0,
     [float[]]$Delays = @(0.0, 0.25, 0.5),
     [int]$SecondsPerDelay = 10,
     [int]$RoamSeconds = 30,
     [int]$SuspicionSeconds = 30,
     [int]$Bots = 2,
+    [float]$Notice = -1,
     [switch]$SkipRoam,
     [string]$HLDSDir = "D:\hlds"
 )
@@ -26,7 +29,8 @@ function Show-AimStatus {
         ForEach-Object { Write-Host ("  " + ($_ -replace '^CrossBot: ', '')) }
 }
 
-$hldsMap = Join-Path $HLDSDir "valve\maps\$mapName.bsp"
+$hldsMap = Join-Path $HLDSDir "$Game\maps\$mapName.bsp"
+$games = if ($Game -eq "valve") { @("valve") } else { @("valve", $Game) }
 if (-not (Test-Path $hldsMap)) { Write-Host "FAIL: no such map $hldsMap"; exit 1 }
 
 Ensure-CbNav -HldsMap $hldsMap -NavPath (Join-Path $HLDSDir "crossplay\addons\crossbot\nav\$mapName.nav") `
@@ -35,8 +39,8 @@ Ensure-CbNav -HldsMap $hldsMap -NavPath (Join-Path $HLDSDir "crossplay\addons\cr
 $logFile = Join-Path $repoRoot "nav_debug\logs\${mapName}_sense.log"
 
 Write-Host "Starting HLDS on port $Port (join with: connect 127.0.0.1:$Port)"
-$startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands @() `
-    -ConfigName "_crossbot_sense_$mapName.cfg" -HLDSDir $HLDSDir -LogFile $logFile
+$startResult = & "$scriptDir\test_server_start.ps1" -Map $mapName -Port $Port -Commands @() -Games $games `
+    -WaitSeconds 180 -ConfigName "_crossbot_sense_$mapName.cfg" -HLDSDir $HLDSDir -LogFile $logFile
 
 $serverPid = Get-CbServerPid $startResult
 Write-Host "Server PID=$serverPid"
@@ -44,8 +48,12 @@ Write-Host "Server PID=$serverPid"
 try {
     $failed = $false
     Invoke-CbRcon $Port "crossbot_gather 0" | Out-Null
-    for ($i = 1; $i -le $Bots; $i++) { Invoke-CbRcon $Port "crossbot_add valve Sense$i" | Out-Null }
+    for ($i = 1; $i -le $Bots; $i++) { Invoke-CbRcon $Port "crossbot_add $Game Sense$i" | Out-Null; Start-Sleep -Milliseconds 400 }
     Invoke-CbRcon $Port "crossbot_sense 1" | Out-Null
+    Invoke-CbRcon $Port "crossbot_notice $Notice" | Out-Null
+    if ($Coverage -ge 0) { Invoke-CbRcon $Port "crossbot_coverage $Coverage" | Out-Null }
+    (Invoke-CbRcon $Port "crossbot_monsters") -split "`r?`n" |
+        Where-Object { $_ -match 'occluder\(s\)' } | ForEach-Object { Write-Host ("  " + ($_ -replace '^CrossBot: ', '')) }
 
     $spawnOut = Invoke-CbRcon $Port "crossbot_list_spawns"
     $spawn = $null
@@ -55,7 +63,8 @@ try {
             break
         }
     }
-    if (-not $spawn) { Write-Host "FAIL: no spawn point found on $mapName"; exit 1 }
+    if (-not $spawn -and $Game -eq "valve") { Write-Host "FAIL: no spawn point found on $mapName"; exit 1 }
+    if (-not $spawn) { Write-Host "no deathmatch spawn on $mapName, skipping the static phase"; $Delays = @() }
 
     Write-Host "`n===== STATIC: bots converge on ($($spawn.X),$($spawn.Y),$($spawn.Z)) and idle ====="
     Write-Host "Read served and queue here, NOT err. Converging the bots is what holds line of sight,"
@@ -66,9 +75,11 @@ try {
     Write-Host "Do not use crossbot_teleport here: it stacks every bot on the identical origin, which"
     Write-Host "makes the eye-to-eye vector zero, so no angle exists and the queue is never fed."
 
-    Invoke-CbRcon $Port "crossbot_nav_goal $($spawn.X) $($spawn.Y) $($spawn.Z)" | Out-Null
-    Write-Host "Walking to the goal..."
-    Start-Sleep -Seconds 20
+    if ($spawn) {
+        Invoke-CbRcon $Port "crossbot_nav_goal $($spawn.X) $($spawn.Y) $($spawn.Z)" | Out-Null
+        Write-Host "Walking to the goal..."
+        Start-Sleep -Seconds 20
+    }
 
     foreach ($delay in $Delays) {
         Invoke-CbRcon $Port "crossbot_aim_delay $delay" | Out-Null
@@ -108,6 +119,7 @@ try {
     $tierViolations = 0
     $tierChecks = 0
     $keepCounts = @{ 'inc' = 0; 'new' = 0 }
+    $covCounts = @{}
     $deadline = (Get-Date).AddSeconds($SuspicionSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 3
@@ -126,6 +138,9 @@ try {
         foreach ($m in [regex]::Matches($out, 'keeps=inc:(\d+),new:(\d+)')) {
             if ([int]$m.Groups[1].Value -gt [int]$keepCounts['inc']) { $keepCounts['inc'] = [int]$m.Groups[1].Value }
             if ([int]$m.Groups[2].Value -gt [int]$keepCounts['new']) { $keepCounts['new'] = [int]$m.Groups[2].Value }
+        }
+        foreach ($m in [regex]::Matches($out, 'CrossBot: (\S+) .*? cov=(\d+)/(\d+)/(\d+)')) {
+            $covCounts[$m.Groups[1].Value] = @([int]$m.Groups[2].Value, [int]$m.Groups[3].Value, [int]$m.Groups[4].Value)
         }
         ($out -split "`r?`n") |
             Where-Object { $_ -match 'susp=|bot\(s\)' } |
@@ -150,6 +165,10 @@ try {
     }
 
     Write-Host ("keeps= inc:{0} new:{1} (cumulative frames, not samples)" -f $keepCounts['inc'], $keepCounts['new'])
+    $covTotal = @(0, 0, 0)
+    foreach ($c in $covCounts.Values) { for ($k = 0; $k -lt 3; $k++) { $covTotal[$k] += $c[$k] } }
+    Write-Host ("coverage= partial:{0} blocked:{1} of {2} perception traces (crossbot_coverage {3})" -f `
+        $covTotal[0], $covTotal[1], $covTotal[2], $(if ($Coverage -ge 0) { $Coverage } else { 'default' }))
     if (($keepCounts['inc'] + $keepCounts['new']) -eq 0) {
         Write-Host "FAIL: vision never saw anyone across the whole phase -- both bots blind, not a pass"
         $failed = $true

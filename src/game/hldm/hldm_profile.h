@@ -38,6 +38,8 @@ public:
 
 	bool IsMeleeWeapon(int id) const override;
 
+	bool MeleeOnlyAllows(int id) const override;
+
 	int AmbushWeapon(AmbushKind kind) const override;
 
 	int DeployWeapon(DeployKind kind) const override;

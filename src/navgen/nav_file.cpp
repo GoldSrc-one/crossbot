@@ -69,7 +69,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	const std::vector<Area> &areas, const std::vector<MergedConnection> &conns, float designMaxSpeed,
 	const std::vector<Vantage> &vantages,
 	const std::vector<CampSpot> &camps, float vantageSpacing, float maxExposure,
-	const std::vector<LiquidVolume> &waterVolumes)
+	const std::vector<LiquidVolume> &waterVolumes, const std::vector<PassableVolume> &passables)
 {
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
@@ -87,6 +87,31 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	std::vector<NavAreaPlane> areaPlanes;
 	std::vector<NavActivationDetourRecord> detourRecords;
 	std::vector<NavDetourPointRecord> detourPoints;
+	std::vector<NavBarrierRecord> barrierRecords;
+	std::vector<int> barrierOfPassable(passables.size(), -1);
+
+	auto barrierFor = [&](int pi) -> uint16_t {
+		if (pi < 0 || static_cast<size_t>(pi) >= passables.size() ||
+			passables[static_cast<size_t>(pi)].areaFlag != NAV_AREA_BARRIER)
+			return kNoBarrier;
+
+		int &index = barrierOfPassable[static_cast<size_t>(pi)];
+		if (index < 0)
+		{
+			const PassableVolume &p = passables[static_cast<size_t>(pi)];
+			NavBarrierRecord brec;
+			brec.modelIndex = static_cast<uint32_t>(p.modelIndex);
+			brec.mins[0] = static_cast<float>(p.modelMins.x);
+			brec.mins[1] = static_cast<float>(p.modelMins.y);
+			brec.mins[2] = static_cast<float>(p.modelMins.z);
+			brec.maxs[0] = static_cast<float>(p.modelMaxs.x);
+			brec.maxs[1] = static_cast<float>(p.modelMaxs.y);
+			brec.maxs[2] = static_cast<float>(p.modelMaxs.z);
+			index = static_cast<int>(barrierRecords.size());
+			barrierRecords.push_back(brec);
+		}
+		return static_cast<uint16_t>(index);
+	};
 
 	for (size_t i = 0; i < areas.size(); ++i)
 	{
@@ -95,10 +120,12 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		ComputeBounds(areas[i].polytope, rec.mins, rec.maxs, rec.centroid);
 		rec.areaFlags = areas[i].areaFlags;
 		rec.activation = areas[i].activation;
-		rec.pad0[0] = rec.pad0[1] = rec.pad0[2] = 0;
+		rec.pad0 = 0;
+		rec.barrier = (rec.areaFlags & NAV_AREA_BARRIER) != 0 ? barrierFor(areas[i].passableIndex) : kNoBarrier;
 		rec.openSeconds = static_cast<float>(areas[i].openSeconds);
 		rec.waterVolume = areas[i].waterVolume;
-		rec.pad1[0] = rec.pad1[1] = rec.pad1[2] = 0;
+		rec.pad1 = 0;
+		rec.barrierFloor = barrierFor(areas[i].floorPassableIndex);
 		rec.submergeZ = static_cast<float>(areas[i].submergeZ);
 		rec.driftVelocity[0] = static_cast<float>(areas[i].driftVelocity.x);
 		rec.driftVelocity[1] = static_cast<float>(areas[i].driftVelocity.y);
@@ -222,6 +249,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 		rec.pos[1] = static_cast<float>(v.pos.y);
 		rec.pos[2] = static_cast<float>(v.pos.z);
 		rec.exposure = static_cast<float>(v.exposure);
+		rec.visibility = static_cast<float>(v.visibility);
 		for (size_t k = 0; k < kMaxWatchDirs; ++k)
 		{
 			NavWatchDir &dst = rec.watch[k];
@@ -300,6 +328,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	header.maxExposure = maxExposure;
 	header.waterVolumeCount = static_cast<uint32_t>(waterRecords.size());
 	header.campCount = static_cast<uint32_t>(campRecords.size());
+	header.barrierCount = static_cast<uint32_t>(barrierRecords.size());
 
 	WriteRaw(f, &header, sizeof(header), "header");
 	WriteRaw(f, areaRecords.data(), areaRecords.size() * sizeof(NavAreaRecord), "area records");
@@ -312,6 +341,7 @@ void WriteNavFile(const std::string &path, const std::string &mapName, uint32_t 
 	WriteRaw(f, vantageRecords.data(), vantageRecords.size() * sizeof(NavVantageRecord), "vantages");
 	WriteRaw(f, waterRecords.data(), waterRecords.size() * sizeof(NavWaterVolumeRecord), "water volumes");
 	WriteRaw(f, campRecords.data(), campRecords.size() * sizeof(NavCampRecord), "camp spots");
+	WriteRaw(f, barrierRecords.data(), barrierRecords.size() * sizeof(NavBarrierRecord), "barriers");
 
 	std::fclose(f);
 }

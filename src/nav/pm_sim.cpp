@@ -1,7 +1,9 @@
 #include "pm_sim.h"
 
+#include <algorithm>
 #include <cmath>
 
+#include "arc_math.h"
 #include "nav_math.h"
 
 namespace PmSim
@@ -65,11 +67,11 @@ float FallSpeed(float fallHeight, float gravity)
 	return (fallHeight > 0.f && gravity > 0.f) ? sqrtf(2.f * gravity * fallHeight) : 0.f;
 }
 
-float FallPenaltySeconds(float damage)
+float FallPenaltySeconds(float damage, float health)
 {
 	if (damage <= 0.f)
 		return 0.f;
-	return damage >= 100.f ? 1.0e4f : damage * 0.5f;
+	return damage >= health ? 1.0e4f : damage * 0.5f;
 }
 
 float PlainJumpHeight(float gravity)
@@ -375,6 +377,40 @@ bool PmSimulator::Step()
 
 	m_origin = Vector(m_pos[0], m_pos[1], m_pos[2]);
 	return true;
+}
+
+int PmSimulator::Coast(const PmArcFn &arc, float maxTime)
+{
+	float dt = m_physics.frameTime;
+	float g = m_physics.gravity;
+	if (!arc || m_onGround || m_jumpPending || g <= 0.f || dt <= 0.f)
+		return 0;
+
+	float wishdir[3] = { m_forward[0] * m_commandedSpeed, m_forward[1] * m_commandedSpeed, 0.0f };
+	float wishspeed = VectorNormalize(wishdir);
+	wishspeed = std::min(wishspeed, std::min(m_physics.maxSpeed, kAirAccelWishSpeedCap));
+	if (DotProduct(m_vel, wishdir) < wishspeed)
+		return 0;
+
+	maxTime = std::min(maxTime, (m_vel[2] + m_physics.maxVelocity) / g);
+	if (maxTime < 3.f * dt)
+		return 0;
+
+	Vector vel = Velocity();
+	float safe = arc(m_origin, vel, g, maxTime);
+	int frames = static_cast<int>(std::floor(safe / dt)) - 1;
+	if (frames < 2)
+		return 0;
+
+	float t = static_cast<float>(frames) * dt;
+	m_origin = ArcMath::ArcPos(m_origin, vel, g, t);
+	m_pos[0] = m_origin.x;
+	m_pos[1] = m_origin.y;
+	m_pos[2] = m_origin.z;
+	m_vel[2] = ArcMath::ArcVelZ(m_vel[2], g, t);
+	m_fallSpeed = -m_vel[2];
+	m_time += t;
+	return frames;
 }
 
 }

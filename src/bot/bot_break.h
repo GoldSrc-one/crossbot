@@ -34,19 +34,6 @@ struct State
 	char targetName[32] = {};
 };
 
-class PhaseThrough
-{
-public:
-	PhaseThrough();
-	~PhaseThrough();
-
-	PhaseThrough(const PhaseThrough &) = delete;
-	PhaseThrough &operator=(const PhaseThrough &) = delete;
-
-private:
-	std::vector<std::pair<edict_t *, int>> m_saved;
-};
-
 bool IsTarget(edict_t *ent);
 
 bool AimSwing(CBot &bot, edict_t *ent, Vector &aimAngles, bool &swing);

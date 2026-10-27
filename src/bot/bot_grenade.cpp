@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "bot.h"
+#include "../game/cvars.h"
 #include "bot_aim.h"
 #include "bot_difficulty.h"
 #include "bot_fire.h"
@@ -147,10 +148,37 @@ namespace
 	void Finish(BotGrenade::State &st, const char *why)
 	{
 		st.slot = -1;
+		st.ordered = false;
 		st.releaseTime = 0.f;
 		st.haveLook = false;
 		st.why = why;
 		st.nextTry = gpGlobals->time + RANDOM_FLOAT(kCooldownMin, kCooldownMax);
+	}
+
+	void PrimeOrdered(CBot &bot)
+	{
+		BotGrenade::State &st = bot.grenade;
+		edict_t *pEdict = bot.pEdict;
+		OffhandInfo info;
+		if (!g_pGameProfile->OffhandRead(pEdict, st.orderSlot, info) || info.count <= 0)
+			return;
+		if (!FakeCmd::Run(pEdict, g_pGameProfile->OffhandCommand(st.orderSlot, true)))
+			return;
+
+		st.slot = st.orderSlot;
+		st.scared = false;
+		st.ordered = true;
+		st.primeTime = gpGlobals->time;
+		st.releaseTime = 0.f;
+		st.pin = info.pin;
+		st.fuse = info.fuse;
+		st.minRange = 0.f;
+		st.mode = info.mode;
+		st.haveLook = false;
+		st.why = "primed on orders";
+		++st.primes;
+		BOT_VLOG("CrossBot: %s primes grenade slot %d type %d on orders (%d left)\n", bot.name, st.slot + 1, info.type,
+			info.count - 1);
 	}
 
 	void Hold(CBot &bot, Vector &angles)
@@ -182,8 +210,18 @@ namespace
 
 		Vector base, vel;
 		bool heard = false;
-		bool target = st.scared ? ScaredPoint(bot, base, vel) : AttackPoint(bot, base, vel, heard);
-		if (target && !st.scared)
+		bool target = false;
+		if (st.ordered)
+		{
+			base = st.orderPoint;
+			vel = Vector(0.f, 0.f, 0.f);
+			target = !FriendNear(pEdict, base, kLandClear) && AttackClear(bot, st.mode, base, vel, false);
+		}
+		else
+		{
+			target = st.scared ? ScaredPoint(bot, base, vel) : AttackPoint(bot, base, vel, heard);
+		}
+		if (target && !st.scared && !st.ordered)
 			target = (base - pEdict->v.origin).Length() >= st.minRange && !FriendNear(pEdict, base, kLandClear) &&
 				AttackClear(bot, st.mode, base, vel, heard);
 		Vector look;
@@ -229,7 +267,7 @@ namespace BotGrenade
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_grenade");
+	cvar_t *cvar = CBotCvar("crossbot_grenade");
 	return !cvar || cvar->value != 0.f;
 }
 
@@ -246,7 +284,16 @@ void Run(CBot &bot, Vector &angles)
 	}
 
 	float now = gpGlobals->time;
-	if (!Enabled() || now < st.nextTry)
+	if (st.orderSlot >= 0 && now > st.orderUntil)
+		st.orderSlot = -1;
+	if (!Enabled() || BotDirective::MeleeOnly(bot) || BotDirective::HoldFire(bot))
+		return;
+	if (st.orderSlot >= 0)
+	{
+		PrimeOrdered(bot);
+		return;
+	}
+	if (now < st.nextTry)
 		return;
 	st.nextTry = now + kDecideInterval;
 
@@ -328,6 +375,36 @@ void Reset(CBot &bot)
 	fresh.scaredThrows = st.scaredThrows;
 	fresh.heardThrows = st.heardThrows;
 	st = fresh;
+}
+
+bool Order(CBot &bot, int slot, const Vector &point, float until, const char *&why)
+{
+	State &st = bot.grenade;
+	OffhandInfo info;
+	if (!Enabled() || !g_pGameProfile)
+	{
+		why = "grenades are off";
+		return false;
+	}
+	if (st.slot < 0 && (!g_pGameProfile->OffhandRead(bot.pEdict, slot, info) || info.count <= 0))
+	{
+		why = "no grenade in that slot";
+		return false;
+	}
+	st.orderSlot = slot;
+	st.orderPoint = point;
+	st.orderUntil = until;
+	return true;
+}
+
+void CancelOrder(CBot &bot)
+{
+	bot.grenade.orderSlot = -1;
+}
+
+int Throws(const CBot &bot)
+{
+	return bot.grenade.throws;
 }
 
 void PrintStatus(const CBot &bot)

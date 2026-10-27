@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -147,6 +148,7 @@ namespace
 	constexpr int kDetpackFuseMin = 5;
 	constexpr int kDetpackFuseMax = 50;
 	constexpr int kDetpackFuseObjective = 10;
+	constexpr int kDetpackFuseOrdered = 20;
 	constexpr float kDetpackSafeDist = 800.f;
 	constexpr float kDetpackRetry = 10.f;
 	constexpr float kDetpackAfterBlast = 5.f;
@@ -914,7 +916,8 @@ namespace
 
 		int kind = 0;
 		float yaw = self->v.v_angle.y;
-		if (bot.camp.holding)
+		bool held = bot.camp.holding || bot.camp.directed;
+		if (held)
 		{
 			yaw = bot.camp.spot.yaw;
 			bool sentryHere = !BotStrategic::HasFortifyTarget(bot) ||
@@ -945,7 +948,7 @@ namespace
 
 		if (!kind)
 		{
-			if (bot.camp.holding && st.buildLogHold != bot.camp.holdStart)
+			if (held && st.buildLogHold != bot.camp.holdStart)
 			{
 				st.buildLogHold = bot.camp.holdStart;
 				BOT_VLOG("CrossBot: %s builds nothing at its camp: %d cells, sentry %d dispenser %d, kind %d\n",
@@ -1443,6 +1446,91 @@ namespace
 		return true;
 	}
 
+	bool Refuse(State &st, const char *why)
+	{
+		st.why = why;
+		return false;
+	}
+
+	bool OrderBuild(CBot &bot, int kind)
+	{
+		State &st = bot.ability;
+		edict_t *self = bot.pEdict;
+		if (self->v.playerclass != kClassEngineer)
+			return Refuse(st, "not an engineer");
+		if (FieldInt(self, g_offsets.ent_isBuilding) != 0)
+			return Refuse(st, "already building");
+
+		int field = kind == kBuildSentry ? g_offsets.ent_hasSentry
+			: kind == kBuildDispenser ? g_offsets.ent_hasDispenser
+			: kind == kBuildEntrance ? g_offsets.ent_hasEntryTele : g_offsets.ent_hasExitTele;
+		if (FieldInt(self, field) != 0)
+			return Refuse(st, "already has one");
+		int need = kind == kBuildSentry ? kCellsSentry : kind == kBuildDispenser ? kCellsDispenser : kCellsTeleporter;
+		int cells = FieldInt(self, g_offsets.ent_ammoCells);
+		if (cells < need)
+			return Refuse(st, "not enough metal");
+
+		float yaw = self->v.v_angle.y;
+		st.param = kind;
+		if (kind == kBuildSentry)
+			st.sentryYaw = yaw;
+		if (!RoomYaw(bot, yaw, st.yaw))
+			return Refuse(st, "no room to build");
+
+		st.task = BotAbility::TASK_BUILD;
+		st.phase = 0;
+		st.start = gpGlobals->time;
+		st.why = "building on orders";
+		BOT_VLOG("CrossBot: %s builds %d on orders facing %.0f (%d cells)\n", bot.name, kind, st.yaw, cells);
+		return true;
+	}
+
+	bool OrderHeal(CBot &bot, edict_t *target)
+	{
+		State &st = bot.ability;
+		edict_t *self = bot.pEdict;
+		if (self->v.playerclass != kClassMedic || !Carried(bot, TFC_MEDIKIT))
+			return Refuse(st, "not a medic");
+		if (!Related(self, target, Teams::REL_FRIEND))
+			return Refuse(st, "needs a teammate to heal");
+		if (target->v.health >= MaxHealth(target))
+			return Refuse(st, "already at full health");
+
+		st.task = BotAbility::TASK_HEAL;
+		st.target.Set(target);
+		st.start = gpGlobals->time;
+		st.why = "healing on orders";
+		BOT_VLOG("CrossBot: %s heals %s on orders (%.0f/%.0f)\n", bot.name, CBotPlayerNameOf(target),
+			target->v.health, MaxHealth(target));
+		return true;
+	}
+
+	bool OrderDetpack(CBot &bot, const char *arg)
+	{
+		State &st = bot.ability;
+		edict_t *self = bot.pEdict;
+		if (!DetpackReady(self))
+			return Refuse(st, "no detpack");
+		if (FriendNear(self, self->v.origin, kDetpackFriendClear))
+			return Refuse(st, "a teammate is too close");
+
+		int fuse = (arg && arg[0]) ? atoi(arg) : kDetpackFuseOrdered;
+		fuse = std::max(kDetpackFuseMin, std::min(kDetpackFuseMax, fuse));
+
+		st.task = BotAbility::TASK_DETPACK;
+		st.target.Clear();
+		st.param = fuse;
+		st.phase = 0;
+		st.start = gpGlobals->time;
+		st.point = self->v.origin;
+		st.route.clear();
+		st.routeIndex = 0;
+		st.why = "detpacking on orders";
+		BOT_VLOG("CrossBot: %s sets a %d s detpack on orders\n", bot.name, fuse);
+		return true;
+	}
+
 	void PlanRetreat(CBot &bot, const Nav::NavMesh &mesh)
 	{
 		State &st = bot.ability;
@@ -1639,7 +1727,7 @@ bool Run(CBot &bot, const Nav::NavMesh &mesh)
 	if (TimeLeft(st.nextTry, now, kDetpackRetry) <= 0.f)
 		st.nextTry = now;
 
-	if (st.task == BotAbility::TASK_NONE && now >= st.nextTry)
+	if (st.task == BotAbility::TASK_NONE && now >= st.nextTry && !BotDirective::Busy(bot))
 	{
 		st.nextTry = now + kDecideInterval;
 		switch (cls)
@@ -1671,6 +1759,34 @@ bool Run(CBot &bot, const Nav::NavMesh &mesh)
 	}
 
 	return Continue(bot, mesh);
+}
+
+bool Start(CBot &bot, const char *name, const char *arg, edict_t *target)
+{
+	State &st = bot.ability;
+	if (st.task != BotAbility::TASK_NONE)
+		return Refuse(st, "busy");
+
+	static const struct
+	{
+		const char *name;
+		int kind;
+	} kBuilds[] = {
+		{ "build_sentry", kBuildSentry },
+		{ "build_dispenser", kBuildDispenser },
+		{ "build_entrance", kBuildEntrance },
+		{ "build_exit", kBuildExit },
+	};
+	for (const auto &b : kBuilds)
+	{
+		if (CB_STRICMP(name, b.name) == 0)
+			return OrderBuild(bot, b.kind);
+	}
+	if (CB_STRICMP(name, "heal") == 0)
+		return OrderHeal(bot, target);
+	if (CB_STRICMP(name, "detpack") == 0)
+		return OrderDetpack(bot, arg);
+	return Refuse(st, "unknown ability");
 }
 
 bool Disguised(edict_t *ent)

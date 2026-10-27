@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "bot_sense.h"
+#include "../game/cvars.h"
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_camp.h"
@@ -15,10 +16,12 @@
 #include "bot_move.h"
 #include "bot_move_nav.h"
 #include "bot_perf.h"
+#include "bot_sight.h"
 #include "../game/crossplay.h"
 #include "../game/game_profile.h"
 #include "../game/teams.h"
 #include "../nav/nav.h"
+#include "../nav/nav_light.h"
 #include "../nav/nav_math.h"
 #include "../nav/nav_mesh.h"
 
@@ -53,7 +56,14 @@ namespace
 
 	constexpr float kLeadEpsilonSq = 1.f;
 
+	constexpr float kNoticeUnits = 1000.f;
+	constexpr float kNoticeForget = 2.f;
+	constexpr float kCloakSeeChance = 0.2f;
+	constexpr float kShadowAxis = 0.25f;
+	constexpr float kLightDrop = 2048.f;
+
 	constexpr float kVantageInterval = 0.1f;
+	constexpr float kBoneOffsetTtl = 0.1f;
 	constexpr float kVantageConeFloor = 0.15f;
 	constexpr float kVantagePathSnap = 60.f;
 	constexpr float kBackCheckHold = 0.4f;
@@ -81,6 +91,8 @@ namespace
 	float g_lastHealth[kMaxClients] = {};
 	edict_t *g_hurt[kMaxClients];
 	int g_hurtCount = 0;
+
+	Nav::LightMap g_light;
 
 	float RandomUnit(BotSense::State &sense)
 	{
@@ -177,6 +189,58 @@ namespace
 		return &g_boneSets[slot];
 	}
 
+	struct BoneOffset
+	{
+		float time = -1.f;
+		int modelIndex = 0;
+		int sequence = -1;
+		int ducking = 0;
+		Vector local;
+	};
+
+	BoneOffset g_boneOffsets[kMaxClients][kMaxSampleBones];
+
+	Vector BonePosition(edict_t *ent, const BoneSetEntry *set, int bone)
+	{
+		int index = g_engfuncs.pfnIndexOfEdict(ent);
+		int slot = -1;
+		for (unsigned char i = 0; i < set->count; ++i)
+		{
+			if (set->bones[i] == bone)
+				slot = i;
+		}
+
+		if (index <= 0 || index >= kMaxClients || slot < 0)
+		{
+			Vector origin;
+			g_engfuncs.pfnGetBonePosition(ent, bone, origin, nullptr);
+			return origin;
+		}
+
+		const entvars_t &v = ent->v;
+		float yaw = v.angles.y * (kPiF / 180.f);
+		float c = cosf(yaw);
+		float s = sinf(yaw);
+
+		BoneOffset &off = g_boneOffsets[index][slot];
+		int ducking = (v.flags & FL_DUCKING) != 0 ? 1 : 0;
+		if (gpGlobals->time - off.time > kBoneOffsetTtl || gpGlobals->time < off.time ||
+			off.modelIndex != v.modelindex || off.sequence != v.sequence || off.ducking != ducking)
+		{
+			Vector origin;
+			g_engfuncs.pfnGetBonePosition(ent, bone, origin, nullptr);
+			Vector d = origin - v.origin;
+			off.local = Vector(c * d.x + s * d.y, -s * d.x + c * d.y, d.z);
+			off.time = gpGlobals->time;
+			off.modelIndex = v.modelindex;
+			off.sequence = v.sequence;
+			off.ducking = ducking;
+			return origin;
+		}
+
+		return v.origin + Vector(c * off.local.x - s * off.local.y, s * off.local.x + c * off.local.y, off.local.z);
+	}
+
 	Vector SamplePoint(CBot &bot, edict_t *ent, int &boneOut, bool preferHead)
 	{
 		boneOut = -1;
@@ -201,11 +265,8 @@ namespace
 			bone = set->bones[pick];
 		}
 
-		Vector origin;
-		g_engfuncs.pfnGetBonePosition(ent, bone, origin, nullptr);
-
 		boneOut = bone;
-		return origin;
+		return BonePosition(ent, set, bone);
 	}
 
 	float RandomBack(BotSense::State &sense)
@@ -431,7 +492,32 @@ namespace
 		}
 	}
 
-	bool TraceVisible(CBot &bot, const Vector &eye, edict_t *ent, Vector &pointOut, int &boneOut)
+	bool Cloaked(edict_t *ent)
+	{
+		if ((ent->v.flags & FL_CLIENT) == 0)
+			return false;
+
+		int game = XPlay::OwnerOf(ent);
+		if (!XPlay::Supported(game))
+			return false;
+		XPlay::ScopedGame ctx(game);
+		return g_pGameProfile->Cloaked(ent);
+	}
+
+	bool Glimpse(CBot &bot, edict_t *ent)
+	{
+		if (ent == bot.sense.target.Get() || !Cloaked(ent))
+			return true;
+
+		++bot.sense.cloakRolls;
+		if (RandomUnit(bot.sense) < kCloakSeeChance)
+			return true;
+
+		++bot.sense.cloakSkips;
+		return false;
+	}
+
+	bool TraceVisible(CBot &bot, const Vector &eye, edict_t *ent, Vector &pointOut, int &boneOut, float &clarityOut)
 	{
 		bool monster = (ent->v.flags & FL_CLIENT) == 0;
 		bool head = !monster && bot.sense.headLatched;
@@ -448,12 +534,21 @@ namespace
 			if (monster)
 				++bot.sense.monTraces;
 
-			TraceResult tr;
+			float clarity = 0.f;
+			bool covered = false;
 			{
 				BOTPERF_SCOPE(ZONE_SN_LOS);
-				TRACE_LINE(eye, point, dont_ignore_monsters, bot.pEdict, &tr);
+				clarity = BotSight::Clarity(eye, point, dont_ignore_monsters, bot.pEdict, ent, &covered);
 			}
-			if (tr.flFraction < 1.f && tr.pHit != ent)
+			++bot.sense.covTraces;
+			if (covered)
+			{
+				if (clarity > 0.f)
+					++bot.sense.covPartial;
+				else
+					++bot.sense.covBlocked;
+			}
+			if (clarity <= 0.f)
 			{
 				if (!monster && attempt == 0)
 				{
@@ -466,10 +561,9 @@ namespace
 			if (monster)
 				++bot.sense.monHits;
 
-			BotSense::Push(bot, point, BotSense::SUSP_SIGHT, ent);
-
 			pointOut = point;
 			boneOut = bone;
+			clarityOut = clarity;
 			return true;
 		}
 
@@ -482,6 +576,112 @@ namespace
 		if (ent)
 			return ent;
 		return bot.sense.target.Get();
+	}
+
+	void ClearNotice(BotSense::State &sense)
+	{
+		for (BotSense::NoticeSlot &slot : sense.notices)
+			slot = BotSense::NoticeSlot();
+	}
+
+	float NoticeProgress(const BotSense::State &sense, const edict_t *ent)
+	{
+		for (const BotSense::NoticeSlot &slot : sense.notices)
+		{
+			if (slot.ent.Is(ent))
+				return slot.progress;
+		}
+		return 0.f;
+	}
+
+	BotSense::NoticeSlot *NoticeSlotFor(BotSense::State &sense, edict_t *ent)
+	{
+		BotSense::NoticeSlot *weakest = nullptr;
+		for (BotSense::NoticeSlot &slot : sense.notices)
+		{
+			if (slot.ent.Is(ent))
+				return &slot;
+			if (!weakest || !slot.ent.Get() || (weakest->ent.Get() && slot.progress < weakest->progress))
+				weakest = &slot;
+		}
+
+		*weakest = BotSense::NoticeSlot();
+		weakest->ent.Set(ent);
+		return weakest;
+	}
+
+	float TargetVisibility(CBot &bot, edict_t *ent, const Vector &eye, const Vector &point)
+	{
+		BotSense::State &sense = bot.sense;
+		sense.lightTarget = Nav::kSpecialLight;
+		sense.lightBack = Nav::kSpecialLight;
+		sense.lightVis = 1.f;
+
+		if (!g_light.Loaded() || (ent->v.effects & (EF_DIMLIGHT | EF_BRIGHTLIGHT | EF_MUZZLEFLASH)) != 0)
+			return 1.f;
+
+		float lt = Nav::kSpecialLight;
+		float lb = Nav::kSpecialLight;
+		g_light.Sample(ent->v.origin, ent->v.origin - Vector(0.f, 0.f, kLightDrop), gpGlobals->time, lt);
+
+		Vector los = point - eye;
+		float dist = los.Length();
+		if (dist > 0.001f)
+			g_light.Sample(point, point + los * (kViewRange / dist), gpGlobals->time, lb);
+
+		sense.lightTarget = lt;
+		sense.lightBack = lb;
+		sense.lightVis = Nav::LightVisibility(lt, lb);
+		return sense.lightVis;
+	}
+
+	bool UpdateNotice(CBot &bot, edict_t *seen, const Vector &eye, const Vector &forward, const Vector &point,
+		float vis)
+	{
+		BotSense::State &sense = bot.sense;
+		float dt = Bot_FrameTime();
+
+		for (BotSense::NoticeSlot &slot : sense.notices)
+		{
+			edict_t *ent = slot.ent.Get();
+			if (!ent || ent == seen)
+				continue;
+
+			slot.progress -= dt / kNoticeForget;
+			if (slot.progress <= 0.f)
+				slot = BotSense::NoticeSlot();
+		}
+
+		if (!seen)
+			return false;
+
+		BotSense::NoticeSlot &slot = *NoticeSlotFor(sense, seen);
+
+		float need = 0.f;
+		Vector los = point - eye;
+		float dist = los.Length();
+		if (dist > 0.001f)
+		{
+			float c = DotProduct(forward, los) / dist;
+			if (c < 0.01f)
+				c = 0.01f;
+			else if (c > 1.f)
+				c = 1.f;
+			need = dist * (sqrtf(1.f - c * c) / c + kShadowAxis * (1.f - vis)) / vis *
+				BotDiff::NoticeScale() / kNoticeUnits;
+		}
+		slot.need = need;
+
+		if (need <= 0.f)
+			slot.progress = 1.f;
+		else
+			slot.progress += dt / need;
+
+		if (slot.progress < 1.f)
+			return false;
+
+		slot.progress = 1.f;
+		return true;
 	}
 
 	void UpdateVision(CBot &bot)
@@ -499,6 +699,8 @@ namespace
 
 		edict_t *incumbent = Incumbent(bot);
 		bool incumbentSeen = false;
+		edict_t *notePick = nullptr;
+		float noteBest = 0.f;
 
 		edict_t *pick = nullptr;
 		float acc = 0.f;
@@ -525,6 +727,17 @@ namespace
 			if (ent == incumbent)
 			{
 				incumbentSeen = true;
+				continue;
+			}
+
+			float note = NoticeProgress(bot.sense, ent);
+			if (note > 0.f)
+			{
+				if (note > noteBest)
+				{
+					noteBest = note;
+					notePick = ent;
+				}
 				continue;
 			}
 
@@ -572,6 +785,17 @@ namespace
 				continue;
 			}
 
+			float note = NoticeProgress(bot.sense, ent);
+			if (note > 0.f)
+			{
+				if (note > noteBest)
+				{
+					noteBest = note;
+					notePick = ent;
+				}
+				continue;
+			}
+
 			float w = kMonsterGaze / (dist < kGazeMinDist ? kGazeMinDist : dist);
 			if (w <= 0.f)
 				continue;
@@ -581,27 +805,46 @@ namespace
 				pick = ent;
 		}
 
+		if (notePick)
+			pick = notePick;
+
 		BotSense::State &sense = bot.sense;
 
 		sense.visionCands = cands;
 		sense.visionKeep = BotSense::KEEP_NONE;
 
-		edict_t *best = nullptr;
+		edict_t *seen = nullptr;
 		Vector bestPoint;
 		int bestBone = -1;
+		float clarity = 1.f;
 
-		if (incumbentSeen && TraceVisible(bot, eye, incumbent, bestPoint, bestBone))
+		if (incumbentSeen && Glimpse(bot, incumbent) &&
+			TraceVisible(bot, eye, incumbent, bestPoint, bestBone, clarity))
 		{
-			best = incumbent;
+			seen = incumbent;
 			sense.visionKeep = BotSense::KEEP_INCUMBENT;
 		}
-		else if (pick && TraceVisible(bot, eye, pick, bestPoint, bestBone))
+		else if (pick && Glimpse(bot, pick) && TraceVisible(bot, eye, pick, bestPoint, bestBone, clarity))
 		{
-			best = pick;
+			seen = pick;
 			sense.visionKeep = BotSense::KEEP_NEW;
 		}
 
 		++sense.keeps[sense.visionKeep];
+		sense.clarity = seen ? clarity : 1.f;
+
+		float vis = seen ? TargetVisibility(bot, seen, eye, bestPoint) * clarity : 1.f;
+		if (vis <= 0.f)
+		{
+			++sense.darkDrops;
+			seen = nullptr;
+		}
+
+		edict_t *best = UpdateNotice(bot, seen, eye, forward, bestPoint, vis) ? seen : nullptr;
+		if (best)
+			BotSense::Push(bot, bestPoint, BotSense::SUSP_SIGHT, best);
+		else
+			bestBone = -1;
 
 		if (best && best != sense.target.Get())
 		{
@@ -639,12 +882,12 @@ namespace
 
 		if (offset.LengthSquared() > kLeadEpsilonSq)
 		{
-			TraceResult leadTrace;
+			float leadClarity = 0.f;
 			{
 				BOTPERF_SCOPE(ZONE_SN_LOS);
-				TRACE_LINE(eye, lead, ignore_monsters, pEdict, &leadTrace);
+				leadClarity = BotSight::Clarity(eye, lead, ignore_monsters, pEdict, nullptr);
 			}
-			if (leadTrace.flFraction < 1.f)
+			if (leadClarity <= 0.f)
 			{
 				++sense.leadVetoes;
 				return;
@@ -805,13 +1048,13 @@ namespace
 
 bool BotSense::Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_sense");
+	cvar_t *cvar = CBotCvar("crossbot_sense");
 	return cvar && cvar->value != 0.f;
 }
 
 bool BotSense::VantageEnabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_vantage");
+	cvar_t *cvar = CBotCvar("crossbot_vantage");
 	return cvar && cvar->value != 0.f;
 }
 
@@ -838,7 +1081,7 @@ float BotSense::ConeWeight(const Nav::VantageBlend &blend, const Vector &dir)
 
 float BotSense::Decay()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_sense_decay");
+	cvar_t *cvar = CBotCvar("crossbot_sense_decay");
 	float decay = cvar ? cvar->value : kDefaultDecay;
 	if (decay < 0.1f)
 		decay = 0.1f;
@@ -875,6 +1118,23 @@ void BotSense::ResetBoneCache()
 	g_boneSetCount = 0;
 
 	g_monsterCount = 0;
+}
+
+void BotSense::LoadLight(const char *bspPath)
+{
+	if (!g_light.Load(bspPath))
+		SERVER_PRINT("CrossBot: no lightmap in map, shadows off.\n");
+}
+
+void BotSense::ForgetLight()
+{
+	g_light.Clear();
+	g_light.ClearStyles();
+}
+
+void BotSense::LightStyle(int style, const char *pattern)
+{
+	g_light.SetStyle(style, pattern);
 }
 
 void BotSense::RefreshMonsters()
@@ -921,6 +1181,21 @@ void BotSense::RefreshAllies()
 int BotSense::MonsterCount()
 {
 	return static_cast<int>(g_monsterCount);
+}
+
+const BotSense::NoticeSlot *BotSense::TopNotice(const CBot &bot, int &countOut)
+{
+	const NoticeSlot *top = nullptr;
+	countOut = 0;
+	for (const NoticeSlot &slot : bot.sense.notices)
+	{
+		if (!slot.ent.Get())
+			continue;
+		++countOut;
+		if (!top || slot.progress > top->progress)
+			top = &slot;
+	}
+	return top;
 }
 
 const char *BotSense::SourceName(SuspicionSource source)
@@ -1201,6 +1476,7 @@ void BotSense::Update(CBot &bot)
 		sense.targetBone = -1;
 		sense.visionCands = 0;
 		sense.visionKeep = KEEP_NONE;
+		ClearNotice(sense);
 		ForgetEnemy(bot);
 		return;
 	}
@@ -1225,6 +1501,7 @@ void BotSense::Update(CBot &bot)
 			sense.targetBone = -1;
 			sense.visionCands = 0;
 			sense.visionKeep = KEEP_NONE;
+			ClearNotice(sense);
 		}
 		else
 		{
@@ -1265,6 +1542,7 @@ void BotSense::OnRespawn(CBot &bot)
 	sense.nextVantageTime = 0.f;
 	sense.backNextTime = 0.f;
 	sense.backHoldUntil = 0.f;
+	ClearNotice(sense);
 	ForgetEnemy(bot);
 }
 
@@ -1310,6 +1588,12 @@ bool BotSense::ApplyLook(CBot &bot)
 	{
 		sense.lookSource = LOOK_GAUSS;
 		bot.desiredAngles = Vector(gaussPitch, Bot_NormalizeAngle(gaussYaw), 0.f);
+		return true;
+	}
+
+	if ((!sense.lookValid || sense.lookAuthority <= 0.f) && BotDirective::AlertLook(bot))
+	{
+		sense.lookSource = LOOK_ALERT;
 		return true;
 	}
 
@@ -1362,6 +1646,7 @@ const char *BotSense::LookSourceName(LookSource source)
 	case LOOK_VANTAGE_PATH: return "vantage-path";
 	case LOOK_VANTAGE_OFFPATH: return "vantage-offpath";
 	case LOOK_NO_VANTAGE: return "no-vantage";
+	case LOOK_ALERT: return "alert";
 	}
 	return "?";
 }

@@ -25,7 +25,7 @@ if ($Port -eq 0) { $Port = 29015 + (Get-Random -Maximum 85) }
 
 $logFile = Join-Path $repoRoot "nav_debug\logs\${Map}_objectives.log"
 
-$commands = @('mp_timelimit 0')
+$commands = @('mp_timelimit 0', 'amxx pause crossbot_menu.amxx')
 if ($StrategicDebug) { $commands += 'crossbot_strategic_debug 1' }
 if ($Plugin) { $commands += 'crossbot_objectives 0' }
 $commands += "crossbot_tactics $Tactics"

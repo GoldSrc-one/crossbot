@@ -112,6 +112,10 @@ struct GameOffsets
 
 	int tankctl_pTank;
 
+	int tsgun_iWeapon;
+	int tsgun_rgAmmo;
+	int tsgun_rgStatus;
+
 	int mm_cTargets;
 	int mm_iTargetName;
 
@@ -141,10 +145,12 @@ struct MapOffsets
 	int dod_objTeam;
 	int dod_objGroup;
 	int dod_objOwner;
+	int dod_plrObject;
 	int dod_brkGroup;
 	int dod_sbYaw;
 	int dod_sbRange;
 	int dod_sbMaster;
+	int dod_acMaster;
 	int dod_esState;
 
 	int tfc_teamNo;
@@ -183,6 +189,8 @@ namespace GameData
 	bool Loaded(int iGame);
 
 	void Activate(int iGame);
+
+	int MonsterEnemyOffset(int iGame);
 
 	void Fatal(const char *fmt, ...);
 }

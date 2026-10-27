@@ -8,8 +8,6 @@ project(crossbot CXX)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# GoldSrc only loads a 32-bit plugin, while navgen is an offline tool built 64-bit. Each configure
-# builds one of them: 32-bit gives crossbot_mm, 64-bit gives navgen. build.bat does both.
 set(CROSSBOT_64BIT OFF)
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(CROSSBOT_64BIT ON)
@@ -36,11 +34,20 @@ file(GLOB CROSSBOT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
     ${CMAKE_SOURCE_DIR}/src/console/*.cpp
     ${CMAKE_SOURCE_DIR}/src/bot/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/brain/*.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/*.cpp
     ${CMAKE_SOURCE_DIR}/src/game/*.cpp
     ${CMAKE_SOURCE_DIR}/src/game/*/*.cpp
     ${CMAKE_SOURCE_DIR}/src/meta/*.cpp
 )
+
+enable_language(C)
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/external/opus ${CMAKE_BINARY_DIR}/opus EXCLUDE_FROM_ALL)
+if(NOT MSVC)
+    target_compile_options(opus PRIVATE -m32)
+endif()
 
 add_library(crossbot_mm SHARED ${CROSSBOT_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/navgen/crc32.cpp
@@ -61,6 +68,7 @@ target_include_directories(crossbot_mm PRIVATE
 )
 
 target_link_directories(crossbot_mm PRIVATE ${CROSSPLAY_DIR})
+target_link_libraries(crossbot_mm PRIVATE opus)
 
 set_target_properties(crossbot_mm PROPERTIES
     PREFIX ""
@@ -80,6 +88,7 @@ endif()
 
 if(WIN32)
     target_compile_definitions(crossbot_mm PRIVATE _WINDOWS WIN32)
+    target_link_libraries(crossbot_mm PRIVATE winhttp)
 endif()
 
 option(CROSSBOT_LADDER_DEBUG "Per-frame ladder state trace on the server console" OFF)
@@ -111,12 +120,14 @@ file(GLOB NAVGEN_SOURCES CONFIGURE_DEPENDS
 
 add_executable(navgen ${NAVGEN_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/nav/airmove_cache.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/nav_light.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/funnel_graph.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/plan_search.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/waypoint_plan.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/path_profile.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/path_follower.cpp
     ${CMAKE_SOURCE_DIR}/src/nav/pm_sim.cpp
+    ${CMAKE_SOURCE_DIR}/src/nav/sight_coverage.cpp
 )
 
 set_target_properties(navgen PROPERTIES

@@ -16,6 +16,8 @@ namespace TFCAbility
 
 bool Run(CBot &bot, const Nav::NavMesh &mesh);
 
+bool Start(CBot &bot, const char *name, const char *arg, edict_t *target);
+
 void RefreshTeleporters();
 
 bool FeignHold(edict_t *pEdict);

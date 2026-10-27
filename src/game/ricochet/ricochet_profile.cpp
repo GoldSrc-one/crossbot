@@ -107,6 +107,11 @@ int CRicochetProfile::MeleeWeapon() const
 	return 0;
 }
 
+bool CRicochetProfile::MeleeOnlyAllows(int id) const
+{
+	return id == kRicochetDisc;
+}
+
 int CRicochetProfile::AmbushWeapon(AmbushKind) const
 {
 	return 0;

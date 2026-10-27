@@ -60,6 +60,7 @@ struct CSSpread
 	float base;
 	float recover;
 	float floor;
+	float unzoomed;
 };
 
 const CSSpread *CS_Spread(int id);

@@ -5,6 +5,11 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+#include <FileSystem.h>
+
 #include "crossplay.h"
 #include "crossplay_api.h"
 #include "gamedata.h"
@@ -17,6 +22,23 @@ static_assert(XPlay::kMaxGames == CrossPlay::maxGameDlls, "XPlay::kMaxGames must
 
 int g_current = -1;
 IGameProfile *g_profiles[XPlay::kMaxGames] = {};
+
+IFileSystem *EngineFileSystem()
+{
+#if defined(_WIN32)
+	HMODULE module = GetModuleHandleA("filesystem_stdio.dll");
+#else
+	void *module = dlopen("filesystem_stdio.so", RTLD_NOW | RTLD_NOLOAD);
+#endif
+	if (!module)
+		return nullptr;
+
+	auto createInterface = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(module, CREATEINTERFACE_PROCNAME));
+	if (!createInterface)
+		return nullptr;
+
+	return static_cast<IFileSystem *>(createInterface(FILESYSTEM_INTERFACE_VERSION, nullptr));
+}
 
 }
 
@@ -91,6 +113,12 @@ const char *HyperDir()
 
 bool FindMapBsp(const char *mapName, char *out, unsigned int size)
 {
+	char relPath[256];
+	snprintf(relPath, sizeof(relPath), "maps/%s.bsp", mapName);
+	IFileSystem *fileSystem = EngineFileSystem();
+	if (fileSystem && fileSystem->GetLocalPath(relPath, out, static_cast<int>(size)))
+		return true;
+
 	const char *dirs[XPlay::kMaxGames + 2];
 	int count = 0;
 

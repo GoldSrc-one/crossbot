@@ -8,7 +8,7 @@ namespace crossbot_nav
 
 constexpr char kNavMagic[4] = {'C', 'B', 'N', 'V'};
 
-constexpr uint32_t kNavVersion = 23;
+constexpr uint32_t kNavVersion = 26;
 
 constexpr size_t kNavWatchDirs = 4;
 
@@ -16,11 +16,18 @@ constexpr uint8_t kNoAreaPlane = 0xFF;
 
 constexpr uint8_t kNoWaterVolume = 0xFF;
 
+constexpr uint16_t kNoBarrier = 0xFFFF;
+
 constexpr float kNavSubmergeNever = 1.0e9f;
 
 constexpr float kNavDefaultDesignSpeed = 320.f;
 
 constexpr float kMinDriftSpeed = 30.f;
+
+constexpr float kOverlookMargin = 64.f;
+constexpr float kOverlookReach = 1.f;
+constexpr size_t kOverlookSamples = 12;
+constexpr float kOverlookChest = 36.f;
 
 enum AreaFlags : uint32_t
 {
@@ -32,6 +39,7 @@ enum AreaFlags : uint32_t
 	NAV_AREA_DOOR             = 1u << 7,
 	NAV_AREA_BREAKABLE        = 1u << 8,
 	NAV_AREA_ELEVATOR         = 1u << 9,
+	NAV_AREA_BARRIER          = 1u << 10,
 };
 
 enum ConnType : uint8_t
@@ -123,9 +131,10 @@ struct NavHeader
 	float maxExposure;
 	uint32_t waterVolumeCount;
 	uint32_t campCount;
+	uint32_t barrierCount;
 };
 
-static_assert(sizeof(NavHeader) == 128, "NavHeader layout changed without a version bump");
+static_assert(sizeof(NavHeader) == 132, "NavHeader layout changed without a version bump");
 
 struct NavAreaRecord
 {
@@ -140,13 +149,15 @@ struct NavAreaRecord
 	uint16_t planeCount;
 
 	uint8_t activation;
-	uint8_t pad0[3];
+	uint8_t pad0;
+	uint16_t barrier;
 	float openSeconds;
 	uint32_t detourOffset;
 	uint32_t detourCount;
 
 	uint8_t waterVolume;
-	uint8_t pad1[3];
+	uint8_t pad1;
+	uint16_t barrierFloor;
 	float submergeZ;
 
 	float driftVelocity[3];
@@ -185,7 +196,15 @@ struct NavDetourPointRecord
 	uint8_t pad[3];
 };
 
+struct NavBarrierRecord
+{
+	uint32_t modelIndex;
+	float mins[3];
+	float maxs[3];
+};
+
 static_assert(sizeof(NavAreaRecord) == 88, "NavAreaRecord layout changed without a version bump");
+static_assert(sizeof(NavBarrierRecord) == 28, "NavBarrierRecord layout changed without a version bump");
 static_assert(sizeof(NavWaterVolumeRecord) == 48, "NavWaterVolumeRecord layout changed");
 static_assert(sizeof(NavActivationDetourRecord) == 40, "NavActivationDetourRecord layout changed");
 static_assert(sizeof(NavDetourPointRecord) == 24, "NavDetourPointRecord layout changed");
@@ -248,11 +267,12 @@ struct NavVantageRecord
 {
 	float pos[3];
 	float exposure;
+	float visibility;
 	NavWatchDir watch[kNavWatchDirs];
 };
 
 static_assert(sizeof(NavWatchDir) == 20, "NavWatchDir layout changed without a version bump");
-static_assert(sizeof(NavVantageRecord) == 96, "NavVantageRecord layout changed without a version bump");
+static_assert(sizeof(NavVantageRecord) == 100, "NavVantageRecord layout changed without a version bump");
 
 enum CampFlags : uint32_t
 {

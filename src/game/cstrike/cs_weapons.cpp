@@ -7,7 +7,8 @@ namespace
 	const WeaponMode kNoMode = {};
 
 	const WeaponMode kAuto = { FIRE_HOLD, AIM_TARGET, TOGGLE_NONE, AMMO_CLIP, 1, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_STICKY };
-	const WeaponMode kSemi = { FIRE_TAP, AIM_TARGET, TOGGLE_NONE, AMMO_CLIP, 1, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_NONE };
+	const WeaponMode kAutoBrace = { FIRE_HOLD, AIM_TARGET, TOGGLE_NONE, AMMO_CLIP, 1, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_STICKY | WPN_Q_BRACE };
+	const WeaponMode kSemi = { FIRE_TAP, AIM_TARGET, TOGGLE_NONE, AMMO_CLIP, 1, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_BRACE };
 	const WeaponMode kShotgun = { FIRE_HOLD, AIM_TARGET, TOGGLE_NONE, AMMO_CLIP, 1, 0.f, 0.f, 2048.f, 0.f, 0.f, 0.f, WPN_Q_NONE };
 	const WeaponMode kZoom = { FIRE_TAP, AIM_NONE, TOGGLE_ZOOM, AMMO_NONE, 0, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_NONE };
 	const WeaponMode kKnife = { FIRE_HOLD, AIM_TARGET, TOGGLE_NONE, AMMO_NONE, 0, 0.f, 0.f, 48.f, 0.f, 0.f, 0.f, WPN_Q_NONE };
@@ -23,29 +24,29 @@ namespace
 		{ CS_XM1014, "weapon_xm1014", 7, 0.3f, RANGE_CLOSE, 0.f, kShotgun, kNoMode, kNoMode },
 		{ CS_C4, "weapon_c4", -1, 0.f, RANGE_NONE, 0.f, kNoMode, kNoMode, kNoMode },
 		{ CS_MAC10, "weapon_mac10", 30, 0.25f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
-		{ CS_AUG, "weapon_aug", 30, 0.4f, RANGE_LONG, 55.f, kAuto, kAuto, kZoom },
+		{ CS_AUG, "weapon_aug", 30, 0.4f, RANGE_LONG, 55.f, kAutoBrace, kAutoBrace, kZoom },
 		{ CS_SMOKEGRENADE, "weapon_smokegrenade", -1, 0.f, RANGE_CLOSE, 0.f, kUnsafeGrenade, kNoMode, kNoMode },
 		{ CS_ELITE, "weapon_elite", 30, 0.15f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
 		{ CS_FIVESEVEN, "weapon_fiveseven", 20, 0.12f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
 		{ CS_UMP45, "weapon_ump45", 25, 0.25f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
 		{ CS_SG550, "weapon_sg550", 30, 0.45f, RANGE_LONG, 40.f, kSemi, kSemi, kZoom },
-		{ CS_GALIL, "weapon_galil", 35, 0.35f, RANGE_LONG, 0.f, kAuto, kNoMode, kNoMode },
-		{ CS_FAMAS, "weapon_famas", 25, 0.35f, RANGE_LONG, 0.f, kAuto, kNoMode, kNoMode },
+		{ CS_GALIL, "weapon_galil", 35, 0.35f, RANGE_LONG, 0.f, kAutoBrace, kNoMode, kNoMode },
+		{ CS_FAMAS, "weapon_famas", 25, 0.35f, RANGE_LONG, 0.f, kAutoBrace, kNoMode, kNoMode },
 		{ CS_USP, "weapon_usp", 12, 0.12f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
 		{ CS_GLOCK18, "weapon_glock18", 20, 0.1f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
 		{ CS_AWP, "weapon_awp", 10, 0.5f, RANGE_LONG, 40.f, kSemi, kSemi, kZoom },
 		{ CS_MP5NAVY, "weapon_mp5navy", 30, 0.25f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
-		{ CS_M249, "weapon_m249", 100, 0.4f, RANGE_LONG, 0.f, kAuto, kNoMode, kNoMode },
+		{ CS_M249, "weapon_m249", 100, 0.4f, RANGE_LONG, 0.f, kAutoBrace, kNoMode, kNoMode },
 		{ CS_M3, "weapon_m3", 8, 0.3f, RANGE_CLOSE, 0.f, kShotgun, kNoMode, kNoMode },
-		{ CS_M4A1, "weapon_m4a1", 30, 0.4f, RANGE_LONG, 0.f, kAuto, kNoMode, kNoMode },
+		{ CS_M4A1, "weapon_m4a1", 30, 0.4f, RANGE_LONG, 0.f, kAutoBrace, kNoMode, kNoMode },
 		{ CS_TMP, "weapon_tmp", 30, 0.22f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
 		{ CS_G3SG1, "weapon_g3sg1", 20, 0.45f, RANGE_LONG, 40.f, kSemi, kSemi, kZoom },
 		{ CS_FLASHBANG, "weapon_flashbang", -1, 0.f, RANGE_CLOSE, 0.f, kUnsafeGrenade, kNoMode, kNoMode },
 		{ CS_DEAGLE, "weapon_deagle", 7, 0.2f, RANGE_CLOSE, 0.f, kSemi, kNoMode, kNoMode },
-		{ CS_SG552, "weapon_sg552", 30, 0.4f, RANGE_LONG, 55.f, kAuto, kAuto, kZoom },
-		{ CS_AK47, "weapon_ak47", 30, 0.4f, RANGE_LONG, 0.f, kAuto, kNoMode, kNoMode },
+		{ CS_SG552, "weapon_sg552", 30, 0.4f, RANGE_LONG, 55.f, kAutoBrace, kAutoBrace, kZoom },
+		{ CS_AK47, "weapon_ak47", 30, 0.4f, RANGE_LONG, 0.f, kAutoBrace, kNoMode, kNoMode },
 		{ CS_KNIFE, "weapon_knife", -1, 0.05f, RANGE_CLOSE, 0.f, kKnife, kNoMode, kNoMode },
-		{ CS_P90, "weapon_p90", 50, 0.3f, RANGE_CLOSE, 0.f, kAuto, kNoMode, kNoMode },
+		{ CS_P90, "weapon_p90", 50, 0.3f, RANGE_CLOSE, 0.f, kAutoBrace, kNoMode, kNoMode },
 	};
 
 	const int kArmoury[] = {
@@ -77,6 +78,10 @@ namespace
 		{ CS_P228,      0.f,   0.f, 0.15f,   0.f,    0.255f,  0.f, 0.075f,  0.9f,  0.325f, 0.6f  },
 		{ CS_FIVESEVEN, 0.f,   0.f, 0.15f,   0.f,    0.255f,  0.f, 0.075f,  0.92f, 0.275f, 0.725f },
 		{ CS_ELITE,     0.f,   0.f, 0.1f,    0.f,    0.175f,  0.f, 0.08f,   0.88f, 0.325f, 0.55f },
+		{ CS_AWP,       10.f,  0.001f, 0.f,  0.25f,  0.f,     0.f, 0.f,     0.f,   0.f,    0.f,   0.08f },
+		{ CS_SCOUT,     170.f, 0.007f, 0.f,  0.075f, 0.f,     0.f, 0.f,     0.f,   0.f,    0.f,   0.025f },
+		{ CS_G3SG1,     0.f,   0.f, 0.f,     0.15f,  0.f,     0.f, 0.f,     0.f,   0.f,    0.f,   0.025f },
+		{ CS_SG550,     0.f,   0.f, 0.f,     0.15f,  0.f,     0.f, 0.f,     0.f,   0.f,    0.f,   0.025f },
 	};
 
 	const CSBullet kBullets[] = {

@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "bot_difficulty.h"
+#include "../game/cvars.h"
 
 namespace BotDiff
 {
@@ -11,10 +12,10 @@ namespace BotDiff
 namespace
 {
 	const Row kTable[DIFF_COUNT] = {
-		{ "easy",   0.40f, 0.85f, 0.25f, 0.50f, 0.000f, 10,  0, true,  true,  true,  false, false, false, false, false, false, false, 2.00f, -0.15f, 0.25f },
-		{ "normal", 0.30f, 1.00f, 0.15f, 0.25f, 2.000f, 40,  0, true,  true,  true,  false, false, false, false, false, false, false, 1.50f, -0.05f, 0.15f },
-		{ "hard",   0.25f, 1.10f, 0.10f, 0.25f, 1.500f, 60, 70, true,  true,  true,  false, false, false, true,  true,  false, false, 1.25f,  0.00f, 0.10f },
-		{ "expert", 0.20f, 1.20f, 0.05f, 0.25f, 1.125f, 90, 90, false, false, false, true,  true,  true,  true,  true,  true,  true,  1.00f,  0.00f, 0.05f },
+		{ "easy",   0.40f, 0.85f, 0.25f, 0.50f, 0.000f, 10,  0, true,  true,  true,  false, false, false, false, false, false, false, 2.00f, -0.15f, 0.25f, 1.50f },
+		{ "normal", 0.30f, 1.00f, 0.15f, 0.25f, 2.000f, 40,  0, true,  true,  true,  false, false, false, false, false, false, false, 1.50f, -0.05f, 0.15f, 1.00f },
+		{ "hard",   0.25f, 1.10f, 0.10f, 0.25f, 1.500f, 60, 70, true,  true,  true,  false, false, false, true,  true,  false, false, 1.25f,  0.00f, 0.10f, 0.75f },
+		{ "expert", 0.20f, 1.20f, 0.05f, 0.25f, 1.125f, 90, 90, false, false, false, true,  true,  true,  true,  true,  true,  true,  1.00f,  0.00f, 0.05f, 0.50f },
 	};
 
 	bool Boolean(const char *name, bool tiered)
@@ -32,7 +33,7 @@ namespace
 
 Tier Current()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_difficulty");
+	cvar_t *cvar = CBotCvar("crossbot_difficulty");
 	if (!cvar)
 		return DIFF_NORMAL;
 
@@ -60,7 +61,7 @@ const char *Name(Tier tier)
 
 float Pin(const char *name)
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer(name);
+	cvar_t *cvar = CBotCvar(name);
 	return (cvar && cvar->value >= 0.f) ? cvar->value : -1.f;
 }
 
@@ -179,6 +180,11 @@ void SpreadWait(float &loOut, float &hiOut)
 	hiOut = row.spreadLate;
 }
 
+float NoticeScale()
+{
+	return Scalar("crossbot_notice", Table(Current()).noticeScale);
+}
+
 void PrintStatus()
 {
 	Tier tier = Current();
@@ -226,6 +232,10 @@ void PrintStatus()
 		Pin("crossbot_spread_fit") >= 0.f ? "pinned" : "tier");
 	SERVER_PRINT(msg);
 	snprintf(msg, sizeof(msg), "  %-18s %+.3f..%+.3f  tier\n", "spread_wait", lo, hi);
+	SERVER_PRINT(msg);
+
+	snprintf(msg, sizeof(msg), "  %-18s %-12.2f %s\n", "notice", NoticeScale(),
+		Pin("crossbot_notice") >= 0.f ? "pinned" : "tier");
 	SERVER_PRINT(msg);
 
 	static const char *kFlagNames[] = {

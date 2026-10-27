@@ -15,6 +15,7 @@ namespace
 
 constexpr double kMinFragmentVolume = 1.0;
 constexpr double kFootprintSlop = 0.5;
+constexpr double kStandHeight = 72.0;
 
 void LeafBoundsXY(const Polytope &poly, Vec3 &mins, Vec3 &maxs)
 {
@@ -82,7 +83,7 @@ int GoverningWaterVolume(const std::vector<LiquidVolume> &waterVolumes, const Ve
 			floorPoint.y < vol.mins.y - kFootprintSlop || floorPoint.y > vol.maxs.y + kFootprintSlop)
 			continue;
 
-		if (vol.HighSurfaceZ() < probe.z)
+		if (vol.HighSurfaceZ() < probe.z || (!vol.moving && vol.mins.z > floorPoint.z + kStandHeight))
 			continue;
 
 		Vec3 inside = floorPoint;
@@ -218,7 +219,8 @@ std::vector<ExtractedLeaf> SplitLeavesByWaterLevels(const std::vector<LiquidVolu
 		{
 			if (!vol.OverlapsColumn(leafMins, leafMaxs))
 				continue;
-			if (vol.HighSurfaceZ() < leafMins.z + kNavFloorToStandOrigin)
+			if (vol.HighSurfaceZ() < leafMins.z + kNavFloorToStandOrigin ||
+				(!vol.moving && vol.mins.z > leafMins.z + kStandHeight))
 				continue;
 
 			AppendFootprintCuts(vol, cuts);

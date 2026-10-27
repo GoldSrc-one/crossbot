@@ -8,10 +8,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <vector>
 
 #include "../../bot/bot.h"
+#include "../cvars.h"
 #include "../../bot/bot_ability.h"
 #include "../../bot/bot_aim.h"
 #include "../../bot/bot_combat.h"
@@ -185,7 +187,7 @@ bool CCSProfile::Detect(const char *gamedir) const
 
 PmSim::FallRule CCSProfile::FallDamage() const
 {
-	if (CVAR_GET_FLOAT("mp_falldamage") == 0.f)
+	if (CBotCvarFloat("mp_falldamage") == 0.f)
 		return PmSim::kNoFall;
 	return { kFallSafeSpeed, kFallDamage };
 }
@@ -290,7 +292,7 @@ bool CCSProfile::AbilityRun(CBot &bot, const Nav::NavMesh &) const
 	else
 	{
 		if (st.task != BotAbility::TASK_NONE || !carrying || enemy || !ground || now < st.nextTry ||
-			!InBombZone(pEdict))
+			!InBombZone(pEdict) || BotDirective::NoAutoObjective(bot))
 			return false;
 
 		st.task = BotAbility::TASK_PLANT;
@@ -313,6 +315,73 @@ bool CCSProfile::AbilityRun(CBot &bot, const Nav::NavMesh &) const
 
 	Vector angles = Bot_UpdateFacing(bot);
 	Bot_RunPlayerMove(bot, angles, 0.f, 0.f, buttons);
+	return true;
+}
+
+int CCSProfile::Abilities(const AbilityInfo *&list) const
+{
+	static const AbilityInfo kList[] = {
+		{ "plant", nullptr, "plant the C4 where you stand; needs the C4 and a bomb zone" },
+	};
+	list = kList;
+	return static_cast<int>(sizeof(kList) / sizeof(kList[0]));
+}
+
+int CCSProfile::RadioCommands(const RadioInfo *&list) const
+{
+	static const RadioInfo kList[] = {
+		{ "coverme", 0, "%!MRAD_COVERME", "Cover me!" },
+		{ "takepoint", 0, "%!MRAD_TAKEPOINT", "You take the point." },
+		{ "holdpos", 0, "%!MRAD_POSITION", "Hold this position." },
+		{ "regroup", 0, "%!MRAD_REGROUP", "Regroup, team." },
+		{ "followme", 0, "%!MRAD_FOLLOWME", "Follow me." },
+		{ "takingfire", 0, "%!MRAD_HITASSIST", "Taking fire, need assistance!" },
+		{ "go", 0, "%!MRAD_GO", "Go go go!" },
+		{ "fallback", 0, "%!MRAD_FALLBACK", "Team, fall back!" },
+		{ "sticktog", 0, "%!MRAD_STICKTOG", "Stick together, team." },
+		{ "getinpos", 0, "%!MRAD_GETINPOS", "Get in position and wait for my go." },
+		{ "stormfront", 0, "%!MRAD_STORMFRONT", "Storm the front!" },
+		{ "report", 0, "%!MRAD_REPORTIN", "Report in, team." },
+		{ "roger", 0, "%!MRAD_ROGER", "Roger that." },
+		{ "roger", 0, "%!MRAD_AFFIRM", "Affirmative." },
+		{ "enemyspot", 0, "%!MRAD_ENEMYSPOT", "Enemy spotted." },
+		{ "needbackup", 0, "%!MRAD_BACKUP", "Need backup." },
+		{ "sectorclear", 0, "%!MRAD_CLEAR", "Sector clear." },
+		{ "inposition", 0, "%!MRAD_INPOS", "I'm in position." },
+		{ "reportingin", 0, "%!MRAD_REPRTINGIN", "Reporting in." },
+		{ "getout", 0, "%!MRAD_BLOW", "Get out of there, it's gonna blow!" },
+		{ "negative", 0, "%!MRAD_NEGATIVE", "Negative." },
+		{ "enemydown", 0, "%!MRAD_ENEMYDOWN", "Enemy down." },
+	};
+	list = kList;
+	return static_cast<int>(sizeof(kList) / sizeof(kList[0]));
+}
+
+bool CCSProfile::StartAbility(CBot &bot, const char *name, const char *, edict_t *) const
+{
+	BotAbility::State &st = bot.ability;
+	if (CB_STRICMP(name, "plant") != 0)
+		return false;
+	if (st.task != BotAbility::TASK_NONE)
+	{
+		st.why = "busy";
+		return false;
+	}
+	if (Find(bot.inventory, CS_C4) < 0)
+	{
+		st.why = "no C4";
+		return false;
+	}
+	if (!InBombZone(bot.pEdict))
+	{
+		st.why = "not in a bomb zone";
+		return false;
+	}
+
+	st.task = BotAbility::TASK_PLANT;
+	st.start = gpGlobals->time;
+	st.why = "ordered to plant";
+	BOT_VLOG("CrossBot: %s is planting the bomb on orders\n", bot.name);
 	return true;
 }
 
@@ -369,6 +438,22 @@ bool CCSProfile::SpreadWide(edict_t *player, int id, void *weapon, float limit, 
 
 	int shots = std::min(GameData::Peek<int>(weapon, g_offsets.wpn_iShotsFired), kShotsCap);
 	ready = now + kShotsDelay + kShotsDecay * static_cast<float>(shots);
+	return true;
+}
+
+bool CCSProfile::BraceSpeed(edict_t *player, int id, void *weapon, float limit, float &speed) const
+{
+	speed = FLT_MAX;
+	const CSSpread *s = CS_Spread(id);
+	if (!s || !player || !weapon || limit <= 0.f)
+		return true;
+
+	float acc = g_offsets.wpn_flAccuracy >= 0 ? GameData::Peek<float>(weapon, g_offsets.wpn_flAccuracy) : s->base;
+	float cone = s->moveA + s->moveB * (s->recover > 0.f ? 1.f - acc : acc);
+	if (!Zoomed(player))
+		cone += s->unzoomed;
+	if (cone > limit)
+		speed = s->moveSpeed;
 	return true;
 }
 

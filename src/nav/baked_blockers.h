@@ -9,7 +9,12 @@ constexpr int kSfWallStartOff = 1;
 constexpr int kSfConveyorVisual = 1;
 constexpr int kSfConveyorNotSolid = 2;
 
-inline bool IsBakedBlocker(const char *classname, int spawnflags)
+inline bool IsBarrierWall(const char *classname, bool named)
+{
+	return named && classname && strcmp(classname, "func_wall_toggle") == 0;
+}
+
+inline bool IsBakedBlocker(const char *classname, int spawnflags, bool named)
 {
 	if (!classname)
 		return false;
@@ -19,7 +24,7 @@ inline bool IsBakedBlocker(const char *classname, int spawnflags)
 		return true;
 
 	if (strcmp(classname, "func_wall_toggle") == 0)
-		return (spawnflags & kSfWallStartOff) == 0;
+		return !named && (spawnflags & kSfWallStartOff) == 0;
 
 	if (strcmp(classname, "func_conveyor") == 0)
 		return (spawnflags & kSfConveyorNotSolid) == 0;

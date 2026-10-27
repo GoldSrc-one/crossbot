@@ -275,6 +275,9 @@ LiquidSet ExtractLiquidVolumes(const BspFile &bsp, const std::vector<Entity> &en
 	for (size_t i = 0; i < entities.size(); ++i)
 	{
 		const Entity &ent = entities[i];
+		std::string cls = ent.Get("classname");
+		if (cls.compare(0, 8, "trigger_") == 0)
+			continue;
 
 		int modelIndex = ParseBrushModelIndex(ent.Get("model"));
 		if (modelIndex < 0 || static_cast<size_t>(modelIndex) >= models.size())
@@ -311,7 +314,6 @@ LiquidSet ExtractLiquidVolumes(const BspFile &bsp, const std::vector<Entity> &en
 
 		std::vector<LiquidVolume> bodies = GroupPieces(pieces, contents, modelIndex, static_cast<int>(i));
 
-		std::string cls = ent.Get("classname");
 		Vec3 movedir = MoveDirFromAngles(EntityAngles(ent));
 
 		bool isDoor = (cls == "func_water" || cls == "func_door") && !ent.Get("targetname").empty() &&

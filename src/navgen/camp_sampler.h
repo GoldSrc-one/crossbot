@@ -2,11 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
+#include "area_merger.h"
 #include "blocking_entities.h"
 #include "bsp_file.h"
 #include "bsp_vis.h"
+#include "entity_parser.h"
 #include "nav_format.h"
 #include "polytope.h"
 #include "vantage_sampler.h"
@@ -34,8 +37,21 @@ struct CampSpot
 	double crouchDist = 0.0;
 	int areaId = -1;
 	uint32_t flags = 0;
+	uint64_t objectives = 0;
 	size_t climbSteps = 0;
 	Vec3 climbStart;
+};
+
+constexpr size_t kMaxCampObjectives = 64;
+
+struct CampObjective
+{
+	std::string name;
+	size_t entities = 0;
+	std::vector<Vec3> points;
+	std::vector<Vec3> mins;
+	std::vector<Vec3> maxs;
+	std::vector<Vec3> nearby;
 };
 
 struct CampParams
@@ -72,10 +88,18 @@ struct CampStats
 	size_t batches = 0;
 	size_t batchItems = 0;
 	size_t threads = 0;
+	size_t objectives = 0;
+	size_t overlookers = 0;
+	size_t overlookKept = 0;
+	std::vector<size_t> lanePicks;
+	double objectiveSeconds = 0.0;
 };
+
+std::vector<CampObjective> BuildCampObjectives(const BspFile &bsp, const std::vector<Entity> &entities,
+	const MergeResult &merged);
 
 std::vector<CampSpot> BuildCampSpots(const BspFile &bsp, const VisIndex &vis,
 	const std::vector<BlockingVolume> &visBlockers, const std::vector<VantageCandidate> &candidates,
-	const CampParams &params, CampStats *stats);
+	const std::vector<CampObjective> &objectives, const CampParams &params, CampStats *stats);
 
 }

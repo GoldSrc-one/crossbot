@@ -35,6 +35,7 @@ struct RouteSpot
 	bool duck = false;
 	bool zoom = false;
 	Bipod bipod = BIPOD_NONE;
+	bool prone = false;
 	float arc = 0.f;
 	bool timed = false;
 	float holdFor = 0.f;
@@ -42,6 +43,7 @@ struct RouteSpot
 	float raceOut = 0.f;
 	float raceLead = 0.f;
 	int snipeId = 0;
+	int clearEnt = 0;
 };
 
 struct SpotMemo
@@ -55,6 +57,7 @@ struct State
 	std::vector<RouteSpot> route;
 
 	bool holding = false;
+	bool directed = false;
 	float holdStart = 0.f;
 	RouteSpot spot;
 
@@ -130,6 +133,8 @@ void NoteSpot(CBot &bot, int campIndex, float seconds);
 
 bool SpotReady(const CBot &bot, int campIndex);
 
+bool SpotOccupied(const CBot &bot, const Vector &pos);
+
 float SpotDist(const Nav::CampSpot &camp);
 
 Vector SpotEye(const Nav::CampSpot &camp);
@@ -141,5 +146,11 @@ bool SpotAllowed(const CBot &bot, const Nav::CampSpot &camp);
 bool FacesThreat(const Nav::CampSpot &camp, const Vector &threat);
 
 Bipod HeldBipod(const CBot &bot);
+
+bool HeldProne(const CBot &bot);
+
+void HoldDirected(CBot &bot, const Nav::NavMesh &mesh, int campIndex, float yaw, float pitch, int stance);
+
+void EndDirected(CBot &bot);
 
 }

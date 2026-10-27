@@ -1,1416 +1,1029 @@
 # Mesh and Path Planning
 
-The mesh the bots run on — areas, connections, queries, the loader, the vantage field —
-and how routes over it come to exist: the A\* search, its cost model, the funnel, the speed
-profile, the air-move simulator and cache, and the gravity rules. How the bot follows the
-result is `doc/movement.md`.
+The mesh the bots run on — areas, connections, lookups, the loader, the vantage field — and how a route
+over it is built: the A\* search, its cost model, the walker that string-pulls and validates air moves
+*during* the search, the speed profile, the air-move simulator and its cache. How the bot follows the
+result is `doc/movement.md`; how navgen builds the mesh is `doc/navgen.md`.
 
-## nav_mesh.h
+## The mesh
 
-### NavMesh struct
-`planAreas` and `planConns` are the planner's view of the same graph, built once when the file is loaded. The area gates in particular are what the funnel routes through, and rebuilding them per repath would repeat the same plane intersections every time.
+### NavMesh, Area, Connection (`nav_mesh.h`)
 
-### Area struct
-- `planes` - inward-facing bound planes (for prism areas, includes footprint vertical planes + z-slab)
+- `NavMesh::planAreas` / `planConns` are the planner's view of the graph, built once at load. Rebuilding
+  the area gates per repath would repeat the same plane intersections every time.
+- `Area::planes` — inward-facing bound planes; for a prism area, the footprint's vertical planes plus a
+  z-slab. Activation data lives only on `planAreas`, loaded straight from the area records.
+- `Connection::gateA` / `gateB` — the funnel gates on each side, baked by navgen with the player radius
+  already applied: inset at both ends and pushed up to that far into the owning area (`GateFromEdge`). A
+  zero-length gate means the opening was too narrow to inset; its midpoint is the only way through.
+  `gateValid` says which sides carry one; a teleport carries neither.
 
-Activation data lives only on `planAreas`, loaded straight from the area records. `Nav::Area` used to mirror
-`doorActivation`/`doorActivatorPos`/`doorWaitTime`, which nothing outside the loader ever read.
+### Loading (`nav_loader.cpp`)
 
-### Connection struct
-- `gateA`, `gateB` - funnel gates on each side, baked by navgen with player radius already applied (inset at both ends and pushed up to that far into the owning area, see `GateFromEdge`). Zero-length gate means opening was too narrow to inset; midpoint is the only way through. `gateValid` says which sides carry one; teleport carries neither.
+`LoadNavFile`:
+- checks the magic `CBNV` and `kNavVersion` (`nav_format.h`, currently 26);
+- reads area records, connection records, area-connection indices, area planes, activation detours and
+  detour points, then the vantage section;
+- verifies the BSP checksum against the live map;
+- builds the `PlanArea` view (bound planes from the area planes) and the `PlanConnection` view (gates,
+  launch params);
+- converts the `NavVantageRecord`s into a `VantageField`, calls `BuildVantageGrid` once, and resolves the
+  per-connection exposure and open distance (see Carefulness and Range bias below);
+- falls back to `kNavDefaultDesignSpeed` (320) when the header's `designMaxSpeed` is unset.
 
-## nav_query.cpp
+The version check is a hard equality, not a floor: every record is `fread` straight into its struct, so
+any layout change is a version bump and a regeneration of every `.nav`, and an older file is refused
+rather than read with a shifted layout.
 
-Two lookups that answer different questions, and the names say which. `FindAreaExact` asks *which area
-contains this point* and is allowed to answer none. `FindAreaNearest` asks *which area is nearest* and is
-a total function that essentially never fails. Picking the wrong one is a recurring bug — a strict lookup
-where a forgiving one belongs makes a bot on a lip forget where it is, and a forgiving one where a strict
-one belongs scores a maneuver against an area the bot never reached (`doc/movement.md`, `FinishLadder` and
-`FinishElevatorRide`).
+### Area lookups (`nav_query.cpp`)
 
-### AreaContainsPoint
-The shared predicate both lookups are built from: AABB test with 4-unit epsilon, then exact plane test
-(2-unit epsilon). Public because a caller sometimes knows *which* area it is asking about, and asking
-directly is not the same question as sweeping the mesh. Areas abut on shared planes, so a point on a
-seam is inside both within the plane epsilon and `FindAreaExact` returns whichever comes first in id
-order — arbitrary. `FinishElevatorRide` tests its ride target with this first for exactly that reason
-(`doc/movement.md`, "The target area wins a boundary tie"); the stop slab and the shaft below it share a
-plane, and the sweep would always answer "shaft".
+Two lookups answer two different questions, and the names say which:
 
-### FindAreaExact
-`AreaContainsPoint` against every area, first hit wins. Null when nothing contains the point. Note the
-point is tested in the mesh's own space: areas are built in hull 3, so their z range is duck-origin z,
-and a caller holding a player's `v.origin` may need `BotNavZ` first. It usually does not matter,
-because an ordinary area spans floor to ceiling and swallows an 18-unit offset — it matters wherever
-areas are thin, which in practice means elevator stop slabs.
+| Function | Question | Can fail? |
+|---|---|---|
+| `FindAreaExact` | which area *contains* this point | yes, returns null |
+| `FindAreaNearest` | which area is *nearest* | essentially never |
 
-### FindAreaNearest
-`FindAreaExact` first, then two fallbacks:
-1. nearest centroid among areas whose AABB holds the point
-2. global nearest centroid
+Picking the wrong one is a recurring bug. A strict lookup where a forgiving one belongs makes a bot on a lip
+forget where it is; a forgiving one where a strict one belongs scores a maneuver against an area the bot
+never reached (`doc/movement.md`, the ladder, air-move and elevator verdicts).
 
-### FindAreaById
-Direct index lookup with fallback to linear search.
+- **`AreaContainsPoint`** — the predicate both are built from: AABB test with `kAabbEpsilon` (4), then the
+  exact plane test with `kPlaneEpsilon` (2). Public because asking about one known area is not the same
+  question as sweeping the mesh. Areas abut on shared planes, so a seam point is inside both and
+  `FindAreaExact` returns whichever has the lower id. `FinishElevatorRide` asks its ride target first for
+  exactly that reason: the stop slab and the shaft below it share a plane, and the sweep always answers
+  "shaft".
+- **`FindAreaExact`** — `AreaContainsPoint` over every area, first hit wins. The test is in mesh space:
+  areas are built in hull 3, so their z range is duck-origin z, and a caller holding a player's
+  `v.origin` may need `BotNavZ` first. An ordinary area spans floor to ceiling and swallows the 18-unit
+  offset; it matters where areas are thin, which in practice means elevator stop slabs.
+- **`FindAreaNearest`** — `FindAreaExact`, then the nearest centroid among areas whose AABB holds the
+  point, then the global nearest centroid.
+- **`FindAreaById`** — direct index, linear search as fallback.
 
-## nav_loader.cpp
+## Vantage field (`nav_vantage.cpp`)
 
-### LoadNavFile
-Loads and validates .nav file:
-- Checks magic ("CBNV") and version (21)
-- Reads area records, connection records, area-connection indices, area planes, activation detours and
-  detour points, then the vantage section
-- Verifies BSP checksum against live map
-- Converts to runtime NavMesh with PlanArea/PlanConnection views
-- Builds PlanArea boundPlanes from Area planes
-- Builds PlanConnection from Connection (including gates, launch params)
-- Converts `NavVantageRecord`s into `VantageField` and calls `BuildVantageGrid` once
+The runtime half of navgen's vantage sampling (`doc/navgen.md`, *vantage_sampler.cpp*). Each reduced
+vantage stores up to four `WatchDir{yaw, pitch, spread, amount}` — the cones through which everything
+with line of sight to that spot arrives — plus `exposure`. The runtime turns a bot's eye position into a
+blended signature it can steer by; `bot_sense.cpp` refreshes one per bot every 0.1 s.
 
-The version check is a hard equality, not a floor, so a file from an older navgen is refused outright
-rather than read with a shifted layout. Every record is `fread` straight into its struct, so any layout
-change is a version bump and a full regeneration of every `.nav`.
+**The field has its own grid** because nothing else in `src/nav/` indexes space (`FindAreaExact` is a
+linear scan) and a blend runs per bot at 10 Hz. It is a CSR uniform grid: count pass, prefix sum, fill
+pass, one allocation each for `cellStart` and `cellItems`. Cell size is the header's `vantageSpacing`,
+floored at 32 and doubled until the cell count is within `64 * vantages + 4096`, so a long thin map does
+not allocate a mostly-empty lattice. `FindNearest` walks cube-shell rings outward and stops once the
+fourth-best distance is inside the searched ring's inscribed radius, `ring * cell`.
 
-## nav_vantage.cpp
+**Scalars interpolate, directions merge.**
+- `exposure` is IDW over the four nearest with weight `1 / (d^2 + 1)` — the same weight and epsilon navgen's
+  decimation scored itself against, so the runtime reproduces the interpolation the decimation assumed.
+- Watch directions are a variable-length list and have no distance, so they cannot be averaged. They are
+  merged with the same greedy peak-and-absorb `ExtractWatchDirs` runs: take the heaviest entry, mean-shift
+  once over everything within 45°, absorb those with summed weight and weighted-RMS spread, repeat up to
+  four times. navgen runs it over a 512-bin histogram; this runs over at most 16 sparse entries, each
+  entering at `idw * amount`.
+- Merged directions under 5% of the kept weight (navgen's `minClusterFraction`) are dropped. Otherwise a
+  far neighbour survives as a fourth watch dir with `amount 0.000`, and `ApplyVantageLook`'s
+  nearest-to-path search would snap the head onto it. Amounts are renormalised over what survives, so
+  `watch[0].amount` is always the largest and safe as a denominator.
 
-### What the field is for
-navgen samples, for every reduced vantage, up to four `WatchDir{yaw, pitch, spread, amount}` — the cones
-that everything with line of sight to that spot arrives *through* — plus `exposure`
-(`doc/navgen.md`, *vantage_sampler.cpp*). This is the runtime half: turn a bot's eye position into a
-blended signature it can steer by. `bot_sense.cpp` refreshes one per bot every 0.1 s.
+**Round-tripping is the correctness test.** Blended at a stored vantage's exact position, the distance-0
+neighbour dominates and the result must be that vantage's own record. `crossbot_vantage_status <x y z>`
+checks this; anything else means the loader, the grid or the merge is wrong.
 
-### The grid exists because there was no spatial index at all
-`FindAreaExact` is a linear scan over every area, and nothing else in `src/nav/` indexes space. A blend
-runs per bot at 10 Hz, so it gets its own CSR uniform grid: count pass, prefix sum, fill pass, one
-allocation for `cellStart` and one for `cellItems` rather than a `vector` per cell. Cell size is the
-header's `vantageSpacing`, floored at 32 and doubled until the cell count is within
-`64 * vantages + 4096`, which keeps a long thin map from allocating a mostly-empty lattice.
+## Planning a route
 
-`FindNearest` walks cells in expanding rings and stops once the fourth-best distance is inside the
-searched ring's inner radius — the ring is a cube shell, so its inscribed radius is `ring * cell`, and
-anything closer than that cannot be hiding in an unsearched cell.
+### PathSearch and PlanPath (`nav_path.cpp`)
 
-### Blending: scalars interpolate, directions do not
-`exposure` is IDW-weighted over the four nearest with `1 / (d^2 + 1)` — the same weight
-and the same epsilon navgen's reduction scores its own decimation against, so the runtime reproduces the
-interpolation the decimation assumed was possible.
+`Nav::PathSearch` is the NavMesh-shaped wrapper over `NavPlan::RouteSearch`: its constructor builds the
+connection graph (`BuildGraph`), adds the bot's hurt costs, copies the trace context and the water surface
+heights, and captures the detour team mask, so the search owns everything it reads except the mesh, which is
+immutable while a map runs. `Step(deadline)` relaxes edges until the deadline passes and returns true when
+the search is over; `Finish` reconstructs the plan. Both set the captured mask first
+(`g_detourTeamMask` is `thread_local`). `PlanPath` is construct, `Step` with no deadline, `Finish`, and is
+what navgen and the one-shot callers use. Searching and string-pulling are one pass, so there is no
+graph-only search to call separately.
 
-Watch directions cannot be averaged that way: they are a variable-length list, and a fixed-length vector
-is the only thing that has a distance. So they are merged angularly instead, with the same greedy
-peak-and-absorb `ExtractWatchDirs` runs — take the heaviest entry, mean-shift once over everything
-within 45 degrees, absorb them with summed weight and a weighted-RMS spread, repeat to at most four.
-The difference is that navgen runs it over a 512-bin histogram and this runs it over at most 16 sparse
-entries, each entering at `idw * amount`.
+**Plans run on one worker thread (`plan_worker.cpp`).** `Repath` builds the `PathSearch` on the game
+thread (the graph build reads live water and runtime penalties), wraps it in a `Nav::PlanJob` held by
+`CBot::search`, and hands it to `SubmitPlan`; later calls poll `PlanJob::done`. The worker steps queued jobs
+round-robin in 4 ms slices (`kPlanSlice`), so one 300-sim plan cannot hold up everyone else's, and on the
+last slice runs `Finish` and `BuildPathProfile` too, leaving the game thread only to copy the result. The
+queue holds `weak_ptr`s: a bot that drops its job (goal or mesh changed, `ResetPath`, respawn) cancels it, and
+the worker frees it after at most the slice in progress. While it is pending `TryRepath` keeps the bot idling
+in place and facing its look target. What the job snapshots at construction — graph costs, runtime
+penalties, hurt costs, runtime teleports, the world snapshot, the team mask — stays as it was while it runs.
+`FlushPlans` empties the queue and waits out the running slice; `BotManager::ServerActivate` and
+`ServerDeactivate` call it before anything map-scoped (bots, mesh, airmove cache) is torn down, and
+`Meta_Detach` joins the thread through `StopPlanWorker`.
 
-**Merged directions under 5% of the kept weight are dropped.** A far neighbour contributes a direction
-whose weight rounds to nothing, and without the cut it survives as a fourth watch dir with
-`amount 0.000` — which `ApplyVantageLook`'s nearest-to-path search would happily snap the bot's head
-onto. The threshold is navgen's own `minClusterFraction`. Amounts are renormalised over what survives,
-so `watch[0].amount` is always the largest and always meaningful as a denominator.
+The worker may only call engine-free code: every trace comes from the world snapshot ("The plan-time
+world"), and nothing on the planner path logs. `kPlanBudgetMs` (6 ms) still caps what one frame spends
+*starting* plans (`PlanBudgetSpent`), which is now just `MakePlanTraces` plus the graph build.
 
-### Round-tripping is the correctness test
-Blend at a stored vantage's exact position and the distance-0 neighbour dominates the IDW completely, so
-the result must be that vantage's own record back. `crossbot_vantage_status <x y z>` exists to check
-exactly that; anything else means the loader, the grid or the merge is wrong.
+Measured 2026-10-20, 16 bots, 60 s, `-DCROSSBOT_PERF=ON`, interleaved, arc traces on, worker vs the same
+search in 4 ms slices on the game thread:
 
-## nav_path.cpp
+| map | `rp_plan` on the game thread, ms/frame | frames ≥ 8 ms | p99 | plan latency avg / max |
+|---|---|---|---|---|
+| xen_dm | 0.22–0.25 → 0.08 | 119/106 → 39/41 | 9.8/9.5 → 6.6/6.9 ms | 11/10 → 13/15 ms, 138/105 → 60/61 ms |
+| dod_avalanche | 0.27–0.30 → 0.08–0.11 | 360/348 → 181/127 | 12.8/13.7 → 12.1/10.0 ms | 19/26 → 17/20 ms, 164/358 → 75/76 ms |
 
-### PlanPath
-The NavMesh-shaped wrapper over `NavPlan::PlanRoute` — builds the connection graph once and hands it
-over. This is what `Repath` calls, and it is the only entry point into planning. There is no
-graph-only `FindPath` and no separate `BuildWaypointPath`: searching and string-pulling are the same
-pass now, so there is nothing meaningful to call in between.
+Latency is submit to `done`. The average barely moves (plans are short now, "The plan-time world"); what the
+worker removes is the tail, and the planning cost on the game thread.
 
-**The goal is clamped into its area, and the plan ends at the clamped point.** `Repath` resolves the
-requested point to an area and clamps it into that area's bounds; `PlanWalker::Finish` emits that
-clamped point as the `goal` waypoint. When the requested point lies outside the mesh the plan
-therefore ends legitimately short of it, and the bot reports "reached goal" from there. This is not a
-planning failure and there is nothing to fix in the planner — but it looks exactly like one from
-outside, because the caller compares against the point it asked for. Read the plan's last waypoint
-before believing a "stopped short" report.
+**The plan ends at the goal clamped into its area.** `Repath` resolves the requested point to an area and
+clamps it into that area's bounds; `PlanWalker::Finish` emits the clamped point as the `goal` waypoint. A
+requested point outside the mesh therefore gives a plan that legitimately stops short, and the bot
+reports "reached goal" there. That is not a planner bug, but to a caller comparing against the point it
+asked for it looks exactly like one — read the plan's last waypoint before believing a "stopped short"
+report.
 
-`test21_teleport` used to be the standing example here: its `info_target` sits in a sealed pocket, so
-the plan stopped 112 units short at `goal (448,336,32)` and the harness called it a failure. It is not
-an example any more — navgen now builds the `trigger_teleport` edge into that pocket and the map
-passes.
+### NavPlan::RouteSearch and PlanRoute (`plan_search.cpp`)
 
-### Carefulness: routing away from exposure
+`RouteSearch` holds the A\* state (open list, per-area `SearchNode`s, walk adjacency) between `Step`
+calls; `PlanRoute` runs it to completion in one call, so a time-sliced search and a one-shot search
+return the same route. **The deadline is checked before every edge, not every expansion**, and a step can
+stop halfway through an area's edges (`m_current`, `m_edge`) and resume there. An area on dod_avalanche
+carries dozens of air-move edges, each a full simulation: with a per-expansion check one `Step` ran to
+29 ms against a 6 ms slice. A step always relaxes at least one edge, so one simulation is the overrun's
+floor. On the worker this is what keeps the round-robin fair.
 
-`PlanPath` takes a `careful` factor in `[0, 1]`. It weights every edge's time by the vantage exposure
-at that edge's crossing point:
+A\* over the area graph where **each search node carries a `PlanWalker`** — the funnel state, the waypoints
+emitted so far and the running cost. Expanding an edge copies the parent's walker and calls `Cross`, so the
+string pull, the air-move simulation and the door/teleport waypoints all happen during the search.
 
-```
-edge score = time * (1 - careful) + time * exposure * careful
-```
+Why not search first and string-pull after: A\* alone only knows a connection exists, while the pull
+re-derives each launch point from the actual funnel, and re-simulating from there can miss the
+destination. Two passes disagree, and the only repair is to truncate and re-search with the edge
+blocked, repeatedly. With one funnel — the one the search built — the disagreement cannot arise.
 
-`careful = 0` is the plain fastest route and reproduces the pre-carefulness planner exactly — the
-factor collapses to 1 and the score is the time. `careful = 1` drops the time term entirely and
-minimizes exposure alone. It is **deliberately uncapped**: a bot with nothing to fight with should
-take the covered way however long it is. `Repath` feeds it `Bot_Carefulness`, which is
-`(1 - combat readiness)` scaled by `crossbot_careful` (`doc/goals.md`, "Carefulness").
+What follows from that:
+- **Cost is real.** `g` is the string-pulled travel time to the node's frontier (`PlanWalker::Time()`,
+  pulled distance over `kNavRunSpeed` = 250) plus each connection's `costSeconds`. A centroid-to-centroid
+  model charges every route for visiting every centroid and overprices routes through many small areas:
+  on test50_stairs it picks a crouch-jump where walking up two areas is cheaper.
+- **Recovery is free.** An air move whose launch cannot be simulated makes `Cross` return false, so the
+  edge does not relax and the search continues. Nothing is truncated or retried.
+  `PlannedRoute::airmovesRejected` counts these.
+- **`h` is sharp.** It is the straight line from the node's funnel frontier to the goal *point*, which is
+  why a crossfire search expands 165 of 503 areas. `g` and `h` share a reference point (`Frontier()`), so
+  they are consistent. They are not strictly admissible — the real route need not cross at the gate
+  midpoint — so a route can come back slightly suboptimal, but never missing.
+- **The goal node's walker is the plan.** Reconstruction calls `Finish` on it and takes its waypoints;
+  there is no replay pass, so the plan cannot drift from what the search costed. `Retract`, `Respeed` and
+  `Relax` then run on it, in that order.
 
-**The exposure is cached on the connection, not blended during the search.** `nav_loader.cpp` resolves
-`Connection::vantageExposure` once per map: `ConnectionCrossing` for the point, lifted to eye height
-(`kVantageMeanEyeLift`, or `kVantageDuckEyeLift` when either endpoint is a crouch area — areas are in
-duck-hull-origin space, so the raw crossing z is 29 units below where the probes were sampled), then
-`BlendVantage` and a divide by `field.maxExposure`. Roughly 2200 blends on crossfire, none of them
-allocating, so it is lost in the load.
+Two properties to know before changing it:
+- **Nodes are keyed by area, not by `(area, incoming connection)`.** Two routes into one area have different
+  funnels; the cheaper wins and the other is discarded. This is the standard Theta\*/TA\* approximation;
+  keying by the pair would be exact but multiplies the node count by the average degree.
+- **Reopening is allowed.** Funnel-derived `g` is path-dependent, so the closed-set argument does not hold
+  and a node that receives a strictly better `g` is re-pushed. `g` is clamped to never fall below its
+  parent's (`std::max(next.Time(), state[current].g)`), which keeps the parent chain acyclic; the
+  reconstruction loop still carries a hop guard in case that reasoning breaks.
 
-Two traps live in that pass. `BlendVantage` returns `out.valid`, which is *`watchCount > 0`* — a spot
-nothing looks at returns `false` carrying a perfectly good exposure, so gate on `blend.neighbors`
-instead. And the fallback for an unresolvable edge is **1.0, not 0**: an unknown edge must collapse the
-factor to 1 and behave like careful mode is off, never become free. A map built with `--no-vantage`
-therefore plans identically at every `careful`. The normalized exposure is `blend.exposure / field.maxExposure`, clamped to `[0, 1]`.
-
-**`g` stays true seconds.** `SearchNode` carries `score` *beside* `g`, and only `score` drives the
-ordering, the dominance test and the open-list key. Nothing touches `PlanWalker`'s lengths or
-`m_extraTime`, which is why the ETA needs no separate accounting at all: it is built by
-`BuildPathProfile` from waypoint geometry (`doc/movement.md`), never from the search cost, so a careful
-route reports the longer time it will actually take to walk.
-
-**The heuristic has to shrink with it.** The factor can go below 1, so the straight-line estimate is
-scaled by `1 - careful + careful * minExposure`, the lowest factor any edge can carry
-(`NavMesh::minConnExposure`, also resolved at load). Without that scaling A* would overestimate and
-quietly return suboptimal routes. Every edge is scaled by at least this bound `(1 - careful + careful * minExposure)`, so scaling the straight-line time estimate by the same bound keeps the heuristic admissible — it remains consistent with the search's own edge weighting. The cost is that the heuristic weakens as `careful` rises and the
-search drifts toward Dijkstra — on crossfire one leg goes 45 expansions / 7ms at `careful 0` to 107
-expansions / 21ms at `careful 1`. Bounded, but it is the number to watch.
-
-### Falls are priced per game
-
-The .nav is shared by every game, and each game hurts on landing differently: HL from 580 u/s, CS and
-DoD from 500, TFC from 650, Ricochet never (`doc/games.md`, `FallDamage()`). So navgen stores the fall
-itself, not its price: `fallHeight` on airmove, ladder and teleport connections is the drop from the
-apex to the landing, and the `costSeconds` it writes carries no fall term
-(`ConnectionCostSeconds(c, false)`). A height, not a speed, so the file does not assume `sv_gravity`.
-
-`PlanPath`, `AreaCosts` and `AreaCostsToGoal` take a `PmSim::FallRule` (default `kHlFall`), and
-`FallCost` in `BuildGraph` and `AreaCostsImpl` adds `FallPenaltySeconds` of the damage that rule gives
-the landing speed `sqrt(2 · 800 · gravity · fallHeight)` — half a second per point, `1e4` for a lethal
-drop. Stored costs have no fall in them, so the runtime only ever adds, which keeps the heuristic
-admissible.
-
-navgen's own decisions still use HL's damage: it ranks trajectories and dismounts by it and
-`airmove_prune.cpp` and `plan_model.cpp` price connections with it (`ConnectionCostSeconds` with its
-default `withFall`). Only the file lost the term, which is why the v23 regeneration left every
-`--dump-path` route unchanged.
-
-### Range bias: routing to ground the weapon can use
-
-`PlanPath` also takes a `NavPlan::RangeBias`, and the two factors multiply:
+**`g` stays true seconds; `score` carries the weighting.** `SearchNode` carries `score` beside `g`, and only
+`score` drives ordering, the dominance test and the open-list key:
 
 ```
-edge score = time * (1 - careful + careful * exposure)
-                  * (1 - weight  + weight  * mismatch)
+score = parent.score + (g - parent.g) * (1 - careful + careful * exposure)
+                                      * (1 - weight  + weight  * mismatch)
 ```
 
-`RangeBias` (`plan_search.h`) holds a weight, the two distance thresholds, and one bit saying whether
-the weapon wants long range. `Weight()` clamps to `[0, 1]` at the struct rather than at the call sites:
-above 1 the multiplier goes negative, which is a negative edge cost in both searches. `Mismatch` is a single lerp: `t` ramps 0 to 1 as the edge's open distance
-goes from `shortDist` to `longDist`, and a close-range weapon takes `t` while a long-range one takes
-`1 - t`. Zero is ideal ground, one is the worst. At `weight = 0.5` the multiplier spans `[0.5, 1]`, so
-a route that fights on the right ground may take twice as long in seconds and still win.
+Nothing touches the walker's lengths or `m_extraTime`. The ETA is built by `BuildPathProfile` from waypoint
+geometry, never from the search cost, so a careful route reports the longer time it will actually take.
 
-`weight = 0` reproduces the planner exactly as it was, which is what every caller that does not opt in
-gets from the default-constructed `RangeBias`. `Repath` feeds it `Bot_RangeBias`, which is the mirror
-of carefulness: `combat readiness` scaled by `kRangePref`, zero for a weapon with no opinion
-(`doc/goals.md`, "Range bias"). An unready bot avoids exposure; a ready one picks its terrain.
+#### Cost of searching
 
-**Open distance is cached on the connection, per direction.** The same load pass that resolves
-`vantageExposure` reuses its `VantageBlend` to fill `Connection::openDistAB` and `openDistBA` —
-`VantageOpenDistance(blend, dir)` with the XY direction between the two area centroids, and its
-negation. The blend is already paid for; this adds two dot-product sums per connection.
+Every air-move edge relaxed runs a full `PmSim` re-simulation. On crossfire (503 areas, 773 walk and 1377
+air-move connections) one `PlanRoute` expands 165 areas and runs 243 simulations, ~0.1 s in navgen against
+BSP-hull traces. `--dump-path` prints both numbers on its `debug search:` line; `Repath` prints them with
+the wall-clock time.
 
-The fallback is **0, not 1**: a connection with no vantage data reads as the shortest possible range.
-That is the honest answer (nothing is visible from there) and it also means a `--no-vantage` map gives
-every edge the same open distance, so the bias cancels out and routing is unchanged.
-
-**The heuristic shrinks again.** `hScale` is multiplied by `RangeBias::BestScale()`, which is
-`1 - weight` — the cheapest multiplier any edge can earn, since `Mismatch >= 0`. Same admissibility
-argument as the exposure bound, and the same cost: a high weight weakens the heuristic.
-
-**A weapon swap invalidates the route.** `bot.plannedRangeClass` records what the current route was
-planned for, and the nav update forces a repath when the live weapon's class differs. It compares the
-*class*, not the weapon id, so swapping between two close-range guns costs nothing. It is stamped only
-once the plan stands: a failed search must not mark the route as planned, or the retry loses its trigger.
-
-## Runtime connection penalties
-`PenalizeConnection` / `RewardConnection` / `ConnectionPenalty` are the runtime's only way to write to
-the mesh. They move `Connection::runtimePenalty`, which `BuildGraph` adds to `costSeconds`, so a
-connection the bot failed on gets more expensive and the next plan routes around it if it can. Failure
-adds `kConnFailPenalty` (5 s), success halves it and snaps to zero under 0.1.
-
-Four properties are deliberate:
-
-- **Not a ban.** The edge stays in the graph at a higher price, because it may be the only way into an
-  area. 5 s is far below the `1.0e4f` soft-infinity `ConnectionCostSeconds` uses for lethal falls, so a
-  penalized one-way drop still gets planned rather than stranding the bot.
-- **Mesh-global and in-memory.** One table shared by every bot, cleared when `Unload` frees the mesh.
-  `runtimePenalty` is not in the file format — it is learned state, and navgen would overwrite it.
-- **Offline planning never sees it.** It defaults to 0 and only the runtime writes it, and navgen
-  builds its own graph, so `--dump-path` output is unchanged by this whole mechanism. A route sweep
-  that diffs after a change here must come out empty.
-- **The reward only fires on edges still being planned.** Once a penalty is large enough that an
-  alternative wins, nothing brings that edge back — there is no exploration term. Acceptable because an
-  edge never planned is an edge never paid for.
-
-Attribution runs launch waypoint → bot → mesh: `Cross` stamps `PlanWaypoint::connIndex` on the air-move
-launch waypoint, `RunAirmoveApproach` latches it into `CBot::airmoveConnIndex`, and `RunAirmoveFlight`
-spends it on landing. The teleport branch stamps it too; only a runtime teleporter spends it (the TFC
-`pad` task penalizes its connection after 10 s on the pad). Walk/door keep `-1` and are the remaining
-extension points.
-
-## Runtime teleport connections
-
-`Nav::AddTeleport` / `SetTeleportWait` / `RemoveTeleport` / `IsAddedTeleport` (`nav.cpp`) are the other
-way the runtime writes the mesh: they add one-way `CONN_TELEPORT` connections for things navgen never
-saw, today TFC engineer teleporters (see `doc/games.md`, `tfc_ability.cpp`). An added connection is a
-normal `Connection` + `PlanConnection` pair with `launchPos` = entrance, `landingPos` = exit,
-`travelSeconds` 0.5 and `costSeconds` = the wait, listed on **both** areas' `connIndices` (the reverse
-fields need to find it from the exit side) and flagged `CONN_FLAG_ONE_WAY`. `PlanWalker::Cross`'s
-existing teleport branch turns it into the usual trigger + destination waypoint pair.
-
-- **Indices are stable.** Slots are appended to `conns`/`planConns` and never erased; a removed slot is
-  unlisted from its areas, masked out, and reused by the next add. Nothing keeps a `Connection *`
-  across frames, only indices, so the append is safe. Both lists clear on `LoadForMap`/`Unload`.
-- **A team mask gates it.** `Connection::teamMask` (0 = everyone, which is every baked connection) is
-  checked in `BuildGraph` and `AreaCostsImpl`. `ThinkOneBot` calls `Nav::SetPlanTeam(teamBit, carrier)`
-  before `Bot_MoveNav`. Teleports get the team bit, or 0 while the bot is an objectives carrier,
-  because TFC refuses to teleport a player carrying a flagged goal item. Plans made outside a bot's
-  think (console dumps, tactics fields computed for another bot) see whatever mask was set last.
-- **Activation detours carry one too.** `PlanDetour::teamMask` is runtime-only: never in the file, 0 on
-  load, stamped by `Nav::SetDetourTeams` from live TFC entities (see `doc/games.md`, team-only doors).
-  `FindDetour` skips a detour whose mask misses `NavPlan::SetDetourTeamMask`, so both `GateAllowsCrossing`
-  and `PushActivationDetour` refuse the edge as if no detour existed. `SetPlanTeam` passes the team bit
-  here **even for a carrier**, because carrying a flag does not stop a TFC player opening their own
-  doors. The mask defaults to `~0u` and navgen never sets it, so offline planning admits every detour.
-- **navgen never calls any of it**, so offline route sweeps are unchanged.
-
-## plan_search.cpp
-
-### NavPlan::PlanRoute
-The planner. A* over the area graph where **each search node carries a `PlanWalker`** — the funnel
-state, the waypoints emitted so far, and the running cost. Expanding an edge copies the parent's
-walker and calls `Cross`, so the string pull, the air-move simulation and the door/teleport waypoints
-all happen *during* the search rather than after it.
-
-This exists because A* and the waypoint planner used to disagree. A* only knew a connection existed;
-the planner decided whether the bot could actually be steered across it, and an air-move edge that
-survived navgen's sampling could still fail at plan time — the funnel re-derives the launch point from
-the actual route, and re-simulating from *that* point can miss the destination area. The old answer
-was to truncate the plan and then re-run the whole search with that connection blocked, up to eight
-times. Now there is only one funnel, the one the search built, so the disagreement cannot arise.
-
-Three things follow from folding them together:
-
-**Cost is real.** `g` is the string-pulled travel time to the node's frontier (`PlanWalker::Time()`,
-pulled distance over `kNavRunSpeed`) plus each connection's `costSeconds`. The old model summed
-centroid → crossing → centroid per hop, which charged the path for visiting every centroid and so
-systematically overpriced routes through many small areas. Measured effect: on test50_stairs the
-planner now walks up through two areas where it used to crouch-jump, because the jump was never
-actually cheaper — the old cost model just could not see the walk.
-
-**Recovery is free.** An air move whose launch cannot be simulated makes `Cross` return false, so the
-edge simply does not relax and the search continues through other edges. Nothing is truncated and
-nothing is retried. `PlannedRoute::airmovesRejected` counts these.
-
-**`h` is sharper.** The heuristic is the straight line from the node's funnel frontier to the goal
-*point*, not centroid to centroid, which is why the search expands so few areas — 165 of crossfire's
-503. `g` and `h` share the same reference point (the last pending gate's midpoint, or the anchor when
-the funnel is empty), so they are consistent with each other. They are not strictly admissible: the
-real route need not cross at the midpoint, so `g + h` can overprice a node whose true crossing is off
-to one side, and the search can return a slightly suboptimal route. It cannot fail to find one.
-
-Two properties worth knowing before changing it:
-
-- **Nodes are keyed by area, not by `(area, incoming connection)`.** Two routes into one area have
-  different funnels; the cheaper one wins and the other funnel is discarded. This is the standard
-  Theta*/TA* approximation. Keying by the pair would be exact but multiplies the node count by the
-  average degree.
-- **Reopening is allowed.** Funnel-derived `g` is path-dependent, so the usual closed-set argument
-  does not hold; a node that receives a strictly better `g` is un-closed and re-pushed. `g` is
-  clamped to never fall below its parent's, which is what makes the parent chain acyclic — the
-  reconstruction loop still carries a hop guard in case that reasoning is ever broken.
-
-The goal node's walker **is** the finished plan: reconstruction calls `Finish` on it and takes its
-waypoints. There is no replay pass, so the plan cannot drift from what the search costed.
-
-**`g` stays true seconds.** `SearchNode` carries `score` beside `g`, and only `score` drives the
-ordering, the dominance test and the open-list key. Nothing touches `PlanWalker`'s lengths or running cost,
-which is why the ETA needs no separate accounting: it is built by `BuildPathProfile` from waypoint geometry,
-never from the search cost, so a careful route correctly reports the longer time it will actually take to walk.
-A node's `g` is the string-pulled travel time plus each connection's `costSeconds` — real seconds, unweighted
-by exposure.
-
-The edge cost scaling for exposure weighting only applies to `score`: `score = parent.score + (g - parent.g) * (1 - careful + careful * exposure)`. This separation lets the planner bound the true path length independently of the exposure weighting.
-
-### Cost of planning in the search
-Every air-move edge the search relaxes runs a full `PmSim` re-simulation, so the price is worth
-knowing. On crossfire (503 areas, 773 walk and 1377 air-move connections) one `PlanRoute` expands 165
-areas and runs 243 simulations, which navgen measures at ~0.1s against BSP-hull traces. `--dump-path`
-prints both numbers on the `debug search:` line, and `Repath` prints them with a wall-clock time.
-
-One early-out does most of the work and is worth not deleting by accident:
+One early-out does most of the work and must not be deleted by accident:
 
 ```cpp
 if (state[current].g + kPlanCostEpsilon >= state[neighbor].g)
     continue;
 ```
 
-Because `g` is clamped to never fall below its parent's, a parent that already costs more than the
-neighbour's best cannot improve it no matter what the edge costs — so the edge can be skipped *before*
-`Cross` runs, which is what would have paid for the simulation. It cut crossfire from 402 simulations
-to 243 and the test maps from 207 to 144, with byte-identical routes on all 52 maps. It is a pure
-early-out, not an approximation.
+Since `g` never falls below the parent's, a parent already costing more than the neighbour's best cannot
+improve it, so the edge is skipped *before* `Cross` pays for a simulation. It is exact, not an
+approximation: it cuts crossfire from 402 simulations to 243 and the test maps from 207 to 144, with
+byte-identical routes on all 52 maps.
 
-Validating on *pop* instead of on every relaxation would cut simulations further, to at most one per
-expanded node, but it needs dead-edge tracking, node resetting and re-opening already closed
-neighbours to avoid missing routes. Eager validation is correct by construction; if the runtime cost
-ever justifies that trade, these are the numbers to beat.
+Validating on *pop* instead would cut simulations to at most one per expanded node, but needs dead-edge
+tracking, node resetting and reopening closed neighbours. Eager validation is correct by construction;
+those are the numbers to beat if runtime cost ever justifies the trade.
 
-### What the planner guarantees, and what it does not
-The search only emits an air move whose launch it re-simulated from the funnel's own launch point and
-watched land inside the destination area. So every maneuver in a returned plan is **simulable** — a
-`PmSim` run from that point at that speed reaches that area.
+#### What a plan guarantees
 
-A ladder gets no such check. Its mount and dismount were both established by navgen against the real
-hulls, so the planner takes the connection at face value and only decides which end it entered from.
+Every air move in a returned plan is **simulable**: the search re-simulated it from the funnel's own launch
+point and watched it land in the destination area. A ladder gets no such check — navgen established its
+mount and dismount against the real hulls, so the planner takes it at face value and only decides which
+end it entered from.
 
-It does not follow that the bot can *execute* it. `PmSim` starts at the exact launch point, at the
-exact yaw, already at the launch speed; the follower has to arrive there having tracked an arc chain,
-and arrives with whatever speed and heading it actually has. `NavFollow::Track` derates speed when it
-is off the chain, so a bot rejoining late reaches the launch slower than planned and undershoots. The
-plan is a proof that the route exists, not a proof that the steering will hit it.
+A plan does **not** prove the bot can execute it. `PmSim` starts at the exact launch point, yaw and speed;
+the follower arrives with whatever speed and heading it has, and `NavFollow::Track` derates speed off the
+chain, so a bot rejoining late reaches the launch slow and undershoots.
 
-This matters when reading test results, because the two failures look nothing alike. A planning
-failure shows up in `--dump-path` — no route, a rejected connection, a plan ending somewhere
-unexpected. An execution failure has a correct plan and a bot that does not follow it, and the only
-place it shows up is the runtime. Changing the cost model can convert the second into a visible
-regression without any planning bug: a route the follower handles badly becomes cheaper, the search
-starts choosing it, and end-to-end pass rates drop while every plan remains valid.
+The two failures look nothing alike in test results:
+- **Planning failure** — shows in `--dump-path`: no route, a rejected connection, a plan ending somewhere
+  unexpected.
+- **Execution failure** — a correct plan the bot does not follow; only the runtime shows it.
 
-## astar_graph.h
+A cost-model change can turn the second into a visible regression without any planning bug: a route the
+follower handles badly gets cheaper, the search picks it, and pass rates drop while every plan stays valid.
 
-Header only — there is no `astar_graph.cpp` any more. The search itself lives in `plan_search.cpp`;
-what remains here is the two things both it and the graph builders need: `kNavRunSpeed`, and the
-`Connection` view of an edge (endpoints, one-way flag, `costSeconds`, crossing point).
+### The cost model (`astar_graph.h`)
 
-`costSeconds` is **additive time**, not the distance multiplier `traverseCost` used to be. That is what lets a
-door contribute the seconds it takes to open; a multiplier had nowhere to put "wait 4 seconds". It already
-includes an air move's `flightTime` and a door area's `openSeconds` (see `ConnectionCostSeconds` in
-`area_merger.cpp`), so `PlanWalker` must not add either again — the search adds `costSeconds` once per
-edge and the walker only measures string-pulled distance.
+Header only; the search lives in `plan_search.cpp`. It holds `kNavRunSpeed` and the `Connection` view of an
+edge: endpoints, one-way flag, `costSeconds`, crossing point.
 
-**`costSeconds` is a surcharge, not a travel cost, and a plain walk connection therefore costs zero.**
-That is correct for the planner, which measures the walk itself, and a trap for anything that wants a
-cheap search without a walker: summing `costSeconds` over a route prices every walk edge at 0, so the
-"cheapest" area is whichever the heap happens to settle first. That is what `travelSeconds` is for — see
-below.
+**`costSeconds` is an additive surcharge in seconds.** Being time is what lets a door contribute the seconds
+it takes to open. It already includes an air move's `flightTime` and a door area's `openSeconds`
+(`ConnectionCostSeconds`, `area_merger.cpp`), so the search adds it once per edge and `PlanWalker` must not
+add either again — the walker only measures string-pulled distance.
+
+Consequences:
+- **A plain walk connection costs zero.** Correct for the planner, which measures the walk itself, and a
+  trap for any cheap search without a walker: summing `costSeconds` prices every walk at 0, so the
+  "cheapest" area is whichever the heap settles first. That is what `travelSeconds` is for.
+- **Everything fed into the cost must be seconds** — `runtimePenalty`, the hurt term, falls, drift — or it
+  will quietly outrank everything else.
 
 ### travelSeconds
 
-A second per-connection cost, written by navgen (`ConnectionTravelSeconds` in `area_merger.cpp`) and used
-by coarse searches that cannot afford a `PlanWalker`. It is the walk between the two area centroids over
-`kNavRunSpeed`, funneled through the connection's gate: if the straight centroid-to-centroid line crosses
-the gate segment it is that line, otherwise it bends around the nearer gate endpoint. Non-walk types get
-the two ground legs only (`centroidA → pointA`, `pointB → centroidB`) because the flight, climb or ride
-itself is already in `costSeconds`.
+A second per-connection cost, written by navgen (`ConnectionTravelSeconds`, `area_merger.cpp`), for
+coarse searches that cannot afford a walker. It is the walk between the two area centroids over
+`kNavRunSpeed`, funneled through the gate: the straight centroid line if it crosses the gate segment,
+otherwise bent around the nearer gate endpoint. Non-walk types get only the two ground legs
+(`centroidA -> pointA`, `pointB -> centroidB`); the flight, climb or ride is already in `costSeconds`.
+Precomputed because it is static and the funnel correction is not worth redoing per frame.
 
-It is precomputed because it is a static property of the mesh and because the funnel correction is not
-something a runtime caller should be redoing per frame.
+**The planner must never add it.** `BuildGraph` does not: `PlanWalker` measures the real distance and
+adding this would charge twice. It inherits the centroid model's bias — overpricing routes through many
+small areas — which is acceptable for choosing a *target*, not a *route*.
 
-**The planner must never add it.** `BuildGraph` deliberately does not: `PlanWalker` measures the real
-string-pulled distance, and adding `travelSeconds` on top would charge every route twice. The only
-consumer is `Nav::AreaCosts`, whose whole job is to answer "roughly how far is that area" without
-planning. `travelSeconds` inherits the centroid model's known bias — it charges a route for visiting
-every centroid, which overprices paths through many small areas — and that is acceptable for choosing a
-*target*, not for choosing a *route*.
+### AreaCosts and AreaCostsToGoal (`nav_path.cpp`)
 
-`Nav::AreaCosts` (`nav_path.cpp`) is the full Dijkstra over `travelSeconds + costSeconds +
-runtimePenalty`, honouring `CONN_FLAG_ONE_WAY` exactly as `plan_search.cpp` does. It fills a
-cost-per-area vector rather than stopping at the first hit, because the callers rank many candidates
-against each other and an early exit only saves microseconds on a ~500-area map.
+- **`Nav::AreaCosts(a)`** — a full Dijkstra from `a` over `travelSeconds + costSeconds + runtimePenalty`
+  (plus the fall, hurt and drift terms below), filling a cost-per-area vector. It never stops early: callers
+  rank many candidates against each other, and on a ~500-area map an early exit saves microseconds.
+- **`Nav::AreaCostsToGoal(g)`** — the same search backwards: every area's cost *to* `g`. One reverse pass
+  turns "price many candidate positions against one goal" into array lookups, which is what makes the
+  opportunist's 4 Hz check affordable (`doc/movement.md`, `bot_opportunist.cpp`).
 
-`GateAllowsCrossing` makes it honour the **static** half of the activation gating too, the half that does
-not depend on the route taken: entering an `activation != ACT_NONE` area by anything other than a walk or a
-ride is impossible, and so is entering it from a neighbour with no `PlanDetour`, a `blocked` one, or one with
-no points. That is the same triple test `PlanWalker::Cross` and `PushActivationDetour` apply, so a Dijkstra
-that skipped it would price areas the planner will always refuse. `crossfire`'s secret room is the case that
-matters: `navgen` already records `detour area 21 <- 23 : BLOCKED (no route to any service point)` because the
-`trigger_multiple` that opens `secret_door` sits *inside* the room, and the 12 items behind it read `11.8s
-away` to the gather scan while every `Repath` to them failed. What stays outside this test is everything
-funnel-dependent — an air move that needs a run-up this approach cannot give — because answering that needs
-the walker, which is the whole reason phase 1 is a plain Dijkstra (`doc/goals.md`, "Selection is two searches").
+Both share `AreaCostsImpl`, which takes the direction as a flag. Its values are plan-seconds:
+centroid-anchored and priced at `kNavRunSpeed`, not at the bot's speed. Mixing them with a real duration
+without converting is the trap the opportunist section describes.
 
-Being seconds is also what lets `runtimePenalty` be added straight on top in `BuildGraph` (see
-`nav.cpp`). Anything else fed into the cost model has to be in seconds too, or it will quietly outrank
-everything.
+They honour the planner's walker-free rules, and every edge test flips with the direction:
+- **`CONN_FLAG_ONE_WAY`** means legal only as `areaA -> areaB`. The forward pass requires `c.areaA ==
+  current`, the reverse pass `c.areaA == neighbor` — the reverse walk looks for the forward edge that would
+  have arrived.
+- **Static activation gating** (`GateAllowsCrossing`, which takes an ordered pair because reversing the
+  search does not reverse the door). Entering an `activation != ACT_NONE` area by anything but a walk or a
+  ride is refused, and so is entering it from a neighbour with no `PlanDetour`, a `blocked` one, or one
+  with no points — the same triple test `PlanWalker::Cross` and `PushActivationDetour` apply. Without it
+  the Dijkstra prices areas the planner always refuses: crossfire's secret room (navgen logs
+  `detour area 21 <- 23 : BLOCKED` because the `trigger_multiple` that opens `secret_door` is inside the
+  room) read its 12 items as `11.8s away` while every `Repath` to them failed. Funnel-dependent refusals,
+  such as an air move needing a run-up this approach cannot give, stay outside: answering them needs the
+  walker, which is why goal selection's first phase is a plain Dijkstra (`doc/goals.md`, "Selection is
+  two searches").
+- The team mask, gravity filter and drift directions, covered in their own sections.
 
-`AreaCosts` takes the same `careful` factor and the same `RangeBias` as `PlanPath` and applies them the
-same way, to `travelSeconds + costSeconds + runtimePenalty` as a whole; the direction of travel for the
-range term is `from -> to`, so the reverse sweep picks the other stored open distance. **Above 0 the
-values stop being seconds and become scores**, which splits the two callers. `BotItems::SelectGoal`
-passes the bot's carefulness and range bias and is fine with it — it only ever ranks candidates against
-each other. `BotOppo::RebuildCosts` must leave both at their zero defaults, because `TryJump` subtracts
-two of these values and compares the difference against a real simulated flight time (`doc/movement.md`);
-scaled costs there would silently deflate every gain.
-Reachability is unaffected either way: the factor is strictly positive, so nothing that was reachable
-becomes unreachable.
+**`careful` and `RangeBias` turn seconds into scores.** `AreaCosts` takes both and applies them as
+`PlanPath` does, to the edge cost as a whole; the range term's direction is `from -> to`, so the reverse
+sweep picks the other stored open distance. Above zero the values are scores, not seconds, which splits
+the callers:
+- goal selection (`BotGoal::Select`, `bot_goal.cpp`) passes the bot's carefulness and range bias — it only
+  ranks candidates against each other;
+- `BotOppo::RebuildCosts` must leave both at their zero defaults and add no hurt term, because `TryJump`
+  subtracts two of these values and compares the difference with a real simulated flight time.
 
-### AreaCostsToGoal
+Reachability is unaffected either way: every factor is strictly positive.
 
-The same Dijkstra run backwards: `AreaCosts(a)` prices every area *from* `a`, `AreaCostsToGoal(g)` prices
-every area's cost *to* `g`. Both share `AreaCostsImpl`, which takes the direction as a flag, because the
-only difference is which endpoint of each edge plays `from`.
+### Carefulness: routing away from exposure
 
-Both edge tests have to flip with it, and neither is symmetric. `CONN_FLAG_ONE_WAY` means the edge is
-legal only as `areaA -> areaB`, so the forward pass requires `c.areaA == current` and the reverse pass
-requires `c.areaA == neighbor` — the reverse walk is looking for the *forward* edge that would have
-arrived here. `GateAllowsCrossing` takes an ordered pair for the same reason: an activation-gated area is
-enterable only by walk or ride and only from a neighbour with a live `PlanDetour`, and reversing the
-search does not reverse the door.
+`PlanPath` takes a `careful` factor in `[0, 1]` that weights each edge's time by the vantage exposure at
+its crossing:
 
-It exists because a caller that has to price *many candidate positions against one fixed goal* would
-otherwise run one search per candidate. One reverse pass turns every such question into an array index,
-which is what makes a 4 Hz check affordable (`doc/movement.md`, `bot_opportunist.cpp`). Its values inherit
-everything `travelSeconds` inherits: centroid-anchored, and priced at `kNavRunSpeed` rather than the
-bot's real speed. They are plan-seconds, not real seconds, and mixing them with a real duration without
-converting is the trap the opportunist section describes.
+```
+edge score = time * (1 - careful) + time * exposure * careful
+```
+
+- `careful = 0` is the plain fastest route, exactly.
+- `careful = 1` drops time and minimises exposure alone. **Deliberately uncapped:** a bot with nothing to
+  fight with should take the covered way however long it is.
+- `Repath` feeds it `Bot_Carefulness`: `(1 - combat readiness)` scaled by `crossbot_careful`
+  (`doc/goals.md`, "Carefulness").
+
+**Exposure is cached per connection at load.** `nav_loader.cpp` resolves `Connection::vantageExposure` once
+per map: `ConnectionCrossing` for the point, lifted to eye height (`kVantageMeanEyeLift` 29, or
+`kVantageDuckEyeLift` 12 when either endpoint is a crouch area — areas are in duck-origin space, so the raw
+crossing z is 29 below where the probes were sampled), then `BlendVantage` and a divide by
+`field.maxExposure`, clamped to `[0, 1]`. About 2200 blends on crossfire, none allocating.
+
+Two traps in that pass:
+- `BlendVantage`'s `out.valid` means `watchCount > 0`, so a spot nothing looks at returns false with a
+  perfectly good exposure. Gate on `blend.neighbors`.
+- An unresolvable edge falls back to **1.0, not 0**. Unknown must collapse the factor to 1 (careful off),
+  never make the edge free. A map built with `--no-vantage` therefore plans identically at every `careful`.
+
+**The heuristic shrinks with it.** The factor can go below 1, so `h` is scaled by
+`1 - careful + careful * minExposure` (`NavMesh::minConnExposure`, resolved at load) — the lowest factor any
+edge can carry, which keeps `h` admissible against the weighted edges. The price is a weaker heuristic as
+`careful` rises: one crossfire leg goes from 45 expansions / 7 ms at `careful 0` to 107 / 21 ms at
+`careful 1`. Bounded, but it is the number to watch.
+
+### Range bias: routing to ground the weapon can use
+
+`PlanPath` also takes a `NavPlan::RangeBias`; it multiplies with carefulness:
+
+```
+edge score = time * (1 - careful + careful * exposure)
+                  * (1 - weight  + weight  * mismatch)
+```
+
+- **`RangeBias`** (`plan_search.h`) holds a weight, two distance thresholds and one bit for "this weapon
+  wants long range". `Weight()` clamps to `[0, 1]` in the struct rather than at call sites, because above 1
+  the multiplier goes negative — a negative edge cost in both searches.
+- **`Mismatch`** is one lerp: `t` ramps 0 to 1 as the edge's open distance goes from `shortDist` to
+  `longDist`; a close-range weapon takes `t`, a long-range one `1 - t`. Zero is ideal ground, one the worst.
+  At `weight = 0.5` the multiplier spans `[0.5, 1]`, so a route on the right ground may take twice as long
+  and still win.
+- **`weight = 0`** (the default-constructed `RangeBias`) is the unbiased planner. `Repath` feeds
+  `Bot_RangeBias`: combat readiness scaled by `kRangePref`, zero for a weapon with no opinion
+  (`doc/goals.md`, "Range bias"). It mirrors carefulness: an unready bot avoids exposure, a ready one picks
+  its terrain.
+
+**Open distance is cached per connection, per direction.** The same load pass reuses its `VantageBlend` to
+fill `Connection::openDistAB` and `openDistBA` with `VantageOpenDistance(blend, dir)`, `dir` being the XY
+direction between the two centroids and its negation — two dot-product sums per connection. The fallback
+is **0, not 1**: no vantage data reads as the shortest range. That is honest (nothing is visible from
+there), and it gives every edge of a `--no-vantage` map the same distance, so the bias cancels.
+
+**The heuristic shrinks again.** `hScale` is also multiplied by `RangeBias::BestScale()`, `1 - weight`, the
+cheapest multiplier any edge can earn since `Mismatch >= 0`. Same argument and same cost as above.
+
+**A weapon swap invalidates the route.** `bot.plannedRangeClass` records the range class the route was
+planned for, and the nav update forces a repath when the live weapon's class differs — the class, not the
+weapon id, so swapping between two close-range guns costs nothing. It is stamped only once a plan stands:
+a failed search must not mark the route as planned, or the retry loses its trigger.
+
+### Revenge: routing out of a watcher's sight
+
+Carefulness and range bias *weight* edges; the revenge route (`doc/goals.md`, "Revenge") *excludes* them.
+A bot approaching where its killer was must not be seen from where that enemy stood, so the search drops
+every walk connection the enemy could watch rather than pricing it up — "we just need his back", not a
+cheaper-but-covered compromise.
+
+The excluded set is a `std::vector<bool>` over connections, built **on the plan worker thread, time-sliced**
+like the search itself. `Repath` passes a `RevengeLos` (the killer's eye, forward, `cosFov`, radius) into
+`RouteSearch` only when the leg's `Stop::revenge` is set; `BuildLosSlice` then fills the bitset inside
+`Step`, before the A\* loop, yielding at the slice deadline exactly as edge relaxation does (it checks every
+64 connections). For each `CONN_WALK` connection whose crossing (`NavAStar::Connection::crossing`, lifted 29
+to eye height as the exposure sample is) is within `crossbot_revenge_los_radius` (2048) of the eye **and**
+within `crossbot_revenge_fov` (120°) of the forward, one snapshot hull trace (`PlanTraceContext::standTrace`,
+engine-free so it is legal on the worker — not an engine `TRACE_LINE`) decides it; a clear line marks the
+connection blocked. `Relax` then skips a blocked connection, exactly as the drift `passable` test does.
+
+- **It is a hard cut, so `h` is untouched.** Removing edges only raises real cost; the straight-line
+  heuristic stays a lower bound, unlike the `careful`/`RangeBias` factors that shrink `hScale`.
+- **No fallback.** If the exclusion leaves no route, that *is* the answer "there is no unseen way in", and
+  the goal is dropped (`doc/goals.md`). The planner never retries without the cut.
+- **The build is off the game thread, so the radius costs latency, not frame time.** It runs once per
+  revenge leg. Measured on dod_avalanche (4226 walk connections, FOV 120°), worst case over spawn points and
+  facings: `los_radius` 2048 traces up to ~1300 crossings (~13 ms of worker time), 1024 ~260 (~2 ms), 768
+  ~115 (~0.4 ms). Because it is sliced on the worker, even the 2048 case never hitches the game thread — it
+  only lengthens that one plan's latency and shares the worker fairly with other bots' plans. The radius is
+  also the stealth zone (only sightlines near where the enemy stood matter), so 2048 is the default. A PVS
+  pre-cull would cut the trace count further but needs the killer's PVS captured at death, since the edict
+  is gone by the next life. `PlannedRoute::losTraced` / `losBlocked` ride back with the plan and
+  `crossbot_revenge_debug` logs them; `crossbot_revenge_probe <x y z> <yaw>` measures the scan synchronously
+  at any point for tuning, with no combat (`doc/diagnostics.md`).
+- **navgen never passes a `RevengeLos`**, so `--dump-path` and offline route sweeps are unaffected, the same
+  guarantee as `runtimePenalty`.
+
+### Falls are priced per game
+
+The `.nav` is shared by every game, and each hurts on landing differently: HL from 580 u/s, CS and DoD from
+500, TFC from 650, Ricochet never (`doc/games.md`, "Fall damage follows mp_falldamage"). So navgen stores the
+fall, not its price: `fallHeight` on air-move, ladder and teleport connections is the drop from apex to
+landing, and the stored `costSeconds` carries no fall term (`ConnectionCostSeconds(c, false)`). A height
+rather than a speed, so the file does not assume `sv_gravity`.
+
+`PlanPath`, `AreaCosts` and `AreaCostsToGoal` take a `PmSim::FallRule` (default `kHlFall`). `FallCost` in
+`BuildGraph` and `AreaCostsImpl` adds `FallPenaltySeconds` of the damage that rule gives the landing speed
+`sqrt(2 · 800 · gravity · fallHeight)`: half a second per point, `1e4` once the damage reaches
+`FallRule::health`. `Bot_FallDamage` fills `health` with the bot's current health, so a bot at 30 hp will not
+plan a 35-point drop a healthy one takes; navgen and any caller passing a bare rule get 100. Stored costs
+carry no fall, so the runtime only ever adds and `h` stays admissible.
+
+navgen's own decisions still use HL's damage: it ranks trajectories and dismounts by it, and
+`airmove_prune.cpp` and `plan_model.cpp` price connections with `ConnectionCostSeconds`' default `withFall`.
+Only the file omits the term, so it moves no `--dump-path` route.
 
 ### drift.h: direction-aware cost
 
 A `func_conveyor` or a horizontal `trigger_push` makes a connection cost different amounts in its two
-directions, and sometimes makes one of them impossible. `doc/navgen.md` (Drift Fields) has how the fields
-are found and how areas get their `driftVelocity`; this is what the searches do with it.
+directions, and can make one of them impossible. How the fields are found and areas get their
+`driftVelocity` is `doc/navgen.md`, "Drift Fields"; this is what the searches do with it.
 
-`crossbot_nav::DriftTerm` is five floats on `NavConnectionRecord`, and **carries no speed**: `length` (how
-much of the crossing lies in drifting areas), the length-weighted mean `along` and `perp`, and the
-`alongMin`/`alongMax` extremes. `NavDrift::EvalDrift(term, maxSpeed, forward)` turns it into
-`{seconds, passable}` for one direction. `forward` means areaA -> areaB, and reversing it negates `along`
+`crossbot_nav::DriftTerm` is five floats on `NavConnectionRecord` and **carries no speed**: `length` (how
+much of the crossing lies in drifting areas), the length-weighted means `along` and `perp`, and the
+extremes `alongMin`/`alongMax`. `NavDrift::EvalDrift(term, maxSpeed, forward)` turns it into
+`{seconds, passable}` for one direction; `forward` means `areaA -> areaB`, and reversing negates `along`
 and swaps which extreme is the worst case.
 
-This is deliberately evaluated per search rather than baked. `Bot_MaxSpeed` reads the cap the engine
-settled on in `PM_Move_Post`, so the speed is per-bot and, under CrossPlay, per hosted game; a 280 u/s
-belt is walkable upstream at 320 and impossible at 270, and a mesh that had decided in advance would
-send a bot onto an edge it cannot cross. `EvalDrift` returns `{0, true}` the moment `length` is zero,
-so on a map with no fields the whole feature costs one float compare per edge.
+**It is evaluated per search, not baked**, because speed is per bot. `Bot_MaxSpeed` reads the cap the engine
+settled on in `PM_Move_Post`, which under CrossPlay differs per hosted game; a 280 u/s belt is walkable
+upstream at 320 and impossible at 270, and a mesh that decided in advance would send a bot onto an edge it
+cannot cross. `EvalDrift` returns `{0, true}` the moment `length` is zero, so a map with no fields pays one
+float compare per edge.
 
-`seconds` is a **correction on the existing `kNavRunSpeed` baseline**, not a replacement for it: negative
-downstream, positive upstream, and bounded by the crossing's own baseline time. That bound is what keeps
-`PlanWalker::Time()` monotonic, so the `std::max(next.Time(), state[current].g)` clamp in `PlanRoute` never
-swallows a step.
+`seconds` is a **correction on the `kNavRunSpeed` baseline**: negative downstream, positive upstream, and
+bounded by the crossing's own baseline time. The bound keeps `PlanWalker::Time()` monotonic, so the parent
+clamp in `PlanRoute` never swallows a step.
 
 Both searches consume it:
-
-- `PlanRoute` (`plan_search.cpp`) skips an impassable direction and folds `seconds` into
-  `AddCost(gc.costSeconds + drift.seconds)`, so it rides in `m_extraTime` alongside door waits and flight
-  time. `PlanPath` passes `traces->physics.maxSpeed`, falling back to `mesh.designMaxSpeed`.
-- `AreaCostsImpl` (`nav_path.cpp`) skips the same directions and adds `seconds` to
-  `travelSeconds + costSeconds + runtimePenalty`, clamped at zero. `AreaCosts`/`AreaCostsToGoal` take a
-  `maxSpeed` argument; the bot call sites pass `Bot_MaxSpeed(bot.pEdict)`.
-
-The heuristic still divides by `kNavRunSpeed`, so a downstream run that beats 250 u/s makes `h` an
-overestimate and optimality becomes best-effort. `PlanRoute` already re-opens closed nodes, so this is a
-difference of degree from the bias `travelSeconds` already carries, not a new failure mode.
-
-Blocking is expressed by `EvalDrift` returning `passable == false`, **not** by a connection flag. There is
-no `ONE_WAY_BACK` bit: the answer depends on the speed of whoever is asking. `CONN_FLAG_ONE_WAY` still
-means what it always did; `crossbot_nav::ConnAllowsDirection` is the shared test wherever the question
-is "may I leave `from` along this connection". The sites asking a different question -- `airmove_prune`
-testing whether an edge is bidirectional, `activation_detours` looking at entries into an area -- keep
-their own inline check.
-
-## funnel_graph.cpp
-
-### NavFunnel::StringPull
-Implements string-pulling (funnel algorithm) on 2D gates:
-- Gates oriented by travel direction (left/right determined by cross product)
-- Maintains funnel apex, left/right bounds
-- When funnel constricts, emits corner at tight bound and restarts from there
-- Returns pulled points with gate indices for corner attribution
-
-Coincident consecutive points are collapsed as they are pushed, keeping the later one so the goal
-always ends the list with `kNoGate`. The last iteration feeds the goal in as *both* funnel bounds, so
-whenever the goal itself became the tight bound the algorithm emitted it as a corner and then pushed
-it again — a zero-length step at the end of nearly every route.
-
-It mattered more than a stray waypoint. `BuildPathProfile` skips a corner whose adjacent segment is
-shorter than `kEpsLen`, and skips it before assigning a speed cap, so the duplicate silently disabled
-arc fitting *and* speed limiting at both corners touching it. In `test5_jump` that was the 104-degree
-turn immediately before the first launch: no arc, and the profile claiming 320 through it. With the
-duplicate gone it fits an 11.7-unit arc capped at 191, and the run-up leg is long enough to get back
-to the 300 the launch wants.
-
-### NavFunnel::MakeGate
-Orders gate endpoints so left/right matches travel direction.
-
-## path_profile.cpp
-
-Fits circular arcs to the waypoint polyline and computes a speed profile the engine can actually
-hold. Runs at plan time, so navgen and the runtime produce identical geometry and the result is
-inspectable offline via `--dump-path`.
-
-### Movement physics it derives from
-
-Each frame on ground the engine runs `PM_Friction` then `PM_WalkMove`. Acceleration scales with
-*wishspeed*, not current speed, so at full drive it is the constant `A = sv_accelerate * maxspeed`
-(3200 at defaults). Friction drag is `D(v) = sv_friction * max(v, sv_stopspeed)`.
-
-Turning at constant speed requires tilting the wish direction forward enough to cancel drag, leaving
-
-```
-a_lat(v) = sqrt(A^2 - (f*v)^2)          r = v^2 / a_lat(v)
-```
-
-which is `r = 34.9` at 320, not the drag-free `v^2/A = 32`. `SpeedForRadius` inverts this.
-
-Braking is the coasting case: `dv/dx = -f` exactly while `v > stopspeed`, so braking distance is
-linear (320 to 0 costs 67.5 units). `BrakeBack` handles the sub-stopspeed branch separately.
-
-### Corner fitting
-For deflection `theta` at a corner with budget `C`:
-
-```
-R_geo = C*cos(theta/2) / (1 - cos(theta/2))     apex stays within C of the vertex
-R_len = min(availIn, availOut) / tan(theta/2)   neighbouring arcs must not overlap
-R     = min(R_geo, R_len)
-```
-
-Three fit passes, because shrinking one arc frees length for its neighbours. When trace functions are
-available the arc is hull-traced entry to apex to exit and shrunk up to 3 times on a hit — this is
-what makes the clearance number a prior rather than an assumption.
-
-Below `v_pivot = sv_accelerate * maxspeed * dt` (53.3, the one-frame velocity quantum) an arc is
-meaningless — the fitted radius is under a unit. Those corners emit no arc; the two lines meet at the
-vertex and the servo pivots through it. Arcs only become geometrically visible above about 200.
-
-Corners at an airmove launch itself and at a landing emit no arc: the launch has to be crossed on the
-launch heading, and a landing is entered with whatever velocity the flight left. The corner *into* the
-run-up node does get one — its outward tangent is clamped to half the run-up leg, which keeps the last
-stretch into the launch straight while still letting the bot round the turn before it.
-
-`Suppressed` is defined as `IsGap(i) || IsGap(i - 1)`, so the same rule covers teleports and ladder
-mounts. A ladder is a gap for the same reason a flight is: the profile is planar, and a climb is almost
-entirely vertical, so there is no ground path between the mount and the dismount to arc through or to
-walk at running speed. The gap segment's cap is lowered to the connection's `ladderSpeed` (200, or 67
-when the climb ends in a crouch-only area), which keeps the profile from believing the bot exits the
-climb at 320 and mis-fitting the first corner after the dismount. The segment's length is still the 2D
-distance across the dismount hop, so `totalTime` under-reports a climb; the *planner's* cost is the
-honest one, and it comes from `ConnectionCostSeconds`, not from here.
-
-### Speed profile
-A backward pass propagates each node cap through `BrakeBack`, with the final waypoint pinned to 0 and
-airmove launches capped at `launchSpeed`. Entry speeds are additionally clamped by the cap of the node
-the segment starts from. `vEntry`/`vExit` are ceilings, not predictions: a segment leaving an arc may
-report 320 while the bot is still accelerating from the arc exit speed. A forward pass integrates the
-real speed against those ceilings to produce `totalTime`, which replaces the old fabricated ETA.
-
-An elevator ride contributes nothing to that integration and has to be added on top. Its two waypoints are
-the mover's column centre at two heights, so `Dist2D` is zero, the segment is never pushed, and the whole
-ride — travel *and* the departure stop's auto-return dwell — is invisible to every pass above. A trailing
-loop adds `elevatorWaitTime + elevatorTravelTime` per ride waypoint. Door and button dwells have the same
-gap and are still left to `kEtaSafetyMargin`; a ride cannot be, because on `test55_plat` it is twice the
-walking time.
-
-A ride's two waypoints share an XY, so its segment has zero length and the integration above cannot
-see it at all. Add the time here or the ETA reads as a walk to the shaft and back out again.
-
-A second forward pass records the prediction the ceilings deliberately omit. Walking front to back, it
-carries the reachable speed through `AccelForward` — the exact solution of `dv/ds = (a - f·max(v,s0))/v`,
-bisected on the closed form, the mirror of `BrakeBack` — and stores it per segment as
-`vReachEntry`/`vReachExit`. A flight neither accelerates nor decelerates horizontally, so a gap segment
-passes the launch speed straight through. `--dump-path` prints this as the `reach` column beside `v`,
-and the two disagreeing is the point: on `test37_walkent` the segment into the launch reads
-`v 320 -> 288` next to `reach 81 -> 288`, which is the 155° hairpin before it showing up as a number.
-
-**The reachable ramp is not a ceiling.** Feeding `AccelForward(vEntry, local)` into `SegSpeedAt` looks
-like the honest thing to do and breaks every map: the follower's target speed is `here.speed`, at `s=0`
-the ramp is 0, `SolveDrive` gets `wanted = 0` and commands nothing, and the bot never leaves the spawn.
-Less obviously it also throttles any long segment that should accelerate and then brake, because
-`max(vEntry, vExit)` with an honest entry collapses the trapezoid — ETAs rose 50% on `test28_slopecase`
-before the deadlock was even reached. A prediction of the bot's speed is a lower bound on nothing; the
-bot may well arrive faster. Ceilings steer, predictions validate, and they are separate fields.
-
-`NodeMaxSpeed` applies `kDuckingMultiplier` for `requiresCrouch`, except at a launch waypoint, where
-the flag means duck in flight and the approach is a full-speed run.
-
-### Speed within a segment
-`SegSpeedAt(seg, local)` is the single definition of "how fast should the bot be `local` units into
-this segment", and both the forward pass and `SampleProfile` go through it. It is
-`min(max(vEntry, vExit), BrakeBack(vExit, sLen - local))`: hold the ceiling until the physical brake
-curve for the segment's exit speed drops below it, then follow that curve down.
-
-It replaces a straight interpolation between `vEntry` and `vExit`, which was wrong in a way that cost
-both accuracy and time. Braking is `dv/dx = -f` regardless of segment length — 320 to 0 takes 67.5
-units, whether the segment is 70 units or 700. Lerping instead spread the deceleration across the
-whole segment, so on a 196-unit approach to a 191-cap corner the bot was told to run at 238 halfway
-along rather than hold 320 and brake in the last 32 units. Measured ground speeds tracked the lerp
-almost exactly, which is why the bot never reached `maxSpeed` on a straight.
-
-The forward pass suffered the same error compounded: as the lerped limit fell toward zero at the end
-of a decelerating segment, `v` hit its 1 u/s floor and each step advanced only `v * dt`, so the tail of
-a segment ending at rest cost roughly `(sLen / maxSpeed) * ln(maxSpeed)` seconds. That inflated
-`totalTime` by about 1.5x across the test maps; it now lands within 10% of measured arrival.
-
-The ceiling is `max(vEntry, vExit)` rather than `vEntry` so an accelerating segment is not capped
-below its own exit speed. On an arc the two are equal and the result is the constant `vCap`.
-
-### Sampling
-`SampleProfile(s)` returns point, tangent, speed, clearance and waypoint index at arclength `s`.
-Speed comes from `SegSpeedAt`, so the servo is commanded to hold speed and brake late rather than to
-coast down gently; `PlanProfile` carries `friction`/`stopSpeed` so the sampler can evaluate the brake
-curve without the physics struct.
-`ProjectOntoProfile(pos, sMin, sMax)` finds the nearest arclength within a window and the unsigned
-lateral distance to it.
-
-## pm_sim.cpp
-
-### PmSim::PmSimulator
-Frame-by-frame HL player movement simulation:
-- `Begin(origin, yaw, speed, jump)` - initializes state
-- `Step()` - advances one frame, returns false if wedged
-- Implements: gravity, jump impulse, air acceleration, clip hull movement (FlyMove), ground categorization
-- Bunny hop cap: 1.7x maxSpeed
-- Air accel wish speed cap: 30
-- Ground normal threshold: 0.7
-- Ground trace distance: 2
-
-### Physics constants
-- Jump impulse: 268.328
-- Max safe fall speed: 580 (no damage)
-- Fatal fall speed: 1024
-- Damage per fall speed unit: 100/(1024-580)
-
-## airmove_cache.cpp
-
-### Why the planner caches whole simulations
-
-`PlanWalker::JumpLandsIn` is the single most expensive thing the plugin does. Each call builds a
-`PmSimulator` and steps it for up to `kAirmoveSimMaxTime`, and every step costs one engine `pfnTraceHull`
-through `Bot_EngineTraceFn` -- 1 to 5 traces per step, roughly 2 typical, over 30 to 360 steps. Most of
-those sims are *rejections*: A* relaxes an air move edge, the jump misses the destination area, the edge
-is dropped. The same connection gets rejected over and over, by every bot, on every repath.
-
-Measured on a 32-bot crossfire server before the cache: 18,000 hull traces per frame charged to
-`ZONE_RP_PLAN`, 53% of all engine trace time. Plan cost tracks sim count almost exactly -- plans with no
-sims average 0.5 ms, plans with 200+ sims average 27 ms and peak past 60 ms.
-
-The unit that gets cached is the whole simulation, not the individual traces. A single trace is only
-0.0008 ms; the win is in never running the 200 of them again.
-
-### The key
-
-A simulation's trajectory is determined by the state `sim.Begin` receives plus the physics the stepper
-reads, so `AirmoveKey` is exactly that and nothing else:
-
-- the **sim start origin** -- `launchFloor` lifted by `launchLift + kPlanLaunchLift`. Folding the lift in
-  means `fromAreaId` drops out of the key: it only ever mattered through `PlanArea::crouch` picking that
-  lift.
-- `yaw`, `speed`, `jump`
-- `crouch` (`needsCrouch`), which selects the duck vs stand hull and push function
-- a hash of the four physics fields that vary *and* are read by the stepper: `maxSpeed`, `gravity`,
-  `airAccelerate`, `maxVelocity`. `accelerate`, `groundFriction`, `stopSpeed` and `edgeFriction` are read
-  by the profile and run-up maths, never by `PmSimulator`, so they are not in the key. `friction` is
-  forced to 1 and `frameTime` is pinned (below).
-
-`destAreaId` is deliberately **not** in the key. The cache stores the landing point and how the sim
-terminated; `ApplyAirmoveResult` runs `PointInArea` against the destination afterwards. One cached
-trajectory therefore answers the question for every destination anyone asks about it.
-
-Keys are matched on exact float equality -- there is no quantisation and no tolerance. That was a
-deliberate choice: it means a cache hit returns bit-for-bit what the simulation would have returned, so
-the cache cannot change a plan. It works because the launch point, while continuous in principle, is
-`NearestPointOnGate` of the funnel-pulled line against a fixed gate, and that clamps to the same values
-far more often than it looks like it should. Measured hit rate is 94% on crossfire and 56% on xen_dm from a
-4096-slot table.
-
-### Pinned frame time
-
-`JumpLandsIn` overrides `physics.frameTime` with `PmSim::kPlanSimFrameTime` (1/60) on its local copy.
-Two reasons, and the caching one is the lesser:
-
-1. `PlanTraceContext::physics.frameTime` is `Bot_FrameTime()`, the latched live server frame time. It
-   jitters every frame, so without the pin no plan-time simulation would ever be repeatable and the cache
-   could never hit.
-2. navgen sampled every `CONN_AIRMOVE` at a fixed 1/60 (`AirmoveParams::frameTime`). The runtime sim was
-   therefore integrating at a different step from the data it was validating against, and drifting further
-   the more loaded the server got. Pinning makes plan-time agree with the baked connection data.
-
-The pin is scoped to the simulation. `BuildPathProfile` and `AirmoveLaunchLead` keep the live frame time,
-because those model how many real frames of acceleration the bot actually gets.
-
-The pin is a no-op inside navgen, whose `PlanTraceContext.physics` already comes from
-`PM_MoveSimulator::Physics()` at the sampler's 1/60.
-
-### What may be cached, and the one case it gets wrong
-
-`PmTrace` carries `hitEntity`, set by `Bot_EngineTraceFn` from `tr.pHit`. Three things make a hit count as
-world rather than as an entity:
-
-- `tr.pHit` is null or is edict 0 (worldspawn).
-- it is a `SOLID_BSP` brush carrying `FL_WORLDBRUSH` — a brush the engine merged into the world, which can
-  never move or be removed.
-- `crossbot_nav::IsBakedBlocker` accepts it. This is the **same predicate navgen used to bake the entity
-  into the mesh** in the first place (`baked_blockers.h`, called from both `navgen::IsBlockingEntity` and
-  the runtime trace). `func_wall`, `func_healthcharger`, `func_recharge`, plus `func_wall_toggle` that does
-  not start off and `func_conveyor` that is not flagged non-solid. The argument is that the nav data is
-  *already* committed to these being solid — navgen carved the areas and sampled the air moves with them
-  in place — so treating them as world at plan time is consistent with the mesh, not a new assumption.
-
-  Keeping the two in one function matters. If navgen's list ever gains or loses a classname and the
-  runtime does not follow, the planner starts caching against geometry the mesh does not agree about.
-
-The trace is `ignore_monsters`, so players and monsters never appear in it at all. Doors, plats, trains and
-breakables are what is left, and they are what makes a sim uncacheable.
-
-`PmSimulator` ORs the flag across every trace it makes into `m_touchedEntity`, and also sets it when the
-`trigger_push` lookup returns a non-zero vector — `Bot_PushFields` snapshots live entities and does a
-`pfnTraceModel` per overlapping field, so a sim that entered a push field depends on entity state too.
-`JumpLandsIn` inserts only when `TouchedEntity()` is false.
-
-That rule is not quite "safe for the rest of the map", and it is worth being precise about why. It
-guarantees the *recorded* trajectory did not depend on a moving entity. It does not guarantee no entity
-will later move *into* that trajectory: a jump that flew over an empty shaft when it was recorded gives a
-stale answer once the lift rises into the path.
-
-`crossbot_airmove_verify 1` re-simulates every hit and compares. Measured mismatch rates, and **every
-single mismatch on every run was this one case** — the fresh sim touched an entity, the cached one had
-not. No mismatch has ever come from any other cause, which is what establishes that the key above is
-sufficient for static geometry:
-
-| map       | mismatches | of hits  | rate  |
-|-----------|-----------:|---------:|------:|
-| crossfire |        106 |  271,339 | 0.04% |
-| xen_dm    |      2,519 |  254,147 | 0.99% |
-
-Two things push that rate up, and both are deliberate choices made elsewhere in this design. Accepting
-navgen's baked blockers means caching trajectories that touch brush entities, and the aging-LFU eviction
-below keeps hot entries alive far longer than the old fixed-victim policy did — a longer-lived entry has
-more time for the world to move underneath it. xen_dm is the worst case in the map set by a wide margin.
-
-The divergence is left in. A wrong answer means the planner believes a jump clears when a moving platform
-now blocks it; the bot attempts it, the follower reports `airmove aborted` and repaths — an existing,
-routine path that already fires far more often from ordinary run-up speed shortfall. If it ever needs to
-go lower, the levers are a staleness TTL on entries or refusing to cache trajectories whose bounds pass
-near a mover; both buy freshness by giving back hit rate.
-
-### Structure and eviction
-
-Fixed 65536-slot table, `kAirmoveCacheSlots` in `airmove_cache.h`. It is a **compile-time constant, not a
-cvar** — the table is a plain member array, so there is no allocation and no resize path. It is about 3.3 MB,
-so it no longer fits in L2; it was 4096 slots (210 KB) until dm_centralcore_v2_one showed 37k of 41k
-inserts evicted with 10 bots, a failed whole-mesh search inserting 1-2k one-off sims per attempt.
-
-Lookup is a hash, never a scan: FNV-1a-style mix over the five float bit patterns, the physics hash and the
-jump/crouch byte, masked to the table. Open addressing with a linear probe of up to `kAirmoveCacheProbe`
-(8) slots, so every operation touches at most 8 entries in one or two cache lines. Lookup stops at the
-first unused slot, which is sound because entries are never deleted individually — only wiped wholesale by
-`Clear()` on map change.
-
-Eviction only happens when all 8 probe slots are occupied by different keys. Each slot carries a saturating
-`freq` (bumped on every hit) and a `stamp` (the global lookup tick at its last hit), and the victim is the
-slot minimising
-
-```
-score = freq >> ((now - stamp) / kAirmoveAgeStep)     // 0 once the shift reaches kAirmoveMaxDecay
-```
-
-ties broken by the older stamp. This is aging LFU evaluated lazily: nothing decays on a timer, the decay
-falls out of the comparison. It protects entries that are used a lot *and* entries used recently, while an
-entry that was hot early and has gone cold loses its protection exponentially instead of squatting forever
-the way plain LFU would. A freshly inserted entry starts at `freq = 1`, so it is the first thing thrown out
-if it never gets a second hit — that is what keeps a burst of one-off launch positions from flushing the
-working set.
-
-The predecessor policy always clobbered slot `base`, which let two hot keys sharing a base ping-pong
-forever. Measured at the same 4096 slots, on 2-minute 32-bot runs:
-
-| map           | fixed victim   | aging LFU      |
-|---------------|----------------|----------------|
-| crossfire     | 86.2% / 47,021 | 93.6% / 13,300 |
-| xen_dm        | 42.1% / 204,364| 55.7% / 119,702|
-| rocket_frenzy | 31.3% / 245,222| 43.0% / 196,835|
-
-(hit rate / evictions). For scale, crossfire at 4096 slots with this policy reaches 93.6%, against 95.1%
-for a 65536-slot table using the old policy — a sixteenth of the memory for one and a half points.
-
-On the harder maps the ceiling is not capacity and not eviction, it is `uncacheable`: sims refused because
-they touched a real mover. Accepting navgen's baked blockers already cut that share of misses roughly in
-half on xen_dm and rocket_frenzy. What is left is genuine door, plat and train geometry.
-
-### Ownership
-
-The cache instance is `g_airmoveCache` in `bot_move_nav.cpp`, attached to `PlanTraceContext::airmoveCache`
-by `MakePlanTraces`. navgen leaves that pointer null, which is what keeps its multi-threaded sampler
-race-free -- `waypoint_plan.cpp` is compiled into both targets. `Bot_ResetAirmoveCache()` is called from
-both `BotManager::ServerActivate` and `ServerDeactivate`, mirroring `BotSense::ResetBoneCache()`.
-
-## waypoint_plan.cpp
+- `PlanRoute` skips an impassable direction and folds `seconds` into
+  `AddCost(gc.costSeconds + drift.seconds)`, so it rides in `m_extraTime` with door waits and flight time.
+  `PlanPath` passes `traces->physics.maxSpeed`, falling back to `mesh.designMaxSpeed`.
+- `AreaCostsImpl` skips the same directions and adds `seconds` to its edge cost, clamped at zero. The bot's
+  call sites pass `Bot_MaxSpeed(bot.pEdict)` as `maxSpeed`.
+
+`h` still divides by `kNavRunSpeed`, so a downstream run faster than 250 u/s makes it overestimate and
+optimality becomes best-effort. `PlanRoute` already reopens nodes, so this is a difference of degree from the
+bias `travelSeconds` carries, not a new failure mode.
+
+**Blocking is `passable == false`, not a connection flag.** There is no "one way back" bit, because the
+answer depends on who is asking. `CONN_FLAG_ONE_WAY` means legal only as `areaA -> areaB`, and
+`crossbot_nav::ConnAllowsDirection` is the shared test wherever the question is "may I leave `from` along
+this connection". Sites asking something else — `airmove_prune` testing whether an edge is bidirectional,
+`activation_detours` looking at entries into an area — keep their own inline check.
+
+### Planning with gravity multipliers
+
+A `trigger_gravity` sticks to whoever touches it until respawn, so a bot is only ever at one multiplier, and
+navgen samples one air-move set per multiplier the map hands out (`doc/navgen.md`). `PlanWalker::Cross`
+refuses an air move whose `conn.gravity` does not match `PlanTraceContext::gravityMultiplier`, and
+`Nav::AreaCosts` applies the same filter, so goal selection and route search agree about which jumps exist.
+An air move baked for another gravity simply does not exist for the bot. The live multiplier is
+`pev->gravity`, read by `Bot_Physics` (`doc/movement.md`).
+
+### Barriers
+
+A `NAV_AREA_BARRIER` area is the inside of a wall the map removes or raises on its own: a named
+`func_wall_toggle`, or a DoD explosives-only breakable (`doc/navgen.md`, "Barriers split too"). `LiveBlocks`
+(`nav_path.cpp`) drops every connection with a barred area at either end, in `BuildGraph` and in the
+`AreaCosts` Dijkstra, beside the live water rule. `Nav::AreaBarred` is two cases: the area is a barrier that
+is closed, or its floor rests on a barrier (`barrierFloor`) that is open. Goal selection prunes by `AreaCosts`, so a goal behind a
+closed barrier is unreachable before any plan is started, and becomes reachable the frame the wall goes.
+
+`Nav::BarrierClosed` (`nav_barrier.cpp`) refreshes once per server frame. A barrier is closed while a live
+entity with `pev->model` equal to its `*N` **and** `absmin`/`absmax` overlapping its baked bounds is not
+`SOLID_NOT`; no such entity means open (a blown breakable is freed). The model index is the only key the BSP
+lump and the live entity share, and the bounds test is what makes it safe: 35 brush models in installed maps
+are shared by several entities (`hl_c5_b` `*174` by ten `func_button`s), an edict slot is reused after a
+removal, and a `.ent` override can move a brush. The cached edict is re-checked every refresh and a rescan
+of every edict runs at most once a second (`kRescanInterval`), so a removed brush does not cost a full scan
+per frame on a map like warpath with 186 barriers.
+
+`Nav::BarrierGeneration` counts state changes. `BotTactics` clears its per-spawn cost fields when it moves.
+A bot already routed through a barrier that closes is not repathed on the spot: it stalls against the wall
+and the ordinary stalled-repath path (`doc/movement.md`) plans around it or gives the goal up.
+
+A barrier brush counts as a mover in the world snapshot (`WorldSolid::counts`), even though
+`func_wall_toggle` carries `FL_WORLDBRUSH`, so an air-move sim that touches one is never cached: a result
+cached while the wall stood would outlive it.
+
+## Runtime writes to the mesh
+
+### Runtime connection penalties
+
+`PenalizeConnection` / `RewardConnection` / `ConnectionPenalty` (`nav.cpp`) are how the runtime learns where
+movement fails. They move `Connection::runtimePenalty`, which `BuildGraph` adds to `costSeconds`: a failure
+adds `kConnFailPenalty` (5 s), a success halves it and snaps it to zero under 0.1. A connection the bot
+failed on gets more expensive, and the next plan routes around it if it can.
+
+Deliberate properties:
+- **Not a ban.** The edge stays in the graph because it may be the only way into an area. 5 s is far below
+  the `1.0e4f` soft infinity `ConnectionCostSeconds` uses for lethal falls, so a penalized one-way drop
+  still gets planned rather than stranding the bot.
+- **Mesh-global and in memory.** One table shared by every bot, cleared when `Unload` frees the mesh. It is
+  not in the file format: it is learned state, and navgen would overwrite it.
+- **Offline planning never sees it.** It defaults to 0 and navgen builds its own graph, so `--dump-path` is
+  unaffected; a route sweep diffing a change here must come out empty.
+- **No exploration term.** The reward only fires on edges still being planned. Once a penalty makes an
+  alternative win, nothing brings the edge back — acceptable, since an edge never planned is never paid
+  for.
+
+Attribution: `Cross` stamps `PlanWaypoint::connIndex` on the air-move launch waypoint,
+`RunAirmoveApproach` latches it into `CBot::airmoveConnIndex`, and `RunAirmoveFlight` spends it on
+landing. Ladder and ride runners latch their own index; walk and door waypoints carry `-1`, so a blocked
+walk is charged through `Bot_PenalizeCurrentConnection`, which reads the route's connection list
+(`doc/movement.md`). The teleport branch stamps `connIndex` too, and only a runtime teleporter spends it:
+the TFC `pad` task penalizes its connection after 10 s on the pad. `crossbot_nav_penalties` lists the
+table.
+
+### Per-bot hurt penalties
+
+`runtimePenalty` learns where movement fails; `Nav::HurtLog` (`nav_path.h`) learns where *this* bot gets
+hurt and where its friends die. It is `CBot::hurt`, 32 entries of `{id, area, hp, time}`: `id` is a
+connection, or an area when `area` is set.
+
+- **What is charged.** `Bot_NoteHurt` runs first in `ThinkOneBot`, before the dead branch, so the frame the
+  bot dies on counts. Any drop in `v.health` (clamped at 0, so overkill is not counted) goes onto
+  `hurtConn`. Bullets, `trigger_hurt`, drowning and falls all count — including a planned drop that
+  `FallCost` already priced, deliberately, since the landing may hurt more than the model says. Respawning
+  raises health and is never damage.
+- **Which connection.** `Bot_MoveNav` resolves `hurtConn` whenever the bot's area changes
+  (`EnteredConnection`): the planned connection into that area when it is on `plannedAreaPath` (which
+  covers air moves, ladders and rides whose mid-air areas are not adjacent to the landing); otherwise the
+  first connection joining the previous area to the new one in that direction; otherwise `-1`. It runs
+  every live frame, combat included, and tracks its own `hurtAreaId` rather than relying on
+  `currentAreaId`. Respawn clears both: nothing led the bot into its spawn.
+- **A friend's death is an area entry.** The frame a bot dies, `ThinkOneBot` hands it to
+  `Bot_NoteFriendDeath` for every live bot that `Teams::Of` calls a friend. A friend whose
+  `plannedAreaPath` still has the dead bot's last area (`hurtAreaId`) ahead of it adds 100 hp
+  (`kFriendDeathHp`) on that area and resets its path, so the next plan weighs the kill zone. A charged
+  connection alone is no deterrent here: a street is several areas wide, and the plan steps onto a
+  parallel connection into the same street. Two cases are skipped:
+  - The death area is the route's last area: every route to that goal ends there, so a repath would
+    return the same route.
+  - The friend is mid-maneuver (`Bot_ManeuverActive`): resetting drops a jump or ladder in flight. The
+    entry is kept for the next plan.
+  Only bot deaths are seen; nothing tracks a human's. Log: `X reroutes around area A where Y died, N hp
+  there`.
+- **An area entry is charged on its connections.** `HurtSeconds` adds half the entry's seconds to every
+  connection in the area's `connIndices`, which lists both directions. A route through the area crosses
+  two of them and pays the full charge; one that ends in it pays half.
+- **Bookkeeping.** `Add` merges onto an existing entry with the same `id` and `area` and refreshes its `time`; a new connection takes a
+  free slot or evicts the oldest. `Decay` forgets 1/3 hp per second (100 hp in five minutes) and frees
+  entries at 0. It runs every frame and before every `Add`, so stored `hp` is always current and the
+  planners need no clock — which keeps navgen clock-free.
+- **Readers.** `PlanPath` from `Repath` adds `hp * 0.05` seconds to the connection's `costSeconds` after
+  `BuildGraph`, so a death costs about 5 s. Every `AreaCosts`/`AreaCostsToGoal` call in `bot_goal.cpp` adds
+  the same, so goal ranking avoids goals behind painful connections, and a flag where friends keep dying
+  rolls lower until the entries decay. `BotOppo::RebuildCosts` must not (see
+  above). Everything added is non-negative, so `h` stays admissible.
+
+Unlike `runtimePenalty`: there is no reward, nothing is shared between bots beyond a friend's death on the
+route, the log survives death, and it
+dies with the map (`CBot()` in `ServerActivate`) because connection indices are per mesh. Damage does not
+force a repath — the edge is already behind the bot. The `hurt N hp on conn C` log line is the only view of
+the table. navgen never passes a log, so `--dump-path` is unaffected.
+
+### Runtime teleport connections
+
+`Nav::AddTeleport` / `SetTeleportWait` / `RemoveTeleport` / `IsAddedTeleport` (`nav.cpp`) add one-way
+`CONN_TELEPORT` connections for things navgen never saw — today TFC engineer teleporters (`doc/games.md`,
+`tfc_ability.cpp`). An added connection is an ordinary `Connection` + `PlanConnection` pair: `launchPos` the
+entrance, `landingPos` the exit, `travelSeconds` 0.5, `costSeconds` the wait, flagged `CONN_FLAG_ONE_WAY`
+and listed on **both** areas' `connIndices` (the reverse searches must find it from the exit side).
+`PlanWalker::Cross`'s teleport branch turns it into the usual trigger + destination waypoint pair.
+
+- **Indices are stable.** Slots are appended to `conns`/`planConns` and never erased; a removed slot is
+  unlisted from its areas, masked out and reused by the next add. Nothing keeps a `Connection *` across
+  frames, so appending is safe. Both lists clear on `LoadForMap`/`Unload`.
+- **A team mask gates it.** `Connection::teamMask` (0 = everyone, which every baked connection is) is
+  checked in `BuildGraph` and `AreaCostsImpl`. `ThinkOneBot` calls `Nav::SetPlanTeam(teamBit, carrier)`
+  before `Bot_MoveNav`. Teleports get the team bit, or 0 while the bot carries an objective, because TFC
+  refuses to teleport a player carrying a flagged goal item. A plan made outside a bot's think (console
+  dumps, tactics fields computed for another bot) sees whatever mask was set last.
+- **Activation detours carry one too.** `PlanDetour::teamMask` is runtime-only — never in the file, 0 on
+  load — and stamped by `Nav::SetDetourTeams` from live TFC entities (`doc/games.md`, "Team-only doors,
+  lifts and buttons"). `FindDetour` skips a detour whose mask misses `NavPlan::SetDetourTeamMask`, so
+  `GateAllowsCrossing` and `PushActivationDetour` refuse the edge as if no detour existed. `SetPlanTeam`
+  passes the team bit here **even for a carrier**: carrying a flag does not stop a TFC player opening their
+  own doors. The mask defaults to `~0u` and navgen never sets it.
+- **navgen never calls any of it**, so offline route sweeps are unchanged.
+
+## The walker (`waypoint_plan.cpp`)
 
 ### NavPlan::PlanWalker
-One partial route: the funnel state, the waypoints emitted so far, the running string-pulled length and
-the accumulated `costSeconds`. It is deliberately **copyable**, because the search keeps one per node and
-expanding an edge means copying the parent's and stepping it forward.
+
+One partial route: the funnel state, the waypoints emitted so far, the running string-pulled length and the
+accumulated `costSeconds`. It is deliberately **copyable**, because the search keeps one per node and
+expanding an edge copies the parent's.
 
 - `Reset(startPoint)` — begin at a point, clearing waypoints, pending gates and stats.
 - `Cross(conn, connIndex, fromId, toId)` — advance over one connection. Returns **false** when the
-  connection cannot be planned, which today means only one thing: an air move whose launch could not be
-  simulated into the destination. The search treats that as "this edge does not exist".
+  connection cannot be planned from here — an unsimulable air move, a gravity mismatch, a refused
+  activation — and the search treats that as "this edge does not exist".
 - `Finish(goalPoint, lastAreaId)` — flush the funnel to the goal and append the goal waypoint.
-- `Respeed()` — the profile pass, see "Re-speeding a launch".
-- `Relax(startArea)` — the shortcut pass, see "Relaxing over walk-connected areas".
-- `Time()` — committed corners plus the pull to the current frontier, over `kNavRunSpeed`, plus
+- `Retract()`, `Respeed()`, `Relax(startArea)` — post-passes on the winning walker, in that order; each has
+  a section below.
+- `Time()` — committed corners plus the pull to the current frontier, over `kNavRunSpeed`, plus the
   `AddCost` contributions. This is the search's `g`.
 - `Frontier()` — the last pending gate's midpoint, or the anchor when the funnel is empty. This is what
-  the heuristic measures from.
+  `h` measures from.
 
-There is no batch `BuildWaypointPlan` any more; `PlanRoute` drives the walker directly and the goal
-node's walker is the finished plan.
+**Barriers.** Air moves, teleports, ladders, elevators, doors, buttons and triggers all flush the funnel and
+re-anchor it at the waypoint they emit, so the string pull never crosses one. That is why a forward search
+can resolve each air move exactly once, when it traverses it, and never revisit an earlier landing — and why
+`m_pendingGates` only ever holds plain-walk gates.
 
-### Relaxing over walk-connected areas
-The funnel only pulls through gates on the A* area chain, and every gate is inset `kPlanClearance` from
-both ends of its seam whether that end is a wall or just another seam. On a fragmented floor many seams
-are shorter than 32 u, collapse to a clamped point gate, and pin the path to their midpoints; the result
-is a chain of small jogs (and collinear duplicate corners in corridors). The per-node walker also makes
-A* path-dependent, so an area D that the straight line would cross can lose the search.
+### Connection types in Cross
 
-`Relax` fixes this after the search: if the route goes a -> b -> c and the line a -> c is clear, b is
-dropped, even when the line crosses areas that are not on the A* chain. From each waypoint it tries the
-farthest plain waypoint first and steps back until a line is clear. Extending forward and stopping at the
-first failure is not enough: on dust2's S-door the short hops between the door's tight corners fail the
-side-line test, while the long line from the last door corner to the goal across the open area north of
-it is clear.
+**Walk (including doors).** A plain walk pushes both gates onto the funnel and continues — leaving area
+first, then entering area. A door adds a button/trigger waypoint if needed, then the door waypoint
+(`requiresDoor`, `doorWaitTime`).
 
-- **Only plain runs.** A waypoint is plain when it has no `connIndex` and none of the door, break,
-  button, trigger, teleport, ladder, elevator, launch or jump flags (crouch is allowed). Both ends and
-  everything dropped must be plain, so special waypoints are never removed and the corner before one
-  (the run-up node, the door approach) always survives as a run end.
-- **Clear** means three `ReachBack` walks over the walk-successor graph all reach the end: the centre
-  line, and two parallel lines `kPlanRelaxClearance` (12) to either side, each started by a
-  perpendicular walk out of a. `ReachBack` already crosses seams only where `FloorsMeetAt` holds, so
-  ledges stop it. Every area crossed must be plain floor (no door, breakable, elevator, crouch,
-  activation, drift or water), and the centre walk must end on a floor within `kPlanRunupSeamStep` of
-  c's height, so a storey overlapping in 2D does not count. The offset is just under `kPlanClearance`
-  because a funnel corner sits exactly that far from its wall corner and `ReachBack` keeps a 2 u inset.
-- **Start area of a waypoint.** A corner's `targetAreaId` is its gate's to-area but the point may lie in
-  the from-area, so `AreaOfWaypoint` takes the target if its column holds the point and otherwise the
-  walk neighbour that does with the nearest floor.
-- **Runs last**, after `Respeed`, because `Retract` and `Respeed` address waypoints by index through
-  `m_launches`; erasing earlier would shift them. Relax never touches launch, landing or run-up
-  waypoints, so the order changes nothing else.
-- `areaPath`/`connPath` stay the A* chain. A bot standing in a relaxed-in area finds no planned
-  connection to penalise after a blocked detour (`bot_move_nav.cpp`); that is accepted. The bot's ETA
-  comes from the profile over the final waypoints, so it is consistent without extra work.
+**Activation detours.** Entering an area with `activation != ACT_NONE` looks up the precomputed detour for
+the neighbour being entered from (`FindDetour`). A missing or blocked detour makes `Cross` return false and
+A\* routes around, so a route never passes a door whose activator is unreachable from that side. A gated area
+entered by any non-walk connection is refused outright. The stored polyline starts and ends on the *same*
+gate midpoint the door waypoint is derived from — both sides call `GateMidpoint`, and if they ever drift the
+unvalidated straight segment between them comes back. `FlushFunnelTo` targets the polyline's first point,
+a point on the entering area's boundary, like any other flush. Only the polyline's interior is
+funnel-validated; the pull from `m_anchor` to its first point is an ordinary straight 2D pull and can clip
+a wall in a prism area.
 
-What it cannot fix: on test14_terrain's hill the seams between neighbouring slope areas differ by 24-33 u
-except in a few-unit window (`ClipLineByStep`), so the straight line really would cross a ledge and the
-small jogs there stay. That is a mesh problem.
-
-**Barriers.** Air moves, teleports, doors, buttons and triggers all flush the funnel and re-anchor it at
-the waypoint they emit. So the string pull never crosses one of them, which is why a forward search can
-resolve each air move exactly once, at the moment it traverses it, and never has to revisit an earlier
-landing.
-
-**Activation detours.** Entering an area with `activation != ACT_NONE` looks up the precomputed detour for the
-neighbour being entered from (`FindDetour`); a missing or blocked entry makes `Cross` return `false` and A*
-routes around, so a route can no longer pass through a door whose activator is unreachable from that side. The
-stored polyline begins and ends on the *same* gate midpoint the door waypoint is derived from — both sides call
-`GateMidpoint`, and if they ever drift the unvalidated straight segment between them comes back. `FlushFunnelTo`
-targets the polyline's first point, which is a point on the entering area's boundary; that is the ordinary case
-(`UpdateFrontier` already aims at the last pending gate's midpoint), unlike the old code which aimed at a point
-inside the button's solid brush. Only the polyline's interior is funnel-validated — the pull from `m_anchor` to
-its first point is a straight 2D pull like every other, and can clip a wall in a prism area.
-
-A gated area entered by a non-walk connection is refused. Previously the teleport, ladder and air-move branches
-of `Cross` all returned before the door check, so an air move landing inside a door area emitted no activation
-waypoint at all.
-
-**Crouch belongs to the segment, not the corner.** `requiresCrouch` on a waypoint means "be ducked while
-travelling to it", so it has to be set on the waypoint that *ends* every pulled segment passing through a
-crouch area. It used to be read off the gate a corner sat on, which silently lost it whenever the funnel
-ran straight through a crouch gate without emitting a corner there — and running straight through is the
-normal case, since a gate only becomes a corner when the funnel constricts. `FlushFunnelTo` therefore
-walks the pending gates alongside the pulled points: a corner sitting on gate `i` ends a segment spanning
-gates `[previous corner's gate, i]`, and if any of those gates is a crouch gate the corner is flagged. It
-returns whether the *tail* segment — the one into the flush target — needs it, because that waypoint is
-pushed by the caller (run-up node, door, button, trigger, teleport trigger, goal), and each of those ORs
-the returned flag with its own area's `crouch`.
-
-The lost flag was not a cosmetic one. On `test45_slopes2` the funnel pulls straight from an air-move
-landing in area 8 to the run-up node in area 9, crossing both 8↔9 gates without a corner; area 9 is
-crouch-only, so the bot walked into the ceiling lip at exactly the 8/9 plane and stalled there. Nothing
-else on the plan said "duck": the follower's only other source is the area it is *already* standing in,
-which a standing bot can never enter.
-
-`PendingGate::crouch` is `fromArea.crouch || toArea.crouch`, so both gates of a crouch connection carry
-it and the flag lands one segment early on the way in and one segment late on the way out. The early one
-is wanted — `PM_Duck` takes 0.4 s on the ground before `FL_DUCKING` and the smaller hull appear, so a
-flag that arrived exactly at the boundary plane would be too late. The late one costs a segment held at
-`kDuckingMultiplier` speed and is the price for it.
-
-**Core data structures:**
-- `PendingGate` - funnel gate with inside area ID, target area ID, crouch flag
-- `PlanTraceContext` - duck/stand trace functions, physics, airmove dump flag
-
-**Gate handling:**
-- `BuildAreaGates` - builds inset gates per bound plane (wall planes only)
-- `BuildConnectionGates` - trims shared face to actual overlap; air moves skip (use sampled gates)
-- Gates pushed per connection: leaving area first, then entering area
-
-**Funnel operations:**
-- `PeekFunnel` - dry-run StringPull to see where route crosses gates
-- `FlushFunnelTo` - runs StringPull, emits corners as waypoints with crouch/targetArea from gate
-
-**Connection types:**
-
-**Elevator:**
-- Checked before the activation guard, because a stop area is gated *and* legitimately enterable — the guard
-  otherwise rejects every non-walk edge into a gated area.
+**Elevator.**
+- Checked *before* the activation guard, because a stop area is gated *and* legitimately enterable; the
+  guard would otherwise reject every non-walk edge into it.
 - When the destination stop is gated, `PushActivationDetour` emits the summon detour first (walk to the call
-  button, press, come back). Returns **false** when that detour is missing or blocked — which is how "you
-  cannot call this lift from up here" is expressed.
-- Adds `m_extraTime += rideWaitSeconds`, then a counted boarding waypoint carrying
+  button, press, come back). A missing or blocked detour returns false — which is how "you cannot call this
+  lift from here" is expressed.
+- Adds `rideWaitSeconds` to `m_extraTime`, then a counted boarding waypoint carrying
   `requiresElevatorRide` / `elevatorTravelTime` / `elevatorWaitTime`, then a free arrival waypoint so the
-  shaft's height never enters the funnel. Anchor moves to the arrival point. The wait is copied onto the
-  waypoint as well as charged to the search, because the runner's ride deadline has to allow for a
-  platform that does not set off until its dwell elapses — see `doc/movement.md`.
-- Walking *onto* a gated stop takes the ordinary door path instead: `needsStop` includes a gated elevator area,
-  so the same detour runs and `doorWaitTime` (= the summon time) is charged.
+  shaft's height never enters the funnel. The anchor moves to the arrival point. The wait is copied onto the
+  waypoint as well as charged to the search, because the runner's ride deadline must allow for a platform
+  that does not set off until its dwell elapses (`doc/movement.md`, Elevators).
+- Walking *onto* a gated stop takes the ordinary door path instead: `needsStop` includes a gated elevator
+  area, so the same detour runs and `doorWaitTime` (the summon time) is charged.
 
-**Teleport:**
-- Flushes funnel to launchPos
-- Adds trigger waypoint (requiresTeleport=true, teleportDest=landingPos)
-- Adds destination waypoint
-- Anchor moves to landingPos
+**Teleport.** Flushes the funnel to `launchPos`, adds the trigger waypoint (`requiresTeleport`,
+`teleportDest = landingPos`) and the destination waypoint, and moves the anchor to `landingPos`.
 
-**Ladder:**
-- Direction is read from the connection, not from a flag: `fromId == conn.areaA` means climbing, so the
-  mount is `launchPos` and the exit is `landingPos`. Otherwise the bot is descending: the exit is
-  `launchPos`, but the mount is **`gateB.left`, not `landingPos`** — where you land coming up is not
-  where you get on going down. navgen puts the descent entry there; see `doc/navgen.md`. When the two
-  differ it is a ledge point the bot runs off to catch the ladder mid-fall, which is why a descending
-  mount can sit at the lip of a drop rather than against the ladder. It runs at `ladderEntryYaw`
-  (from the connection's `gateAYaw`) and holds `ladderYaw` once on the ladder; the two are the same
-  angle except for a side approach, where catching the column means coming at it from ~90° off the
-  face normal.
-  A one-way ladder never reaches the descending case, because `PlanRoute` refuses the reverse edge.
-- Flushes funnel to the mount, at player height for the area being left
-- Adds mount waypoint (requiresLadder=true, ladderUp, ladderYaw, ladderSpeed, ladderExit, targetArea,
-  connIndex)
-- Adds exit waypoint (targetArea), not counted toward path length — the climb is vertical and its cost
-  already arrived through `AddCost`, from `ConnectionCostSeconds`' ladder arm
-- Anchor moves to the exit point
-- No gate is pushed. Ladder gates are degenerate points at the mount and dismount, so there is nothing
-  for the funnel to string-pull through; the mount is simply a hard waypoint, like a teleport trigger.
+**Ladder.**
+- Direction comes from the connection: `fromId == conn.areaA` means climbing, so the mount is `launchPos` and
+  the exit `landingPos`. Descending, the exit is `launchPos` but the mount is **`gateB.left`, not
+  `landingPos`** — where you land coming up is not where you get on going down (`doc/navgen.md`). When they
+  differ, the mount is a ledge point the bot runs off to catch the ladder mid-fall. A one-way ladder never
+  reaches the descending case, because `PlanRoute` refuses the reverse edge.
+- The bot runs in at `ladderEntryYaw` (from the connection's `gateAYaw`) and holds `ladderYaw` once on the
+  ladder. They are the same angle except for a side approach, where catching the column means arriving ~90°
+  off the face normal.
+- Flushes the funnel to the mount at player height for the area being left; adds the mount waypoint
+  (`requiresLadder`, `ladderUp`, `ladderYaw`, `ladderEntryYaw`, `ladderSpeed`, `ladderExit`, target area,
+  `connIndex`) and the exit waypoint; moves the anchor to the exit.
+- The exit waypoint is not counted toward path length: the climb is vertical and its cost already arrived
+  through `AddCost`, from `ConnectionCostSeconds`' ladder arm.
+- No gate is pushed. Ladder gates are degenerate points at mount and dismount, so the mount is simply a
+  hard waypoint, like a teleport trigger.
 
-**Air Move:**
-- Refuses the edge outright when `conn.gravity` does not match `PlanTraceContext::gravityMultiplier`.
-  Air moves are sampled once per gravity a `trigger_gravity` can put the bot in, and the ones baked for
-  a gravity the bot is not currently at simply do not exist for it. `Nav::AreaCosts` applies the same
-  filter so goal selection and route search agree about which jumps exist
-- Pushes arrival gate (entry side only)
-- If traces available: re-simulates from funnel's preferred launch point, through
-  `PlanTraceContext::standPush`/`duckPush` so a launch crossing a `trigger_push` field is simulated the
-  same way navgen sampled it
-  - Computes funnel crossing on launch gate (exit side)
-  - Interpolates yaw/speed from gateAYaw/gateASpeed
-  - Re-simulates with PmSim; if lands in dest area, uses simulated params
-  - On a miss, one retry at a rescaled speed — see "Rescaling a missed launch"
-  - If the retry misses too, `Cross` returns false and the whole edge is refused — there is no fallback
-    to the baked params, because a launch that does not land where the plan says is worse than no edge
-    at all
-- Pops arrival gate
-- Flushes funnel to launch point
-- Adds launch waypoint (airmoveLaunch=true, requiresJump, launchSpeed/Yaw, jumpBackDist, requiresCrouch, targetArea)
-- Adds landing waypoint (targetArea)
-- Anchor moves to landing point
+**Air move.**
+- Refused outright when `conn.gravity` does not match `PlanTraceContext::gravityMultiplier` (see
+  "Planning with gravity multipliers").
+- Pushes the arrival gate (entry side only) and computes where the funnel crosses the launch gate.
+- Interpolates yaw and speed from `gateAYaw`/`gateASpeed` at that fraction, clamps the speed to the server
+  (see "Launch speed is clamped to the server"), and re-simulates with `JumpLandsIn` from that point,
+  through `PlanTraceContext::standPush`/`duckPush` so a launch across a `trigger_push` is simulated the way
+  navgen sampled it.
+- On a miss, one retry at a rescaled speed ("Rescaling a missed launch"). If that misses too, `Cross` returns
+  false. There is no fallback to the baked params: a launch that does not land where the plan says is worse
+  than no edge.
+- Pops the arrival gate, inserts the run-up node, flushes to the launch point, adds the launch waypoint
+  (`airmoveLaunch`, `requiresJump`, `launchSpeed`/`launchYaw`, `jumpBackDist`, `requiresCrouch`, target area,
+  `connIndex`) and the landing waypoint, and moves the anchor to the landing.
 
-**Walk (including doors):**
-- Door: adds button/trigger waypoint if needed, then door waypoint (requiresDoor, doorWaitTime)
-- Non-door: pushes both gates to funnel, continues
+**Swim pricing is deliberately coarse.** Either endpoint under water prices the whole leg as a swim, which
+over-charges the seam legs into and out of a pool. That is the direction to be wrong in: a land route that
+loses to water should lose by a margin.
 
-**Swim pricing is deliberately coarse.** Either endpoint under water prices the whole leg as a swim,
-which over-charges the seam legs entering or leaving a pool. That is the direction to be wrong in:
-a land route that loses to water should lose by a margin.
+**Goal.** `Finish` flushes the funnel to the goal point and adds the final waypoint.
 
-**Goal:**
-- Flushes funnel to goal point
-- Adds final waypoint
+### Crouch belongs to the segment, not the corner
 
-### Gate/Geometry Utilities
+`requiresCrouch` on a waypoint means "be ducked while travelling *to* it", so it must be set on the waypoint
+that ends every pulled segment passing through a crouch area. `FlushFunnelTo` walks the pending gates
+alongside the pulled points: a corner on gate `i` ends a segment spanning gates `[previous corner's gate,
+i]`, and if any of those is a crouch gate the corner is flagged. It returns whether the *tail* segment — the
+one into the flush target — needs it, because that waypoint (run-up node, door, button, trigger, teleport
+trigger, goal) is pushed by the caller, which ORs the flag with its own area's `crouch`.
 
-**GateFloorZ** - interpolates floor Z along gate from endpoint heights
+Why: reading the flag off the gate a corner sits on loses it whenever the funnel runs straight through a
+crouch gate without emitting a corner there — the normal case, since a gate only becomes a corner when the
+funnel constricts. On `test45_slopes2` that walks the bot standing into the ceiling lip of crouch-only area
+9, where it stalls; the follower's only other source of "duck" is the area it already stands in, which a
+standing bot can never enter.
 
-**NearestPointOnGate** - finds closest point on gate segment to funnel polyline
+`PendingGate::crouch` is `fromArea.crouch || toArea.crouch`, so the flag lands one segment early on the way
+in and one late on the way out. The early one is wanted: `PM_Duck` takes 0.4 s on the ground before
+`FL_DUCKING` and the small hull appear, so a flag arriving exactly at the boundary would be too late. The
+late one costs a segment held at `kDuckingMultiplier` speed.
 
-**CrossingOnGate** - finds where funnel polyline crosses gate plane, clamps to gate span
+### Gates and geometry
 
-**GateFraction** - parametric position along stored gate (0=left, 1=right)
+The funnel only pulls through gates; these build them and answer geometric questions about areas.
 
-**LerpYaw** - shortest angular interpolation (handles +/-180 wrap)
+- **`BuildAreaGates`** — one inset gate (`edgeGates`) per bound wall plane.
+- **`BuildConnectionGates`** — for a walk connection, finds the shared face and builds a gate on each side,
+  falling back to the prebuilt `edgeGates`; air moves skip it and use their sampled gates.
+  - A shared wall runs the whole boundary, but only the stretch where the two floors meet within a step is
+    crossable — the rest is a cliff face. The face is narrowed to the longest steppable run, with each end
+    pushed out to the exact crossing so the gate is not quantized away by the sampling spacing, and the
+    function reports whether anything survived.
+  - It is the same wall from either side, but only one side may have bound planes that close it: a wedge
+    under a ramp is capped by its sloped ceiling, so its own edge line runs to infinity and `EdgeOfPlane`
+    rejects it. The line is taken from whichever neighbour bounds it.
+  - `PlanFloorFn` (`waypoint_plan.h`) samples an area's walkable floor at a 2D point, false where there is
+    none. `PlanArea` models only plane floors, so navgen, which knows the real geometry, supplies it to keep
+    gates off the cliff parts of a shared wall.
+- **`GateFromEdge`** — builds a gate from an edge line: insets both ends by `kPlanClearance` (16), pushes it
+  inward by up to 16, and clamps it to a point when too narrow. The push is capped at **half the area's
+  depth** along `inward`, measured from each inset end to the far wall with `ClipLineByWalls`; an unbounded
+  depth keeps the full push. Without the cap, an area thinner than 32 gets the gates of its two opposite
+  connections crossed, and the funnel walks forward, back and forward to thread them: at de_dust2's mid
+  double door (16-deep sliver 208) every bot drives into the jamb. Capped, both gates sit mid-sliver and the pull
+  goes straight.
+- **`ConnectionCrossing`** — the gate midpoint, or `launchPos` for a non-walk connection.
+- **`GateFloorZ`** interpolates floor z along a gate from its endpoint heights; **`GateFraction`** is the
+  parametric position along a stored gate (0 = left, 1 = right).
+- **`NearestPointOnGate`** — closest point on a gate segment to the funnel polyline. **`CrossingOnGate`** —
+  where the polyline crosses the gate plane, clamped to the gate span.
+- **`LerpYaw`** — shortest angular interpolation across ±180.
+- **`PointInArea`** — point against `boundPlanes` with epsilon. **`InAreaColumn`** — against the upright
+  planes and the implied walls only, ignoring floor and ceiling.
+- **`FloorPlaneOf`** — the bound plane with the highest `normal.z`. That is the *flattest* upward plane, not
+  the highest, so it only answers whether an area has a floor at all — never a height.
+- **`AreaFloorZ`** — floor height at (x, y). An area is the intersection of its half-spaces, so every plane
+  with `normal.z > kWallNormalZ` (0.3) is a lower bound and the floor is the **maximum** over them. Reading
+  one plane is wrong for any area with more than one upward face, which is every prism area: crossfire's
+  area 168 is a ramp plus a flat patch, and `FloorPlaneOf` gives the patch's −1838 for a ramp climbing to
+  −1684, which puts a run-up node on the pit floor (see "The run-up node"). A prism area's planes are its
+  footprint plus a z-slab, so there it returns the slab bottom; a caller that needs the standing height on a
+  prism traces down (`ResolveVolumeAreas`, `doc/goals.md`, "Healing volumes give one entity several candidates").
+- **`FloorsMeetAt`** — two areas' floors agree at a seam point within a tolerance; both must have a floor
+  plane, and the heights come from `AreaFloorZ`.
+- **`EdgeOfPlane`** — a wall plane as a 2D segment, clipped by the area's other walls. **`ClipLineByWalls`**
+  — clips a segment by an area's wall planes.
 
-**PointInArea** - tests point against boundPlanes with epsilon
+**Implied walls.** `ForEachImpliedWall`: an area's footprint is not fixed by its vertical planes alone. A
+floor rising one way and a ceiling falling the other pinch the column shut where they meet — a wedge under a
+ramp is capped by the ramp, a sliver between two pyramid faces is bounded that way at both ends. Eliminating
+z from the half-space system recovers those bounds exactly: for a floor `f` and ceiling `c`, "the floor stays
+under the ceiling" is one linear constraint in x and y, implied by the two planes, so it can only trim
+overreach, never cut into the area. It iterates every floor/ceiling pair, skips pairs parallel in plan (they
+never converge), and emits each as an inward-facing half-plane in x/y.
 
-**InAreaColumn** - tests point against wall planes only (ignores floor/ceiling), for column test
-
-**FloorPlaneOf** - finds bound plane with highest normal.z (most upward). That is the *flattest* upward
-plane, not the highest one, so it is only good for asking whether an area has a floor at all — never for
-a height.
-
-**AreaFloorZ** - floor height at (x,y). An area is the intersection of its half-spaces, so every plane
-with `normal.z > kWallNormalZ` is a lower bound on z there and the floor is the *maximum* over all of
-them. Reading one plane instead is wrong for any area with more than one upward face, which is every
-prism area: crossfire's 168 is a ramp plus a small flat patch, and asking `FloorPlaneOf` gave the patch's
-z, -1838, for every point on a ramp that climbs to -1684. See "The clamp runs backwards along the route"
-for what that cost.
-
-**FloorsMeetAt** - true when two areas' floors agree at a seam point within a tolerance. Both areas must
-have a floor plane at all; the heights themselves come from `AreaFloorZ`.
-
-**EdgeOfPlane** - extracts wall plane as 2D line segment, clips by other walls in area
-
-**ClipLineByWalls** - clips line segment by other wall planes in area
-
-### Implied Walls from Floor/Ceiling Pairs
-
-**ForEachImpliedWall** - an area's footprint is not fixed by its vertical planes alone. A floor rising one way and a ceiling falling the other pinch the column shut where they meet, and that closure is a vertical half-plane no bound plane records: a wedge under a ramp is capped by the ramp itself, and the sliver between two faces of a pyramid is bounded that way at both ends. Eliminating z from the half-space system recovers those bounds exactly - for a floor f and a ceiling c, "the floor stays under the ceiling" is one linear constraint in x and y, and it is implied by the two planes, so it can only trim overreach, never cut into the area. The function iterates all floor/ceiling pairs; parallel in plan pairs (they never converge, so they bound nothing here) are skipped. Each implied wall is emitted as an inward-facing half-plane in x/y.
-
-**GateFromEdge** - builds gate from edge line: insets ends, pushes inward by kPlanClearance (16), clamps if too narrow
-- The push is capped at half the area's depth along `inward`, measured from each inset end to the far
-  wall with `ClipLineByWalls`. A full 16 into an area thinner than 32 lands the gate past the area's
-  middle, so the gates of two opposite connections cross and the funnel has to walk forward, back and
-  forward again to thread them in order. de_dust2's mid double door had exactly this: the 16-deep sliver
-  208 between seams x=-392 and x=-376 got its 209-side gate at x=-376 and its 103-side gate at x=-392,
-  and every bot through it drove into the jamb, stopped and reversed. Capped, both sit at x=-384 and the
-  string-pull goes straight. An unbounded depth keeps the full push.
-
-**BuildAreaGates** - builds edgeGates for all bound planes
-
-**BuildConnectionGates** - for walk connections: finds shared face, builds gates on both sides; falls back to pre-built edgeGates
-- A shared wall between two areas runs the full length of the boundary, but only the stretch where the two floors meet within a step is actually crossable -- the rest is a cliff face. Narrows [lo, hi] to the longest run that a walker can step across, and reports whether anything survived.
-- Push each end outwards to the exact crossing, so a gate is not quantized away by the spacing.
-- It is the same wall from either side, but only one side may have bound planes that close it off: a wedge under a ramp is capped by its sloped ceiling, so its own edge line runs to infinity and EdgeOfPlane rejects it. Take the line from whichever neighbour bounds it.
-
-**ConnectionCrossing** - midpoint of gates (or launchPos for non-walk)
-
-## waypoint_plan.h
-
-### PlanFloorFn
-Samples the walkable floor of one area at a 2D point. Returns false where the area has no floor there. PlanArea only models a single floor plane, so callers that know the real geometry (navgen) supply this to keep gates off the parts of a shared wall where the two floors are a cliff apart.
-
-### PlanArea
-- `boundPlanes` - inward-facing planes (for prism: footprint walls + z-slab)
-- `edgeGates` - one per bound plane, inset/pushed gates
-- `door`, `breakable`, `activation`, `doorWaitTime` - a door area makes the plan stop at it
-- `detours` - one `PlanDetour` per walk neighbour of a gated area, precomputed by navgen. Each is a closed
-  polyline of `PlanDetourPoint` starting and ending on that neighbour's gate midpoint, with `actIndex` marking
-  the activation waypoint, plus `blocked` when no activator is reachable from that side. `FindDetour` scans
-  linearly — a gated area has two to four entries
-
-### PlanConnection
-- `planeA`, `planeB` - bound plane indices for connection (baking only)
-- `gateA`, `gateB` - shared face gates (built by BuildConnectionGates)
-- `gateAYaw[2]`, `gateASpeed[2]` - launch params at gateA ends
-
-### PlanWaypoint
-- `point` - position at player height (duck origin + 18 for stand)
-- Flags: requiresElevatorRide, elevatorTravelTime, elevatorWaitTime, requiresCrouch, requiresDoor, requiresBreak, requiresButtonUse, requiresTriggerTouch, activatorCenter, requiresTeleport, teleportDest, requiresLadder, ladderUp, ladderYaw, ladderEntryYaw, ladderSpeed, ladderExit, airmoveLaunch, requiresJump, launchSpeed, launchYaw, jumpBackDist, launchSimulated, launchSimFailed, launchSimFrom/To/Aim, targetAreaId
-- `activatorCenter` is the activator brush model centre, copied from the detour. The bot aims at it to press:
-  GoldSrc `PlayerUse` picks the entity whose centre gives the largest forward dot above `VIEW_FIELD_NARROW`,
-  so the runtime cannot press without knowing where the brush is
-- `requiresBreak` is serviced at runtime by `BotBreak` — the bot stops, draws its melee weapon and hits the
-  brush until it dies. The plan's `openSeconds` (`health * 0.1`) is only the ETA estimate; the runtime
-  decides for itself whether the entity is breakable at all, from `takedamage` and `health`. See `doc/movement.md`
-
-### Constants
-- `kPlanClearance = 16` - player hull radius; gates inset by this at ends and pushed this far off connection plane (at most half the area's depth)
-- `kPlanClampedClearance = 6.63` - corner-cut budget at a clamped gate, `16*(sqrt(2)-1)`: the diagonal
-  slack at a right-angle corner of a minimum-width corridor
-- `kPlanStandHeight = 18` - duck hull origin to stand origin
+**A tilted wall is a ceiling.** "Ceiling" means every plane that is neither a floor (`normal.z >
+kWallNormalZ`) nor truly upright (`|normal.z| <= kUprightNormalZ`, 0.001) — overhangs and steep slopes
+included. `InAreaColumn` and `ClipLineByWalls` treat only upright planes as walls. `EdgeOfPlane` turns a
+tilted connection plane into its line *at the floor*, by the same elimination against `FloorPlaneOf`; an area
+with no floor plane keeps the plain reading at z = 0. Reading a tilted plane at z = 0 is off by
+`normal.z * floorZ / |normal.xy|`, growing with the floor's distance from z = 0: on de_aztec an arch plane in
+area 450 (floor z −206) read that way is a wall 46 units off its real foot, which cuts a 2.4-unit seam to
+nothing and sends the string pull through solid. `--dump-path-between "x y z x y z"` plans such a leg offline.
 
 ### Corner clearance
-`PlanWaypoint::clearance` is how far an arc may deviate from the vertex. It is derived in
-`GateClearance` from the gate the corner came from, *not* stored on `PlanGate` — gates round-trip
-through `MergedConnection` and the `.nav` file, both of which copy field by field, so anything added
-to `PlanGate` is silently dropped on load.
 
-Gate width is not the budget. `GateFromEdge` already insets endpoints `kPlanClearance` from the wall,
-so a surviving endpoint is 16 units off geometry by construction and the remaining width is *extra*
-freedom: `clearance = min(16 + halfWidth, 32)`. A clamped gate collapsed to a point, so it gets
-`kPlanClampedClearance`. Under-estimating stops the bot at every tight gate.
+`PlanWaypoint::clearance` is how far an arc may deviate from the vertex. `GateClearance` derives it from the
+gate the corner came from — it is not stored on `PlanGate`, because gates round-trip through
+`MergedConnection` and the `.nav` file field by field, and anything added to `PlanGate` is silently dropped
+on load.
 
-**That extra width is on the wrong side.** A funnel corner sits on a gate endpoint and the arc bulges
-toward the inside of the turn, along `norm(w - u)` — the side the funnel wrapped around, where the room
-is the 16 unit inset, not the half-width. `CornerClearance` in `FlushFunnelTo` therefore clamps the gate
-value: it tries `GateClearance`, then `kPlanClearance`, then `kPlanClampedClearance`, and keeps the
-first whose apex `p + bis * c` is inside the corner's own area or the gate's other area. Pure column
-tests, no traces. The hull trace in `BuildPathProfile` was supposed to catch an over-estimate, and does
-next to a wall, but over a ledge a horizontal hull trace hits nothing and the arc was kept — bots
-rounded 2fort's catwalk corners into the pit. An apex that lands in a *third* area (a fragmented open
-floor) is refused too, which only costs a slightly tighter arc. On the test maps this changes the
-clearance at 77 corners, the actual radius at 3 (by 1-3 units), and no route time.
+Gate width is not the budget. `GateFromEdge` already insets endpoints 16 from the wall, so the remaining
+width is *extra* freedom: `clearance = min(16 + halfWidth, 32)`. A clamped gate is a point and gets
+`kPlanClampedClearance` (6.63 = `16 * (sqrt(2) - 1)`, the diagonal slack at a right-angle corner of a
+minimum-width corridor). Under-estimating stops the bot at every tight gate.
 
-### PlanTraceContext
-- `duckTrace`, `standTrace` - trace functions for re-simulation
-- `physics` - movement physics
-- `dumpAirmoves` - debug output flag
-- `collectRunupTraces` - vestigial. The steered-approach simulator it fed no longer exists, so nothing
-  reads it and nothing fills `PlanStats::runupTraces`.
+**That extra width is on the wrong side**, so `CornerClearance` in `FlushFunnelTo` clamps it. A funnel corner
+sits on a gate endpoint and its arc bulges toward the inside of the turn, along `norm(w - u)`, where the room
+is the 16-unit inset, not the half-width. It tries `GateClearance`, then `kPlanClearance`, then
+`kPlanClampedClearance`, and keeps the first whose apex `p + bis * c` lies inside the corner's own area or
+the gate's other area — column tests only, no traces. An apex in a *third* area (a fragmented open floor) is
+refused too, costing only a slightly tighter arc. The profile's hull trace catches an over-estimate next to
+a wall, but over a ledge a horizontal hull trace hits nothing, and without the clamp bots round 2fort's
+catwalk corners into the pit. On the test maps the clamp changes the clearance at 77 corners, the radius at 3
+(by 1–3 units), and no route time.
 
-### PlanStats
-These are per-walker, so they describe the route that was kept and nothing else — a walker copied down a
-branch the search abandoned takes its counters with it.
+### Relaxing over walk-connected areas
 
-- `airmovesSimulated` - launches re-simulated and accepted, i.e. air moves actually on the plan.
-- `airmovesUnplannable` - launches the simulation could not make. On the winning walker this is always
-  0, because a failed launch means `Cross` returned false and the walker was discarded. It is the
-  per-walker view of what `PlannedRoute::airmovesRejected` counts across the whole search.
-- `airmovesRespeeded` - launches the profile could not deliver the design speed to, which were
-  re-simulated at the speed it could and still landed.
-- `airmovesRespeedKept` - launches where that slower re-simulation also missed, so the design speed was
-  kept. See "Re-speeding a launch": this no longer truncates.
-- `airmovesRetracted` - earlier launches whose speed was cut so their landing stops sitting on top of
-  the next launch's run-up node. See "Landing on the next run-up".
-- `airmovesRetractKept` - pairs where that pull was rejected — the two headings too far apart, or the
-  slower jump no longer landing in its own area — so the earlier design speed was kept.
-- `corners`, `gatesClamped` - funnel diagnostics.
-- `runupTraces` - vestigial, never populated. `--dump-svg` still accepts them and draws nothing.
+`Relax` runs after the search: if the route goes a → b → c and the line a → c is clear, b is dropped — even
+when that line crosses areas not on the A\* chain. From each waypoint it tries the *farthest* plain waypoint
+first and steps back until a line is clear.
 
-`airmovesFromStored` and `unplannableConn` are gone. The first never counted what its name said — it was
-incremented on the branch that gave up, so it only ever equalled `airmovesUnplannable`. The second existed
-only so the retry loop knew which connection to block, and there is no retry loop.
+Why: the funnel only pulls through gates on the A\* chain, and every gate is inset 16 from both ends of its
+seam whether that end is a wall or another seam. On a fragmented floor many seams are under 32 u, collapse to
+point gates and pin the path to their midpoints — a chain of small jogs, and collinear duplicate corners in
+corridors. The per-node walker also makes A\* path-dependent, so an area the straight line would cross can
+lose the search. Extending forward and stopping at the first failure is not enough: on dust2's S-door the
+short hops between the door's tight corners fail, while the long line from the last door corner to the goal
+is clear.
 
-### Unplannable air moves
-A launch that `JumpLandsIn` cannot make (or one with no gate to funnel through, so no simulation was
-attempted) makes `Cross` return false. That is all that happens: the search drops the edge and carries
-on. Nothing is truncated, nothing is retried, and the route that comes back has no unplannable air moves
-in it by construction.
+- **Only plain runs.** A waypoint is plain when it has no `connIndex` and none of the door, break, button,
+  trigger, teleport, ladder, elevator, launch or jump flags (crouch is allowed). Both ends and everything
+  dropped must be plain, so special waypoints are never removed and the corner before one (the run-up node,
+  the door approach) always survives as a run end.
+- **Clear** means three `ReachBack` walks over the walk-successor graph all reach the end: the centre line,
+  and two parallel lines `kPlanRelaxClearance` (12) to either side, each started by a perpendicular walk out
+  of a. `ReachBack` only crosses seams where `FloorsMeetAt` holds, so ledges stop it. Every area crossed must
+  be plain floor (no door, breakable, elevator, crouch, activation, drift or water), and the centre walk
+  must end on a floor within `kPlanRunupSeamStep` (18) of c's height, so a storey overlapping in 2D does not
+  count. The offset is just under 16 because a funnel corner sits exactly 16 from its wall corner and
+  `ReachBack` keeps a 2-unit inset.
+- **Start area of a waypoint.** A corner's `targetAreaId` is its gate's to-area, but the point may lie in the
+  from-area, so `AreaOfWaypoint` takes the target if its column holds the point, otherwise the walk
+  neighbour that does with the nearest floor.
+- **It runs last**, after `Respeed`, because `Retract` and `Respeed` address waypoints by index through
+  `m_launches` and erasing earlier would shift them. Relax never touches launch, landing or run-up
+  waypoints, so the order changes nothing else.
+- `areaPath`/`connPath` stay the A\* chain. A bot standing in a relaxed-in area finds no planned connection to
+  penalise after a blocked detour; that is accepted. The ETA comes from the profile over the final
+  waypoints, so it stays consistent.
 
-This is worth stating plainly because it used to be the opposite. The planner would truncate the route at
-the bad launch, and `PlanRoute` would then block that connection and re-run A* from scratch, up to eight
-times. Both of those are gone.
+It cannot fix a mesh whose seams really are ledges: on test14_terrain's hill neighbouring slope areas differ
+by 24–33 u except in a few-unit window (`ClipLineByStep`), so the straight line would cross a ledge and the
+jogs stay.
 
-The failure is genuinely route-dependent, not a property of the connection alone: the stored launch comes
-from `ProbeAirMoves` sampling a whole edge, while the plan launches from wherever the funnel crosses that
-edge on *this* route. `test45_slopes2` is the worked example — a drop off the upper floor's south lip is
-sampled fine, but the funnel pulls the launch to the corner of the gate, from where the mover clears the
-lip and lands on the ramp below instead of the pit floor, outside the destination area's bound planes.
+### Air moves at plan time
 
-Because rejection now happens inside the search, `--dump-airmove`'s `sim miss` lines are no longer
-failures — they are the edges the search routed around, and their count matches `rejected in search`
-exactly. Three on test45_slopes2, four each on test28_slopecase and test15_staircase. A connection that
-appears there on every route is still an air move `ProbeAirMoves` should not have exported, and chasing
-it belongs there rather than here.
+#### JumpLandsIn
 
-### JumpLandsIn (waypoint_plan.cpp)
-`JumpLandsIn` re-simulates one air move at plan time and accepts it only if the mover ends up inside
-the destination area. It begins on the launch point itself, at a given speed and the launch heading,
-and requests the jump on the first frame.
+Re-simulates one air move at plan time and accepts it only if the mover ends inside the destination area. It
+starts **on the launch point**, at the given speed and the launch heading, and requests the jump on the
+first frame.
 
-It used to start some distance back along the launch heading, on the theory that simulating the
-run-up validated the approach. It did not: a straight line drawn backwards from the launch is not
-where the route comes from, so it ran through whatever geometry happened to be behind the launch and
-the mover wedged or slid off a wall before ever reaching the launch plane. At the last value of 64
-this failed on **every air move in every test map**, truncating all fifteen routes at the first jump.
-The approach is now checked by the profile instead, which knows the real route — see the run-up node
-below.
+Why not start some distance back to validate the run-up: a straight line drawn backwards from the launch is
+not where the route comes from, so it runs through whatever is behind the launch and wedges. At 64 units back
+it fails every air move on every test map. The approach is checked by the profile instead, which knows the
+real route (the run-up node below).
 
-### The run-up node
-A waypoint inserted `launchSpeed * kPlanAirmoveRunupTime` (0.1 s of travel, floored at
-`kPlanAirmoveRunupMin` = 8 units) back along the launch heading, so the route's last leg into a launch
-is straight and aligned. Roughly six frames of approach at a full-speed launch, proportionally less
-for the slow drops, where a fixed distance used to leave the node stranded far off the natural route —
-`test15_staircase` had two plan segments leaving the mesh entirely for that reason.
+`JumpLandsIn` pins `physics.frameTime` to `kPlanSimFrameTime` (1/60) on its local copy — see the airmove
+cache for why.
 
-Two things bound that distance from underneath and above. `AccelDistance(0, launchSpeed)` plus one
-`AirmoveLaunchLead` is the distance the physics actually needs to reach the design speed from a
-standstill, and the node is never placed closer than that. It never binds in the current speed range —
-0.1 s of travel is the larger term from roughly 70 u/s upward — but the 0.1 s is a travel-time guess
-and this is the real requirement, so the guess can no longer silently fall under it.
+#### Unplannable air moves
 
-`ClampTravelInsideArea` then walks the wall planes of the source area and shortens the offset so the
-node lands inside it, `kLaunchInset` clear of the wall. Placing it blindly put the node **through** the
-wall whenever the launch sat less than the offset from the far side: on `test37_walkent` the 5→4 launch
-at y=43.6 in an area starting at y=16 got a run-up node at y=14.9, 1.1 units inside solid. The funnel
-then pulled the approach against geometry that is not walkable and the arc fitter had nothing to work
-with. The offset is length, not direction: it does not stop the node landing behind the bot when the
-route arrives perpendicular to the launch heading, which is what produces the hairpin above. When the
-route arrives by *air move* the node can land behind the bot outright — see "Landing on the next
-run-up". The `AccelDistance` bound is charged at doubled friction whenever the launch sits at a ledge —
-see "Edge friction on the approach".
+A launch `JumpLandsIn` cannot make — or one with no gate to funnel through, so nothing was simulated — makes
+`Cross` return false. The search drops the edge and carries on; nothing is truncated or retried, and the
+returned route has no unplannable air moves by construction.
 
-**The clamp runs backwards along the route, not inside one area.** `PlanWalker::RunupDistance` steps
-area by area: clamp inside the current one, and when that falls short of the offset, re-clamp with no
-inset to reach the seam and continue in the area the route came from. An area's predecessor is read
-straight off `m_pendingGates` — each walk connection pushes a gate pair carrying `insideArea`, and
-`m_pendingGates` only ever holds plain-walk gates because every barrier flushes the funnel — so no
-adjacency structure has to be plumbed into the walker. The chain stops at a real wall, at a seam the
-next area's column does not actually contain, at a seam where the two floors are more than
-`kPlanRunupSeamStep` apart, or at a crouch area, where running at `kDuckingMultiplier` would make the
-extra distance worth less than the ducking costs.
+The failure is route-dependent, not a property of the connection: the stored launch comes from
+`ProbeAirMoves` sampling a whole edge, while the plan launches from wherever the funnel crosses it on *this*
+route. On `test45_slopes2` the funnel pulls a drop's launch to the gate corner, from where the mover clears
+the lip and lands on the ramp instead of the pit floor.
 
-The floor-continuity clause is there because `InAreaColumn` is a pure XY test — it skips every plane
-with `|normal.z| > kWallNormalZ` — so on its own it happily walks a run-up back across a cliff. Crossfire
-area 168 is a 26.57° ramp from the pit floor up to a ledge, sharing its column with the pit below it;
-the run-up for the ramp-top air move was placed on the pit floor 150 units under the launch, and the bot
-spent the rest of the round stalling and re-planning between a launch it could not walk to and the point
-it kept falling back to. `FloorsMeetAt` compares `AreaFloorZ` on both sides of the seam and stops the
-walk-back where they disagree by more than a step.
+`--dump-airmove`'s `sim miss` lines are therefore not failures — they are the edges the search routed
+around, and their count equals `rejected in search` (three on test45_slopes2, four each on test28_slopecase
+and test15_staircase). A connection that appears there on *every* route is an air move `ProbeAirMoves`
+should not have exported; chase it there.
 
-Confining it to one area silently capped the launch speed on thin ledges. `test54_window`'s area 3 is
-a 16-unit-deep lip between the window and the pit; the 3→17 jump wants 26.7 units of run-up and got
-3.2, so the bot reached 159 of a 267 design speed and aborted the jump every time. Extending back
-through the window into area 2 gives the full offset and it now launches at 267 exactly.
+#### The run-up node
 
-Two invariants make the extension safe. The straight run-up→launch leg is not string-pulled, but every
-step of the walk-back is clamped inside a convex area and each seam point is checked against the next
-area's column, so the leg lies inside the union by construction. And the gates the run-up point now
-sits *behind* are dropped before `FlushFunnelTo` — otherwise the pull would be forced out through a
-gate the target is on the near side of, and come back. Those gates only constrained the leg the funnel
-no longer draws.
+A waypoint inserted back along the launch heading so the route's last leg into a launch is straight and
+aligned. Its distance is `launchSpeed * kPlanAirmoveRunupTime` (0.1 s of travel, roughly six frames),
+floored at `kPlanAirmoveRunupMin` (8) — proportional, because a fixed distance strands the node off the
+route for slow drops (on `test15_staircase` two segments leave the mesh).
 
-The cost is that a run-up node absorbing a former gate corner also loses that corner's `clearance`,
-falling back to the default 16 where the gate may have reported 32. That is the conservative
-direction — a narrower corridor shrinks arcs rather than cutting them — and it is why `test5_jump`
-trades two corners for one and reports one more `slowed`.
+Bounds on that distance:
+- **Below:** `AccelDistance(0, launchSpeed)` plus one `AirmoveLaunchLead`, the distance physics needs to reach
+  the design speed from a standstill. It does not bind in the current speed range (0.1 s is larger from
+  about 70 u/s up), but it keeps the travel-time guess from silently falling under the real requirement.
+  It is charged at doubled friction when the launch sits at a ledge ("Edge friction on the approach").
+- **Above:** `ClampTravelInsideArea` walks the source area's wall planes and shortens the offset so the
+  node lands inside, `kLaunchInset` (2) clear of the wall. Placed blindly the node goes through the wall
+  whenever the launch sits closer than the offset to the far side (on `test37_walkent`, 1.1 units into
+  solid). The clamp limits length, not direction: when the route arrives perpendicular to the launch heading
+  the node can still sit behind the bot, which produces a hairpin.
 
-It is load-bearing for a second reason that has nothing to do with alignment. `Bot_MoveNav` hands
-control to `RunAirmoveApproach` when the tracker's `wpIndex` reaches the launch waypoint, and
-`wpIndex` comes from whichever profile segment the bot projects onto. `BuildPathProfile` drops
-segments shorter than `kEpsLen`, and the funnel's last corner lands on the launch point exactly, so
-without this node the segment ending at the launch is zero-length, gets dropped, and no segment ever
-carries the launch's index. The bot then walks straight through the launch point and never jumps.
+**The clamp runs backwards along the route, not inside one area.** `PlanWalker::RunupDistance` steps area by
+area: clamp inside the current one and, when that falls short, re-clamp with no inset to the seam and
+continue in the area the route came from. Predecessors come straight off `m_pendingGates` — each walk
+connection pushes a gate pair carrying `insideArea`, and the list holds only plain-walk gates — so no
+adjacency structure is plumbed into the walker. The chain stops at a real wall, at a seam the next area's
+column does not contain, at a seam whose floors differ by more than `kPlanRunupSeamStep`, or at a crouch area
+(running at `kDuckingMultiplier` makes extra distance worth less than the ducking costs).
 
-### Launch speed is clamped to the server
-`candSpeed` comes out of the nav file's `gateASpeed`, which the sampler produced at navgen's assumed
-`maxSpeed` — 320 by default. The bot flying it need not agree, and the number to compare against is
-not a cvar but whatever `PM_CheckParamters` left in `pmove->maxspeed` — 270 for a valve player, whether
-or not `sv_maxspeed` says so (the test server, `D:\hlds\crossplay`, never sets it). `Bot_Physics` reads that
-live value into `PlanTraceContext::physics` — see `Bot_MaxSpeed` in `doc/movement.md`. `Cross` therefore clamps
-`candSpeed` to `physics.maxSpeed` before handing it to `JumpLandsIn`.
+- The **floor-continuity** stop exists because `InAreaColumn` is a pure XY test and happily walks a run-up
+  back across a cliff: crossfire's area 168 is a 26.57° ramp sharing its column with the pit below, and
+  without the stop the run-up for the ramp-top jump lands on the pit floor 150 units under the launch.
+- Why not confine the run-up to one area: it silently caps launch speed on thin ledges. `test54_window`'s
+  16-deep lip gives its jump 3.2 of the 26.7 units it wants and the bot reaches 159 of 267; through the
+  window into the next area it launches at 267.
+- Two invariants make it safe. Every step is clamped inside a convex area and each seam point checked
+  against the next column, so the straight run-up → launch leg lies inside the union. And the gates the
+  run-up point now sits *behind* are dropped before `FlushFunnelTo`, or the pull would be forced out through
+  a gate on the near side and come back.
+- Cost: a run-up node absorbing a former gate corner loses that corner's clearance and falls back to 16 —
+  the conservative direction, which is why `test5_jump` trades two corners for one and reports one more
+  `slowed`.
 
-This is what keeps a nav file server-independent. Sampling stores the fastest jump the geometry allows;
-each server's planner then asks whether *it* can make that jump, and an air move needing 315 on a
-270 server simply fails `JumpLandsIn` and is rejected in the search like any other unplannable launch.
-No regen, no per-server nav.
+**The node is also what makes the bot jump at all.** `Bot_MoveNav` hands control to `RunAirmoveApproach`
+when the tracker's `wpIndex` reaches the launch waypoint, and `wpIndex` comes from the profile segment the
+bot projects onto. `BuildPathProfile` drops segments shorter than `kEpsLen`, and the funnel's last corner
+lands exactly on the launch point, so without this node the segment ending at the launch is zero-length,
+dropped, and no segment carries the launch's index — the bot walks through the launch and never jumps.
 
-The clamp has to live here because nothing downstream applies it. `PmSim::Begin` sets the launch
-velocity to the commanded speed **unclamped** — its `maxSpeed` check bounds the air-accel wish speed
-during flight, not the launch — so an unclamped `candSpeed` produces a simulation that succeeds at a
-speed the bot can never hold, and a plan that asserts it. `RunAirmoveDrive` does clamp its drive to
-`BotMaxSpeed`, so the bot then chases a launch speed it is not allowed to reach and the approach never
-arms: `test40_walljump` planned 315, drove at 270, and aborted every attempt.
+#### Launch speed is clamped to the server
 
-`Respeed` alone did not cover this. It measures the shortfall correctly, but when the slower
-re-simulation also misses it keeps the design speed by design, so the unreachable 315 survived to the
-follower as `airmovesRespeedKept`.
+`Cross` clamps the candidate speed to `physics.maxSpeed` before handing it to `JumpLandsIn`.
 
-### Rescaling a missed launch
-`Cross` interpolates yaw and speed from the gate ends at the fraction the funnel crosses, and that pair
-was never flown by any sample — the gate endpoints sit at mean ± 1σ along the fitted segment and the
-yaw/speed there come from a one-sided local regression, so at `t` 0 or 1 the planner is extrapolating.
-An overshoot or undershoot of a few tens of units is routine, and refusing the edge on it loses genuine
-connectivity.
+`candSpeed` comes from the nav file's `gateASpeed`, sampled at navgen's `--max-speed` (320 by default). The
+bot flying it may be slower, and the number to compare against is not a cvar but what `PM_CheckParamters`
+left in `pmove->maxspeed` — 270 for a valve player, whether or not `sv_maxspeed` says so. `Bot_Physics` reads
+that live value into `PlanTraceContext::physics` (`doc/movement.md`, `Bot_MaxSpeed`).
 
-So a miss gets exactly one retry, and the correction is one division: `want / conn.flightTime`, where
-`want` is the destination centroid projected onto the candidate heading. `flightTime` is the air time
-of the sampled trajectory the connection was built from — a flight that really did land in the
-destination — so the division asks the only question that matters: how fast must the bot leave the gate
-to cover `want` in the time the geometry allows.
+This keeps a nav file server-independent: sampling stores the fastest jump the geometry allows, each server
+asks whether *it* can make it, and an air move needing 315 on a 270 server fails `JumpLandsIn` and is
+rejected like any other. No regen, no per-server nav.
 
-Scaling `candSpeed` by `want / |end - exitPoint|` instead is the obvious correction, and it is the
-*same number* whenever the miss ends at the destination's height, because there `|end - exitPoint|` is
-`candSpeed * flightTime` and the two forms cancel. They diverge exactly where the assumption behind the
-ratio — that air time barely depends on launch speed — breaks: when the missed flight ends somewhere
-else vertically, its horizontal reach carries a different air time and the correction inherits it.
-`test54_window`'s `1->2` is the extreme case: a 51-unit hop up onto a window sill whose first attempt
-clears the sill, misses the 16-unit lip past it and falls 224 units into a pit — 192 units of travel
-over 1.16 s. The ratio folds that fall in and answers 44 for a jump that needs 90. Dividing by the
-connection's own 0.57 s answers 91, and it lands.
+The clamp has to live here because nothing downstream applies it. `PmSim::Begin` sets the launch velocity
+**unclamped** — its `maxSpeed` bounds the air-accel wish speed in flight, not the launch — so an unclamped
+speed simulates a jump the bot can never deliver. `RunAirmoveDrive` does clamp to `Bot_MaxSpeed`, so the bot
+then chases an unreachable launch speed and aborts every attempt (unclamped, `test40_walljump` plans 315 and
+drives 270). `Respeed` does not cover it either: when the slower re-simulation also misses it keeps the design speed
+by design.
 
-**The aim point is the destination centroid, not the funnel's own crossing of the arrival gate.** The
-crossing is where the string pull wanted to enter, which is by construction the *nearest* corner of that
-gate, and aiming a rescaled jump at the edge of the landing area is how you land just outside it. On
-`test54_window` the `1->3` crossing asks for 207 and sails over the 16-unit lip into the pit; the
-centroid asks for 152 and lands.
+#### Rescaling a missed launch
 
-Nothing iterates. A second miss refuses the edge exactly as before, and the retry is skipped when `want`
-is under `kPlanAirmoveRangeEps` or the correction moves the speed by less than `kPlanAirmoveRespeedEps`.
-The rescaled speed is clamped to `physics.maxSpeed`. A connection whose `flightTime` is under
-`kPlanAirmoveFlightEps` falls back to the old ratio, where that clamp is also what bounds the degenerate
-case: a first sim that wedges immediately travels ~0 units and the ratio blows up, so it retries at full
-speed and almost always misses again — one wasted simulation, never an unbounded one.
+A miss in `Cross` gets exactly one retry at speed `want / conn.flightTime`, where `want` is the destination
+**centroid** projected onto the candidate heading and `flightTime` is the air time of the sampled trajectory
+the connection was built from.
 
-**Correcting downward composes with `Respeed`; correcting upward does not.** A retry that raises the
-speed can assert a launch the run-up cannot deliver, and `Respeed` will then knock it back down and keep
-the design speed if the slower jump misses. In practice the corrections that matter are reductions,
-because the extrapolated gate speed is biased toward the cloud's interior mean and overshoots.
+Why retry at all: the yaw/speed pair `Cross` interpolates at the funnel's crossing fraction was never flown
+by any sample. The gate endpoints sit at mean ± 1σ along the fitted segment and their yaw/speed come from a
+one-sided local regression, so at `t` 0 or 1 the planner is extrapolating, and overshooting or undershooting
+by a few tens of units is routine. Refusing those edges loses real connectivity.
 
-`test54_window` is the map this exists for. Its spawn room is a closed box whose only exit is a window
-24 units up the wall, so navgen finds no launch edge there at all (`FilterLaunchEdges` needs void ahead
-at running height) and every jump out of it is reverse-seeded from the landing spread of the jumps back
-in — a 2D blob squashed into a segment, the worst case for the end regression. Both edges out of the
-room miss, and area 1's only other exits drop into the pit, which cannot climb back to the sill level —
-so until the retry corrects `1->2` to 91 and `1->3` to 152, the map has no route at all.
+Why divide by the connection's flight time: it is the air time of a flight that really landed in the
+destination, so the division asks how fast the bot must leave to cover `want` in the time the geometry
+allows. The obvious alternative, scaling by `want / |end - exitPoint|`, is the *same number* whenever the miss
+ends at the destination's height, and diverges when it ends elsewhere vertically. `test54_window`'s `1->2` is
+the extreme case: the unscaled launch overshoots a 16-unit lip and falls 224 units into a pit; the ratio folds
+that fall in and asks for 44, the flight-time form asks for 91 and lands.
 
-Across the 19 stock deathmatch maps the flight-time form converts 8 more retries from `landed elsewhere`
-to `landed in area` (161 of 582 to 169 of 586) and moves three routes — `contamination` 28 waypoints to
-25, `disposal` 11 connections to 10, `datacore` 14 to 16 — leaving every other route byte-identical. On
-the test maps `test28_slopecase` trades four corners for a crouch jump (22 waypoints to 21) and
-`test31_push` shifts a few waypoints; nothing else moves, and all 51 pass.
+Why the centroid and not the funnel's crossing of the arrival gate: that crossing is by construction the
+*nearest* corner of the gate, and aiming a rescaled jump at the edge of the landing area is how you land just
+outside it (`test54_window`'s `1->3`: 207 from the crossing sails over the lip, 152 from the centroid lands).
 
-### Re-speeding a launch
-The stored `exitSpeed` is what the air-move sampler launched at, not what the route can deliver. A
-corner 30 units before the launch caps the bot well under it, and nothing used to notice: the plan
-asserted the design speed and the jump was validated at a speed the bot would never reach.
+Bounds:
+- Nothing iterates. A second miss refuses the edge.
+- The retry is skipped when `want` is under `kPlanAirmoveRangeEps` or the correction moves the speed by less
+  than `kPlanAirmoveRespeedEps`. The rescaled speed is clamped to `physics.maxSpeed`.
+- A connection with `flightTime` under `kPlanAirmoveFlightEps` falls back to the distance ratio, where the
+  clamp bounds the degenerate case: a first sim that wedges immediately travels ~0 units, so it retries at
+  full speed — one wasted simulation, never an unbounded one.
+- Correcting downward composes with `Respeed`; correcting upward does not (a raised speed can exceed what the
+  run-up delivers, and `Respeed` then knocks it back). In practice the corrections that matter are
+  reductions, because the extrapolated gate speed is biased toward the sample cloud's mean and overshoots.
 
-`PlanWalker::Retract` runs first (see "Landing on the next run-up") and may lower an earlier launch;
-the comparison below is against `PendingLaunch::designSpeed`, which `Retract` rewrites, so the two
-passes compose instead of fighting.
+`test54_window` is the map this exists for: its spawn room's only exit is a window 24 units up the wall, so
+navgen finds no launch edge there (`FilterLaunchEdges` needs void ahead at running height) and every jump
+out is reverse-seeded from the landings of the jumps back in — the worst case for the end regression. Without
+the retry the map has no route. Across the 19 stock deathmatch maps the flight-time form lands 169 of 586
+retries against the distance ratio's 161 of 582, and the two differ in three routes (`contamination`,
+`disposal`, `datacore`); on the test maps only `test28_slopecase` and `test31_push` differ, and all 51 pass.
 
-`PlanWalker::Respeed` therefore builds a probe `PlanProfile` over the finished waypoint list.
-`ProfileLaunchReach` reads the reachable-speed pass on the segment ending at each launch — the arc fit,
-the backward braking pass and the acceleration integral all folded into one number — and if it falls
-short of the design speed by more than `kPlanAirmoveRespeedEps`, the jump is re-simulated at that
-speed. The landing waypoint moves to wherever it actually lands. The yaw needs no adjustment: the last
+#### Re-speeding a launch
+
+`PlanWalker::Respeed` re-simulates each launch at the speed the route can actually deliver. It builds a probe
+`PlanProfile` over the finished waypoints; `ProfileLaunchReach` reads the reachable-speed pass on the segment
+ending at each launch (arc fit, backward braking pass and acceleration integral folded into one number), and
+if that falls short of `PendingLaunch::designSpeed` by more than `kPlanAirmoveRespeedEps`, the jump is
+re-simulated at the reach and the landing waypoint moves to where it lands. The yaw needs no change: the last
 leg is straight along the launch heading by construction.
 
-**The reach is taken one `AirmoveLaunchLead` short of the launch point, not at it.** The bot commits to
-the jump a frame of travel before the plane, so that is where its speed stops rising, and measuring at
-the launch point over-reports by exactly the speed gained in that last frame. Measuring at the point of
-no return is also what makes the check bite at all: read at the launch point it saturates, because
-`vExit` on that segment *is* the design speed, so the comparison could only ever fail when the profile
-fell short over the whole segment.
+Why: the stored `exitSpeed` is what the sampler launched at, not what the route delivers. A corner 30 units
+before the launch caps the bot well under it, and without this pass the plan asserts a speed the bot never
+reaches.
 
-**A slower jump that no longer lands does not truncate the route.** The design speed is kept and
-`airmovesRespeedKept` counts it. Truncating here was the last place a complete plan could still be cut
-short, and with the retry loop gone there is nothing left to recover it — a jump the bot may come up
-short on beats a plan that stops dead in the middle of the map, and the follower already has
-`launchSimFailed` to reason about. It is back to never firing on the test maps, but it did fire while
-the run-up was confined to one area: `test6_crouchjump` kept a 290 design speed the profile could not
-reach. Extending the run-up backwards along the route fixed the cause rather than the symptom — the
-same launch now re-speeds cleanly to 253 — so a kept design speed remains the signal that a launch is
-asserting a speed the approach cannot deliver.
+- **The reach is read one `AirmoveLaunchLead` short of the launch**, not at it. The bot commits to the jump a
+  frame before the plane, so that is where its speed stops rising. Read at the launch point it saturates —
+  `vExit` on that segment *is* the design speed — so the check could only fail if the whole segment fell
+  short.
+- **A slower jump that no longer lands keeps the design speed**, counted in `airmovesRespeedKept`, and the
+  route is not truncated. A jump the bot may come up short on beats a plan that stops dead mid-map, and the
+  follower has `launchSimFailed` to reason about. It fires on no test map; a kept design speed
+  is the signal that a launch asserts a speed its approach cannot deliver.
+- **One iteration only.** The run-up node's position depends on the design speed and the funnel was already
+  pulled through it, so re-placing it from the re-speeded result would invalidate the geometry it was
+  computed on.
+- **Why not an incremental reach estimate inside the search?** It would let launches be simulated at the
+  right speed first time, but would change launch speeds on every map to replace a pass that never fires.
 
-This is also why the search does not carry an incremental reach-speed estimate. Folding one into
-`PlanWalker` would let launches be simulated at the right speed the first time, but it would change
-launch speeds on every map to replace a pass that never fires.
+Two profile rules make the reach meaningful, and both are required:
+- the corner *into* the run-up node is not suppressed: it gets a real arc and speed cap, with its outward
+  tangent clamped to half the run-up leg so the straight approach survives;
+- `NodeMaxSpeed` does not apply `kDuckingMultiplier` at a launch waypoint, where `requiresCrouch` means duck
+  *in flight*; capping the approach at 107 makes every crouch jump arrive at a third of its launch speed.
 
-Only one iteration runs. The node's own position depends on the design speed, and the funnel was
-already string-pulled through it, so re-placing it from the re-speeded result would invalidate the
-geometry the result was computed on.
+`Retract` runs before `Respeed` and may lower an earlier launch; because it rewrites
+`PendingLaunch::designSpeed`, the two compose instead of fighting.
 
-Two corners of the profile are what make the number meaningful, and both had to change for it:
-- the corner *into* the run-up node is no longer suppressed, so it gets a real arc and a real speed
-  cap. Its outward tangent is clamped to half the run-up leg so the straight approach survives.
-- `NodeMaxSpeed` no longer applies `kDuckingMultiplier` at a launch waypoint. `requiresCrouch` there
-  means duck *in flight*; the approach is a full-speed run. Capping it at 107 made every crouch jump
-  arrive at a third of its launch speed — `test6_crouchjump` and `test40_walljump` both failed
-  re-speeding outright until this was fixed.
+#### Landing on the next run-up
 
-### Landing on the next run-up
-When the barrier before an air move is *another* air move, the run-up node could be placed behind the
-point where the bot lands. `RunupDistance` walks back through area geometry, and a previous landing is
-not in `m_pendingGates` to stop it — that list holds plain-walk gates only, because every barrier
-flushes the funnel. On `test54_window` at `--plan-speed 270` the node sat 14 units *behind* the
-landing:
+When the barrier before an air move is *another* air move, the run-up node can land behind where the bot
+lands: `RunupDistance` walks back through area geometry, and a previous landing is not in `m_pendingGates` to
+stop it. Unclamped, on `test54_window` at `--plan-speed 270`:
 
 ```
 wp[ 3] landing  (582.0, 759.4, -1475.4) area 2
@@ -1418,198 +1031,489 @@ wp[ 4] corner   (585.6, 773.4, -1476.0) area 2     <- run-up node, behind the la
 wp[ 5] jump     (585.2, 746.9, -1476.0) area 17 JUMP launch 265
 ```
 
-The plan credited 26.5 units of approach. The bot lands at wp[3] already moving at the previous launch
-speed *toward* wp[5], so it cannot use them: it delivered 200 of 265, aborted, repathed and fell in
-the pit.
+The plan credits 26.5 units of approach, but the bot lands already moving toward wp[5] and cannot use them;
+it delivers 200 of 265 and aborts. `Respeed` cannot see this: `IsGap` covers launch, teleport and ladder
+waypoints but not landings, so the ~170° reversal is arc-fitted to a pivot cap around 53 and
+`ProfileLaunchReach` integrates over the whole 26.5 units and saturates.
 
-**`Respeed` cannot see this.** `IsGap` covers launch, teleport and ladder waypoints but not landings,
-so the node is not `Suppressed` — the ~170° reversal is arc-fitted, collapses to a pivot cap around
-53, and `ProfileLaunchReach` then integrates forward over the whole 26.5 units and saturates at
-`vExit`. The profile reads 265 of 265 and reports `0 re-speeded`, because it credits the reversal leg
-as travel.
+Two fixes:
 
-Two things fix it, and the first is what makes the second measurable.
+**The offset is clamped at the anchor, but only across an air move.** After an air move `m_anchor` is the
+landing, so the run-up cannot start before it. The clamp projects onto the launch heading, which is only valid
+when the bot arrives *on* that heading — hence `m_anchorFromAirmove`. Applied at every anchor it breaks curved
+approaches (on `test6_crouchjump` the projection of the start point is −194 and a legitimate run-up vanishes).
 
-**The offset is clamped at the anchor, but only across an air move.** `m_anchor` is where the bot
-enters the current walk stretch, and after an air move that is the landing, so the run-up cannot be
-placed before it. The clamp is a straight-line projection onto the launch heading, which is only valid
-when the bot arrives *on* that heading — hence `m_anchorFromAirmove`. Applying it at every anchor
-breaks curved approaches: on `test6_crouchjump` the route runs south from the spawn and then launches
-north-east, so the projection of the start point is −194 and a legitimate run-up disappears.
+**`PlanWalker::Retract` buys the distance back.** For each adjacent launch pair whose later launch's
+`needRunup` exceeds the `haveRunup` the clamp left it, the *earlier* launch speed is cut by the same one-shot
+ratio as the `Cross` rescale, moving its landing back along its own flight line.
+- `needRunup` and `haveRunup` are recorded on `PendingLaunch` at `Cross` time, so detection needs no
+  profile. `needRunup` is `AccelDistance(0, launchSpeed)` plus one lead — entry-speed independent, so there
+  is no feedback loop. Sizing it from `AccelDistance(reached, design)` under-delivers: pulling the earlier
+  launch back also lowers the speed carried into the approach.
+- Both shapes are handled: `[launch][landing][run-up][launch]` and, when the anchor clamp left `runupBack`
+  under `kPlanAirmoveRunupEps` and no node was pushed, `[launch][landing][launch]`. In the short shape the
+  landing itself starts the measured segment, so the pull lengthens it directly.
+- **The run-up node moves with the landing.** `ProfileLaunchReach` measures only node → launch, so room opened
+  before the node is invisible to it. `Retract` re-places the node `needRunup` back along the launch heading,
+  re-floored in its own area and rejected if it leaves that area's column. Landing and node move by the same
+  distance, so no new corner appears.
+- **The pulled landing may leave the destination area.** On a thin destination the pull lands short of it
+  (`test54_window`'s 16-unit lip). A failed `JumpLandsIn` then gets a second look: `AreaContaining` finds
+  where the mover came to rest, and the landing is accepted there when that area is not crouch and
+  `LegIsWalkable` confirms the straight leg from it to the launch. That leg check is load-bearing: the
+  landing moves along the *earlier flight line* while the run-up runs along the *launch heading*, so it can
+  drift sideways off walkable ground while passing every other test.
+- Guards that keep the design speed and count `airmovesRetractKept`: a degenerate flight length; alignment
+  below `kPlanAirmoveRetractAlign` (0.5) between the earlier flight and the later heading — beyond 60° the
+  pull is mostly lateral and the required distance blows up; and a re-simulation landing neither in the
+  destination nor in an accepted neighbour. Nothing is ever truncated.
+- `Retract` writes `PendingLaunch::designSpeed` as well as the waypoint, so `Respeed` stays downward-only
+  relative to the retracted value instead of raising it straight back.
 
-**`PlanWalker::Retract` then buys the distance back.** For each adjacent launch pair shaped
-`[launch][landing][run-up][launch]`, if the later launch's `needRunup` exceeds the `haveRunup` the
-clamp left it, the *earlier* launch speed is cut by the same one-shot ratio the `Cross` rescale uses,
-so its landing moves back along its own flight line. Both quantities are recorded on `PendingLaunch`
-at `Cross` time, so the detection needs no profile: `needRunup` is `AccelDistance(0, launchSpeed)`
-plus one lead, which is entry-speed independent and therefore has no feedback loop.
-
-That last point is why the first attempt under-delivered. Sizing the pull from
-`AccelDistance(reached, design)` looks right but is not: pulling the earlier launch back also lowers
-the speed the bot carries across the gap into the approach, so more runway arrives with a slower
-entry and the one-shot lands short.
-
-**The run-up node moves with the landing.** `ProfileLaunchReach` measures only the final segment —
-run-up node to launch — so room opened up *before* the node is invisible to it. `Retract` re-places
-the node at `needRunup` back along the launch heading, re-floored in its own area and rejected if it
-leaves that area's column. Landing and node move back by the same distance along the launch heading,
-so their relative position is preserved and no new corner appears.
-
-Guards, each keeping the design speed and counting `airmovesRetractKept`: a degenerate flight length,
-an alignment below `kPlanAirmoveRetractAlign` (0.5) between the earlier flight and the later launch
-heading — beyond 60° the pull is mostly lateral and the required distance blows up — and a
-`JumpLandsIn` that lands neither in the earlier destination area nor in a walkable neighbour of it —
-see below. Nothing is ever truncated.
-
-`Retract` runs between `Finish` and `Respeed`, and writes `PendingLaunch::designSpeed` as well as the
-waypoint. Without that write `Respeed` compares its reach against the *original* design speed and
-raises the launch straight back up; with it, `Respeed` stays downward-only relative to the retracted
-value and mops up whatever the pull could not reach.
-
-#### Landing in a walk-connected neighbour
-Two things stopped `Retract` from firing at all on the shape it was written for.
-
-**The adjacency gate assumed a run-up node.** It required `later.index == prev.index + 3`, the
-`[launch][landing][run-up][launch]` layout. But when the anchor clamp leaves `runupBack` under
-`kPlanAirmoveRunupEps` no run-up node is pushed, the pair is `[launch][landing][launch]` and the gap
-is 2 — exactly the worst case, skipped. Both shapes are accepted now, and the node-moving tail runs
-only for the longer one. No waypoint is inserted for the short one: with no node the landing waypoint
-itself starts the approach segment, which is the segment `ProfileLaunchReach` measures, so the pull
-lengthens it directly.
-
-**The pulled landing may leave the destination area.** Pulling the landing back is the whole point,
-and on a thin destination it lands short of it. `test54_window`'s area 3 is a 16-unit lip; pulling the
-`1→3` landing the 39 units the `3→17` launch needs puts it in area 2, and the plain `JumpLandsIn`
-refuses. So a failed `JumpLandsIn` now gets a second look: `AreaContaining` finds where the mover
-actually came to rest, and the landing is accepted there when the area is not the destination, is not
-`crouch`, and `LegIsWalkable` confirms the bot can walk the straight leg from that point to the
-launch.
-
-That leg check is the load-bearing guard, not a formality. The landing moves along the *earlier
-flight line* while the run-up runs along the *launch heading*, and `kPlanAirmoveRetractAlign` only
-holds those within 60° of each other, so the landing can drift sideways off walkable ground while
-still passing every other test. `LegIsWalkable` validates the leg the bot will actually walk.
-
-**`ReachBack` is the walk-back the area graph knows, and it is not `RunupDistance`.** `RunupDistance`
-chains areas off `m_pendingGates`, and that is right for `Cross`: the funnel's gate trail is exactly
-the ground the route came over, and walking a run-up back past a barrier the route crossed — a door,
-the route's own start — is not something the funnel can express. `Retract` has neither problem. It
-runs after `Finish` on a settled route and only asks whether a straight leg is walkable, so it reads
-walk adjacency directly: `PlanRoute` builds a per-area predecessor list from the `CONN_WALK`
-connections and hands it to every `PlanWalker`. `ReachBack` keeps every guard `RunupDistance` uses —
-`ClampTravelInsideArea` inside each convex area, the next area's column must contain the seam point,
-`FloorsMeetAt` within `kPlanRunupSeamStep`, no crouch areas — plus a visited set, because the area
+**`ReachBack` is not `RunupDistance`.** `RunupDistance` chains areas off `m_pendingGates`, which is right for
+`Cross`: the gate trail is exactly the ground the route came over, and walking back past a barrier is not
+expressible in the funnel. `Retract` runs on a settled route and only asks whether a straight leg is walkable,
+so it reads walk adjacency directly: `PlanRoute` builds a per-area predecessor list from the `CONN_WALK`
+connections and hands it to every walker. `ReachBack` keeps every `RunupDistance` guard (convex clamp, seam in
+the next column, `FloorsMeetAt` within `kPlanRunupSeamStep`, no crouch) plus a visited set, because the area
 graph has cycles and a gate trail does not.
 
 **The follower does not care which area the landing is in.** `AirmoveLandingMiss` measures against the
-landing *waypoint*, and `haveMiss` is therefore always true on a planned air move, so the
-`landedId != airmoveTargetArea` fallback never runs and the connection is never penalized for landing
-in the neighbour. The launch waypoint keeps the connection's own destination in `targetAreaId`, which
-is why the log reads `landed ... area 2 (wanted 3) miss 1.9 ... penalty 0.0`.
+landing *waypoint*, so the area fallback never runs and a landing in the neighbour is not penalized; the launch
+keeps the connection's own destination in `targetAreaId`, hence log lines like `landed ... area 2 (wanted 3)
+miss 1.9 ... penalty 0.0`.
 
-On `test54_window` the `1→3` launch retracts 142 → 74 and lands in area 2 at `(555.2, 784.9)`. The
-`3→17` approach goes from 0.4 units to 39.0, `1 re-speed kept design` becomes `0`, and the launch
-the bot delivers goes from 80% of its 270 design to 100%. It is the only map in the suite whose plan
-moves — every other route is byte-identical, at both `--plan-speed` settings.
+On `test54_window` `Retract` cuts the `1→3` launch from 142 to 74, landing in area 2; the `3→17` approach gets
+39.0 units instead of 0.4, and the bot delivers 100% of its 270 design instead of 80%. It is the only map whose
+plan `Retract` changes.
 
-### Edge friction on the approach
-Every run-up ends at a ledge — that is what an air move is — and GoldSrc charges for that. `PM_Friction`
-traces `kEdgeProbeAhead` (16 units) ahead along the velocity and `kEdgeProbeDrop` (34) down; when that
-trace comes back clear it multiplies ground friction by `sv_edgefriction`, normally 2. So the last 16
-units before *any* launch run at friction 8, not 4.
+#### Edge friction on the approach
 
-The follower always knew this — `BotDrivePhysics` doubles `groundFriction` when `AtFrictionEdge` says
-so — but doubling it there only corrects the throttle the bot asks for, not the physics the engine
-applies. The planner did not know it at all: `MakePlanTraces` copies plain `Bot_Physics`, and both
-`BuildPathProfile` and `PlanWalker::Cross` used `groundFriction * friction` neat. The plan therefore
-sized every launch approach with half the friction the run-up actually sees.
+Every run-up ends at a ledge, and `PM_Friction` charges for that: it traces `kEdgeProbeAhead` (16) ahead along
+the velocity and `kEdgeProbeDrop` (34) down, and when that comes back clear multiplies ground friction by
+`sv_edgefriction`, normally 2. So the last 16 units before any launch run at friction 8, not 4. The follower
+models this (`Bot_DrivePhysics`, `doc/movement.md`), but that only corrects its throttle; `MakePlanTraces`
+copies plain `Bot_Physics`, so the planner has to model the ledge itself or it sizes every approach with half
+the real friction.
 
-It only bites when the run-up is short, because the shortfall is the whole cost of the last 16 units.
-At `accel = 2700`, `stopSpeed = 100`, reaching 236 u/s from a standstill takes 13.7 units at friction 4
-and **21.5** at friction 8. On `crossfire` the bot launches west out of area 32 — a box only 36 units
-wide in x — so the run-up is 14 to 23 units, entirely inside the edge zone:
+It bites when the run-up is short: at `accel = 2700`, `stopSpeed = 100`, reaching 236 u/s from rest takes
+13.7 units at friction 4 and **21.5** at friction 8. Sized at friction 4, a crossfire launch out of a
+36-unit-wide area gets 14 units of run-up, delivers ~198 of 236 and aborts at 80–84% of design.
+
+`PlanWalker::LaunchAtEdge` runs the engine's probe from the launch floor along the launch heading, in the hull
+the bot has on the run-up (the launch area's `crouch`), once per launch in `Cross`, cached on
+`PendingLaunch::atEdge`. Probing at the launch is the right read: it is the closest point to the drop, so a
+clear probe there means the whole final 16 units are in the zone.
+
+The two users treat the flag differently on purpose:
+- **`Cross` doubles friction for all of `needed`**, even past 16 units. Deliberately pessimistic and safe:
+  `needed` can only *lengthen* `runupBack`, and `RunupDistance` and the anchor clamp then cut it to what the
+  geometry offers. It never asserts a speed.
+- **`ProfileLaunchReach` does assert one, so it integrates exactly:** `AccelForward` over the plain stretch,
+  then again over the edge stretch at doubled friction. The edge stretch is `min(usable, edgeZone - lead)`,
+  because the bot commits one `AirmoveLaunchLead` before the waypoint.
+
+Modelling it moves launch speeds in both directions (5 of 45 maps at each plan speed; `test6_crouchjump` 235 →
+258, `test38_islands` 282 → 278): a longer `needed` pushes the node back, and a longer approach can support a
+faster launch even at doubled friction. Either way the plan asserts what the ground delivers.
+
+**Still optimistic:** `BuildPathProfile` carries one global `profile.friction`, so the `vReachEntry` handed to
+`ProfileLaunchReach` is computed without edge friction. Second order — it feeds the long haul, not the last
+16 units — and per-segment friction in the profile is a much larger change.
+
+### Data structures (`waypoint_plan.h`)
+
+**`PlanArea`**
+- `boundPlanes` — inward-facing planes (prism: footprint walls + z-slab); `edgeGates` — one inset gate per
+  bound plane.
+- `door`, `breakable`, `activation`, `doorWaitTime` — a door area makes the plan stop at it.
+- `detours` — one `PlanDetour` per walk neighbour of a gated area, precomputed by navgen: a closed polyline of
+  `PlanDetourPoint` starting and ending on that neighbour's gate midpoint, `actIndex` marking the activation
+  waypoint, `blocked` when no activator is reachable from that side. `FindDetour` scans linearly; a gated area
+  has two to four entries.
+
+**`PlanConnection`** — `planeA`/`planeB` (bound plane indices, baking only), `gateA`/`gateB` (shared-face gates
+from `BuildConnectionGates`), `gateAYaw[2]`/`gateASpeed[2]` (launch params at gateA's ends).
+
+**`PlanWaypoint`**
+- `point` — at player height (duck origin + 18 for standing).
+- Flags and payload: `requiresElevatorRide`, `elevatorTravelTime`, `elevatorWaitTime`, `requiresCrouch`,
+  `requiresDoor`, `requiresBreak`, `requiresButtonUse`, `requiresTriggerTouch`, `activatorCenter`,
+  `requiresTeleport`, `teleportDest`, `requiresLadder`, `ladderUp`, `ladderYaw`, `ladderEntryYaw`,
+  `ladderSpeed`, `ladderExit`, `airmoveLaunch`, `requiresJump`, `launchSpeed`, `launchYaw`, `jumpBackDist`,
+  `launchSimulated`, `launchSimFailed`, `launchSimFrom`/`To`/`Aim`, `targetAreaId`, `connIndex`,
+  `clearance`, `drift`.
+- `activatorCenter` is the activator brush model's centre, copied from the detour. GoldSrc `PlayerUse` picks
+  the entity whose centre gives the largest forward dot above `VIEW_FIELD_NARROW`, so the bot cannot press
+  without knowing where the brush is.
+- `requiresBreak` is serviced at runtime by `BotBreak` (`doc/movement.md`). The plan's `openSeconds`
+  (`health * 0.1`) is only the ETA estimate; the runtime decides for itself whether the entity is breakable.
+
+**Constants**
+- `kPlanClearance = 16` — player hull radius; gates are inset this much at the ends and pushed up to this
+  far off the connection plane (at most half the area's depth).
+- `kPlanClampedClearance = 6.63` — corner budget at a clamped gate (see Corner clearance).
+- `kPlanStandHeight = 18` — duck-hull origin to stand origin.
+
+**`PlanTraceContext`** — `duckTrace`/`standTrace` for re-simulation, `duckPush`/`standPush`, `physics`,
+`gravityMultiplier`, `airmoveCache`, `dumpAirmoves`. `collectRunupTraces` is vestigial: the steered-approach
+simulator it fed is gone, nothing reads it, and nothing fills `PlanStats::runupTraces` (`--dump-svg` still
+accepts them and draws nothing).
+
+**`PlanStats`** — per walker, so they describe the kept route only; a walker copied down an abandoned branch
+takes its counters with it.
+- `airmovesSimulated` — launches re-simulated and accepted, i.e. the air moves on the plan.
+- `airmovesUnplannable` — launches the simulation could not make; always 0 on the winning walker, since such
+  a walker was discarded. `PlannedRoute::airmovesRejected` is the search-wide count.
+- `airmovesRespeeded` / `airmovesRespeedKept` — launches re-simulated at the reachable speed, and those where
+  that also missed so the design speed was kept.
+- `airmovesRetracted` / `airmovesRetractKept` — earlier launches pulled back for the next run-up, and pairs
+  where the pull was refused.
+- `corners`, `gatesClamped` — funnel diagnostics.
+
+## The funnel (`funnel_graph.cpp`)
+
+`NavFunnel::StringPull` is the funnel algorithm on 2D gates:
+- gates are oriented by travel direction (`MakeGate` orders endpoints so left/right match it, by cross
+  product);
+- it maintains the apex and the left/right bounds, and when the funnel constricts emits a corner at the tight
+  bound and restarts from there;
+- it returns the pulled points with gate indices, for corner attribution.
+
+`PeekFunnel` is a dry-run pull to see where the route crosses the gates; `FlushFunnelTo` runs the pull and emits
+the corners as waypoints.
+
+**Coincident consecutive points are collapsed as they are pushed**, keeping the later one, so the goal always
+ends the list with `kNoGate`. The last iteration feeds the goal in as both bounds, and without the collapse a
+goal that becomes the tight bound is emitted twice — a zero-length step at the end of nearly every route. That
+duplicate is not cosmetic: `BuildPathProfile` skips a corner whose adjacent segment is under `kEpsLen` before
+assigning its speed cap, so it silently disables arc fitting and speed limiting at both corners touching it (on
+`test5_jump` the 104° turn before the first launch gets no arc and a claimed 320, instead of an 11.7-unit arc
+capped at 191).
+
+## Speed profile (`path_profile.cpp`)
+
+`BuildPathProfile` fits circular arcs to the waypoint polyline and computes a speed profile the engine can
+actually hold. It runs at plan time, so navgen and the runtime produce identical geometry, inspectable offline
+with `--dump-path`.
+
+### The physics it derives from
+
+Each ground frame the engine runs `PM_Friction` then `PM_WalkMove`. Acceleration scales with *wishspeed*, not
+current speed, so at full drive it is the constant `A = sv_accelerate * maxspeed` (3200 at defaults). Friction
+drag is `D(v) = sv_friction * max(v, sv_stopspeed)`.
+
+- **Turning** at constant speed needs the wish direction tilted forward enough to cancel drag, leaving
+  `a_lat(v) = sqrt(A^2 - (f*v)^2)` and `r = v^2 / a_lat(v)` — 34.9 at 320, not the drag-free `v^2/A = 32`.
+  `SpeedForRadius` inverts this.
+- **Braking** is coasting: `dv/dx = -f` exactly while `v > stopspeed`, so braking distance is linear (320 to 0
+  costs 67.5 units). `BrakeBack` handles the sub-stopspeed branch separately.
+- **Accelerating**: `AccelForward` is the exact solution of `dv/ds = (a - f·max(v, s0))/v`, bisected on the
+  closed form — the mirror of `BrakeBack`. `AccelDistance` is its inverse use.
+
+### Corner fitting
+
+For deflection `theta` at a corner with clearance budget `C`:
 
 ```
-airmove aborted at (255.7,961.6,-1468.0) plan speed 236 actual 189 (80% of design) conn 1430
-airmove aborted at (242.3,961.5,-1468.0) plan speed 237 actual 198 (84% of design) conn  866
+R_geo = C*cos(theta/2) / (1 - cos(theta/2))     apex stays within C of the vertex
+R_len = min(availIn, availOut) / tan(theta/2)   neighbouring arcs must not overlap
+R     = min(R_geo, R_len)
 ```
 
-14 units at friction 8 delivers ~198. The plan said 236, the follower demands 95%, and the launch
-aborts. `Respeed` cannot save it because it sets `launchSpeed` to exactly the reach it measured, with
-no margin, using the same friction that produced the wrong number.
+- Three fit passes, because shrinking one arc frees length for its neighbours. With trace functions the arc
+  is hull-traced entry → apex → exit and shrunk up to 3 times on a hit, which makes the clearance a prior rather
+  than an assumption.
+- Below `sv_accelerate * maxspeed * dt` (53.3, the one-frame velocity quantum) an arc is meaningless — the
+  fitted radius is under a unit — so the corner emits no arc and the servo pivots through the vertex. Arcs
+  only become visible above about 200.
+- **Gaps get no arc.** `Suppressed(i)` is `IsGap(i) || IsGap(i - 1)`, where a gap is an air-move launch, a
+  teleport or a ladder mount. A launch must be crossed on the launch heading and a landing is entered with
+  whatever velocity the flight left. A ladder is a gap because the profile is planar and a climb is almost
+  entirely vertical; its segment's cap is lowered to the connection's `ladderSpeed` (200, or 67 when the climb
+  ends crouched) so the profile does not believe the bot leaves the ladder at 320. The segment's length is
+  still the 2D dismount hop, so `totalTime` under-reports a climb; the planner's cost
+  (`ConnectionCostSeconds`) is the honest one.
+- The corner *into* a run-up node does get an arc, its outward tangent clamped to half the run-up leg, so the
+  last stretch into the launch stays straight while the bot still rounds the turn before it.
 
-`PlanWalker::LaunchAtEdge` runs the engine's probe from the launch floor along the launch heading,
-with the hull the bot has on the run-up (the launch area's `crouch` flag). It is evaluated once per
-launch in `Cross` and cached on `PendingLaunch::atEdge`, because both the run-up sizing and `Respeed`
-need it and neither should re-trace. Probing from the launch point rather than along the approach is
-the right read: it is the closest point to the drop, so a clear probe there means the whole final 16
-units are inside the zone.
+### Speed passes
 
-**The two users of that flag treat it differently on purpose.** `Cross` doubles the friction for the
-whole of `needed`, past 16 units where the real friction is back to normal. That is deliberately
-pessimistic, and it is safe because `needed` can only ever *lengthen* `runupBack` — `RunupDistance`
-and the anchor clamp then cut it back to whatever the geometry actually offers. It never asserts a
-speed. `ProfileLaunchReach` does assert one, so it integrates exactly: `AccelForward` over the plain
-stretch, then `AccelForward` again over the edge stretch at doubled friction. Composing two forward
-integrals needs no new solver and no inverse.
+1. **Backward pass** — propagates each node cap through `BrakeBack`; the final waypoint is pinned to 0, launches
+   are capped at `launchSpeed`, and entry speeds are also clamped by the cap of the node the segment starts
+   from. `NodeMaxSpeed` applies `kDuckingMultiplier` for `requiresCrouch` (except at a launch waypoint) and the
+   drift adjustment (`doc/movement.md`, Following a drifting path).
+2. **Forward time pass** — integrates real speed against those ceilings to produce `totalTime`, which lands
+   within 10% of measured arrival.
+3. **Forward reach pass** — carries the reachable speed through `AccelForward` and stores it per segment as
+   `vReachEntry`/`vReachExit`. A flight passes the launch speed straight through. `--dump-path` prints it as
+   the `reach` column beside `v`, and the two disagreeing is the point: on `test37_walkent` the segment into the
+   launch reads `v 320 -> 288` next to `reach 81 -> 288`, the 155° hairpin before it showing as a number.
 
-The edge stretch is `min(usable, edgeZone - lead)`, not `min(usable, edgeZone)`. The bot commits to the
-jump one `AirmoveLaunchLead` *before* the waypoint, so the ground it covers inside the zone is shorter
-than the zone by exactly that lead. Dropping the term over-charges every launch by a frame of travel.
+**Ceilings steer, predictions validate, and they are separate fields.** `vEntry`/`vExit` are ceilings, not
+predictions: a segment leaving an arc may report 320 while the bot is still accelerating. Feeding the reachable
+ramp into `SegSpeedAt` instead breaks every map — at `s = 0` the ramp is 0, `SolveDrive` gets `wanted = 0`, and
+the bot never leaves spawn — and it collapses the accelerate-then-brake trapezoid on long segments (ETAs rise 50%
+on `test28_slopecase`). A prediction is a lower bound on nothing; the bot may arrive faster.
 
-Sweeping this changed 5 of 45 maps at each plan speed, and launch speeds moved in **both** directions.
-A longer `needed` pushes the run-up node further back, and a longer approach can support a faster
-launch even at doubled friction: `test6_crouchjump` goes 235 → 258 on its 2→x jump while
-`test38_islands` goes 282 → 278 on its 4→x. The point is not that launches got slower, it is that the
-number the plan asserts is now the number the ground delivers.
+**Rides are added after the loop.** An elevator ride's two waypoints share an XY, so its segment has zero length
+and is never pushed; the whole ride — travel and the departure stop's auto-return dwell — is invisible to every
+pass. A trailing loop adds `elevatorWaitTime + elevatorTravelTime` per ride waypoint. Door and button dwells have
+the same gap and are left to `kEtaSafetyMargin`; a ride cannot be, because on `test55_plat` it is twice the
+walking time and the ETA-derived test timeout fails.
 
-**Still optimistic:** `BuildPathProfile`'s backward braking and forward reachable passes carry one
-global `profile.friction`, so `vReachEntry` — the speed handed to `ProfileLaunchReach` at the start of
-the approach — is still computed without edge friction. That is second order here, because it feeds the
-long haul rather than the last 16 units, and making the profile carry per-segment friction is a much
-larger change than this one.
+### Speed within a segment
 
-- `BuildAreaGates(PlanArea&)` - fills edgeGates from boundPlanes
-- `BuildConnectionGates(areas, conns)` - builds shared face gates
-- `ConnectionCrossing(areas, conn)` - crossing point, still stored on the graph edge
-- `PlanWalker` - the entry point; `NavPlan::PlanRoute` drives it
+`SegSpeedAt(seg, local)` is the single definition of "how fast at `local` units into this segment", used by the
+forward pass and `SampleProfile`:
 
-## pm_sim.h
+```
+min(max(vEntry, vExit), BrakeBack(vExit, sLen - local))
+```
+
+Hold the ceiling until the physical brake curve for the exit speed drops below it, then follow the curve down.
+`max(vEntry, vExit)` rather than `vEntry`, so an accelerating segment is not capped below its own exit; on an arc
+the two are equal.
+
+Why not lerp `vEntry` → `vExit`: braking takes 67.5 units from 320 whatever the segment length, so a lerp spreads
+the deceleration over the whole segment (a 196-unit approach to a 191-cap corner tells the bot 238 halfway along
+instead of 320 and a late brake). Measured ground speeds track the lerp, so the bot never reaches `maxSpeed` on a
+straight. The forward pass compounds it: as the lerped limit falls toward zero, `v` hits its 1 u/s floor and the
+tail of a segment ending at rest costs about `(sLen / maxSpeed) * ln(maxSpeed)` seconds, inflating `totalTime`
+~1.5x.
+
+### Sampling
+
+- `SampleProfile(s)` returns point, tangent, speed, clearance and waypoint index at arclength `s`. Speed comes
+  from `SegSpeedAt`, so the servo holds speed and brakes late; `PlanProfile` carries `friction`/`stopSpeed` so
+  the sampler can evaluate the brake curve without the physics struct.
+- `ProjectOntoProfile(pos, sMin, sMax)` finds the nearest arclength in a window and the unsigned lateral distance
+  to it; it skips zero-length segments.
+- `ProfileWaypointS` gives a waypoint's arclength, used for the follower's barriers (`doc/movement.md`).
+
+## Air-move simulation (`pm_sim.h`, `pm_sim.cpp`)
 
 ### PmPhysics
-- `accelerate`, `groundFriction`, `stopSpeed` - sv_accelerate, sv_friction and sv_stopspeed. `PmSimulator` never reads them; they are carried for `BuildPathProfile` and `NavFollow::SolveDrive`, which are where ground physics is actually modelled.
-- `edgeFriction` - sv_edgefriction. Not applied here: `BotDrivePhysics` folds it into `groundFriction` for the frames the bot is within a hull's reach of a drop, so `SolveDrive` sees one already-effective friction. See `NavFollow::SolveDrive`.
-- `friction` - pmove->friction, the per-entity multiplier. Not sv_friction.
+
+- `accelerate`, `groundFriction`, `stopSpeed` — `sv_accelerate`, `sv_friction`, `sv_stopspeed`. `PmSimulator`
+  never reads them; they are carried for `BuildPathProfile` and `NavFollow::SolveDrive`, where ground physics is
+  modelled.
+- `edgeFriction` — `sv_edgefriction`. Not applied here: `Bot_DrivePhysics` folds it into `groundFriction` for
+  the frames the bot is at a drop (`doc/movement.md`, `NavFollow::SolveDrive`).
+- `friction` — `pmove->friction`, the per-entity multiplier, not `sv_friction`.
 
 ### PmSimulator
-- `Begin(origin, yaw, speed, jump)` - starts on the ground with velocity derived from the yaw and speed.
-- `BeginAirborne(origin, velocity, yaw, speed)` - starts mid-flight with the velocity given directly,
-  for a state that was measured rather than commanded. This is how a ladder dismount launches: the climb
-  velocity is a fact of `PM_LadderMove`, not something a yaw and a speed can express. Both entry points
-  delegate to the same private `Reset`.
 
-## pm_sim.cpp
+Frame-by-frame HL player movement, **airborne only**: gravity, the pending jump impulse, `AirAccelerate`,
+`FlyMove` (clip-hull movement), `CatagorizePosition`.
 
-### Step
-One frame of **airborne** movement only: gravity, the pending jump impulse, `AirAccelerate`, `FlyMove`,
-`CatagorizePosition`. There is no `PM_Friction` and no ground accelerator anywhere in this file.
+- `Begin(origin, yaw, speed, jump)` — starts on the ground with velocity from yaw and speed. The jump impulse is
+  applied inside the first `Step`, so `OnGround()` is still true when `Begin` returns.
+- `BeginAirborne(origin, velocity, yaw, speed)` — starts mid-flight with an explicit velocity, for a state that
+  was measured rather than commanded (a ladder dismount, a long jump). Both delegate to a private `Reset`.
+- `Step()` — advances one frame; returns false if wedged.
+- `Coast(arc, maxTime)` — skips whole frames of free flight on the analytic parabola and returns how many.
+  navgen's sampler (`doc/navgen.md`, "Coasting"), `JumpLandsIn` and `Bot_SimulateAirmoveArc` (which fills the
+  skipped frames' points from the parabola) call it before every `Step`; a null `PmArcFn` makes it a no-op. It is exact
+  because the stepper splits gravity half before and half after `FlyMove`, so frame-boundary positions lie on
+  `p0 + v·t − ½g·t²`. It refuses unless airborne with no jump pending and `AirAccelerate` is a no-op
+  (`vel·wishdir ≥ min(wishspeed, maxSpeed, 30)`; wishdir is horizontal and gravity vertical, so that holds for the
+  whole flight), caps the flight where `CheckVelocity` would clamp `vz`, and stops one frame short of the first
+  contact `arc` reports, so `Step` handles every touching frame as before. The parabola math is
+  `src/nav/arc_math.h`, templated on the vector and scalar type so `PmSimulator` uses it as `float` and navgen's
+  trace as `double`.
+- Constants: jump impulse `kJumpImpulse` 268.328; bunny-hop cap 1.7 × maxSpeed; air-accel wish speed cap 30;
+  ground normal threshold 0.7; ground trace distance 2. Falls: no damage below 580 u/s, fatal at 1024, damage
+  `100 / (1024 - 580)` per unit between (HL's rule; `FallRule` generalizes it, see "Falls are priced per game").
 
-That is the right shape for what the simulator is for — proving where a launch lands — but it is the
-reason a plan can assert an air move the bot cannot begin. `JumpLandsIn` starts the mover *at* the launch
-point already travelling at the launch speed; nothing simulates the run-up, so a launch speed the bot
-cannot accelerate to on the ground is indistinguishable from one it can. The ground approach is checked
-by `BuildPathProfile` instead, which does model friction and braking, and executed by
-`NavFollow::SolveDrive`.
+There is no `PM_Friction` and no ground accelerator anywhere in it. That is the right shape for proving where a
+launch lands, and the reason a plan can assert an air move the bot cannot begin: `JumpLandsIn` starts the mover
+already at launch speed, so a speed the bot cannot reach on the ground looks the same as one it can. The approach
+is checked by `BuildPathProfile` and executed by `NavFollow::SolveDrive`.
 
-### FlyMove
-Reaching here with i == numplanes means the loop above found no single plane the velocity could slide along, which is PM_FlyMove's "go along the crease" case. The early break out of that loop already stored the sliding velocity, so it must not fall in here -- testing i != numplanes instead zeroes the velocity of every successful slide.
+- **`AirAccelerate`** is `PM_AirAccelerate` with wish speed capped at 30, so it can only nudge a trajectory.
+- **`FlyMove`**: reaching the "go along the crease" case with `i == numplanes` means no single plane could be
+  slid along. The loop's early break has already stored the sliding velocity, so it must not fall into that case —
+  testing `i != numplanes` instead zeroes the velocity of every successful slide.
+- **Push fields.** `PM_AddCorrectGravity` folds the vertical component of a `trigger_push` into velocity as an
+  acceleration and clears it from the base velocity, so only the horizontal remainder wraps `FlyMove`. That
+  horizontal base velocity wraps the move as in `PM_AirMove`/`PM_WalkMove`: added before the clip-and-slide loop,
+  removed once the ground check has seen it. The fields come from a `PmPushFn` — `Bot_PushFields` at runtime
+  (`doc/movement.md`), the sampler's own at navgen time (`doc/navgen.md`).
 
-### AirAccelerate
-PM_AirAccelerate, wish speed capped at 30, so it can only ever nudge a trajectory in flight.
+## The plan-time world (`bsp_world.cpp`)
 
-## Planning with gravity multipliers
+The planner's simulations never call the engine. `Nav::LoadBspWorld` reads the map's planes, clipnodes and
+models (the same read that checksums the BSP against the `.nav`), and `NavMesh::world` keeps them for the map's
+life. `Bot_WorldSnapshot` copies, once per server frame, what an `ignore_monsters` hull trace can hit, following
+`SV_ClipToLinks`: every `SOLID_BSP` entity with a brush model (minus `FL_MONSTERCLIP` brushes and zero-size
+entities), plus `MOVETYPE_PUSHSTEP` solids as boxes, with origin, angles, `absmin`/`absmax`, owner, whether a hit
+counts as an entity (`counts`, the airmove cache's purity rule) and whether `BotBreak::IsTarget` accepts it
+(`breakable`). It also keeps the `trigger_push` fields. The snapshot is an immutable `shared_ptr`, so a plan that
+captured it reads a consistent world on any thread for as long as it runs.
 
-During planning, `gravityMultiplier` filters air moves the same way `PlanWalker::Cross` does, so goal selection and route search agree about which jumps exist. The filter is applied at the Dijkstra stage when selecting goals.
+- **`Nav::TraceWorld`** is `SV_Move`: the world's hull (`models[0].headnode[hull]`) first, then every snapshot
+  solid whose `absmin`/`absmax` meets the move's box grown by the hull and 1 unit, each in its own frame
+  (`origin` subtracted; rotated by `AngleVectors` when its angles are non-zero, the normal rotated back). A box
+  solid is the engine's six-plane box hull. An entity replaces the result when it is all-solid, start-solid or
+  nearer, and start-solid is sticky, as in the engine. The descent is `HullTrace::HullCheck`
+  (`src/nav/hull_trace.h`), navgen's own, instantiated for `Vector`/`float`.
+- **`TraceFilter`** carries the hull, the edict to skip (and what it owns) and `phaseBreakables`. The planner's
+  traces (`MakePlanTraces`) phase breakables; the in-flight and avoidance sims do not.
+- **`Nav::SafeArcTime`** is navgen's `SafeArcTime` over the snapshot: the arc through the world and the
+  solids (a solid's arc is the same parabola in its frame, gravity rotated with it), the arc lowered by
+  `kGroundTraceDist`, and `ArcEnterBox` into each push field's box. `Bot_WorldArcFn` wraps it as the
+  `PmArcFn` for `Coast`.
+- **`Nav::PushAt`** point-tests the origin against each field's clip hull in the sim's hull, the test
+  `pfnTraceModel(origin, origin, hull, field)` makes.
 
-When the bot is at a different gravity than an air move was sampled for, that air move simply does not exist in the planner's view of the graph. Only the air moves matching the bot's current gravity are available for planning.
+Without a loaded mesh there is no world, and `Bot_WorldTraceFn` falls back to `pfnTraceHull`; the planner never
+runs then.
 
+**Agreement with the engine.** Measured 2026-10-20 with a compare harness (both traces on every planner ray, since
+deleted), 16 bots:
+
+| map | rays | disagree | what |
+|---|---:|---:|---|
+| xen_dm | 5.6M | ~30 | a `func_door` that moved between the snapshot and the ray, same frame |
+| dod_avalanche | 1.0M | 0.15% fraction, 0.04% solid/entity | breakables the planner phases (expected); fixed spots on sloped world brushes where the engine stops 0.05–0.3 of a short move later and the descent backs off to 0 |
+
+The sloped spots are not float error: the same descent in `double` disagrees at the same rays. It is the same
+descent navgen builds the mesh with.
+
+**Cost.** Per simulated airmove (cache misses), `rp_plan` ms, same runs as above, interleaved:
+
+| map | engine trace | snapshot, stepped | snapshot + `Coast` |
+|---|---:|---:|---:|
+| xen_dm | 0.279 / 0.317 | 0.078 / 0.083 | 0.057 / 0.058 |
+| dod_avalanche | 0.213 / 0.212 | 0.158 / 0.160 | 0.069 / 0.083 |
+
+Why it wins where a per-ray port lost (`doc/testing.md`, "BSP tracer at runtime"): solids are
+culled by box before any descent, the engine's per-call overhead is gone, and the arc replaces most rays. Coasting
+changes 0.1–0.3% of runtime sims against fully stepped ones (xen_dm 17 outcomes and 33 landings moved > 1 unit of
+18,838; dod_avalanche 8 and 15 of 12,580): one-frame landing differences, long multi-push flights that amplify
+float noise, and corner grazes (`doc/navgen.md`, "Coasting").
+
+## Airmove cache (`airmove_cache.cpp`)
+
+### Why whole simulations are cached
+
+`PlanWalker::JumpLandsIn` is the most expensive thing the planner does: each call steps a `PmSimulator` for up to
+`kAirmoveSimMaxTime` (6 s) over 30 to 360 frames. Most of those sims are *rejections* — the same edge rejected over
+and over, by every bot, on every repath. With engine traces, a 32-bot crossfire server without the cache charged
+18,000 hull traces per frame to `ZONE_RP_PLAN`. Since the plan-time world and `Coast`, a miss costs 0.06–0.08 ms on
+xen_dm and dod_avalanche, and it is paid on the worker. With the cache off entirely the game thread does not
+notice (xen_dm p99 6.6/6.9 ms both ways; dod_avalanche frames ≥ 8 ms 159/183 vs 181/127) and plan latency stays
+within run-to-run noise.
+
+### The key
+
+A trajectory is determined by what `sim.Begin` receives plus the physics the stepper reads, so `AirmoveKey` is
+exactly that:
+- the **sim start origin** — `launchFloor` lifted by `launchLift + kPlanLaunchLift`. Folding the lift in keeps
+  `fromAreaId` out of the key; it would only matter through `PlanArea::crouch` choosing the lift;
+- `yaw`, `speed`, `jump`;
+- `crouch` (`needsCrouch`), which picks the duck or stand hull and push function;
+- a hash of the physics fields the stepper reads and that vary: `maxSpeed`, `gravity`, `airAccelerate`,
+  `maxVelocity`. `accelerate`, `groundFriction`, `stopSpeed` and `edgeFriction` are never read by `PmSimulator`;
+  `friction` is forced to 1 and `frameTime` pinned.
+
+`destAreaId` is **not** in the key. The cache stores the landing point and how the sim ended;
+`ApplyAirmoveResult` runs `PointInArea` against the destination afterwards, so one cached trajectory answers for
+every destination.
+
+**Exact float equality, no quantisation.** A hit returns bit-for-bit what the simulation would, so the cache
+cannot change a plan. It still hits because the launch point is `NearestPointOnGate` of the pulled line against a
+fixed gate, which clamps to the same values far more often than it looks like it should: 94% on crossfire, 56% on
+xen_dm from 4096 slots.
+
+### Pinned frame time
+
+`JumpLandsIn` overrides `physics.frameTime` with `PmSim::kPlanSimFrameTime` (1/60) on its local copy:
+1. `PlanTraceContext::physics.frameTime` is `Bot_FrameTime()`, which jitters every frame, so without the pin no
+   plan-time simulation would repeat and the cache could never hit.
+2. More importantly, navgen samples every `CONN_AIRMOVE` at a fixed 1/60 (`AirmoveParams::frameTime`); integrating
+   at the live step drifts from the data being validated, further the more loaded the server.
+
+The pin is scoped to the simulation — `BuildPathProfile` and `AirmoveLaunchLead` keep the live frame time, because
+they model how many real frames of acceleration the bot gets — and is a no-op in navgen, whose physics already come
+from `PM_MoveSimulator::Physics()` at 1/60.
+
+### What may be cached
+
+`PmTrace::hitEntity`, set by `Nav::TraceWorld` from the `WorldSolid::counts` of the solid that decided the
+result, marks a hit on something that can move. A hit counts as **world** when:
+- it is the world hull (worldspawn);
+- it is a `SOLID_BSP` brush with `FL_WORLDBRUSH` (merged into the world; can never move or be removed),
+  except a barrier wall (`crossbot_nav::IsBarrierWall`), which `func_wall_toggle` makes removable;
+- `crossbot_nav::IsBakedBlocker` accepts it — the **same predicate navgen uses to bake entities into the mesh**
+  (`baked_blockers.h`, called from both `navgen::IsBlockingEntity` and the runtime trace): `func_wall`,
+  `func_healthcharger`, `func_recharge`, an unnamed `func_wall_toggle` not starting off, `func_conveyor` not flagged
+  non-solid. The mesh is already committed to these being solid, so treating them as world is consistent with
+  it. Keeping it one function matters: if the two lists diverge, the planner caches against geometry the mesh
+  disagrees about.
+
+The snapshot holds what an `ignore_monsters` trace sees, so players and monsters never appear, and the planner
+phases breakables. Doors, plats, trains and pushables are what is left, and they make a sim uncacheable. `PmSimulator` ORs the flag across every trace into `m_touchedEntity`,
+and also sets it when the `trigger_push` lookup returns a non-zero vector (the push snapshot depends on live entity
+state). `JumpLandsIn` inserts only when `TouchedEntity()` is false.
+
+**The one case it gets wrong.** That rule guarantees the *recorded* trajectory did not depend on a mover; it does
+not guarantee no mover later moves *into* it (a jump recorded over an empty shaft is stale once the lift rises).
+`crossbot_airmove_verify 1` re-simulates every hit and compares. Every measured mismatch is this case, which is
+what establishes the key is sufficient for static geometry:
+
+| map       | mismatches | of hits  | rate  |
+|-----------|-----------:|---------:|------:|
+| crossfire |        106 |  271,339 | 0.04% |
+| xen_dm    |      2,519 |  254,147 | 0.99% |
+
+Two deliberate choices push the rate up: accepting baked blockers caches trajectories that touch brush entities,
+and aging-LFU keeps hot entries alive longer, giving the world more time to move under them. The divergence is left
+in: a wrong answer means the bot attempts a jump a platform now blocks, reports `airmove aborted` and repaths — a
+routine path that already fires far more often from run-up shortfall. If it ever needs to go lower, the levers are
+a staleness TTL or refusing trajectories whose bounds pass near a mover; both cost hit rate.
+
+### Structure and eviction
+
+- **Fixed table**, `kAirmoveCacheSlots` = 65536 in `airmove_cache.h` — a compile-time constant, not a cvar; the
+  table is a plain member array with no allocation or resize path. About 3.3 MB, so it does not fit in L2. Why not
+  4096 slots (210 KB): dm_centralcore_v2_one evicts 37k of 41k inserts with 10 bots, a failed whole-mesh search
+  inserting 1–2k one-off sims per attempt.
+- **Lookup is a hash, never a scan:** an FNV-1a-style mix over the five float bit patterns, the physics hash and the
+  jump/crouch byte, masked to the table. Open addressing with a linear probe of up to `kAirmoveCacheProbe` (8)
+  slots, one or two cache lines. Lookup stops at the first unused slot, which is sound because entries are only
+  ever wiped wholesale by `Clear()`.
+- **Eviction** happens only when all 8 probe slots hold other keys. Each slot carries a saturating `freq` (bumped on
+  every hit) and a `stamp` (the global lookup tick at its last hit); the victim minimises
+
+  ```
+  score = freq >> ((now - stamp) / kAirmoveAgeStep)     // 0 once the shift reaches kAirmoveMaxDecay
+  ```
+
+  ties going to the older stamp. Aging LFU, evaluated lazily: it protects entries used a lot *and* entries used
+  recently, while a once-hot entry loses protection exponentially instead of squatting as under plain LFU. A new
+  entry starts at `freq = 1` and is the first thrown out if never hit again, so a burst of one-off launches cannot
+  flush the working set.
+
+Why not fixed-victim eviction (always clobber slot `base`): two hot keys sharing a base ping-pong forever.
+At 4096 slots, 2-minute 32-bot runs (hit rate / evictions):
+
+| map           | fixed victim    | aging LFU       |
+|---------------|-----------------|-----------------|
+| crossfire     | 86.2% / 47,021  | 93.6% / 13,300  |
+| xen_dm        | 42.1% / 204,364 | 55.7% / 119,702 |
+| rocket_frenzy | 31.3% / 245,222 | 43.0% / 196,835 |
+
+For scale, crossfire at 4096 slots with aging LFU reaches 93.6% against 95.1% for 65536 slots with fixed victims.
+On the harder maps the ceiling is neither capacity nor eviction but `uncacheable` sims that touched a real mover;
+accepting baked blockers halves that share on xen_dm and rocket_frenzy.
+
+### Ownership
+
+The instance is `g_airmoveCache` in `bot_move_nav.cpp`, attached to `PlanTraceContext::airmoveCache` by
+`MakePlanTraces`. Only the plan worker reads or writes it (every `JumpLandsIn` with traces runs there), so it has no
+lock; the game thread only sets the verify flag and prints the counters. navgen leaves the pointer null, which keeps
+its multi-threaded sampler race-free — `waypoint_plan.cpp` is compiled into both targets.
+`Bot_ResetAirmoveCache()` clears it from `BotManager::ServerActivate` and `ServerDeactivate`, after `FlushPlans`. `crossbot_airmove_cache_stats` prints occupancy, hit rate,
+inserts and evictions (`doc/console.md`).

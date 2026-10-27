@@ -2,16 +2,20 @@
 #include <meta_api.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iterator>
 
+#include "../game/cvars.h"
 #include "../game/game_profile.h"
 #include "../game/objectives.h"
 #include "../nav/astar_graph.h"
 #include "../nav/nav.h"
 #include "../nav/nav_path.h"
+#include "../nav/nav_query.h"
 #include "bot.h"
 #include "bot_camp.h"
+#include "bot_combat.h"
 #include "bot_fun.h"
 #include "bot_goal.h"
 #include "bot_difficulty.h"
@@ -31,6 +35,26 @@ namespace
 	constexpr float kGoalBiasFloor = 2.f;
 	constexpr float kBias = 2.f;
 	constexpr float kDetourBudget = 6.f;
+	constexpr float kRevengeHoldMin = 4.f;
+	constexpr float kRevengeHoldMax = 10.f;
+
+	bool RevengeOn()
+	{
+		cvar_t *cvar = CBotCvar("crossbot_revenge");
+		return cvar && cvar->value != 0.f;
+	}
+
+	float RevengeBudget()
+	{
+		cvar_t *cvar = CBotCvar("crossbot_revenge_budget");
+		return cvar ? cvar->value : 10.f;
+	}
+
+	bool RevengeDebug()
+	{
+		cvar_t *cvar = CBotCvar("crossbot_revenge_debug");
+		return cvar && cvar->value != 0.f;
+	}
 
 	unsigned int NextRand(CBot &bot)
 	{
@@ -48,6 +72,124 @@ namespace
 	float RandUnit(CBot &bot)
 	{
 		return static_cast<float>(NextRand(bot) >> 8) / 16777216.f;
+	}
+
+	float RevengeWeight(const std::vector<float> &fromBot, int area)
+	{
+		return 1.f / powf(fromBot[area] + kGoalBiasFloor, BotGoal::Bias());
+	}
+
+	bool RevengeReachable(const CBot &bot, const std::vector<float> &fromBot, int area)
+	{
+		return area >= 0 && static_cast<size_t>(area) < fromBot.size() && area != bot.currentAreaId &&
+			fromBot[area] < Nav::kUnreachableSeconds;
+	}
+
+	void ChooseRevenge(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot)
+	{
+		BotRevenge &rv = bot.revenge;
+		std::vector<int> camps;
+		std::vector<float> weights;
+		float total = 0.f;
+
+		const Nav::Area *spot = Nav::FindAreaNearest(mesh, rv.point);
+		int spotArea = spot ? static_cast<int>(spot->id) : -1;
+		float spotWeight = 0.f;
+		if (RevengeReachable(bot, fromBot, spotArea))
+		{
+			spotWeight = RevengeWeight(fromBot, spotArea);
+			total += spotWeight;
+		}
+
+		float radius = BotGoal::RevengeLosRadius();
+		float cosFov = BotGoal::RevengeFovCos();
+		int traced = 0;
+		for (size_t i = 0; i < mesh.camps.size(); ++i)
+		{
+			const Nav::CampSpot &camp = mesh.camps[i];
+			if (!RevengeReachable(bot, fromBot, camp.areaId) || !BotCamp::SpotAllowed(bot, camp))
+				continue;
+
+			Vector eye = BotCamp::SpotEye(camp);
+			Vector delta = eye - rv.eye;
+			float dist = delta.Length();
+			if (dist > radius || dist < 1.f)
+				continue;
+			if (DotProduct(delta * (1.f / dist), rv.aimForward) >= cosFov)
+				continue;
+
+			++traced;
+			TraceResult tr;
+			TRACE_LINE(eye, rv.point, ignore_monsters, bot.pEdict, &tr);
+			if (tr.flFraction < 1.f || tr.fStartSolid)
+				continue;
+
+			float w = RevengeWeight(fromBot, camp.areaId);
+			camps.push_back(static_cast<int>(i));
+			weights.push_back(w);
+			total += w;
+		}
+
+		rv.campIndex = -1;
+		rv.areaId = -1;
+		if (total <= 0.f)
+		{
+			rv.active = false;
+			if (RevengeDebug())
+				BOT_VLOG("CrossBot: %s has nowhere reachable to take revenge from (%d camps traced)\n",
+					bot.name, traced);
+			return;
+		}
+
+		float roll = RandUnit(bot) * total - spotWeight;
+		for (size_t i = 0; roll > 0.f && i < camps.size(); ++i)
+		{
+			rv.campIndex = camps[i];
+			roll -= weights[i];
+		}
+
+		if (rv.campIndex >= 0)
+		{
+			const Nav::CampSpot &camp = mesh.camps[rv.campIndex];
+			rv.areaId = camp.areaId;
+			rv.dest = camp.pos;
+		}
+		else
+		{
+			rv.areaId = spotArea;
+			rv.dest = rv.point;
+		}
+
+		if (RevengeDebug())
+			BOT_VLOG("CrossBot: %s picks revenge %s %d at (%.1f,%.1f,%.1f), %.1fs out, of %zu camps "
+				"(%d traced)%s\n", bot.name, rv.campIndex >= 0 ? "camp" : "spot area",
+				rv.campIndex >= 0 ? rv.campIndex : rv.areaId, rv.dest.x, rv.dest.y, rv.dest.z,
+				fromBot[rv.areaId], camps.size(), traced, spotWeight > 0.f ? " plus the spot" : "");
+	}
+
+	bool RevengeReady(CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &fromBot,
+		BotGoal::Stop &out)
+	{
+		BotRevenge &rv = bot.revenge;
+		if (!rv.active || !RevengeOn())
+			return false;
+
+		if (rv.areaId < 0)
+			ChooseRevenge(bot, mesh, fromBot);
+
+		if (!rv.active || bot.currentAreaId == rv.areaId)
+		{
+			rv.active = false;
+			return false;
+		}
+
+		out = BotGoal::Stop();
+		out.tier = BotGoal::GOAL_NONE;
+		out.areaId = rv.areaId;
+		out.point = rv.dest;
+		out.revenge = true;
+		out.campIndex = rv.campIndex;
+		return true;
 	}
 
 	float CandCost(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
@@ -68,7 +210,7 @@ namespace
 		switch (tier)
 		{
 		case BotGoal::GOAL_STRATEGIC:
-			BotStrategic::Collect(bot, mesh, out);
+			BotStrategic::Collect(bot, mesh, costs, out);
 			break;
 		case BotGoal::GOAL_FUN:
 			BotFun::Collect(bot, mesh, out);
@@ -144,7 +286,7 @@ namespace
 
 		for (const BotGoal::Candidate &c : cands)
 		{
-			float cost = CandCost(bot, mesh, costs, c);
+			float cost = c.rollCost >= 0.f ? c.rollCost : CandCost(bot, mesh, costs, c);
 			float w = 1.f / powf(cost + kGoalBiasFloor, bias);
 			weights.push_back(w);
 			total += w;
@@ -207,6 +349,15 @@ namespace
 	{
 		BotGoal::State &st = bot.goal;
 
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (stop.revenge && stop.campIndex >= 0 && mesh)
+		{
+			BotCamp::CommitSnipe(bot, *mesh, stop.campIndex,
+				g_engfuncs.pfnRandomFloat(kRevengeHoldMin, kRevengeHoldMax), 0, bot.revenge.point);
+			st.stop.revenge = true;
+			return;
+		}
+
 		BotItems::ForgetGoalItem(bot);
 		BotFun::Forget(bot);
 		BotStrategic::Forget(bot);
@@ -266,6 +417,29 @@ namespace
 		{
 			CommitStop(bot, st.target, false);
 			return;
+		}
+
+		if (!st.target.revenge && !BotStrategic::Urgent(bot))
+		{
+			BotGoal::Stop rv;
+			if (RevengeReady(bot, mesh, fromBot, rv))
+			{
+				size_t ra = static_cast<size_t>(rv.areaId);
+				if (ra < toGoal.size() && ra < fromBot.size())
+				{
+					float in = toGoal[ra];
+					float out = fromBot[ra];
+					if (in < Nav::kUnreachableSeconds && out < Nav::kUnreachableSeconds &&
+						in < here && out + in - here <= RevengeBudget())
+					{
+						if (RevengeDebug())
+							BOT_VLOG("CrossBot: %s detours for revenge to (%.1f,%.1f,%.1f) area %d, "
+								"%.1fs out\n", bot.name, rv.point.x, rv.point.y, rv.point.z, rv.areaId, out);
+						CommitStop(bot, rv, true);
+						return;
+					}
+				}
+			}
 		}
 
 		if (st.target.tier == BotGoal::GOAL_STRATEGIC && BotTactics::Pick(bot, mesh, fromBot))
@@ -336,6 +510,7 @@ const char *TierName(Tier tier)
 	case GOAL_GATHER: return "gather";
 	case GOAL_FUN: return "fun";
 	case GOAL_STRATEGIC: return "strategic";
+	case GOAL_DIRECTIVE: return "directive";
 	default: break;
 	}
 	return "none";
@@ -357,7 +532,7 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot), &bot.hurt);
 
 	std::vector<Candidate> gather;
 	CollectTier(bot, mesh, costs, GOAL_GATHER, gather);
@@ -447,11 +622,27 @@ bool Select(CBot &bot, const Nav::NavMesh &mesh)
 		CBotClassOf(best->ent), best->point.x, best->point.y,
 		best->point.z, best->areaId, cost, cands.size());
 
+	bool dmClass = !needed && (best->tier == GOAL_GATHER ||
+		(best->tier == GOAL_STRATEGIC && BotStrategic::KindOf(best->payload) == BotStrategic::KIND_ROAM));
+	if (dmClass)
+	{
+		Stop rv;
+		if (RevengeReady(bot, mesh, costs, rv))
+		{
+			if (RevengeDebug())
+				BOT_VLOG("CrossBot: %s seeks revenge at (%.1f,%.1f,%.1f) area %d\n",
+					bot.name, rv.point.x, rv.point.y, rv.point.z, rv.areaId);
+			st.target = rv;
+			st.targetOrigin = rv.point;
+			tier = GOAL_FUN;
+		}
+	}
+
 	if (tier > GOAL_GATHER)
 	{
 		Nav::AreaCostsToGoal(mesh, static_cast<uint32_t>(st.target.areaId), st.toTargetCosts,
 			Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-			Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
+			Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot), &bot.hurt);
 		st.toTargetArea = st.target.areaId;
 		BotCamp::BuildRoute(bot, mesh, costs);
 	}
@@ -508,7 +699,7 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 		return;
 	}
 
-	if (bot.strat.arrival)
+	if (bot.strat.arrival || bot.camp.holding)
 		return;
 
 	if ((ent->v.origin - st.targetOrigin).Length() <= BotStrategic::MoveRadius(st.target.payload))
@@ -534,13 +725,13 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 	st.skipped.clear();
 
 	Nav::AreaCostsToGoal(mesh, areaId, st.toTargetCosts, Bot_GravityMultiplier(bot.pEdict),
-		Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
+		Bot_Carefulness(bot), Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot), &bot.hurt);
 	st.toTargetArea = st.target.areaId;
 
 	std::vector<float> costs;
 	Nav::AreaCosts(mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot), &bot.hurt);
 
 	BotCamp::BuildRoute(bot, mesh, costs);
 
@@ -551,6 +742,16 @@ void RefreshStrategic(CBot &bot, const Nav::NavMesh &mesh)
 bool Advance(CBot &bot)
 {
 	State &st = bot.goal;
+
+	if (st.stop.revenge)
+	{
+		bot.revenge.active = false;
+		if (st.target.revenge)
+		{
+			Clear(bot);
+			return false;
+		}
+	}
 
 	if (!st.active || !st.onDetour)
 	{
@@ -568,7 +769,7 @@ bool Advance(CBot &bot)
 	std::vector<float> costs;
 	Nav::AreaCosts(*mesh, static_cast<uint32_t>(bot.currentAreaId), costs,
 		Bot_GravityMultiplier(bot.pEdict), Bot_Carefulness(bot),
-		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot));
+		Bot_MaxSpeed(bot.pEdict), Bot_RangeBias(bot), Bot_FallDamage(bot), &bot.hurt);
 
 	PickStop(bot, *mesh, costs);
 	Bot_ResetNavPath(bot);
@@ -589,12 +790,20 @@ void CommitCampStop(CBot &bot, const Vector &point, int areaId, int campIndex)
 
 bool OnArrived(CBot &bot)
 {
+	if (bot.goal.stop.revenge)
+	{
+		if (RevengeDebug())
+			BOT_VLOG("CrossBot: %s reached its revenge %s\n", bot.name, bot.goal.stop.camp ? "camp" : "spot");
+		bot.revenge.active = false;
+		return bot.goal.stop.camp ? BotCamp::OnArrived(bot) : Advance(bot);
+	}
+
 	if (bot.goal.stop.camp)
 		return BotCamp::OnArrived(bot);
 
 	if (bot.goal.stop.tier == GOAL_FUN)
 		BotFun::OnArrived(bot);
-	else if (bot.goal.stop.tier != GOAL_STRATEGIC)
+	else if (bot.goal.stop.tier != GOAL_STRATEGIC && bot.goal.stop.tier != GOAL_DIRECTIVE)
 		BotItems::OnArrived(bot);
 
 	return Advance(bot);
@@ -627,6 +836,20 @@ void OnRepathFailed(CBot &bot)
 {
 	State &st = bot.goal;
 
+	if (st.active && st.stop.revenge)
+	{
+		if (RevengeDebug())
+			BOT_VLOG("CrossBot: %s has no unseen route for revenge, giving up on it\n", bot.name);
+		bot.revenge.active = false;
+		if (st.onDetour)
+		{
+			Advance(bot);
+			return;
+		}
+		Clear(bot);
+		return;
+	}
+
 	if (st.active && st.stop.camp)
 	{
 		BotCamp::Abandon(bot, "no route to it");
@@ -654,6 +877,8 @@ void OnRepathFailed(CBot &bot)
 		BotFun::OnRepathFailed(bot);
 	else if (st.stop.tier == GOAL_STRATEGIC)
 		BotStrategic::OnRepathFailed(bot);
+	else if (st.stop.tier == GOAL_DIRECTIVE)
+		BotDirective::OnGoalFailed(bot, "no route");
 	else
 		BotItems::OnRepathFailed(bot);
 
@@ -663,6 +888,18 @@ void OnRepathFailed(CBot &bot)
 void OnBlocked(CBot &bot, const char *what)
 {
 	State &st = bot.goal;
+
+	if (st.active && st.stop.revenge)
+	{
+		bot.revenge.active = false;
+		if (st.onDetour)
+		{
+			Advance(bot);
+			return;
+		}
+		Clear(bot);
+		return;
+	}
 
 	if (st.active && st.stop.camp)
 	{
@@ -691,6 +928,8 @@ void OnBlocked(CBot &bot, const char *what)
 		BotFun::OnBlocked(bot, what);
 	else if (st.stop.tier == GOAL_STRATEGIC)
 		BotStrategic::OnBlocked(bot, what);
+	else if (st.stop.tier == GOAL_DIRECTIVE)
+		BotDirective::OnGoalFailed(bot, what);
 	else
 		BotItems::OnBlocked(bot, what);
 
@@ -704,6 +943,58 @@ void OnRespawn(CBot &bot)
 	BotStrategic::OnRespawn(bot);
 	BotCamp::OnRespawn(bot);
 	Clear(bot);
+
+	bot.revenge.active = bot.revenge.pending && RevengeOn();
+	bot.revenge.pending = false;
+}
+
+void NoteDeath(CBot &bot)
+{
+	bot.revenge.pending = false;
+	bot.revenge.areaId = -1;
+	if (!RevengeOn() || !bot.pEdict)
+		return;
+
+	edict_t *killer = BotCombat::Attacker(bot.pEdict);
+	if (!killer)
+		return;
+
+	edict_t *tracked = BotCombat::Enemy(bot);
+	if (!tracked)
+		tracked = bot.sense.enemy.Get();
+	if (killer != tracked)
+		return;
+
+	Vector forward, right, up;
+	g_engfuncs.pfnAngleVectors(killer->v.v_angle, forward, right, up);
+
+	bot.revenge.pending = true;
+	bot.revenge.point = bot.sense.enemyPos;
+	bot.revenge.eye = killer->v.origin + killer->v.view_ofs;
+	bot.revenge.aimForward = forward;
+
+	if (RevengeDebug())
+		BOT_VLOG("CrossBot: %s was killed by %s, will seek revenge at (%.1f,%.1f,%.1f)\n",
+			bot.name, STRING(killer->v.netname), bot.revenge.point.x, bot.revenge.point.y,
+			bot.revenge.point.z);
+}
+
+bool RevengeEnabled()
+{
+	return RevengeOn();
+}
+
+float RevengeFovCos()
+{
+	cvar_t *cvar = CBotCvar("crossbot_revenge_fov");
+	float deg = cvar ? cvar->value : 120.f;
+	return cosf(deg * 0.5f * 0.01745329252f);
+}
+
+float RevengeLosRadius()
+{
+	cvar_t *cvar = CBotCvar("crossbot_revenge_los_radius");
+	return (cvar && cvar->value > 0.f) ? cvar->value : 2048.f;
 }
 
 }

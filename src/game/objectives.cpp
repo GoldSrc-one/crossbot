@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "crossplay.h"
+#include "cvars.h"
 #include "ent_handle.h"
 #include "gamedata.h"
 #include "objectives.h"
@@ -292,6 +293,17 @@ bool DodMasterOpen(int master)
 	return on != invert;
 }
 
+int DodAreaOwner(const edict_t *area)
+{
+	if (area->v.target)
+	{
+		edict_t *point = FIND_ENTITY_BY_STRING(nullptr, "targetname", STRING(area->v.target));
+		if (point && g_engfuncs.pfnIndexOfEdict(point) != 0 && strcmp(CBotClassOf(point), "dod_control_point") == 0)
+			return Int(point, g_off.dod_cpTeam);
+	}
+	return Int(area, g_off.dod_acOwningTeam);
+}
+
 void ReadDod()
 {
 	const int teams[2] = { kDodAllies, kDodAxis };
@@ -315,7 +327,7 @@ void ReadDod()
 	});
 
 	ForEach("dod_capture_area", [&](edict_t *ent) {
-		int owner = Int(ent, g_off.dod_acOwningTeam);
+		int owner = DodAreaOwner(ent);
 		int attack = 0;
 		int players = 0;
 		for (int i = 0; i < 2; ++i)
@@ -326,7 +338,7 @@ void ReadDod()
 			players = std::max(players, Int(ent, numCap[i]));
 		}
 
-		if (!attack)
+		if (!attack || !DodMasterOpen(Int(ent, g_off.dod_acMaster)))
 			return;
 
 		int group = 0;
@@ -337,7 +349,8 @@ void ReadDod()
 				group = Objectives::kAnyGroup;
 		}
 
-		Objectives::Site &site = AddSite(ent, attack, TeamBit(owner), 0, group);
+		int held = (owner == kDodAllies || owner == kDodAxis) ? TeamBit(owner) : both & ~attack;
+		Objectives::Site &site = AddSite(ent, attack, held, 0, group);
 		site.needPlayers = players;
 	});
 
@@ -348,15 +361,19 @@ void ReadDod()
 		edict_t *holder = Handle(ent, g_off.dod_objOwner);
 		if (holder && CBotIsLivePlayer(holder))
 		{
-			AddCarrier(holder, group, group, true, false);
-			return;
+			void *held = Priv(holder) ? GameData::Peek<void *>(Priv(holder), g_off.dod_plrObject) : nullptr;
+			if (held == Priv(ent))
+			{
+				AddCarrier(holder, group, group, true, false);
+				return;
+			}
 		}
 
 		if ((ent->v.effects & EF_NODRAW) != 0)
 			return;
 
 		int carry = (team == kDodAllies || team == kDodAxis) ? TeamBit(3 - team) : both;
-		AddPayload(ent, group, group, carry, TeamBit(team));
+		AddPayload(ent, group, group, carry, both & ~carry);
 	});
 
 	ForEach("func_breakable", [&](edict_t *ent) {
@@ -618,7 +635,7 @@ namespace Objectives
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_objectives");
+	cvar_t *cvar = CBotCvar("crossbot_objectives");
 	return !cvar || cvar->value != 0.f;
 }
 

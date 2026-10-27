@@ -98,6 +98,8 @@ struct State
 	int selfVetoes = 0;
 	int aimVetoes = 0;
 	int spreadWaits = 0;
+	int braceWaits = 0;
+	bool braceHolding = false;
 	float spreadUntil = 0.f;
 	int spreadClip = -1;
 	int targetAims = 0;
@@ -129,6 +131,9 @@ struct State
 	int lasers = 0;
 	int braces = 0;
 	float commitFor = 0.f;
+	int orderId = 0;
+	Vector orderPoint;
+	float orderUntil = 0.f;
 	int bracing = 0;
 	bool braceDuckClear = false;
 	float braceTraceTime = 0.f;
@@ -168,11 +173,19 @@ float CarryOf(const CBot &bot, int weaponId);
 
 int SnipeWeapon(CBot &bot);
 
+bool CampWeapon(CBot &bot);
+
 void AccrueCarry(CBot &bot);
 
 void Reset(CBot &bot);
 
 void Think(CBot &bot);
+
+bool Order(CBot &bot, int weaponId, const Vector &point, float until, const char *&why);
+
+void CancelOrder(CBot &bot);
+
+int Shots(const CBot &bot);
 
 bool AimPoint(const CBot &bot, Vector &point);
 
@@ -180,7 +193,9 @@ bool ThrowBanned(const CBot &bot);
 
 unsigned short Buttons(CBot &bot, const Vector &angles);
 
-bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly);
+bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly, float &cap);
+
+bool BraceCreep(const CBot &bot);
 
 const char *ModeName(Mode mode);
 

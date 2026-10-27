@@ -10,6 +10,7 @@ param(
     [string]$LogFile = "",
     [string[]]$ExtraArgs = @(),
     [int]$StdinKeepaliveSeconds = 36000,
+    [int]$MaxPlayers = 16,
     [switch]$RequireVerbose
 )
 
@@ -59,7 +60,7 @@ for ($i = 0; $i -lt $Games.Count; $i++) {
     $launchArgs += @("-xgame$($i + 1)", $Games[$i], "-sgame$($i + 1)", $Games[$i])
 }
 $launchArgs += @(
-    "+sv_lan", "1", "+deathmatch", "1", "+developer", "2", "+maxplayers", "16",
+    "+sv_lan", "1", "+deathmatch", "1", "+developer", "2", "+maxplayers", "$MaxPlayers",
     "+rcon_password", "crossbot_test", "+port", "$Port"
 )
 if ($ExtraArgs.Count -gt 0) { $launchArgs += $ExtraArgs }

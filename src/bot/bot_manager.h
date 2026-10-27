@@ -14,13 +14,17 @@ namespace BotManager
 
 	CBot *FindBot(edict_t *pEdict);
 
+	int Slots();
+
+	CBot *Slot(int index);
+
 	void Touch(edict_t *pentTouched, edict_t *pentOther);
 
 	bool AddBot(int iGame, const char *name, const char *arg);
 
 	bool SetGoalForAllBots(const Vector &point);
 
-	bool TeleportAllBots(const Vector &point);
+	bool TeleportAllBots(const Vector &point, const char *name = nullptr);
 
 	bool KillAllBots();
 
@@ -50,5 +54,7 @@ namespace BotManager
 	void OnEvent(int flags, const edict_t *pInvoker);
 
 	void PrintWaypoints();
+
+	void PrintSpawns();
 }
 

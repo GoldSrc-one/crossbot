@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "bsp_file.h"
+#include "hull_trace.h"
 #include "polytope.h"
 
 namespace navgen
@@ -32,13 +33,7 @@ std::vector<Polytope> CarvePolytopeAgainstTree(const BspFile &bsp, int headnode,
 	int removeContents, double mapRadius, double minPieceVolume = 1.0, double epsilon = 0.01,
 	bool *removedAny = nullptr);
 
-struct HullTree
-{
-    const dclipnode_t *clipnodes = nullptr;
-    size_t clipnodeCount = 0;
-    const dplane_t *planes = nullptr;
-    size_t planeCount = 0;
-};
+using HullTree = HullTrace::HullTree;
 
 HullTree WorldHull(const BspFile &bsp);
 
@@ -112,10 +107,6 @@ struct BatchTraceScratch
     std::vector<uint8_t> blockedShift;
 };
 
-// blocked[i * m + j] = segment starts[i] -> ends[j] reaches a CONTENTS_SOLID leaf. starts and ends are
-// xyz float triplets (3 * n and 3 * m floats), and all plane math is float. n, m <= 65535. Allocates only
-// when scratch has to grow. Fastest when the starts share a leaf and the ends share a leaf. CPUs without
-// SSE4.1 and POPCNT get SegmentBlocked per combo instead.
 void SegmentsBlockedBatch(const HullTree &hull, int headnode, const float *starts, size_t n,
     const float *ends, size_t m, uint8_t *blocked, BatchTraceScratch &scratch);
 
@@ -153,9 +144,15 @@ inline bool SegmentHitsBox(const Vec3 &a, const Vec3 &b, const Vec3 &mins, const
     return true;
 }
 
-// Blocker bounds are hull-expanded (see ExtractBlockingVolumes), so segments missing them skip the trace.
 TraceResult TraceHullWithEntities(const BspFile &bsp, int worldHeadnode,
     const std::vector<BlockingVolume> &blockers, const Vec3 &start, const Vec3 &end);
+
+TraceResult TraceHullArc(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &vel,
+    double gravity, double maxTime);
+
+TraceResult TraceHullArcWithEntities(const BspFile &bsp, int worldHeadnode,
+    const std::vector<BlockingVolume> &blockers, const Vec3 &start, const Vec3 &vel, double gravity,
+    double maxTime);
 
 }
 

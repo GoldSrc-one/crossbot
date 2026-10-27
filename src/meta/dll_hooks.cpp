@@ -2,11 +2,14 @@
 #include <meta_api.h>
 #include <pm_defs.h>
 
+#include "../bot/bot_hitch.h"
 #include "../bot/bot_manager.h"
 #include "../bot/bot_move.h"
 #include "../bot/bot_perf.h"
 #include "../bot/bot_sense.h"
 #include "../bot/bot_timing.h"
+#include "../brain/brain.h"
+#include "../brain/brain_feed.h"
 #include "../console/commands.h"
 #include "../game/gamedata.h"
 
@@ -18,6 +21,12 @@ cvar_t g_tracePathCvar = {
 
 cvar_t g_navAvoidCvar = {
 	"crossbot_nav_avoid",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_beamJumpCvar = {
+	"crossbot_beam_jump",
 	"1",
 	FCVAR_SERVER
 };
@@ -220,6 +229,12 @@ cvar_t g_aimDelayCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_noticeCvar = {
+	"crossbot_notice",
+	"-1",
+	FCVAR_SERVER
+};
+
 cvar_t g_senseCvar = {
 	"crossbot_sense",
 	"1",
@@ -229,6 +244,12 @@ cvar_t g_senseCvar = {
 cvar_t g_senseDecayCvar = {
 	"crossbot_sense_decay",
 	"5",
+	FCVAR_SERVER
+};
+
+cvar_t g_coverageCvar = {
+	"crossbot_coverage",
+	"1",
 	FCVAR_SERVER
 };
 
@@ -250,6 +271,36 @@ cvar_t g_carefulCvar = {
 	FCVAR_SERVER
 };
 
+cvar_t g_revengeCvar = {
+	"crossbot_revenge",
+	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_revengeBudgetCvar = {
+	"crossbot_revenge_budget",
+	"10",
+	FCVAR_SERVER
+};
+
+cvar_t g_revengeFovCvar = {
+	"crossbot_revenge_fov",
+	"120",
+	FCVAR_SERVER
+};
+
+cvar_t g_revengeLosRadiusCvar = {
+	"crossbot_revenge_los_radius",
+	"2048",
+	FCVAR_SERVER
+};
+
+cvar_t g_revengeDebugCvar = {
+	"crossbot_revenge_debug",
+	"0",
+	FCVAR_SERVER
+};
+
 cvar_t g_grenadeCvar = {
 	"crossbot_grenade",
 	"1",
@@ -259,6 +310,18 @@ cvar_t g_grenadeCvar = {
 cvar_t g_deployCvar = {
 	"crossbot_deploy",
 	"1",
+	FCVAR_SERVER
+};
+
+cvar_t g_meleeOnlyCvar = {
+	"crossbot_melee_only",
+	"0",
+	FCVAR_SERVER
+};
+
+cvar_t g_namePrefixCvar = {
+	"crossbot_name_prefix",
+	"",
 	FCVAR_SERVER
 };
 
@@ -319,6 +382,7 @@ void GameDLLInit()
 	CrossBotCommands::Register();
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tracePathCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_navAvoidCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_beamJumpCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_gatherCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_combatCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_teamsCvar);
@@ -334,8 +398,7 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_tacticsDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_snipeCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_campCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_campDebugCvar);
-	g_engfuncs.pfnCvar_RegisterVariable(&g_difficultyCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_campDebugCvar);	g_engfuncs.pfnCvar_RegisterVariable(&g_difficultyCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_oppoIntervalCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_turnScaleCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimGainCvar);
@@ -352,17 +415,28 @@ void GameDLLInit()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_wallbangCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_spreadFitCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_aimDelayCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_noticeCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_senseDecayCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_coverageCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_fireCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_vantageCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_carefulCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_revengeCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_revengeBudgetCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_revengeFovCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_revengeLosRadiusCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_revengeDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_meleeOnlyCvar);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_namePrefixCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_grenadeCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deploySurfaceCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_deployDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_timeDebugCvar);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_airmoveVerifyCvar);
+	Brain::RegisterCvars();
+	BotHitch::Register();
 #ifdef CROSSBOT_VERBOSE
 	g_engfuncs.pfnCvar_RegisterVariable(&g_verboseCvar);
 #endif
@@ -375,13 +449,17 @@ void GameDLLInit()
 
 void ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
 {
+	BotHitch::Reset();
 	BotManager::ServerActivate(pEdictList, edictCount, clientMax);
+	Brain::OnMapStart();
 	RETURN_META(MRES_IGNORED);
 }
 
 void ServerDeactivate()
 {
+	Brain::OnMapEnd();
 	BotManager::ServerDeactivate();
+	BrainFeed::Reset();
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -400,7 +478,11 @@ void ClientDisconnect(edict_t *pEntity)
 
 void StartFrame()
 {
+	BotHitch::FrameBegin();
 	BotManager::StartFrame();
+	BotHitch::Section(BotHitch::SECTION_BRAIN);
+	Brain::Frame();
+	BotHitch::FrameEnd();
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -413,6 +495,12 @@ void PlayerPostThink(edict_t *pEntity)
 void Touch(edict_t *pentTouched, edict_t *pentOther)
 {
 	BotManager::Touch(pentTouched, pentOther);
+	RETURN_META(MRES_IGNORED);
+}
+
+void ClientCommand(edict_t *pEntity)
+{
+	BrainFeed::OnClientCommand(pEntity);
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -488,6 +576,7 @@ C_DLLEXPORT int GetEntityAPI2(DLL_FUNCTIONS *pFunctionTable, int *interfaceVersi
 
 	memset(pFunctionTable, 0, sizeof(DLL_FUNCTIONS));
 	pFunctionTable->pfnPM_Move = PM_Move;
+	pFunctionTable->pfnClientCommand = ClientCommand;
 	return TRUE;
 }
 

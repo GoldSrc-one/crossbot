@@ -11,9 +11,16 @@
 #include "../bot/bot_fun.h"
 #include "../bot/bot_items.h"
 #include "../bot/bot_manager.h"
+#include "../bot/bot_sight.h"
 #include "../bot/bot_move_nav.h"
 #include "../bot/bot_strategic.h"
 #include "../bot/bot_weapons.h"
+#include "../brain/brain.h"
+#include "../brain/brain_feed.h"
+#include "../brain/brain_memory.h"
+#include "../brain/brain_tools.h"
+#include "../brain/brain_voice.h"
+#include "../brain/json.h"
 #include "../game/crossplay.h"
 #include "../game/ent_handle.h"
 #include "../game/game_profile.h"
@@ -21,6 +28,7 @@
 #include "../game/give_item.h"
 #include "../game/objectives.h"
 #include "../nav/nav.h"
+#include "../nav/nav_barrier.h"
 
 namespace
 {
@@ -238,6 +246,31 @@ namespace
 	void Cmd_CrossBotMonsters()
 	{
 		BotManager::PrintMonsters();
+	}
+
+	void Cmd_CrossBotSight()
+	{
+		if (CMD_ARGC() < 7)
+		{
+			SERVER_PRINT("usage: crossbot_sight <x1> <y1> <z1> <x2> <y2> <z2>\n");
+			return;
+		}
+
+		float v[6];
+		for (int i = 0; i < 6; ++i)
+			v[i] = static_cast<float>(atof(CMD_ARGV(i + 1)));
+		Vector from(v[0], v[1], v[2]), to(v[3], v[4], v[5]);
+
+		TraceResult tr;
+		TRACE_LINE(from, to, ignore_monsters, nullptr, &tr);
+		bool covered = false;
+		float clarity = BotSight::Clarity(from, to, ignore_monsters, nullptr, nullptr, &covered);
+
+		char msg[256];
+		snprintf(msg, sizeof(msg), "CrossBot: sight trace=%.3f hit=%s clarity=%.3f%s (coverage=%d ready=%d)\n",
+			tr.flFraction, tr.pHit ? CBotClassOf(tr.pHit) : "-", clarity, covered ? " covered" : "",
+			BotSight::Enabled() ? 1 : 0, BotSight::Ready() ? 1 : 0);
+		SERVER_PRINT(msg);
 	}
 
 	void Cmd_CrossBotDifficultyStatus()
@@ -703,18 +736,32 @@ namespace
 			SERVER_PRINT("CrossBot: no bots connected.\n");
 	}
 
+	void Cmd_CrossBotRevengeProbe()
+	{
+		if (CMD_ARGC() < 5)
+		{
+			SERVER_PRINT("usage: crossbot_revenge_probe <x> <y> <z> <yaw>\n");
+			return;
+		}
+
+		Vector eye(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
+			static_cast<float>(atof(CMD_ARGV(3))));
+		float yaw = static_cast<float>(atof(CMD_ARGV(4)));
+		Bot_RevengeLosProbe(eye, yaw);
+	}
+
 	void Cmd_CrossBotTeleport()
 	{
 		if (CMD_ARGC() < 4)
 		{
-			SERVER_PRINT("usage: crossbot_teleport <x> <y> <z>\n");
+			SERVER_PRINT("usage: crossbot_teleport <x> <y> <z> [bot]\n");
 			return;
 		}
 
 		Vector point(static_cast<float>(atof(CMD_ARGV(1))), static_cast<float>(atof(CMD_ARGV(2))),
 			static_cast<float>(atof(CMD_ARGV(3))));
 
-		if (!BotManager::TeleportAllBots(point))
+		if (!BotManager::TeleportAllBots(point, CMD_ARGC() > 4 ? CMD_ARGV(4) : nullptr))
 			SERVER_PRINT("CrossBot: no bots connected.\n");
 	}
 
@@ -736,22 +783,7 @@ namespace
 
 	void Cmd_CrossBotListSpawns()
 	{
-		static const char *kSpawnClassnames[] = {"info_player_start", "info_player_deathmatch"};
-		for (const char *classname : kSpawnClassnames)
-		{
-			edict_t *ent = nullptr;
-			while (true)
-			{
-				ent = FIND_ENTITY_BY_STRING(ent, "classname", classname);
-				if (!ent || g_engfuncs.pfnIndexOfEdict(ent) == 0)
-					break;
-
-				char msg[128];
-				snprintf(msg, sizeof(msg), "CrossBot: spawn %s (%.1f,%.1f,%.1f)\n", classname,
-					ent->v.origin.x, ent->v.origin.y, ent->v.origin.z);
-				SERVER_PRINT(msg);
-			}
-		}
+		BotManager::PrintSpawns();
 	}
 
 	void Cmd_CrossBotListTargets()
@@ -848,6 +880,41 @@ namespace
 		ListCandidates(BotDeploy::PrintGates);
 	}
 
+	void Cmd_CrossBotListBarriers()
+	{
+		const Nav::NavMesh *mesh = Nav::Get();
+		if (!mesh)
+		{
+			SERVER_PRINT("CrossBot: no nav mesh loaded\n");
+			return;
+		}
+
+		std::vector<size_t> areas(mesh->barriers.size(), 0);
+		for (const Nav::Area &area : mesh->areas)
+		{
+			if (area.barrier < areas.size())
+				++areas[area.barrier];
+		}
+
+		char msg[256];
+		size_t closed = 0;
+		for (size_t i = 0; i < mesh->barriers.size(); ++i)
+		{
+			const Nav::Barrier &b = mesh->barriers[i];
+			bool shut = Nav::BarrierClosed(*mesh, static_cast<uint16_t>(i));
+			closed += shut ? 1 : 0;
+			edict_t *ent = b.cachedEntIndex > 0 ? g_engfuncs.pfnPEntityOfEntIndex(b.cachedEntIndex) : nullptr;
+			snprintf(msg, sizeof(msg), "CrossBot: barrier %zu *%u %s, %zu area(s), (%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f), %s #%d %s\n",
+				i, b.modelIndex, shut ? "CLOSED" : "open", areas[i], b.mins.x, b.mins.y, b.mins.z,
+				b.maxs.x, b.maxs.y, b.maxs.z, ent ? STRING(ent->v.classname) : "gone", b.cachedEntIndex,
+				ent && ent->v.targetname ? STRING(ent->v.targetname) : "");
+			SERVER_PRINT(msg);
+		}
+
+		snprintf(msg, sizeof(msg), "CrossBot: %zu barrier(s), %zu closed\n", mesh->barriers.size(), closed);
+		SERVER_PRINT(msg);
+	}
+
 	void Cmd_CrossBotAirmoveCache()
 	{
 		const NavPlan::AirmoveCache &cache = Bot_AirmoveCache();
@@ -906,6 +973,182 @@ namespace
 			mesh->conns.size());
 		SERVER_PRINT(summary);
 	}
+
+	const char *NextWord(const char *p, char *out, size_t size)
+	{
+		while (*p == ' ' || *p == '\t')
+			++p;
+		size_t n = 0;
+		while (*p && *p != ' ' && *p != '\t')
+		{
+			if (n + 1 < size)
+				out[n++] = *p;
+			++p;
+		}
+		out[n] = '\0';
+		return p;
+	}
+
+	void Cmd_CrossBotDo()
+	{
+		const char *p = CMD_ARGS();
+		char who[64];
+		char tool[32];
+		p = NextWord(p ? p : "", who, sizeof(who));
+		p = NextWord(p, tool, sizeof(tool));
+		if (!who[0] || !tool[0])
+		{
+			SERVER_PRINT("CrossBot: usage: crossbot_do <bot|all> <tool> [json args]\n");
+			return;
+		}
+		while (*p == ' ' || *p == '\t')
+			++p;
+
+		const char *json = *p ? p : "{}";
+		Json::Doc doc;
+		if (!doc.Parse(json, strlen(json)) || doc.TypeOf(doc.Root()) != Json::T_OBJECT)
+		{
+			SERVER_PRINT("CrossBot: crossbot_do args must be one JSON object\n");
+			return;
+		}
+
+		edict_t *speaker = BrainTools::FindPlayer(doc.GetStr(doc.Root(), "speaker").c_str());
+		bool all = CB_STRICMP(who, "all") == 0;
+		bool found = false;
+		ForEachBot([&](edict_t *ent) {
+			CBot *bot = BotManager::FindBot(ent);
+			if (!all && CB_STRICMP(bot->name, who) != 0)
+				return true;
+			found = true;
+			std::string result;
+			ScopedGame ctx(bot->gameDll);
+			XPlay::InGame(bot->gameDll, [&] { BrainTools::Execute(*bot, tool, doc, doc.Root(), speaker, result); });
+			char msg[320];
+			snprintf(msg, sizeof(msg), "CrossBot: %s %s -> %s\n", bot->name, tool, result.c_str());
+			SERVER_PRINT(msg);
+			return all;
+		});
+		if (!all && !found)
+			ComplainNoName("bot", who);
+	}
+
+	void Cmd_CrossBotDirectiveStatus()
+	{
+		ForEachBot([](edict_t *ent) { BotDirective::PrintStatus(*BotManager::FindBot(ent)); return true; });
+	}
+
+	void Cmd_CrossBotBrainLog()
+	{
+		BrainFeed::Print(CMD_ARGC() > 1 ? atoi(CMD_ARGV(1)) : 30);
+	}
+
+	void Cmd_CrossBotBrainStatus()
+	{
+		Brain::PrintStatus();
+	}
+
+	void Cmd_CrossBotBrainReload()
+	{
+		Brain::Reload();
+	}
+
+	void Cmd_CrossBotBrainUnignore()
+	{
+		Brain::Unignore(CMD_ARGC() > 1 ? CMD_ARGV(1) : "");
+	}
+
+	void Cmd_CrossBotBrainIgnore()
+	{
+		if (CMD_ARGC() < 2)
+		{
+			SERVER_PRINT("usage: crossbot_brain_ignore <player name> [seconds]\n");
+			return;
+		}
+		Brain::IgnorePlayer(CMD_ARGV(1), CMD_ARGC() > 2 ? static_cast<float>(atof(CMD_ARGV(2))) : 120.f);
+	}
+
+	void Cmd_CrossBotVoiceSay()
+	{
+		const char *p = CMD_ARGS();
+		char who[64];
+		p = NextWord(p ? p : "", who, sizeof(who));
+		while (*p == ' ' || *p == '\t')
+			++p;
+		if (!who[0] || !*p)
+		{
+			SERVER_PRINT("CrossBot: usage: crossbot_voice_say <bot> <text>\n");
+			return;
+		}
+		bool found = false;
+		ForEachBot([&](edict_t *ent) {
+			CBot *bot = BotManager::FindBot(ent);
+			if (CB_STRICMP(bot->name, who) != 0)
+				return true;
+			found = true;
+			std::string result;
+			BrainVoice::Speak(*bot, p, true, result);
+			std::string msg = std::string("CrossBot: ") + bot->name + " voice -> " + result + "\n";
+			SERVER_PRINT(msg.c_str());
+			return false;
+		});
+		if (!found)
+			ComplainNoName("bot", who);
+	}
+
+	CBot *BotNamed(const char *who)
+	{
+		CBot *found = nullptr;
+		ForEachBot([&](edict_t *ent) {
+			CBot *bot = BotManager::FindBot(ent);
+			if (CB_STRICMP(bot->name, who) != 0)
+				return true;
+			found = bot;
+			return false;
+		});
+		if (!found)
+			ComplainNoName("bot", who);
+		return found;
+	}
+
+	void Cmd_CrossBotVoiceTone()
+	{
+		if (CMD_ARGC() < 2)
+		{
+			SERVER_PRINT("CrossBot: usage: crossbot_voice_tone <bot> [seconds] [hz]\n");
+			return;
+		}
+		CBot *bot = BotNamed(CMD_ARGV(1));
+		float seconds = CMD_ARGC() > 2 ? static_cast<float>(atof(CMD_ARGV(2))) : 3.f;
+		float hz = CMD_ARGC() > 3 ? static_cast<float>(atof(CMD_ARGV(3))) : 440.f;
+		if (bot)
+			BrainVoice::Tone(*bot, seconds < 0.1f ? 0.1f : (seconds > 30.f ? 30.f : seconds), hz);
+	}
+
+	void Cmd_CrossBotVoiceEcho()
+	{
+		if (CMD_ARGC() < 2)
+		{
+			SERVER_PRINT("CrossBot: usage: crossbot_voice_echo <bot|off>\n");
+			return;
+		}
+		if (CB_STRICMP(CMD_ARGV(1), "off") == 0)
+		{
+			BrainVoice::Echo(nullptr);
+			SERVER_PRINT("CrossBot: voice echo off\n");
+			return;
+		}
+		CBot *bot = BotNamed(CMD_ARGV(1));
+		if (!bot)
+			return;
+		BrainVoice::Echo(bot);
+		std::string msg = std::string("CrossBot: voice echo: human voice now replays from ") + bot->name + "\n";
+		SERVER_PRINT(msg.c_str());
+	}
+
+	void Cmd_CrossBotBrainMemory()
+	{
+		BrainMemory::Print(CMD_ARGC() > 1 ? atoi(CMD_ARGV(1)) : 20);
+	}
 }
 
 namespace CrossBotCommands
@@ -915,6 +1158,7 @@ void Register()
 {
 	ADD_SERVER_COMMAND("crossbot_add", Cmd_CrossBotAdd);
 	ADD_SERVER_COMMAND("crossbot_nav_goal", Cmd_CrossBotNavGoal);
+	ADD_SERVER_COMMAND("crossbot_revenge_probe", Cmd_CrossBotRevengeProbe);
 	ADD_SERVER_COMMAND("crossbot_teleport", Cmd_CrossBotTeleport);
 	ADD_SERVER_COMMAND("crossbot_kill", Cmd_CrossBotKill);
 	ADD_SERVER_COMMAND("crossbot_nav_status", Cmd_CrossBotNavStatus);
@@ -927,6 +1171,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_list_goals", Cmd_CrossBotListGoals);
 	ADD_SERVER_COMMAND("crossbot_list_objectives", Cmd_CrossBotListObjectives);
 	ADD_SERVER_COMMAND("crossbot_list_gates", Cmd_CrossBotListGates);
+	ADD_SERVER_COMMAND("crossbot_list_barriers", Cmd_CrossBotListBarriers);
 	ADD_SERVER_COMMAND("crossbot_deploy_status", Cmd_CrossBotDeployStatus);
 	ADD_SERVER_COMMAND("crossbot_airmove_cache_stats", Cmd_CrossBotAirmoveCache);
 	ADD_SERVER_COMMAND("crossbot_weapons", Cmd_CrossBotWeapons);
@@ -937,6 +1182,7 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_aim_status", Cmd_CrossBotAimStatus);
 	ADD_SERVER_COMMAND("crossbot_sense_status", Cmd_CrossBotSenseStatus);
 	ADD_SERVER_COMMAND("crossbot_monsters", Cmd_CrossBotMonsters);
+	ADD_SERVER_COMMAND("crossbot_sight", Cmd_CrossBotSight);
 	ADD_SERVER_COMMAND("crossbot_difficulty_status", Cmd_CrossBotDifficultyStatus);
 	ADD_SERVER_COMMAND("crossbot_vantage_status", Cmd_CrossBotVantageStatus);
 	ADD_SERVER_COMMAND("crossbot_camp_status", Cmd_CrossBotCampStatus);
@@ -950,6 +1196,17 @@ void Register()
 	ADD_SERVER_COMMAND("crossbot_fire_status", Cmd_CrossBotFireStatus);
 	ADD_SERVER_COMMAND("crossbot_fire_pin", Cmd_CrossBotFirePin);
 	ADD_SERVER_COMMAND("crossbot_weapon_carry", Cmd_CrossBotWeaponCarry);
+	ADD_SERVER_COMMAND("crossbot_do", Cmd_CrossBotDo);
+	ADD_SERVER_COMMAND("crossbot_directive_status", Cmd_CrossBotDirectiveStatus);
+	ADD_SERVER_COMMAND("crossbot_brain_log", Cmd_CrossBotBrainLog);
+	ADD_SERVER_COMMAND("crossbot_brain_status", Cmd_CrossBotBrainStatus);
+	ADD_SERVER_COMMAND("crossbot_brain_reload", Cmd_CrossBotBrainReload);
+	ADD_SERVER_COMMAND("crossbot_brain_unignore", Cmd_CrossBotBrainUnignore);
+	ADD_SERVER_COMMAND("crossbot_brain_ignore", Cmd_CrossBotBrainIgnore);
+	ADD_SERVER_COMMAND("crossbot_voice_say", Cmd_CrossBotVoiceSay);
+	ADD_SERVER_COMMAND("crossbot_voice_tone", Cmd_CrossBotVoiceTone);
+	ADD_SERVER_COMMAND("crossbot_voice_echo", Cmd_CrossBotVoiceEcho);
+	ADD_SERVER_COMMAND("crossbot_brain_memory", Cmd_CrossBotBrainMemory);
 }
 
 }

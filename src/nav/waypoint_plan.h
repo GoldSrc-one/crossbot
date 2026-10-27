@@ -89,6 +89,8 @@ struct PlanArea
 
 void SetDetourTeamMask(uint32_t mask);
 
+uint32_t DetourTeamMask();
+
 const PlanDetour *FindDetour(const PlanArea &area, uint32_t fromId);
 
 struct PlanConnection
@@ -182,6 +184,8 @@ struct PlanTraceContext
 	PmSim::PmTraceFn standTrace;
 	PmSim::PmPushFn duckPush;
 	PmSim::PmPushFn standPush;
+	PmSim::PmArcFn duckArc;
+	PmSim::PmArcFn standArc;
 	PmSim::PmPhysics physics;
 	float gravityMultiplier = 1.f;
 	const std::vector<float> *waterSurfaces = nullptr;

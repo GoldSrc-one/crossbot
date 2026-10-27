@@ -225,28 +225,6 @@ bool Active(const CBot &bot)
 	return bot.brk.active;
 }
 
-PhaseThrough::PhaseThrough()
-{
-	for (int i = 1; i < gpGlobals->maxEntities; ++i)
-	{
-		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
-		if (!IsTarget(ent))
-			continue;
-
-		m_saved.push_back(std::make_pair(ent, static_cast<int>(ent->v.solid)));
-		ent->v.solid = SOLID_NOT;
-	}
-}
-
-PhaseThrough::~PhaseThrough()
-{
-	for (size_t i = 0; i < m_saved.size(); ++i)
-	{
-		if (!m_saved[i].first->free)
-			m_saved[i].first->v.solid = m_saved[i].second;
-	}
-}
-
 bool AimSwing(CBot &bot, edict_t *ent, Vector &aimAngles, bool &swing)
 {
 	swing = false;
@@ -359,7 +337,7 @@ bool Run(CBot &bot)
 	edict_t *ent = st.target.Get();
 	float now = gpGlobals->time;
 
-	if (!ent || ent->v.solid == SOLID_NOT || ent->v.health <= 0.f)
+	if (!ent || (ent->v.solid == SOLID_NOT && st.standoff <= 0.f) || ent->v.health <= 0.f)
 	{
 		Finish(bot);
 		return false;

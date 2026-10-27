@@ -150,6 +150,10 @@ const Request kRequests[] = {
 
 	{ "CFuncTankControls", "m_pTank",                 CB_OFF(tankctl_pTank), true },
 
+	{ "CTSGun",            "m_iWeapon",               CB_OFF(tsgun_iWeapon), true },
+	{ "CTSGun",            "m_rgAmmo",                CB_OFF(tsgun_rgAmmo), true },
+	{ "CTSGun",            "m_rgStatus",              CB_OFF(tsgun_rgStatus), true },
+
 	{ "CMultiManager",     "m_cTargets",              CB_OFF(mm_cTargets) },
 	{ "CMultiManager",     "m_iTargetName",           CB_OFF(mm_iTargetName) },
 
@@ -184,10 +188,12 @@ const Request kDodRequests[] = {
 	{ "CObject",       "m_iTeam",                 CB_MAP(dod_objTeam) },
 	{ "CObject",       "sz_Group",                CB_MAP(dod_objGroup) },
 	{ "CObject",       "m_hOwner",                CB_MAP(dod_objOwner) },
+	{ "CBasePlayer",   "m_pObject",               CB_MAP(dod_plrObject) },
 	{ "CBreakable",    "sz_Group",                CB_MAP(dod_brkGroup) },
 	{ "CSandBag",      "m_nYaw",                  CB_MAP(dod_sbYaw), true },
 	{ "CSandBag",      "m_nRange",                CB_MAP(dod_sbRange), true },
 	{ "CSandBag",      "m_sMaster",               CB_MAP(dod_sbMaster), true },
+	{ "CBaseToggle",   "m_sMaster",               CB_MAP(dod_acMaster), true },
 	{ "CEnvState",     "m_iState",                CB_MAP(dod_esState), true },
 };
 
@@ -413,6 +419,14 @@ bool Loaded(int iGame)
 		return false;
 
 	return g_gameLoaded[iGame];
+}
+
+int MonsterEnemyOffset(int iGame)
+{
+	if (!Loaded(iGame))
+		return -1;
+
+	return g_gameOffsets[iGame].mon_hEnemy;
 }
 
 void LoadAll()

@@ -19,6 +19,10 @@ PmSim::PmPhysics Bot_DrivePhysics(edict_t *pEdict);
 
 bool Bot_PenalizeCurrentConnection(CBot &bot);
 
+void Bot_NoteHurt(CBot &bot);
+
+void Bot_NoteFriendDeath(CBot &friendBot, const CBot &dead);
+
 void Bot_BailManeuver(CBot &bot, const char *why);
 
 bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector *velocity, float yaw,
@@ -27,6 +31,8 @@ bool Bot_SimulateAirmoveArc(edict_t *pEdict, const Vector &origin, const Vector 
 bool Bot_AirmoveArcAt(const BotAirmoveArc &arc, float t, Vector &pos, Vector &vel);
 
 void Bot_FaceDir(CBot &bot, const Vector &dir);
+
+void Bot_RevengeLosProbe(const Vector &eye, float yaw);
 
 void Bot_DriveTo(CBot &bot, const Vector &angles, const Vector &to, bool stop,
 	unsigned short extra, float speed, float standRadius);

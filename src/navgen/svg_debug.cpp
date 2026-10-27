@@ -164,7 +164,7 @@ const char *FillForArea(const Area &area)
 		return kAreaFloodable;
 	if (area.areaFlags & crossbot_nav::NAV_AREA_DOOR)
 		return kAreaDoor;
-	if (area.areaFlags & crossbot_nav::NAV_AREA_BREAKABLE)
+	if (area.areaFlags & (crossbot_nav::NAV_AREA_BREAKABLE | crossbot_nav::NAV_AREA_BARRIER))
 		return kAreaBreakable;
 	if (area.areaFlags & crossbot_nav::NAV_AREA_ELEVATOR)
 		return kAreaElevator;

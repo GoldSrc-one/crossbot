@@ -4,8 +4,10 @@
 #include "dod/dod_profile.h"
 #include "gearbox/gearbox_profile.h"
 #include "hldm/hldm_profile.h"
+#include "rewolf/rewolf_profile.h"
 #include "ricochet/ricochet_profile.h"
 #include "tfc/tfc_profile.h"
+#include "ts/ts_profile.h"
 
 IGameProfile *GameProfile_Detect(const char *gamedir)
 {
@@ -16,6 +18,8 @@ IGameProfile *GameProfile_Detect(const char *gamedir)
 	static CTFCProfile tfcProfile;
 	static CCSProfile csProfile;
 	static CDODProfile dodProfile;
+	static CRewolfProfile rewolfProfile;
+	static CTSProfile tsProfile;
 
 	if (hldmProfile.Detect(gamedir))
 		return &hldmProfile;
@@ -31,6 +35,10 @@ IGameProfile *GameProfile_Detect(const char *gamedir)
 		return &csProfile;
 	if (dodProfile.Detect(gamedir))
 		return &dodProfile;
+	if (rewolfProfile.Detect(gamedir))
+		return &rewolfProfile;
+	if (tsProfile.Detect(gamedir))
+		return &tsProfile;
 
 	return NULL;
 }

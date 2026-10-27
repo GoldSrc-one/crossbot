@@ -7,10 +7,12 @@
 #include <cstring>
 
 #include "bot_avoid.h"
+#include "../game/cvars.h"
 #include "bot.h"
 #include "bot_break.h"
 #include "bot_deploy.h"
 #include "bot_log.h"
+#include "bot_move.h"
 #include "../nav/nav_mesh.h"
 #include "../nav/nav_query.h"
 #include "../nav/waypoint_plan.h"
@@ -62,8 +64,14 @@ namespace
 	constexpr int kAvoidBeamMaxSteps = 48;
 	constexpr float kAvoidBeamDepth = 32.f;
 	constexpr float kAvoidBeamPad = 4.f;
-	constexpr float kAvoidBeamXY = 16.f;
 	constexpr float kAvoidWalkOverTime = 1.f;
+	constexpr float kAvoidJumpBeamPad = 4.f;
+	constexpr float kAvoidJumpMinSpeed = 100.f;
+	constexpr float kAvoidJumpMinAlong = 0.5f;
+	constexpr float kAvoidJumpApproachHold = 0.1f;
+	constexpr float kAvoidJumpSimTime = 1.2f;
+	constexpr float kAvoidJumpPendingTime = 2.f;
+	constexpr float kAvoidJumpLandGrace = 0.1f;
 	constexpr float kAvoidPadRadius = 48.f;
 
 	const char *ClassOf(edict_t *ent)
@@ -127,7 +135,7 @@ namespace
 					continue;
 				if (BotDeploy::BeamMeetsHull(beams[i], from, hull, zLo, zHi, 0.f))
 					continue;
-				if (!BotDeploy::BeamMeetsHull(beams[i], at, hull, zLo, zHi, kAvoidBeamXY))
+				if (!BotDeploy::BeamMeetsHull(beams[i], at, hull, zLo, zHi, BotDeploy::kBeamGuardPad))
 					continue;
 
 				distOut = len * t;
@@ -164,6 +172,16 @@ namespace
 		if (disc < 0.f)
 			return -1.f;
 		return (PmSim::kJumpImpulse - sqrtf(disc)) / gravity;
+	}
+
+	float DropTime(float rise, float gravity)
+	{
+		if (gravity <= 1.f)
+			return -1.f;
+		float disc = PmSim::kJumpImpulse * PmSim::kJumpImpulse - 2.f * gravity * std::max(rise, 0.f);
+		if (disc < 0.f)
+			return -1.f;
+		return (PmSim::kJumpImpulse + sqrtf(disc)) / gravity;
 	}
 
 	bool RouteExemptsHit(const CBot &bot, const Nav::NavMesh &mesh, edict_t *hit, int solid,
@@ -531,36 +549,48 @@ namespace
 		float maxX = bmax.x + pad;
 		float maxY = bmax.y + pad;
 
-		int probes = 0;
-		Vector prev = origin;
 		size_t limit = std::min(bot.waypoints.size(), bot.waypointIndex + kAvoidDestLookahead);
-		for (size_t i = bot.waypointIndex; i < limit; ++i)
+		for (int pass = 0; pass < 2; ++pass)
 		{
-			const Nav::Waypoint &wp = bot.waypoints[i];
-			Vector target(wp.point.x, wp.point.y,
-				wp.point.z + hullHalf - NavPlan::kPlanStandHeight);
-
-			float len = (prev - target).Length2D();
-			int steps = std::max(1, static_cast<int>(len / kAvoidDestStep));
-			for (int s = 1; s <= steps; ++s)
+			bool mustCross = pass == 0;
+			bool entered = false;
+			int probes = 0;
+			Vector prev = origin;
+			for (size_t i = bot.waypointIndex; i < limit; ++i)
 			{
-				float t = static_cast<float>(s) / static_cast<float>(steps);
-				float x = prev.x + (target.x - prev.x) * t;
-				float y = prev.y + (target.y - prev.y) * t;
-				if (x >= minX && x <= maxX && y >= minY && y <= maxY)
-					continue;
-				if (probes >= kAvoidDestProbes)
-					return false;
-				++probes;
-				if (!Ground(ctx, x, y, prev.z, destOut))
-					continue;
-				indexOut = i;
-				return true;
-			}
+				const Nav::Waypoint &wp = bot.waypoints[i];
+				Vector target(wp.point.x, wp.point.y,
+					wp.point.z + hullHalf - NavPlan::kPlanStandHeight);
 
-			if (WaypointIsFlagged(wp))
-				break;
-			prev = target;
+				float len = (prev - target).Length2D();
+				int steps = std::max(1, static_cast<int>(len / kAvoidDestStep));
+				for (int s = 1; s <= steps; ++s)
+				{
+					float t = static_cast<float>(s) / static_cast<float>(steps);
+					float x = prev.x + (target.x - prev.x) * t;
+					float y = prev.y + (target.y - prev.y) * t;
+					if (x >= minX && x <= maxX && y >= minY && y <= maxY)
+					{
+						entered = true;
+						continue;
+					}
+					if (mustCross && !entered)
+						continue;
+					if (probes >= kAvoidDestProbes)
+						return false;
+					++probes;
+					if (!Ground(ctx, x, y, prev.z, destOut))
+						continue;
+					indexOut = i;
+					return true;
+				}
+
+				if (WaypointIsFlagged(wp))
+					break;
+				prev = target;
+			}
+			if (entered)
+				return false;
 		}
 		return false;
 	}
@@ -589,6 +619,189 @@ namespace
 		bot.avoid.walkOverUntil = gpGlobals->time + kAvoidWalkOverTime;
 		BOT_VLOG("CrossBot: %s avoid walks over %s, no way around\n", bot.name, ClassOf(hit));
 		return true;
+	}
+
+	bool RerouteAroundMine(CBot &bot, BotAvoid::Decision &out, edict_t *hit,
+		const BotDeploy::Beam *beam, const char *why)
+	{
+		if (!beam || !hit || beam->hazard)
+			return false;
+
+		BotAvoid::State &st = bot.avoid;
+		for (const CBotEntHandle &seen : st.blockedMines)
+		{
+			if (seen.Is(hit))
+				return false;
+		}
+
+		st.blockedMines[st.blockedMineNext].Set(hit);
+		st.blockedMineNext = (st.blockedMineNext + 1) % BotAvoid::kBlockedMines;
+
+		out.searchFailed = true;
+		st.lastKind = BotAvoid::AVOID_BLOCKED;
+
+		BOT_VLOG("CrossBot: %s avoid rerouting around %s at (%.1f,%.1f,%.1f), %s\n",
+			bot.name, ClassOf(hit), bot.pEdict->v.origin.x, bot.pEdict->v.origin.y,
+			bot.pEdict->v.origin.z, why);
+
+		return true;
+	}
+
+	bool BeamJumpEnabled()
+	{
+		cvar_t *cvar = CBotCvar("crossbot_beam_jump");
+		return !cvar || cvar->value != 0.f;
+	}
+
+	float BeamSide(const Vector &a, const Vector &b, const Vector &p)
+	{
+		return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+	}
+
+	const char *BeamJumpLands(CBot &bot, const BotDeploy::Beam &beam, const Vector &dir, float speed,
+		const PmSim::PmPhysics &physics, float &flightOut)
+	{
+		edict_t *pEdict = bot.pEdict;
+		const Vector &origin = pEdict->v.origin;
+		float side = BeamSide(beam.start, beam.end, origin);
+
+		PmSim::PmSimulator sim(Bot_WorldTraceFn(pEdict, kHullDuck), physics);
+		sim.BeginAirborne(origin,
+			Vector(pEdict->v.velocity.x, pEdict->v.velocity.y, PmSim::kJumpImpulse),
+			atan2f(dir.y, dir.x) / kAvoidDegToRad, speed);
+
+		float zLo = 0.f, zHi = 0.f;
+		while (sim.Time() < kAvoidJumpSimTime)
+		{
+			if (!sim.Step())
+				return "stuck";
+			if (BotDeploy::BeamMeetsHull(beam, sim.Origin(), kHullDuck, zLo, zHi, kAvoidJumpBeamPad))
+				return sim.Time() < kAvoidJumpLandGrace * 2.f ? "touches at launch" : "touches in flight";
+			if (sim.OnGround())
+			{
+				flightOut = sim.Time();
+				return BeamSide(beam.start, beam.end, sim.Origin()) * side < 0.f ? NULL : "lands short";
+			}
+		}
+		return "never lands";
+	}
+
+	bool TryBeamJump(CBot &bot, BotAvoid::Decision &out, const BotDeploy::Beam &beam,
+		const Vector &pathDir, float feetZ, float beamHi, float gap, float top,
+		const PmSim::PmPhysics &physics, float now)
+	{
+		BotAvoid::State &state = bot.avoid;
+		edict_t *pEdict = bot.pEdict;
+		const Vector &origin = pEdict->v.origin;
+		const Vector &vel = pEdict->v.velocity;
+
+		bool feasible = false;
+		bool ready = false;
+		float dist = 0.f;
+		Vector seg(beam.end.x - beam.start.x, beam.end.y - beam.start.y, 0.f);
+		float segLen = seg.Length2D();
+		float g = physics.gravity;
+		float speed = vel.x * pathDir.x + vel.y * pathDir.y;
+
+		if (g > 1.f && segLen >= 1.f)
+		{
+			float nx = -seg.y / segLen;
+			float ny = seg.x / segLen;
+			float along = pathDir.x * nx + pathDir.y * ny;
+			if (fabsf(along) >= kAvoidJumpMinAlong)
+			{
+				dist = -((origin.x - beam.start.x) * nx + (origin.y - beam.start.y) * ny) / along;
+				float reach = kAvoidHullHalf * (fabsf(nx) + fabsf(ny)) / fabsf(along) + kAvoidJumpBeamPad;
+				float rise = beamHi + kAvoidJumpBeamPad - feetZ - kDuckHullHalf;
+				float disc = PmSim::kJumpImpulse * PmSim::kJumpImpulse - 2.f * g * rise;
+				if (dist > 0.f && disc > 0.f)
+				{
+					float root = sqrtf(disc);
+					float t1 = std::max(0.f, (PmSim::kJumpImpulse - root) / g);
+					float t2 = (PmSim::kJumpImpulse + root) / g;
+					float lo = std::max(kAvoidJumpMinSpeed, 2.f * reach / (t2 - t1));
+					float hi = physics.maxSpeed;
+					if (t1 > 0.f)
+						hi = std::min(hi, (dist - reach) / t1);
+					feasible = dist > reach && lo <= hi && speed <= hi;
+					ready = feasible && speed >= lo && dist <= speed * PmSim::kJumpImpulse / g;
+				}
+			}
+		}
+
+		if (!feasible)
+		{
+			if (state.jumpBeam.Is(beam.ent))
+				state.jumpBeam.Clear();
+			return false;
+		}
+
+		state.jumpBeam.Set(beam.ent);
+		state.jumpBeamUntil = now + kAvoidJumpApproachHold;
+		Record(state, BotAvoid::AVOID_JUMP, beam.ent, gap, top);
+
+		if ((pEdict->v.flags & FL_DUCKING) != 0)
+		{
+			state.duckUntil = 0.f;
+			out.duck = false;
+			out.suppressPlanCrouch = true;
+			return true;
+		}
+
+		if (!ready || now < state.jumpCooldownUntil)
+			return true;
+
+		float flight = 0.f;
+		if (const char *why = BeamJumpLands(bot, beam, pathDir, speed, physics, flight))
+		{
+			state.jumpBeam.Clear();
+			BOT_VLOG("CrossBot: %s avoid beam-jump %s refused by the simulation (%s), dist %.0f speed %.0f\n",
+				bot.name, ClassOf(beam.ent), why, dist, speed);
+			return false;
+		}
+
+		out.jump = true;
+		state.jumpArmed = true;
+		state.jumpCooldownUntil = now + kAvoidJumpCooldown;
+		state.duckUntil = std::max(state.duckUntil, now + flight);
+		state.jumpBeamUntil = now + flight + kAvoidJumpApproachHold;
+
+		state.jumpMine.Set(beam.ent);
+		state.jumpBeamA = beam.start;
+		state.jumpBeamB = beam.end;
+		state.jumpStart = now;
+		state.jumpSide = BeamSide(beam.start, beam.end, origin);
+		state.jumpSpeed = speed;
+		state.jumpGap = gap;
+		state.jumpDist = dist;
+
+		Announce(bot, "beam-jump", beam.ent, gap, top, dist, speed, flight);
+		return true;
+	}
+
+	void ResolveJump(CBot &bot, float now)
+	{
+		BotAvoid::State &st = bot.avoid;
+		if (st.jumpStart <= 0.f)
+			return;
+
+		edict_t *pEdict = bot.pEdict;
+		bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
+		const char *verdict = NULL;
+		if (!st.jumpMine.Get())
+			verdict = "FAILED (mine went off)";
+		else if (onGround && now - st.jumpStart > kAvoidJumpLandGrace
+			&& BeamSide(st.jumpBeamA, st.jumpBeamB, pEdict->v.origin) * st.jumpSide < 0.f)
+			verdict = "cleared";
+		else if (now - st.jumpStart > kAvoidJumpPendingTime)
+			verdict = "inconclusive";
+		if (!verdict)
+			return;
+
+		BOT_VLOG("CrossBot: %s beam jump %s, gap %.0f speed %.0f dist %.0f\n", bot.name, verdict,
+			st.jumpGap, st.jumpSpeed, st.jumpDist);
+		st.jumpStart = 0.f;
+		st.jumpMine.Clear();
 	}
 
 	bool TakeBreakTarget(CBot &bot, BotAvoid::Decision &out, edict_t *hit, const char *why)
@@ -645,6 +858,8 @@ namespace
 		{
 			if (WalkOverHazard(bot, hit, beam))
 				return;
+			if (!recedes && RerouteAroundMine(bot, out, hit, beam, "no clear rejoin point"))
+				return;
 			if (!recedes && TakeMineTarget(bot, out, hit, beam, "no clear rejoin point"))
 				return;
 			if (!recedes && TakeBreakTarget(bot, out, hit, "no clear rejoin point"))
@@ -691,6 +906,8 @@ namespace
 
 		if (WalkOverHazard(bot, hit, beam))
 			return;
+		if (!recedes && RerouteAroundMine(bot, out, hit, beam, ok ? "too long" : "no way around"))
+			return;
 		if (!recedes && TakeMineTarget(bot, out, hit, beam, ok ? "too long" : "no way around"))
 			return;
 		if (!recedes && TakeBreakTarget(bot, out, hit, ok ? "too long" : "no way around"))
@@ -729,8 +946,27 @@ const char *KindName(Kind kind)
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_nav_avoid");
+	cvar_t *cvar = CBotCvar("crossbot_nav_avoid");
 	return !cvar || cvar->value != 0.f;
+}
+
+bool BeamJumpActive(const CBot &bot, const edict_t *beamEnt)
+{
+	return gpGlobals->time < bot.avoid.jumpBeamUntil && bot.avoid.jumpBeam.Is(beamEnt);
+}
+
+bool JumpPendingOn(const CBot &bot, const edict_t *mine)
+{
+	const State &st = bot.avoid;
+	if (st.jumpStart <= 0.f || gpGlobals->time - st.jumpStart > kAvoidJumpPendingTime)
+		return false;
+	return !st.jumpMine.Get() || st.jumpMine.ent == mine;
+}
+
+void ClearJump(CBot &bot)
+{
+	bot.avoid.jumpStart = 0.f;
+	bot.avoid.jumpMine.Clear();
 }
 
 Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
@@ -744,6 +980,8 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 
 	bool onGround = (pEdict->v.flags & FL_ONGROUND) != 0;
 	bool ducking = (pEdict->v.flags & FL_DUCKING) != 0;
+
+	ResolveJump(bot, now);
 
 	if (state.jumpArmed)
 	{
@@ -822,8 +1060,11 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 			float plainJump = PmSim::PlainJumpHeight(physics.gravity);
 			float crouchJump = plainJump + kDuckHullHalf;
 
+			bool body = (hit->v.flags & (FL_CLIENT | FL_MONSTER)) != 0;
+			float overTime = DropTime(top - kDuckHullHalf, physics.gravity);
+			bool clears = overTime >= 0.f && speed * overTime >= dist + depth + 2.f * kAvoidHullHalf;
 			bool canJump = !beam && top > kAvoidStepHeight
-				&& top <= crouchJump - kAvoidJumpMargin;
+				&& top <= crouchJump - kAvoidJumpMargin && (!body || clears || ducking);
 			bool canDuck = gap >= kAvoidDuckClearance;
 
 			if (canJump)
@@ -873,7 +1114,9 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 					Record(state, AVOID_DUCK, hit, gap, top);
 				}
 			}
-			else if (now >= state.nextSearchTime && !DetourActive(bot, state, now)
+			else if (!(beam && !beam->hazard && BeamJumpEnabled()
+					&& TryBeamJump(bot, out, *beam, pathDir, feetZ, beamHi, gap, top, physics, now))
+				&& now >= state.nextSearchTime && !DetourActive(bot, state, now)
 				&& bot.waypointIndex < bot.waypoints.size())
 			{
 				RunSideSearch(bot, mesh, out, hit, beam, tr.vecEndPos, pathDir, gap, top, hull,

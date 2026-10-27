@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "../game/ent_handle.h"
 #include "../nav/pm_sim.h"
 
 struct CBot;
@@ -30,6 +31,7 @@ enum Kind
 };
 
 constexpr float kDetourClearance = 4.f;
+constexpr int kBlockedMines = 4;
 
 struct State
 {
@@ -44,6 +46,25 @@ struct State
 
 	float blockedUntil = 0.f;
 	float walkOverUntil = 0.f;
+
+	edict_t *guardBeam = nullptr;
+	float guardTime = 0.f;
+	float guardLogTime = 0.f;
+
+	CBotEntHandle blockedMines[kBlockedMines];
+	int blockedMineNext = 0;
+
+	CBotEntHandle jumpBeam;
+	float jumpBeamUntil = 0.f;
+
+	CBotEntHandle jumpMine;
+	Vector jumpBeamA;
+	Vector jumpBeamB;
+	float jumpStart = 0.f;
+	float jumpSide = 0.f;
+	float jumpSpeed = 0.f;
+	float jumpGap = 0.f;
+	float jumpDist = 0.f;
 
 	Kind lastKind = AVOID_NONE;
 	char lastHit[32] = {};
@@ -73,5 +94,11 @@ Decision Update(CBot &bot, const Nav::NavMesh &mesh, const Vector &pathDir,
 const char *KindName(Kind kind);
 
 bool Enabled();
+
+bool BeamJumpActive(const CBot &bot, const edict_t *beamEnt);
+
+bool JumpPendingOn(const CBot &bot, const edict_t *mine);
+
+void ClearJump(CBot &bot);
 
 }

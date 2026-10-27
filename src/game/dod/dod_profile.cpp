@@ -501,11 +501,6 @@ bool CDODProfile::PreThink(edict_t *pEdict) const
 	return true;
 }
 
-bool CDODProfile::IsDead(edict_t *pEdict) const
-{
-	return CHLDMProfile::IsDead(pEdict) || pEdict->v.iuser1 > 0;
-}
-
 void CDODProfile::Respawn(edict_t *pEdict) const
 {
 	IdleMove(pEdict);
@@ -520,7 +515,8 @@ bool CDODProfile::AbilityRun(CBot &bot, const Nav::NavMesh &mesh) const
 		return st.task != BotAbility::TASK_NONE && Stop(st, "bipod");
 
 	float now = gpGlobals->time;
-	if (st.task == BotAbility::TASK_NONE && (now >= st.nextTry || st.nextTry - now > kDecideInterval))
+	if (st.task == BotAbility::TASK_NONE && !BotDirective::Busy(bot) &&
+		(now >= st.nextTry || st.nextTry - now > kDecideInterval))
 	{
 		st.nextTry = now + kDecideInterval;
 		if (!StartStab(bot))
@@ -533,6 +529,66 @@ bool CDODProfile::AbilityRun(CBot &bot, const Nav::NavMesh &mesh) const
 	case BotAbility::TASK_DISCARD: return RunDiscard(bot);
 	default:                       return false;
 	}
+}
+
+int CDODProfile::Abilities(const AbilityInfo *&list) const
+{
+	static const AbilityInfo kList[] = {
+		{ "dropammo", "dropammo", "drop spare ammo for the teammate you are facing" },
+	};
+	list = kList;
+	return static_cast<int>(sizeof(kList) / sizeof(kList[0]));
+}
+
+int CDODProfile::RadioCommands(const RadioInfo *&list) const
+{
+	static const RadioInfo kList[] = {
+		{ "voice_attack", 1, nullptr, "Attack!" },
+		{ "voice_hold", 2, nullptr, "Hold this position!" },
+		{ "voice_fallback", 3, nullptr, "Fall back!" },
+		{ "voice_left", 4, nullptr, "Flank left!" },
+		{ "voice_right", 5, nullptr, "Flank right!" },
+		{ "voice_sticktogether", 6, nullptr, "Stick together!" },
+		{ "voice_cover", 7, nullptr, "Covering fire!" },
+		{ "voice_usegrens", 8, nullptr, "Use your grenades!" },
+		{ "voice_ceasefire", 9, nullptr, "Cease fire!" },
+		{ "voice_yessir", 10, nullptr, "Yes sir!" },
+		{ "voice_negative", 11, nullptr, "Negative!" },
+		{ "voice_backup", 12, nullptr, "Need backup!" },
+		{ "voice_fireinhole", 13, nullptr, "Fire in the hole!" },
+		{ "voice_grenade", 14, nullptr, "Grenade!" },
+		{ "voice_sniper", 15, nullptr, "Sniper!" },
+		{ "voice_fireleft", 16, nullptr, "Taking fire, left flank!" },
+		{ "voice_fireright", 17, nullptr, "Taking fire, right flank!" },
+		{ "voice_areaclear", 18, nullptr, "Area clear!" },
+		{ "voice_gogogo", 19, nullptr, "Go go go!" },
+		{ "voice_displace", 20, nullptr, "Displace!" },
+		{ "voice_enemyahead", 21, nullptr, "Enemy ahead!" },
+		{ "voice_enemybehind", 22, nullptr, "Enemy behind us!" },
+		{ "voice_mgahead", 23, nullptr, "Machine gun ahead!" },
+		{ "voice_moveupmg", 24, nullptr, "Move up the machine gun!" },
+		{ "voice_needammo", 25, nullptr, "Need ammo!" },
+		{ "voice_usebazooka", 26, nullptr, "Use the rocket!" },
+		{ "voice_bazookaspotted", 27, nullptr, "Rocket spotted!" },
+		{ "signal_sticktogether", kRadioSignalBase + 0, nullptr, "(hand signal) Stick together." },
+		{ "signal_fallback", kRadioSignalBase + 1, nullptr, "(hand signal) Fall back." },
+		{ "signal_no", kRadioSignalBase + 2, nullptr, "(hand signal) No." },
+		{ "signal_yes", kRadioSignalBase + 3, nullptr, "(hand signal) Yes." },
+		{ "signal_sniper", kRadioSignalBase + 4, nullptr, "(hand signal) Sniper." },
+		{ "signal_backup", kRadioSignalBase + 5, nullptr, "(hand signal) Backup." },
+		{ "signal_enemyright", kRadioSignalBase + 6, nullptr, "(hand signal) Enemy right." },
+		{ "signal_enemyleft", kRadioSignalBase + 7, nullptr, "(hand signal) Enemy left." },
+		{ "signal_grenade", kRadioSignalBase + 8, nullptr, "(hand signal) Grenade." },
+		{ "signal_flankleft", kRadioSignalBase + 9, nullptr, "(hand signal) Flank left." },
+		{ "signal_moveout", kRadioSignalBase + 10, nullptr, "(hand signal) Move out." },
+		{ "signal_flankright", kRadioSignalBase + 11, nullptr, "(hand signal) Flank right." },
+		{ "signal_areaclear", kRadioSignalBase + 12, nullptr, "(hand signal) Area clear." },
+		{ "signal_coveringfire", kRadioSignalBase + 13, nullptr, "(hand signal) Covering fire." },
+		{ "signal_holdposition", kRadioSignalBase + 15, nullptr, "(hand signal) Hold position." },
+		{ "signal_enemyspotted", kRadioSignalBase + 17, nullptr, "(hand signal) Enemy spotted." },
+	};
+	list = kList;
+	return static_cast<int>(sizeof(kList) / sizeof(kList[0]));
 }
 
 float CDODProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const
@@ -699,6 +755,15 @@ void CDODProfile::MoveAdjust(CBot &bot, float &fmove, float &smove, unsigned sho
 		return;
 	}
 
+	if (BotCamp::HeldProne(bot))
+	{
+		s.sprint = false;
+		Hold(fmove, smove, buttons);
+		if (pEdict->v.iuser3 != kProne)
+			ToggleProne(pEdict, s);
+		return;
+	}
+
 	if (pEdict->v.iuser3 == kProne)
 	{
 		s.sprint = false;
@@ -730,6 +795,11 @@ float CDODProfile::MaxSpeed(edict_t *pEdict, float engineMax) const
 	float stamina = std::clamp(pEdict->v.fuser4, 0.f, kStaminaCap);
 	float speed = stamina + (g_slots[slot].sprint ? kSprintBase : kWalkBase);
 	return std::min(engineMax, speed);
+}
+
+bool CDODProfile::CanProne(edict_t *pEdict) const
+{
+	return pEdict && Own(pEdict);
 }
 
 bool CDODProfile::CanDeploy(edict_t *pEdict) const

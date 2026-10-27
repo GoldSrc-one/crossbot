@@ -115,6 +115,7 @@ if ($navgenRun.ExitCode -ne 0) {
 Remove-Item $traceLogPath -ErrorAction SilentlyContinue
 
 $bootCommands = @(
+    "amxx pause crossbot_menu.amxx",
     "crossbot_trace_path $traceCvarPath",
     "crossbot_difficulty 1",
     "crossbot_gather 0",

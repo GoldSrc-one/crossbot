@@ -1,5 +1,7 @@
 #include "clipnode_tree.h"
 #include "blocking_entities.h"
+#include "arc_math.h"
+#include "nav_math.h"
 
 #include <immintrin.h>
 #include <intrin.h>
@@ -150,13 +152,11 @@ std::vector<Polytope> CarvePolytopeAgainstTree(const BspFile &bsp, int headnode,
 namespace
 {
 
-constexpr double kDistEpsilon = 0.03125;
-
-double PlaneDiff(const dplane_t &plane, const Vec3 &p)
-{
-	return static_cast<double>(plane.normal[0]) * p.x + static_cast<double>(plane.normal[1]) * p.y +
-		static_cast<double>(plane.normal[2]) * p.z - plane.dist;
-}
+using HullTrace::kDistEpsilon;
+using HullTrace::PlaneDiff;
+using HullTrace::ClassifyAt;
+using HullTrace::HullStep;
+using HullTrace::HullCheck;
 
 }
 
@@ -172,14 +172,7 @@ HullTree WorldHull(const BspFile &bsp)
 
 int ClassifyPoint(const HullTree &hull, int headnode, const Vec3 &point)
 {
-	int nodeIndex = headnode;
-	while (nodeIndex >= 0)
-	{
-		const dclipnode_t &node = hull.clipnodes[static_cast<size_t>(nodeIndex)];
-		const dplane_t &plane = hull.planes[static_cast<size_t>(node.planenum)];
-		nodeIndex = (PlaneDiff(plane, point) >= 0.0) ? node.children[0] : node.children[1];
-	}
-	return nodeIndex;
+	return ClassifyAt(hull, headnode, point);
 }
 
 int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point)
@@ -190,110 +183,9 @@ int ClassifyPoint(const BspFile &bsp, int headnode, const Vec3 &point)
 namespace
 {
 
-enum class HullStep
-{
-	Continue,
-	Stop,
-	Clear
-};
-
 struct NullTrace
 {
 };
-
-template <bool BoolOnly, typename Trace>
-HullStep HullCheck(const HullTree &hull, int headnode, int nodeIndex, double p1f, double p2f,
-	const Vec3 &p1, const Vec3 &p2, Trace &trace)
-{
-	if (nodeIndex < 0)
-	{
-		if constexpr (BoolOnly)
-		{
-			return (nodeIndex == CONTENTS_SOLID) ? HullStep::Stop : HullStep::Continue;
-		}
-		else
-		{
-			if (nodeIndex != CONTENTS_SOLID)
-			{
-				trace.allsolid = false;
-				trace.contents = nodeIndex;
-			}
-			else
-			{
-				trace.startsolid = true;
-			}
-			return HullStep::Continue;
-		}
-	}
-
-	const dclipnode_t &node = hull.clipnodes[static_cast<size_t>(nodeIndex)];
-	const dplane_t &plane = hull.planes[static_cast<size_t>(node.planenum)];
-
-	double t1 = PlaneDiff(plane, p1);
-	double t2 = PlaneDiff(plane, p2);
-
-	if (t1 >= 0.0 && t2 >= 0.0)
-		return HullCheck<BoolOnly>(hull, headnode, node.children[0], p1f, p2f, p1, p2, trace);
-	if (t1 < 0.0 && t2 < 0.0)
-		return HullCheck<BoolOnly>(hull, headnode, node.children[1], p1f, p2f, p1, p2, trace);
-
-	double frac = (t1 < 0.0)
-		? (t1 + kDistEpsilon) / (t1 - t2)
-		: (t1 - kDistEpsilon) / (t1 - t2);
-	if (frac < 0.0)
-		frac = 0.0;
-	else if (frac > 1.0)
-		frac = 1.0;
-
-	double midf = p1f + (p2f - p1f) * frac;
-	Vec3 mid = p1 + (p2 - p1) * frac;
-
-	int side = (t1 < 0.0) ? 1 : 0;
-
-	HullStep nearStep = HullCheck<BoolOnly>(hull, headnode, node.children[side], p1f, midf, p1, mid,
-		trace);
-	if (nearStep != HullStep::Continue)
-		return nearStep;
-
-	if (ClassifyPoint(hull, node.children[side ^ 1], mid) != CONTENTS_SOLID)
-		return HullCheck<BoolOnly>(hull, headnode, node.children[side ^ 1], midf, p2f, mid, p2, trace);
-
-	if constexpr (BoolOnly)
-	{
-		if (static_cast<float>(midf) < 1.0f)
-			return HullStep::Stop;
-	}
-	else
-	{
-		if (trace.allsolid)
-			return HullStep::Stop;
-
-		if (side == 0)
-			trace.planeNormal = Vec3(plane.normal[0], plane.normal[1], plane.normal[2]);
-		else
-			trace.planeNormal = Vec3(-plane.normal[0], -plane.normal[1], -plane.normal[2]);
-	}
-
-	while (ClassifyPoint(hull, headnode, mid) == CONTENTS_SOLID)
-	{
-		frac -= 0.1;
-		if (frac < 0.0)
-			break;
-		midf = p1f + (p2f - p1f) * frac;
-		mid = p1 + (p2 - p1) * frac;
-	}
-
-	if constexpr (BoolOnly)
-	{
-		return (static_cast<float>(midf) < 1.0f) ? HullStep::Stop : HullStep::Clear;
-	}
-	else
-	{
-		trace.fraction = static_cast<float>(midf);
-		trace.endpos = mid;
-		return HullStep::Stop;
-	}
-}
 
 void BuildOriginChain(const HullTree &hull, int headnode, const Vec3 &start, HullOriginChain &chain)
 {
@@ -480,10 +372,8 @@ struct BatchContext
 	uint32_t *combo = nullptr;
 	float *p1f = nullptr;
 	float *p2f = nullptr;
-	// combo = (i << shift) | j, which is also the combo's index into blocked.
 	unsigned shift = 0;
 	uint32_t jMask = 0;
-	// Coordinates split per axis, padded to a multiple of 4 by repeating the last point.
 	const float *sx = nullptr;
 	const float *sy = nullptr;
 	const float *sz = nullptr;
@@ -499,12 +389,6 @@ inline float PlaneDistF(const dplane_t &plane, const float *p)
 	return plane.normal[0] * p[0] + plane.normal[1] * p[1] + plane.normal[2] * p[2] - plane.dist;
 }
 
-// The node distance fills return 1 when every distance they wrote is >= 0 and 2 when every one is < 0:
-// each entry's t1 and t2 lerp between its own start and end distance, so the whole list then belongs to
-// one child. 0 otherwise.
-
-// All n + m distances, four points per step. Same operation order as PlaneDistF, so the results are
-// bit-identical to FillUsedDistances; the repeated padding points leave the min and max unchanged.
 int FillAllDistances(const BatchContext &ctx, const dplane_t &plane)
 {
 	const __m128 nx = _mm_set1_ps(plane.normal[0]);
@@ -534,7 +418,6 @@ int FillAllDistances(const BatchContext &ctx, const dplane_t &plane)
 	return 0;
 }
 
-// Only the distances a narrow list touches: fewer than n + m.
 int FillUsedDistances(const BatchContext &ctx, const dplane_t &plane, const uint32_t *combos, size_t count)
 {
 	float lo = 3.0e38f;
@@ -553,7 +436,6 @@ int FillUsedDistances(const BatchContext &ctx, const dplane_t &plane, const uint
 	return lo >= 0.0f ? 1 : (hi < 0.0f ? 2 : 0);
 }
 
-// pshufb masks that pack the lanes set in a 4-bit mask to the front of a 4 x 4-byte vector.
 struct LaneCompressTable
 {
 	uint8_t shuffle[16][16];
@@ -598,18 +480,6 @@ inline void MarkLanes(const BatchContext &ctx, size_t at, unsigned mask)
 	}
 }
 
-// The entries at [base, base + count) belong to this node and are never written. Children get two fresh
-// lists above top, each at most count long plus a 4-slot gap, so nothing is restored on the way back up.
-// Unlike HullCheck<true> there is no hit position: any solid leaf reached means blocked, so the
-// ClassifyPoint pre-check and back-off loop go away and the order of the two child calls is free.
-// The distance buffers are shared by every level: a node is done with them before it recurses.
-//
-// Entries go through four SSE lanes per step. The split is computed for every lane and blended in
-// (branching around it measured slower), so the only per-entry decisions are two movemasks. Each list is
-// written a whole vector at a time and advances by popcount; the gap after it absorbs the unused lanes,
-// and reads past count are masked out. Measured on crossfire 16x16: ~58 ns per combo, against ~220 for
-// the scalar per-entry version of this descent and ~550 for SegmentBlocked. AVX2 lanes gained up to 8%
-// on 16x16 and lost 4-7% at 6x6 and below.
 void BatchDescend(const BatchContext &ctx, int nodeIndex, size_t base, size_t count, size_t top)
 {
 	const dclipnode_t &node = ctx.hull.clipnodes[static_cast<size_t>(nodeIndex)];
@@ -621,7 +491,6 @@ void BatchDescend(const BatchContext &ctx, int nodeIndex, size_t base, size_t co
 		: FillUsedDistances(ctx, plane, ctx.combo + base, count);
 	if (side != 0)
 	{
-		// Hand the whole list to that child as is: same entries, same top, nothing copied.
 		int child = node.children[side - 1];
 		if (child >= 0)
 			BatchDescend(ctx, child, base, count, top);
@@ -650,7 +519,6 @@ void BatchDescend(const BatchContext &ctx, int nodeIndex, size_t base, size_t co
 		unsigned live = 0;
 		if (count - k >= 4)
 		{
-			// Built from register values: four float stores and a 16-byte reload would stall store forwarding.
 			ts = _mm_setr_ps(ctx.ts[c[0] >> shift], ctx.ts[c[1] >> shift], ctx.ts[c[2] >> shift],
 				ctx.ts[c[3] >> shift]);
 			te = _mm_setr_ps(ctx.te[c[0] & jMask], ctx.te[c[1] & jMask], ctx.te[c[2] & jMask],
@@ -684,7 +552,6 @@ void BatchDescend(const BatchContext &ctx, int nodeIndex, size_t base, size_t co
 		unsigned frontMask = (m1 | m2) & live;
 		unsigned backMask = ~(m1 & m2) & live;
 
-		// HullCheck's split: eps leans toward p1's side. p1's half goes to p1's child, the rest to the other.
 		__m128 frac = _mm_div_ps(_mm_add_ps(t1, _mm_blendv_ps(eps, negEps, front1)), _mm_sub_ps(t1, t2));
 		frac = _mm_min_ps(_mm_max_ps(frac, zero), one);
 		__m128 midf = _mm_add_ps(p1f, _mm_mul_ps(_mm_sub_ps(p2f, p1f), frac));
@@ -722,8 +589,6 @@ void BatchDescend(const BatchContext &ctx, int nodeIndex, size_t base, size_t co
 		BatchDescend(ctx, back, backBase, backCount, childTop);
 }
 
-// Above the node where the starts or the ends first disagree, every segment lies wholly on one side, so
-// the batch can start there. Starts in one leaf and ends in one leaf make this their common ancestor.
 int SkipSharedPrefix(const BatchContext &ctx, int node)
 {
 	while (node >= 0)
@@ -746,7 +611,6 @@ void SegmentsBlockedBatch(const HullTree &hull, int headnode, const float *start
 	if (combos == 0)
 		return;
 
-	// The descent needs SSE4.1 (which implies SSSE3) and POPCNT: CPUID leaf 1, ECX bits 19 and 23.
 	static const bool hasSimd = [] {
 		int info[4] = {};
 		__cpuid(info, 1);
@@ -822,8 +686,6 @@ void SegmentsBlockedBatch(const HullTree &hull, int headnode, const float *start
 		scratch.headnode = headnode;
 	}
 
-	// Each level adds two lists of at most combos plus their 4-slot gaps; the 8 on top cover reads past
-	// the end of the deepest list.
 	size_t capacity = combos + static_cast<size_t>(scratch.depth) * (2 * combos + 8) + 8;
 	if (scratch.combo.size() < capacity)
 	{
@@ -848,7 +710,6 @@ void SegmentsBlockedBatch(const HullTree &hull, int headnode, const float *start
 		}
 	}
 
-	// (i << shift) | j is the caller's i * m + j only for a power-of-two m; any other m works on a copy.
 	const bool remap = (static_cast<size_t>(1) << ctx.shift) != m;
 	ctx.blocked = blocked;
 	if (remap)
@@ -868,6 +729,57 @@ void SegmentsBlockedBatch(const HullTree &hull, int headnode, const float *start
 				blocked[i * m + j] = ctx.blocked[(i << ctx.shift) | j];
 }
 
+TraceResult TraceHullArc(const HullTree &hull, int headnode, const Vec3 &start, const Vec3 &vel,
+	double gravity, double maxTime)
+{
+	HullTrace::ArcTrace<Vec3, double> arc = HullTrace::TraceArc(hull, headnode, start, vel,
+		Vec3(0.0, 0.0, -gravity), maxTime);
+
+	TraceResult trace;
+	trace.start = start;
+	trace.end = ArcMath::ArcPos(start, vel, gravity, maxTime);
+	trace.endpos = ArcMath::ArcPos(start, vel, gravity, arc.time);
+	trace.planeNormal = arc.normal;
+	trace.fraction = (maxTime > 0.0) ? static_cast<float>(arc.time / maxTime) : 1.0f;
+	trace.allsolid = arc.allsolid;
+	trace.startsolid = arc.startsolid;
+	trace.contents = arc.contents;
+	return trace;
+}
+
+TraceResult TraceHullArcWithEntities(const BspFile &bsp, int worldHeadnode,
+	const std::vector<BlockingVolume> &blockers, const Vec3 &start, const Vec3 &vel, double gravity,
+	double maxTime)
+{
+	HullTree hull = WorldHull(bsp);
+	TraceResult best = TraceHullArc(hull, worldHeadnode, start, vel, gravity, maxTime);
+	if (best.fraction <= 0.0f)
+		return best;
+
+	Vec3 mins, maxs;
+	ArcMath::ArcBounds(start, vel, gravity, maxTime * best.fraction, mins, maxs);
+	mins = mins - Vec3(1.0, 1.0, 1.0);
+	maxs = maxs + Vec3(1.0, 1.0, 1.0);
+
+	for (const BlockingVolume &blocker : blockers)
+	{
+		if (!NavMath::BoxesOverlap(mins, maxs, blocker.mins, blocker.maxs))
+			continue;
+
+		TraceResult tr = TraceHullArc(hull, blocker.headnode, start - blocker.origin, vel, gravity, maxTime);
+		if (tr.fraction < best.fraction)
+		{
+			best = tr;
+			best.ent = 1;
+			best.start = start;
+			best.end = tr.end + blocker.origin;
+			best.endpos = tr.endpos + blocker.origin;
+		}
+	}
+
+	return best;
+}
+
 TraceResult TraceHullWithEntities(const BspFile &bsp, int worldHeadnode,
     const std::vector<BlockingVolume> &blockers, const Vec3 &start, const Vec3 &end)
 {
@@ -879,9 +791,6 @@ TraceResult TraceHullWithEntities(const BspFile &bsp, int worldHeadnode,
 
     TraceResult bestTr = worldTr;
 
-    // Same cull as the engine's SV_ClipToLinks: the trace's swept box against the entity's absolute bounds
-    // grown by 1 (SV_LinkEdict). Blocker bounds are already hull-expanded, so the sweep is just the segment.
-    // A tighter segment-vs-box test changed results: qbsp's hull expansion can reach past those bounds.
     Vec3 sweepMins(std::min(start.x, end.x) - 1.0, std::min(start.y, end.y) - 1.0, std::min(start.z, end.z) - 1.0);
     Vec3 sweepMaxs(std::max(start.x, end.x) + 1.0, std::max(start.y, end.y) + 1.0, std::max(start.z, end.z) + 1.0);
     for (const BlockingVolume &blocker : blockers)

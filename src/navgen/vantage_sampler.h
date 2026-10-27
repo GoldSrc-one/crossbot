@@ -11,14 +11,17 @@
 #include "nav_format.h"
 #include "polytope.h"
 
+namespace Nav
+{
+class LightMap;
+}
+
 namespace navgen
 {
 
 constexpr double kDuckEyeLift = 12.0;
 constexpr double kStandEyeLift = 46.0;
 
-// The lattice spacing floor. The actual spacing is derived from the walkable footprint so a map gets about
-// kDefaultVantagePoints samples: pair cost is quadratic in the sample count.
 constexpr double kDefaultVantageGrid = 15.0;
 constexpr size_t kDefaultVantagePoints = 40000;
 constexpr double kDefaultVantageSpacing = 128.0;
@@ -44,6 +47,7 @@ struct Vantage
 	double floorZ = 0.0;
 	uint32_t areaFlags = 0;
 	double exposure = 0.0;
+	double visibility = 1.0;
 	std::vector<WatchDir> watch;
 };
 
@@ -60,7 +64,7 @@ struct VantageCandidate
 
 struct VantageParams
 {
-	double gridSize = 0.0; // 0 = max(kDefaultVantageGrid, sqrt(footprint / maxPoints))
+	double gridSize = 0.0;
 	size_t maxPoints = kDefaultVantagePoints;
 	double targetSpacing = kDefaultVantageSpacing;
 	double clusterConeDeg = kDefaultVantageCone;
@@ -73,6 +77,7 @@ struct VantageParams
 	bool verifyNeighbors = false;
 	size_t threadCount = 0;
 	bool groupCull = false;
+	const Nav::LightMap *light = nullptr;
 };
 
 struct VantageStats
@@ -88,6 +93,7 @@ struct VantageStats
 	double footprintArea = 0.0;
 	double gridSize = 0.0;
 	double maxExposure = 0.0;
+	double meanVisibility = 1.0;
 	double meanReductionError = 0.0;
 	double maxReductionError = 0.0;
 	double meanWatchDist = 0.0;

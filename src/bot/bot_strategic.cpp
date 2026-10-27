@@ -8,8 +8,10 @@
 #include <cstring>
 
 #include "../game/game_profile.h"
+#include "../game/cvars.h"
 #include "../game/objectives.h"
 #include "../game/teams.h"
+#include "../nav/nav_path.h"
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_goal.h"
@@ -19,6 +21,7 @@
 #include "bot_move_nav.h"
 #include "bot_sense.h"
 #include "bot_strategic.h"
+#include "bot_tactics.h"
 
 namespace
 {
@@ -27,8 +30,6 @@ namespace
 	constexpr float kGoalDuckRange = 128.f;
 	constexpr float kGoalUseRange = 64.f;
 	constexpr float kGoalStandRadius = 8.f;
-	constexpr float kSpawnJump = 128.f;
-	constexpr float kSpawnNear = 64.f;
 	constexpr float kUseStandoff = 40.f;
 	constexpr float kGuardStandoff = 96.f;
 	constexpr float kGoalFailCooldown = 10.f;
@@ -233,36 +234,36 @@ namespace
 			out.push_back(entry.second);
 	}
 
-	bool HoldLimited(int kind)
+	bool Approach(const Nav::NavMesh &mesh, const std::vector<float> &costs, const Vector &goal,
+		BotItems::Placement &out)
 	{
-		return kind == BotStrategic::KIND_ATTACK || kind == BotStrategic::KIND_DELIVER ||
-			kind == BotStrategic::KIND_FETCH || kind == BotStrategic::KIND_DEFEND || kind == BotStrategic::KIND_SUPPORT;
+		bool found = false;
+		float best = 0.f;
+		for (const Nav::Area &area : mesh.areas)
+		{
+			if (area.id >= costs.size() || costs[area.id] >= Nav::kUnreachableSeconds)
+				continue;
+			Vector point = BotItems::ClampToArea(area, goal);
+			float d = (point - goal).LengthSquared();
+			if (found && d >= best)
+				continue;
+			found = true;
+			best = d;
+			out.areaId = area.id;
+			out.point = point;
+		}
+		return found;
 	}
 
 	void StartLife(CBot &bot)
 	{
-		BotStrategic::State &st = bot.strat;
-		st.spawnTime = gpGlobals->time;
-		st.defender = g_engfuncs.pfnRandomLong(0, 1) != 0;
-		st.lastOrigin = bot.pEdict->v.origin;
-
-		if (Objectives::Active())
-			BOT_VLOG("CrossBot: %s starts a life as %s\n", bot.name, st.defender ? "a defender" : "an attacker");
+		bot.strat.spawnTime = gpGlobals->time;
 	}
 
-	bool NearOwnSpawn(const CBot &bot)
+	bool HoldLimited(int kind)
 	{
-		if (!Objectives::Active())
-			return false;
-
-		int team = Teams::TeamOf(bot.pEdict);
-		for (const Objectives::Spawn &spawn : Objectives::Get().spawns)
-		{
-			edict_t *ent = spawn.ent.Get();
-			if (ent && spawn.team == team && (ent->v.origin - bot.pEdict->v.origin).Length() <= kSpawnNear)
-				return true;
-		}
-		return false;
+		return kind == BotStrategic::KIND_ATTACK || kind == BotStrategic::KIND_DELIVER ||
+			kind == BotStrategic::KIND_FETCH || kind == BotStrategic::KIND_DEFEND || kind == BotStrategic::KIND_SUPPORT;
 	}
 }
 
@@ -271,14 +272,14 @@ namespace BotStrategic
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_strategic");
+	cvar_t *cvar = CBotCvar("crossbot_strategic");
 	return !cvar || cvar->value != 0.f;
 }
 
 bool DebugEnabled()
 {
 #if BOT_VLOG_ON
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_strategic_debug");
+	cvar_t *cvar = CBotCvar("crossbot_strategic_debug");
 	return cvar && cvar->value != 0.f;
 #else
 	return false;
@@ -300,6 +301,15 @@ bool ValidFor(const CBot &bot, edict_t *ent, int payload)
 
 	Intent found;
 	return FindIntent(bot, ent, KindOf(payload), found);
+}
+
+bool IntentPoint(const CBot &bot, edict_t *ent, int kind, Vector &point)
+{
+	Intent found;
+	if (!FindIntent(bot, ent, kind, found))
+		return false;
+	point = found.point;
+	return true;
 }
 
 bool ResolvePoint(const Nav::NavMesh &mesh, const Vector &origin, uint32_t &areaId, Vector &point)
@@ -415,7 +425,7 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 		}
 	}
 
-	if (!bot.strat.defender && g_pGameProfile && g_pGameProfile->Fortifies(bot.pEdict))
+	if (g_pGameProfile && g_pGameProfile->Fortifies(bot.pEdict))
 	{
 		for (const Objectives::Site &site : tables.sites)
 		{
@@ -426,6 +436,7 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 	}
 
 	int cap = std::max(1, sharedTotal / std::max(1, TeamAlive(team)));
+	std::vector<const Objectives::Payload *> guarded;
 	for (const Objectives::Payload &payload : tables.payloads)
 	{
 		edict_t *ent = payload.ent.Get();
@@ -444,22 +455,26 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 		}
 		else if ((payload.defendTeams & bit) != 0)
 		{
-			Push(out, ent, ent->v.origin, false, KIND_DEFEND, kRankSupport);
+			auto same = std::find_if(guarded.begin(), guarded.end(), [&](const Objectives::Payload *p) {
+				return payload.group != 0 && p->group == payload.group && p->id == payload.id;
+			});
+			if (same == guarded.end())
+				guarded.push_back(&payload);
+			else if ((ent->v.origin - bot.pEdict->v.origin).Length() <
+				((*same)->ent.Get()->v.origin - bot.pEdict->v.origin).Length())
+				*same = &payload;
 		}
 	}
+	for (const Objectives::Payload *payload : guarded)
+		Push(out, payload->ent.Get(), payload->ent.Get()->v.origin, false, KIND_DEFEND, kRankIdle);
 
-	bool support = false;
-	bool defend = false;
-	for (const Intent &intent : out)
+	bool support = std::any_of(out.begin(), out.end(), [](const Intent &intent) {
+		return intent.kind == KIND_SUPPORT && intent.rank <= kRankSupport;
+	});
+	if (support)
 	{
-		support = support || (intent.kind == KIND_SUPPORT && intent.rank <= kRankSupport);
-		defend = defend || (intent.kind == KIND_DEFEND && intent.rank <= kRankSupport);
-	}
-	if (support && defend)
-	{
-		int drop = bot.strat.defender ? KIND_SUPPORT : KIND_DEFEND;
-		out.erase(std::remove_if(out.begin(), out.end(), [drop](const Intent &intent) {
-			return intent.kind == drop && intent.rank <= kRankSupport;
+		out.erase(std::remove_if(out.begin(), out.end(), [](const Intent &intent) {
+			return intent.kind == KIND_DEFEND && intent.rank <= kRankSupport;
 		}), out.end());
 	}
 
@@ -473,7 +488,8 @@ void Intents(const CBot &bot, std::vector<Intent> &out)
 	}
 }
 
-void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Candidate> &out)
+void Collect(const CBot &bot, const Nav::NavMesh &mesh, const std::vector<float> &costs,
+	std::vector<BotGoal::Candidate> &out)
 {
 	if (bot.currentAreaId < 0 || !Enabled())
 		return;
@@ -527,17 +543,26 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Can
 	std::vector<Intent> intents;
 	Intents(bot, intents);
 
+	std::vector<float> enemyField;
+	if (std::any_of(intents.begin(), intents.end(), [](const Intent &i) { return i.kind == KIND_DEFEND; }))
+		BotTactics::EnemyField(bot, mesh, enemyField);
+
+	std::vector<BotGoal::Candidate> defends;
+	bool enemyReaches = false;
+
 	std::vector<BotItems::Placement> places;
+	std::vector<BotItems::Placement> reach;
 	for (const Intent &intent : intents)
 	{
 		if (MemoReady(bot, intent.ent) > gpGlobals->time)
 			continue;
 
+		bool defend = intent.kind == KIND_DEFEND;
 		places.clear();
 		if (intent.detpack)
 			DetpackSpots(mesh, intent.point, places);
 		else if (intent.volume)
-			BotItems::VolumeAreas(mesh, intent.ent, bot.pEdict->v.origin, places);
+			BotItems::VolumeAreas(mesh, intent.ent, bot.pEdict->v.origin, places, defend);
 
 		if (places.empty())
 		{
@@ -553,6 +578,37 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Can
 			places.push_back(place);
 		}
 
+		float enemy = Nav::kUnreachableSeconds;
+		if (defend)
+		{
+			reach = places;
+			BotItems::Placement own;
+			if (!intent.volume && ResolvePoint(mesh, intent.point, own.areaId, own.point))
+				reach.push_back(own);
+
+			for (const BotItems::Placement &place : reach)
+			{
+				if (place.areaId < enemyField.size())
+					enemy = std::min(enemy, enemyField[place.areaId]);
+			}
+
+			if (enemy < Nav::kUnreachableSeconds)
+				enemyReaches = true;
+			if (DebugEnabled() && enemy < Nav::kUnreachableSeconds)
+				BOT_VLOG("CrossBot: %s weighs the defend %s #%d at %.1fs from the enemy\n", bot.name,
+					CBotTargetNameOf(intent.ent), g_engfuncs.pfnIndexOfEdict(intent.ent), enemy);
+			else if (DebugEnabled())
+				BOT_VLOG("CrossBot: %s leaves the defend %s #%d alone, no enemy spawn reaches it\n", bot.name,
+					CBotTargetNameOf(intent.ent), g_engfuncs.pfnIndexOfEdict(intent.ent));
+
+			bool walkable = std::any_of(places.begin(), places.end(), [&](const BotItems::Placement &p) {
+				return p.areaId < costs.size() && costs[p.areaId] < Nav::kUnreachableSeconds;
+			});
+			BotItems::Placement closest;
+			if (!walkable && Approach(mesh, costs, intent.point, closest))
+				places.push_back(closest);
+		}
+
 		for (const BotItems::Placement &place : places)
 		{
 			BotGoal::Candidate cand;
@@ -561,8 +617,18 @@ void Collect(const CBot &bot, const Nav::NavMesh &mesh, std::vector<BotGoal::Can
 			cand.areaId = place.areaId;
 			cand.point = place.point;
 			cand.payload = intent.kind | (intent.rank << kRankShift);
-			out.push_back(cand);
+			cand.rollCost = defend ? enemy : -1.f;
+			(defend ? defends : out).push_back(cand);
 		}
+	}
+
+	for (BotGoal::Candidate &cand : defends)
+	{
+		if (!enemyReaches)
+			cand.rollCost = -1.f;
+		else if (cand.rollCost >= Nav::kUnreachableSeconds)
+			continue;
+		out.push_back(cand);
 	}
 }
 
@@ -759,14 +825,8 @@ void OnRespawn(CBot &bot)
 
 void NoteLife(CBot &bot)
 {
-	State &st = bot.strat;
-	Vector origin = bot.pEdict->v.origin;
-	bool jumped = (origin - st.lastOrigin).Length() > kSpawnJump;
-	st.lastOrigin = origin;
-	if (st.spawnTime > 0.f && !(jumped && NearOwnSpawn(bot)))
-		return;
-
-	StartLife(bot);
+	if (bot.strat.spawnTime <= 0.f)
+		StartLife(bot);
 }
 
 bool Outranked(const CBot &bot, int payload)

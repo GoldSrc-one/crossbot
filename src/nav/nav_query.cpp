@@ -9,6 +9,7 @@ namespace
 {
 constexpr float kAabbEpsilon = 4.0f;
 constexpr float kPlaneEpsilon = 2.0f;
+constexpr float kFloorNormalZ = 0.3f;
 
 bool OutsideBounds(const Area &area, const Vector &point)
 {
@@ -24,6 +25,25 @@ bool AreaContainsPoint(const Area &area, const Vector &point)
 		return false;
 
 	return NavMath::PointInsidePlanes(point, area.planes, kPlaneEpsilon);
+}
+
+float AreaFloorZ(const Area &area, float x, float y)
+{
+	float best = area.mins.z;
+	bool any = false;
+	for (const AreaPlane &pl : area.planes)
+	{
+		if (pl.normal.z <= kFloorNormalZ)
+			continue;
+
+		float z = (pl.dist - pl.normal.x * x - pl.normal.y * y) / pl.normal.z;
+		if (!any || z > best)
+		{
+			best = z;
+			any = true;
+		}
+	}
+	return best;
 }
 
 const Area *FindAreaExact(const NavMesh &mesh, const Vector &point)

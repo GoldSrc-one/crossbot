@@ -5,7 +5,8 @@
 #include <cstdio>
 #include <cstring>
 
-#include "bot_deploy.h"
+#include "bot_deploy.h"
+#include "../game/cvars.h"
 #include "bot.h"
 #include "bot_aim.h"
 #include "bot_combat.h"
@@ -57,7 +58,6 @@ namespace
 	constexpr float kHazardLift = 2.f;
 	constexpr float kDeployBeamSlack = 24.f;
 	constexpr float kDeployGuardStep = 8.f;
-	constexpr float kDeployGuardPad = 24.f;
 	constexpr float kDeployClearMargin = 24.f;
 	constexpr float kDeployRetreatTimeout = 1.5f;
 	constexpr float kDeployDuckClear = 40.f;
@@ -550,6 +550,7 @@ namespace
 			gpGlobals->time - st.startTime);
 
 		st.active = false;
+		st.ordered = false;
 		st.phase = BotDeploy::PHASE_NONE;
 		st.lastReason = why;
 		bot.nextRepathTime = gpGlobals->time;
@@ -561,14 +562,14 @@ namespace BotDeploy
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_deploy");
+	cvar_t *cvar = CBotCvar("crossbot_deploy");
 	return !cvar || cvar->value != 0.f;
 }
 
 bool DebugEnabled()
 {
 #if BOT_VLOG_ON
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_deploy_debug");
+	cvar_t *cvar = CBotCvar("crossbot_deploy_debug");
 	return cvar && cvar->value != 0.f;
 #else
 	return false;
@@ -686,6 +687,11 @@ void NoteDeath(CBot &bot)
 	if (mine)
 		++st.selfHits;
 
+	if (BotAvoid::JumpPendingOn(bot, inflictor))
+		BOT_VLOG("CrossBot: %s beam jump FAILED (killed), gap %.0f speed %.0f dist %.0f\n", bot.name,
+			bot.avoid.jumpGap, bot.avoid.jumpSpeed, bot.avoid.jumpDist);
+	BotAvoid::ClearJump(bot);
+
 	if (!DebugEnabled())
 		return;
 
@@ -718,7 +724,7 @@ void NoteDeath(CBot &bot)
 
 SpotKind SurfacePin()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_deploy_surface");
+	cvar_t *cvar = CBotCvar("crossbot_deploy_surface");
 	if (!cvar || cvar->value <= 0.f)
 		return SPOT_NONE;
 
@@ -1125,7 +1131,7 @@ const Beam *BeamFor(const edict_t *ent)
 	return NULL;
 }
 
-BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead)
+BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead, const Beam **hit)
 {
 	if (g_beams.empty())
 		return BEAM_CLEAR;
@@ -1148,11 +1154,12 @@ BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead)
 	for (size_t i = 0; i < g_beams.size(); ++i)
 	{
 		const Beam &beam = g_beams[i];
-		if (!beam.ent || beam.ent->free || (beam.hazard && walkOver))
+		if (!beam.ent || beam.ent->free || (beam.hazard && walkOver)
+			|| BotAvoid::BeamJumpActive(bot, beam.ent))
 			continue;
 
 		float zLo = 0.f, zHi = 0.f;
-		if (BeamMeetsHull(beam, origin, hull, zLo, zHi, kDeployGuardPad))
+		if (BeamMeetsHull(beam, origin, hull, zLo, zHi, kBeamGuardPad))
 			continue;
 
 		bool ahead = false;
@@ -1160,7 +1167,7 @@ BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead)
 		{
 			float t = static_cast<float>(s) / static_cast<float>(steps);
 			Vector at = origin + (end - origin) * t;
-			ahead = BeamMeetsHull(beam, at, hull, zLo, zHi, kDeployGuardPad);
+			ahead = BeamMeetsHull(beam, at, hull, zLo, zHi, kBeamGuardPad);
 		}
 
 		if (!ahead)
@@ -1169,10 +1176,16 @@ BeamBlock BeamGuard(const CBot &bot, const Vector &moveDir, float lookahead)
 		if (!ducking && zLo - feetZ >= kDeployDuckClear)
 		{
 			if (worst == BEAM_CLEAR)
+			{
 				worst = BEAM_DUCK;
+				if (hit)
+					*hit = &beam;
+			}
 			continue;
 		}
 
+		if (hit)
+			*hit = &beam;
 		return BEAM_STOP;
 	}
 
@@ -1188,6 +1201,7 @@ void OnRespawn(CBot &bot)
 {
 	State &st = bot.deploy;
 	st.active = false;
+	st.ordered = false;
 	st.phase = PHASE_NONE;
 	st.spot = Spot();
 	st.prevWeaponId = 0;
@@ -1196,12 +1210,31 @@ void OnRespawn(CBot &bot)
 	st.memo.clear();
 }
 
+static void Begin(CBot &bot, DeployKind kind, const Spot &spot, bool duck)
+{
+	State &st = bot.deploy;
+	st.active = true;
+	st.phase = PHASE_APPROACH;
+	st.spot = spot;
+	st.kind = kind;
+	st.prevWeaponId = ActiveWeaponId(bot);
+	st.startTime = gpGlobals->time;
+	st.nextSelectTime = 0.f;
+	st.firedTime = 0.f;
+	st.lastReason = "started";
+
+	BOT_VLOG("CrossBot: %s is mining conn %u (open %.0f, %s, %s) at (%.0f,%.0f,%.0f)\n", bot.name,
+		spot.connIndex, spot.opening, SpotKindName(spot.kind), duck ? "ducked" : "standing",
+		spot.stand.x, spot.stand.y, spot.stand.z);
+}
+
 void TryStart(CBot &bot, const Nav::NavMesh &mesh)
 {
 	State &st = bot.deploy;
 	if (st.active)
 		return;
-	if (!Enabled() || !g_pGameProfile)
+	if (!Enabled() || !g_pGameProfile || BotDirective::MeleeOnly(bot) || BotDirective::HoldFire(bot) ||
+		BotDirective::Busy(bot))
 		return;
 
 	float now = gpGlobals->time;
@@ -1257,19 +1290,79 @@ void TryStart(CBot &bot, const Nav::NavMesh &mesh)
 		return;
 	}
 
-	st.active = true;
-	st.phase = PHASE_APPROACH;
-	st.spot = spot;
-	st.kind = kind;
-	st.prevWeaponId = ActiveWeaponId(bot);
-	st.startTime = now;
-	st.nextSelectTime = 0.f;
-	st.firedTime = 0.f;
-	st.lastReason = "started";
+	Begin(bot, kind, spot, duck);
+}
 
-	BOT_VLOG("CrossBot: %s is mining conn %u (open %.0f, %s, %s) at (%.0f,%.0f,%.0f)\n", bot.name,
-		spot.connIndex, spot.opening, SpotKindName(spot.kind), duck ? "ducked" : "standing",
-		spot.stand.x, spot.stand.y, spot.stand.z);
+bool Reserve(CBot &bot, const Nav::NavMesh &mesh, const char *item, Vector &stand, const char *&why)
+{
+	State &st = bot.deploy;
+	if (st.active)
+	{
+		why = "already placing";
+		return false;
+	}
+
+	int kinds = 0;
+	int chosen = -1;
+	for (int k = 0; k < DEPLOY_COUNT && chosen < 0; ++k)
+	{
+		int weaponId = g_pGameProfile ? g_pGameProfile->DeployWeapon(static_cast<DeployKind>(k)) : 0;
+		const WeaponSpec *spec = weaponId ? g_pGameProfile->GetWeaponSpec(weaponId) : nullptr;
+		if (!spec || (item && item[0] && (!spec->classname || CB_STRICMP(spec->classname, item) != 0)))
+			continue;
+		++kinds;
+		if (DeployAmmo(bot, weaponId) > 0)
+			chosen = k;
+	}
+	if (chosen < 0)
+	{
+		why = kinds ? "none left to place" : "nothing it can place";
+		return false;
+	}
+
+	DeployKind kind = static_cast<DeployKind>(chosen);
+	bool duck = kind == DEPLOY_TRIPMINE && (NextRand(st, bot.pEdict) & 1u) != 0u;
+	std::vector<int> areas(1, bot.currentAreaId);
+	const Nav::Area *here = bot.currentAreaId >= 0 ? Nav::FindAreaById(mesh, static_cast<uint32_t>(bot.currentAreaId)) : nullptr;
+	for (size_t i = 0; here && i < here->connIndices.size(); ++i)
+	{
+		const Nav::Connection &conn = mesh.conns[here->connIndices[i]];
+		areas.push_back(static_cast<int>(conn.areaA == here->id ? conn.areaB : conn.areaA));
+	}
+
+	Spot spot;
+	bool found = false;
+	float bestDist = 0.f;
+	for (int areaId : areas)
+	{
+		Spot candidate;
+		bool ok = kind == DEPLOY_SATCHEL ? FindDropSpot(bot, mesh, areaId, candidate)
+			: FindSpot(bot, mesh, areaId, duck, candidate);
+		float dist = (candidate.stand - bot.pEdict->v.origin).Length();
+		if (!ok || (found && dist >= bestDist))
+			continue;
+		spot = candidate;
+		bestDist = dist;
+		found = true;
+	}
+	if (!found)
+	{
+		why = "no spot to place it here";
+		return false;
+	}
+
+	st.pending = spot;
+	st.pendingKind = kind;
+	st.pendingDuck = duck;
+	stand = spot.stand;
+	return true;
+}
+
+void StartReserved(CBot &bot)
+{
+	State &st = bot.deploy;
+	Begin(bot, st.pendingKind, st.pending, st.pendingDuck);
+	st.ordered = true;
 }
 
 bool Run(CBot &bot)
@@ -1278,9 +1371,10 @@ bool Run(CBot &bot)
 	if (!st.active)
 		return false;
 
-	if (!Enabled() || !g_pGameProfile)
+	if ((!Enabled() && !st.ordered) || !g_pGameProfile)
 	{
 		st.active = false;
+		st.ordered = false;
 		st.phase = PHASE_NONE;
 		return false;
 	}

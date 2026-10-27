@@ -2,6 +2,7 @@
 
 #include <extdll.h>
 
+#include <memory>
 #include <vector>
 
 #include "../game/ent_handle.h"
@@ -9,6 +10,7 @@
 #include "../game/weapon_spec.h"
 #include "../nav/nav_path.h"
 #include "../nav/path_follower.h"
+#include "../nav/plan_worker.h"
 #include "bot_ability.h"
 #include "bot_aim.h"
 #include "bot_avoid.h"
@@ -17,6 +19,7 @@
 #include "bot_combat.h"
 #include "bot_daze.h"
 #include "bot_deploy.h"
+#include "bot_directive.h"
 #include "bot_fire.h"
 #include "bot_fun.h"
 #include "bot_goal.h"
@@ -44,6 +47,18 @@ struct BotFullMemo
 {
 	char classname[32] = {};
 	float expireTime = 0.f;
+};
+
+struct BotRevenge
+{
+	bool pending = false;
+	bool active = false;
+	Vector point;
+	Vector eye;
+	Vector aimForward;
+	int areaId = -1;
+	int campIndex = -1;
+	Vector dest;
 };
 
 struct BotAirmoveArc
@@ -99,6 +114,8 @@ struct CBot
 
 	bool wasDead = false;
 
+	BotRevenge revenge;
+
 	float gravity = 1.f;
 
 	BotInventory inventory;
@@ -106,6 +123,10 @@ struct CBot
 	std::vector<Nav::Waypoint> waypoints;
 	size_t waypointIndex = 0;
 	float nextRepathTime = 0.f;
+	std::shared_ptr<Nav::PlanJob> search;
+	Vector searchGoal;
+	Vector searchClampedGoal;
+	uint32_t searchStartArea = 0;
 	float spawnHoldUntil = 0.f;
 	WeaponRangeClass plannedRangeClass = RANGE_NONE;
 
@@ -209,6 +230,7 @@ struct CBot
 	BotFire::State fire;
 	BotGrenade::State grenade;
 	BotAbility::State ability;
+	BotDirective::State directive;
 	BotFire::Carry weaponCarry;
 
 	bool fallTelemetryLogged = false;
@@ -219,6 +241,9 @@ struct CBot
 	float lastProgressS = 0.f;
 	int stallRepaths = 0;
 	Vector stallOrigin;
+	int stuckGiveUps = 0;
+	Vector stuckOrigin;
+	float stuckTime = 0.f;
 
 	Vector lastOrigin;
 	bool hasLastOrigin = false;
@@ -229,6 +254,11 @@ struct CBot
 	std::vector<uint32_t> plannedConnPath;
 	std::vector<uint32_t> visitedAreaPath;
 
+	Nav::HurtLog hurt;
+	int hurtConn = -1;
+	int hurtAreaId = -1;
+	float hurtLastHealth = 0.f;
+
 	float pathStartTime = 0.f;
 
 	float estimatedArrivalTime = 0.f;
@@ -237,5 +267,6 @@ struct CBot
 
 	float moveForward = 0.f;
 	float moveSide = 0.f;
+	float lineSide = 0.f;
 };
 

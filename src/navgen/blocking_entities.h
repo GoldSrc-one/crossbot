@@ -1,12 +1,15 @@
 #pragma once
 
+#include <deque>
 #include <string>
 #include <vector>
 
 #include "bsp_file.h"
+#include "clipnode_tree.h"
 #include "entity_parser.h"
 #include "leaf_extractor.h"
 #include "nav_format.h"
+#include "sight_coverage.h"
 
 namespace navgen
 {
@@ -18,6 +21,25 @@ struct BlockingVolume
 	Vec3 mins;
 	Vec3 maxs;
 	int entityIndex = -1;
+	const SightCoverage::Grid *coverage = nullptr;
+};
+
+struct SightCoverageItem
+{
+	SightCoverage::Placed placed;
+	int entityIndex = -1;
+	size_t modelIndex = 0;
+};
+
+struct SightCoverageSet
+{
+	std::deque<std::vector<SightCoverage::Model>> models;
+	std::vector<std::string> modelNames;
+	std::vector<SightCoverageItem> items;
+	SightCoverage::Grid grid;
+	std::vector<std::string> notes;
+	SightCoverage::Stats stats;
+	double seconds = 0.0;
 };
 
 struct PushVolume
@@ -70,6 +92,9 @@ struct PassableVolume
 	std::vector<ActivatorVolume> activators;
 	double openSeconds = 0.0;
 	int entityIndex = -1;
+	int modelIndex = -1;
+	Vec3 modelMins;
+	Vec3 modelMaxs;
 };
 
 struct PassableSet
@@ -132,7 +157,14 @@ void CollectActivatorsFor(const BspFile &bsp, const std::vector<Entity> &entitie
 std::vector<BlockingVolume> ExtractBlockingVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex);
 
-std::vector<BlockingVolume> ExtractVisBlockers(const BspFile &bsp, const std::vector<Entity> &entities);
+std::vector<BlockingVolume> ExtractVisBlockers(const BspFile &bsp, const std::vector<Entity> &entities,
+	const SightCoverageSet *coverage = nullptr);
+
+void ExtractSightCoverage(const std::string &bspPath, const std::vector<Entity> &entities, const HullTree &hull,
+	int worldHeadnode, SightCoverageSet &out);
+
+void DumpSightCoverage(const std::string &bspPath, const std::vector<Entity> &entities,
+	const SightCoverageSet &set, const std::string &dir);
 
 std::vector<BlockingVolume> ExtractLadderVolumes(const BspFile &bsp, const std::vector<Entity> &entities,
 	int hullIndex);

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "nav_barrier.h"
 #include "nav_loader.h"
 #include "nav_water.h"
 
@@ -19,6 +20,7 @@ std::vector<int> g_addedUsed;
 void LoadForMap(const char *mapName)
 {
 	ResetWaterCache();
+	ResetBarrierCache();
 	g_addedFree.clear();
 	g_addedUsed.clear();
 	g_mesh = LoadNavFile(mapName);
@@ -27,6 +29,7 @@ void LoadForMap(const char *mapName)
 void Unload()
 {
 	ResetWaterCache();
+	ResetBarrierCache();
 	g_addedFree.clear();
 	g_addedUsed.clear();
 	g_mesh.reset();

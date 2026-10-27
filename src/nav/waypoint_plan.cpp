@@ -15,9 +15,10 @@ namespace NavPlan
 namespace
 {
 
-uint32_t g_detourTeamMask = ~0u;
+thread_local uint32_t g_detourTeamMask = ~0u;
 
 constexpr float kWallNormalZ = 0.3f;
+constexpr float kUprightNormalZ = 0.001f;
 
 constexpr float kPlanNoCeiling = 1.0e9f;
 
@@ -78,8 +79,21 @@ bool PointInArea(const Vector &p, const PlanArea &area, float epsilon)
 	return NavMath::PointInsidePlanes(p, area.boundPlanes, epsilon);
 }
 
+bool HasFloorPlane(const PlanArea &area)
+{
+	for (const PlanPlane &p : area.boundPlanes)
+		if (p.normal.z > kWallNormalZ)
+			return true;
+	return false;
+}
+
+float WallNormalLimit(const PlanArea &area)
+{
+	return HasFloorPlane(area) ? kUprightNormalZ : kWallNormalZ;
+}
+
 template <typename Fn>
-void ForEachImpliedWall(const PlanArea &area, Fn &&fn)
+void ForEachImpliedWall(const PlanArea &area, Fn &&fn, const PlanPlane *skip = nullptr)
 {
 	for (const PlanPlane &f : area.boundPlanes)
 	{
@@ -88,7 +102,7 @@ void ForEachImpliedWall(const PlanArea &area, Fn &&fn)
 
 		for (const PlanPlane &c : area.boundPlanes)
 		{
-			if (c.normal.z >= -kWallNormalZ)
+			if (&c == skip || c.normal.z > kWallNormalZ || std::fabs(c.normal.z) <= kUprightNormalZ)
 				continue;
 
 			float nx = f.normal.z * c.normal.x - c.normal.z * f.normal.x;
@@ -116,9 +130,10 @@ bool InAreaColumn(const Vector &p, const PlanArea &area, float margin)
 			inside = false;
 	};
 
+	float limit = WallNormalLimit(area);
 	for (const PlanPlane &pl : area.boundPlanes)
 	{
-		if (std::fabs(pl.normal.z) > kWallNormalZ)
+		if (std::fabs(pl.normal.z) > limit)
 			continue;
 		test(pl.normal.x, pl.normal.y, pl.dist);
 		if (!inside)
@@ -368,17 +383,18 @@ bool ClipLineByWalls(EdgeLine &line, const PlanArea &area, const PlanPlane *skip
 		}
 	};
 
+	float limit = WallNormalLimit(area);
 	for (const PlanPlane &other : area.boundPlanes)
 	{
 		if (&other == skip)
 			continue;
-		if (std::fabs(other.normal.z) > kWallNormalZ)
+		if (std::fabs(other.normal.z) > limit)
 			continue;
 
 		clip(other.normal.x, other.normal.y, other.dist);
 	}
 
-	ForEachImpliedWall(area, clip);
+	ForEachImpliedWall(area, clip, skip);
 
 	return bounded && (line.hi - line.lo) > 0.0001f;
 }
@@ -393,12 +409,21 @@ EdgeLine EdgeOfPlane(const PlanArea &area, size_t planeIdx)
 	if (std::fabs(pl.normal.z) > kWallNormalZ)
 		return line;
 
-	float nlen = std::sqrt(pl.normal.x * pl.normal.x + pl.normal.y * pl.normal.y);
+	float nx = pl.normal.x, ny = pl.normal.y, d = pl.dist;
+	const PlanPlane *floor = FloorPlaneOf(area);
+	if (floor && std::fabs(pl.normal.z) > kUprightNormalZ)
+	{
+		nx = floor->normal.z * pl.normal.x - pl.normal.z * floor->normal.x;
+		ny = floor->normal.z * pl.normal.y - pl.normal.z * floor->normal.y;
+		d = floor->normal.z * pl.dist - pl.normal.z * floor->dist;
+	}
+
+	float nlen = std::sqrt(nx * nx + ny * ny);
 	if (nlen < 0.0001f)
 		return line;
 
-	line.inward = Vector(pl.normal.x / nlen, pl.normal.y / nlen, 0.f);
-	float dist = pl.dist / nlen;
+	line.inward = Vector(nx / nlen, ny / nlen, 0.f);
+	float dist = d / nlen;
 	line.along = Vector(-line.inward.y, line.inward.x, 0.f);
 	line.base = Vector(line.inward.x * dist, line.inward.y * dist, 0.f);
 	line.valid = ClipLineByWalls(line, area, &pl) && line.lo > -1e8f && line.hi < 1e8f;
@@ -635,6 +660,11 @@ void BuildConnectionGates(const std::vector<PlanArea> &areas, std::vector<PlanCo
 void SetDetourTeamMask(uint32_t mask)
 {
 	g_detourTeamMask = mask;
+}
+
+uint32_t DetourTeamMask()
+{
+	return g_detourTeamMask;
 }
 
 const PlanDetour *FindDetour(const PlanArea &area, uint32_t fromId)
@@ -916,6 +946,7 @@ bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, 
 		return false;
 
 	const PmSim::PmPushFn &push = needsCrouch ? m_traces->duckPush : m_traces->standPush;
+	const PmSim::PmArcFn &arc = needsCrouch ? m_traces->duckArc : m_traces->standArc;
 
 	bool duckLaunch = (fromAreaId < m_areas->size()) && (*m_areas)[fromAreaId].crouch;
 	float launchLift = duckLaunch ? 0.f : kPlanStandHeight;
@@ -959,6 +990,7 @@ bool PlanWalker::JumpLandsIn(const Vector &launchFloor, float yaw, float speed, 
 
 	while (sim.Time() < kAirmoveSimMaxTime)
 	{
+		sim.Coast(arc, kAirmoveSimMaxTime - sim.Time());
 		if (!sim.Step())
 		{
 			result.outcome = AIRMOVE_WEDGED;

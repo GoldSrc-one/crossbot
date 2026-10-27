@@ -2,9 +2,11 @@
 
 #include <extdll.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "bsp_world.h"
 #include "nav_camp.h"
 #include "nav_format.h"
 #include "nav_vantage.h"
@@ -32,6 +34,18 @@ struct Area
 	float submergeZ = crossbot_nav::kNavSubmergeNever;
 
 	Vector driftVelocity = Vector(0.f, 0.f, 0.f);
+
+	uint16_t barrier = crossbot_nav::kNoBarrier;
+	uint16_t barrierFloor = crossbot_nav::kNoBarrier;
+};
+
+struct Barrier
+{
+	uint32_t modelIndex = 0;
+	Vector mins, maxs;
+
+	mutable int cachedEntIndex = -1;
+	mutable bool closed = false;
 };
 
 struct WaterVolume
@@ -88,6 +102,7 @@ struct Connection
 struct NavMesh
 {
 	std::string mapName;
+	std::shared_ptr<const BspWorld> world;
 	float designMaxSpeed = crossbot_nav::kNavDefaultDesignSpeed;
 	std::vector<Area> areas;
 	std::vector<Connection> conns;
@@ -97,6 +112,7 @@ struct NavMesh
 	std::vector<NavPlan::PlanConnection> planConns;
 
 	std::vector<WaterVolume> waterVolumes;
+	std::vector<Barrier> barriers;
 
 	VantageField vantageField;
 	std::vector<CampSpot> camps;

@@ -24,7 +24,7 @@ namespace BotItems
 	const Nav::Area *StandArea(const Nav::NavMesh &mesh, const Vector &center);
 
 	void VolumeAreas(const Nav::NavMesh &mesh, edict_t *ent, const Vector &from,
-		std::vector<Placement> &out);
+		std::vector<Placement> &out, bool all = false);
 
 	bool IsPickupGone(edict_t *ent);
 	bool IsChargerEmpty(edict_t *ent);

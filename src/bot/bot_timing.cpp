@@ -4,7 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "bot_timing.h"
+#include "bot_timing.h"
+#include "../game/cvars.h"
 #include "bot.h"
 
 namespace
@@ -76,7 +77,7 @@ namespace BotTiming
 
 bool Enabled()
 {
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_time_debug");
+	cvar_t *cvar = CBotCvar("crossbot_time_debug");
 	return cvar && cvar->value != 0.f;
 }
 

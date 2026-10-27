@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "teams.h"
+#include "cvars.h"
 #include "crossplay.h"
 
 namespace
@@ -66,7 +67,7 @@ bool Enabled()
 	if (!g_mapTeamplay)
 		return false;
 
-	cvar_t *cvar = g_engfuncs.pfnCVarGetPointer("crossbot_teams");
+	cvar_t *cvar = CBotCvar("crossbot_teams");
 	return !cvar || cvar->value != 0.f;
 }
 

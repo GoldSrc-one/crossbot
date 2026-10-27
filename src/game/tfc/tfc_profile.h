@@ -16,6 +16,9 @@ public:
 	bool OffhandPrimed(edict_t *pEdict) const override;
 	const char *HazardEntity() const override;
 	bool AbilityRun(CBot &bot, const Nav::NavMesh &mesh) const override;
+	int Abilities(const AbilityInfo *&list) const override;
+	bool StartAbility(CBot &bot, const char *name, const char *arg, edict_t *target) const override;
+	bool AbilityArg(const char *name, const char *value, char *out, size_t size) const override;
 	void RefreshWorld() const override;
 	bool Disguised(edict_t *pEdict) const override;
 	bool HoldFire(const CBot &bot) const override;

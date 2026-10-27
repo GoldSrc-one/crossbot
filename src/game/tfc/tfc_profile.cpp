@@ -3,6 +3,7 @@
 #include <commonmacros.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../../bot/bot_move.h"
@@ -31,6 +32,19 @@ namespace
 
 	constexpr float kFallSafeSpeed = 650.f;
 	constexpr float kFallDamage = 100.f / 374.f;
+
+	const char *const kDisguiseArgs = "class: scout, sniper, soldier, demoman, medic, hwguy, pyro or engineer";
+
+	struct DisguiseClass
+	{
+		const char *name;
+		int id;
+	};
+
+	const DisguiseClass kDisguiseClasses[] = {
+		{ "scout", 1 }, { "sniper", 2 }, { "soldier", 3 }, { "demoman", 4 }, { "medic", 5 },
+		{ "hwguy", 6 }, { "pyro", 7 }, { "engineer", 9 },
+	};
 
 	enum TFCGrenade
 	{
@@ -240,6 +254,51 @@ bool CTFCProfile::OffhandPrimed(edict_t *pEdict) const
 bool CTFCProfile::AbilityRun(CBot &bot, const Nav::NavMesh &mesh) const
 {
 	return TFCAbility::Run(bot, mesh);
+}
+
+int CTFCProfile::Abilities(const AbilityInfo *&list) const
+{
+	static const AbilityInfo kList[] = {
+		{ "discard", "discard", "drop the ammo your class does not use, for a teammate to pick up" },
+		{ "dropitems", "dropitems", "drop the goal item you carry (flag, keycard)" },
+		{ "saveme", "saveme", "call for a medic" },
+		{ "heal", nullptr, "medic: heal the target teammate; be next to them first" },
+		{ "build_sentry", nullptr, "engineer: build a sentry gun in front of you; it guards the way you face" },
+		{ "build_dispenser", nullptr, "engineer: build a dispenser in front of you" },
+		{ "build_entrance", nullptr, "engineer: build the teleporter entrance in front of you" },
+		{ "build_exit", nullptr, "engineer: build the teleporter exit in front of you" },
+		{ "detsentry", "detsentry", "engineer: blow up your sentry gun" },
+		{ "detdispenser", "detdispenser", "engineer: blow up your dispenser" },
+		{ "detentryteleporter", "detentryteleporter", "engineer: blow up your teleporter entrance" },
+		{ "detexitteleporter", "detexitteleporter", "engineer: blow up your teleporter exit" },
+		{ "detpack", nullptr, "demoman: set a detpack where you stand, then run", "fuse seconds, 5-50, default 20" },
+		{ "detpipe", "detpipe", "demoman: detonate your pipebombs" },
+		{ "feign", "feign", "spy: feign death, or get up again" },
+		{ "disguise_enemy", "disguise_enemy", "spy: disguise as an enemy", kDisguiseArgs },
+		{ "disguise_friendly", "disguise_friendly", "spy: disguise as a teammate", kDisguiseArgs },
+	};
+	list = kList;
+	return static_cast<int>(sizeof(kList) / sizeof(kList[0]));
+}
+
+bool CTFCProfile::StartAbility(CBot &bot, const char *name, const char *arg, edict_t *target) const
+{
+	return TFCAbility::Start(bot, name, arg, target);
+}
+
+bool CTFCProfile::AbilityArg(const char *name, const char *value, char *out, size_t size) const
+{
+	if (CB_STRNICMP(name, "disguise_", 9) != 0 || !value)
+		return false;
+	for (const DisguiseClass &c : kDisguiseClasses)
+	{
+		if (CB_STRICMP(value, c.name) == 0 || atoi(value) == c.id)
+		{
+			snprintf(out, size, "%d", c.id);
+			return true;
+		}
+	}
+	return false;
 }
 
 void CTFCProfile::RefreshWorld() const

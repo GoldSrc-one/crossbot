@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("all", "gates", "tripmine", "standoff", "satchel")]
+    [ValidateSet("all", "gates", "tripmine", "standoff", "satchel", "crossgame", "reroute")]
     [string]$Phase = "all",
     [int]$Seconds = 150,
     [int]$Port = 29200,
@@ -19,7 +19,7 @@ $results = New-Object System.Collections.ArrayList
 
 function Invoke-Phase([string]$name, [string]$map, [int]$port, [string[]]$boot,
         [scriptblock]$body) {
-    Invoke-CbPhase $name $map $port $boot $body -LogDir $logDir -HLDSDir $HLDSDir `
+    Invoke-CbPhase $name $map $port (@("amxx pause crossbot_menu.amxx") + $boot) $body -LogDir $logDir -HLDSDir $HLDSDir `
         -LogPrefix "deploy" -ConfigPrefix "_deploy" -Failures $failures
 }
 
@@ -44,6 +44,18 @@ function Test-Gates([int]$port) {
     }
 }
 
+function Assert-BeamJumps($lines, [string]$who, [bool]$expected = $true) {
+    $cleared = Measure-CbCount $lines "${who}beam jump cleared"
+    $failed = Measure-CbCount $lines "${who}beam jump FAILED"
+    $tried = $cleared + $failed
+    if ($expected) { Assert-Cb ($tried -gt 0) "beams were crouch-jumped ($tried)" }
+    if ($tried -gt 0) {
+        $rate = [Math]::Round(100.0 * $failed / $tried, 1)
+        Assert-Cb ($failed * 20 -le $tried) "beam jumps fail at most 5% ($failed of $tried, $rate%)"
+    }
+    return "jumps=$cleared/$tried"
+}
+
 function Test-Tripmine([int]$port) {
     $lines = Invoke-Phase "tripmine" "crossfire" $port @("crossbot_deploy_debug 1") {
         param($p)
@@ -64,17 +76,17 @@ function Test-Tripmine([int]$port) {
     $placed = Measure-CbCount $lines "placed a mine"
     $stand = Measure-CbCount $lines ", standing\)"
     $duck = Measure-CbCount $lines ", ducked\)"
-    $jump = Measure-CbCount $lines "avoid jump monster_tripmine"
     $crawl = Measure-CbCount $lines "avoid duck monster_tripmine"
     $removed = Measure-CbCount $lines "Tripmine at .* removed"
     $goals = Measure-CbCount $lines "reached goal"
-    $contact = Measure-CbCount $lines "KILLED BY ITS OWN MINE.*onbeam 1"
+    $contact = @($lines | Select-String "KILLED BY ITS OWN MINE.*onbeam 1" |
+        Where-Object { $_.Line -notmatch "avoid jump vs" }).Count
     $blast = Measure-CbCount $lines "KILLED BY ITS OWN MINE.*onbeam 0"
     $armedIn = Measure-CbCount $lines "STILL IN BEAM AT ARMING"
 
     Assert-Cb ($placed -gt 0) "tripmines placed ($placed)"
     Assert-Cb ($stand -gt 0 -and $duck -gt 0) "both stances used (stand=$stand duck=$duck)"
-    Assert-Cb ($jump -eq 0) "no beam was jumped -- a beam cannot be jumped ($jump)"
+    $jumps = Assert-BeamJumps $lines ""
     Assert-Cb ($crawl -gt 0) "a beam was crawled under ($crawl)"
     Assert-Cb ($removed -eq 0) "no mine failed to find a surface ($removed removed)"
     Assert-Cb ($goals -gt 0) "bots still reach goals with beams up ($goals)"
@@ -82,7 +94,7 @@ function Test-Tripmine([int]$port) {
     Assert-Cb ($armedIn -eq 0) "no mine armed around its placer ($armedIn)"
 
     [void]$results.Add(
-        "tripmine placed=$placed duck=$crawl goals=$goals contact=$contact blast=$blast")
+        "tripmine placed=$placed duck=$crawl $jumps goals=$goals contact=$contact blast=$blast")
 }
 
 function Test-Standoff([int]$port) {
@@ -117,6 +129,52 @@ function Test-Standoff([int]$port) {
     Assert-Cb ($stuck -eq 0) "bot never sat blocked by a beam ($stuck)"
 
     [void]$results.Add("standoff placed=$placed shoot=$shoot killed=$killed")
+}
+
+function Test-Crossgame([int]$port, [string]$name, [int]$jump) {
+    $boot = @("mp_timelimit 0", "mp_freezetime 0", "mp_roundtime 9", "amxx pause crossbot_menu.amxx",
+        "crossbot_deploy_debug 1", "crossbot_strategic 0", "crossbot_combat 0", 'crossbot_name_prefix ""',
+        "crossbot_beam_jump $jump")
+    $lines = Invoke-CbPhase $name "de_dust2" $port $boot {
+        param($p)
+        Invoke-CbRconQuiet $p "crossbot_add valve Miner"
+        Invoke-CbRconQuiet $p "crossbot_add cstrike Follower t"
+        Start-Sleep -Seconds 10
+        $deadline = (Get-Date).AddSeconds($Seconds)
+        while ((Get-Date) -lt $deadline) {
+            Invoke-CbRconQuiet $p "crossbot_equip weapon_tripmine Miner"
+            Invoke-CbRconQuiet $p "crossbot_teleport -420 -280 40 Miner"
+            Invoke-CbRconQuiet $p "crossbot_teleport -437 -420 47 Follower"
+            Invoke-CbRconQuiet $p "crossbot_nav_goal -392 160 40"
+            Start-Sleep -Seconds 8
+            Invoke-CbRconQuiet $p "crossbot_nav_status"
+            Start-Sleep -Seconds 12
+            Invoke-CbRconQuiet $p "crossbot_nav_status"
+            Start-Sleep -Milliseconds 500
+        }
+        Invoke-CbRconQuiet $p "crossbot_deploy_status"
+        Start-Sleep -Milliseconds 800
+    } -LogDir $logDir -HldsDir $HLDSDir -LogPrefix "deploy" -ConfigPrefix "_deploy" -Failures $failures `
+        -Games @("valve", "cstrike")
+
+    $placed = Measure-CbCount $lines "Miner placed a mine"
+    $reached = Measure-CbCount $lines "Follower reached goal"
+    $guard = Measure-CbCount $lines "Follower beam guard stop"
+
+    Assert-Cb ($placed -gt 0) "the HL bot placed a mine at the gate ($placed)"
+    Assert-Cb ($reached -gt 0) "the CS bot still reached its goal ($reached)"
+    if ($jump -ne 0) {
+        $low = Measure-CbCount $lines "Miner is mining .*, ducked\)"
+        $extra = Assert-BeamJumps $lines "Follower " ($low -gt 0)
+    } else {
+        $reroutes = Measure-CbCount $lines "Follower avoid rerouting around monster_tripmine"
+        $jumped = Measure-CbCount $lines "avoid beam-jump"
+        Assert-Cb ($reroutes -gt 0) "the CS bot rerouted before shooting ($reroutes)"
+        Assert-Cb ($jumped -eq 0) "crossbot_beam_jump 0 stops every beam jump ($jumped)"
+        $extra = "reroutes=$reroutes"
+    }
+
+    [void]$results.Add("$name placed=$placed reached=$reached guardstop=$guard $extra")
 }
 
 function Test-Satchel([int]$port) {
@@ -161,6 +219,8 @@ if ($Phase -eq "all" -or $Phase -eq "gates")    { Test-Gates    ($Port) }
 if ($Phase -eq "all" -or $Phase -eq "tripmine") { Test-Tripmine ($Port + 10) }
 if ($Phase -eq "all" -or $Phase -eq "standoff") { Test-Standoff ($Port + 11) }
 if ($Phase -eq "all" -or $Phase -eq "satchel")  { Test-Satchel  ($Port + 12) }
+if ($Phase -eq "crossgame") { Test-Crossgame ($Port + 13) "crossgame" 1 }
+if ($Phase -eq "reroute")   { Test-Crossgame ($Port + 14) "reroute" 0 }
 
 Write-Host ""
 Write-Host "=== summary ==="

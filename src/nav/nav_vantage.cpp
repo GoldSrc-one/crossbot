@@ -307,7 +307,8 @@ bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &ou
 		float w = 1.f / (best[n].distSq + kVantageIdwEpsilon);
 		wsum += w;
 
-		out.exposure += w * v.exposure;
+		out.exposure += w * v.exposure * v.visibility;
+		out.visibility += w * v.visibility;
 
 		for (int k = 0; k < v.watchCount; ++k)
 		{
@@ -326,6 +327,7 @@ bool BlendVantage(const VantageField &field, const Vector &eye, VantageBlend &ou
 		return false;
 
 	out.exposure /= wsum;
+	out.visibility /= wsum;
 
 	MergeWatchDirs(entries, entryCount, out);
 

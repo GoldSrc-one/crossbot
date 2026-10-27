@@ -149,6 +149,46 @@ bool PointInSolid(const BspFile &bsp, int headnode, const std::vector<BlockingVo
 	return false;
 }
 
+size_t TagBarrierFloors(const BspFile &bsp, int headnode, const std::vector<PassableVolume> &passables,
+	std::vector<Area> &areas)
+{
+	size_t tagged = 0;
+	for (Area &area : areas)
+	{
+		if ((area.areaFlags & crossbot_nav::NAV_AREA_BARRIER) != 0)
+			continue;
+
+		const Face *floor = LowestFloorFace(area.polytope);
+		if (!floor)
+			continue;
+
+		Vec3 p = WindingCentroid(floor->winding);
+		p.z -= 1.0;
+		if (ClassifyPoint(bsp, headnode, p) == CONTENTS_SOLID)
+			continue;
+
+		for (size_t pi = 0; pi < passables.size(); ++pi)
+		{
+			const PassableVolume &pass = passables[pi];
+			if (pass.areaFlag != crossbot_nav::NAV_AREA_BARRIER)
+				continue;
+
+			const BlockingVolume &vol = pass.volume;
+			if (p.x < vol.mins.x || p.x > vol.maxs.x || p.y < vol.mins.y || p.y > vol.maxs.y ||
+				p.z < vol.mins.z || p.z > vol.maxs.z)
+				continue;
+
+			if (ClassifyPoint(bsp, vol.headnode, p - vol.origin) == CONTENTS_SOLID)
+			{
+				area.floorPassableIndex = static_cast<int>(pi);
+				++tagged;
+				break;
+			}
+		}
+	}
+	return tagged;
+}
+
 bool OnWindingBoundary(const Vec3 &p, const Winding &w)
 {
 	for (size_t i = 0; i < w.size(); ++i)
@@ -366,7 +406,6 @@ void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<Bloc
 		std::vector<Winding> stillRemaining;
 		for (Winding &piece : remaining)
 		{
-			// Blocker bounds are hull-expanded, so a piece outside them cannot reach its solid.
 			if (!WindingTouchesBox(piece, blocker.mins, blocker.maxs))
 			{
 				stillRemaining.push_back(std::move(piece));
@@ -378,7 +417,6 @@ void CarveAgainstSolids(const BspFile &bsp, int headnode, const std::vector<Bloc
 			CarveWindingAgainstTreeSided(bsp, blocker.headnode,
 				TranslateWinding(piece, blocker.origin * -1.0), bias, blockerSolid, blockerEmpty);
 
-			// A blocker that removes nothing leaves the piece whole; its tree planes would only fragment it.
 			if (blockerSolid.empty())
 			{
 				stillRemaining.push_back(std::move(piece));

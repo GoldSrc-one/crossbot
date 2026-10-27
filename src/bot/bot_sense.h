@@ -13,6 +13,7 @@ namespace BotSense
 {
 
 constexpr size_t kSuspicionSlots = 256;
+constexpr size_t kNoticeSlots = 8;
 
 enum SuspicionSource : unsigned char
 {
@@ -47,6 +48,7 @@ enum LookSource : unsigned char
 	LOOK_VANTAGE_PATH,
 	LOOK_VANTAGE_OFFPATH,
 	LOOK_NO_VANTAGE,
+	LOOK_ALERT,
 };
 
 struct Suspicion
@@ -58,6 +60,13 @@ struct Suspicion
 	SuspicionSource source = SUSP_SOUND;
 	SuspicionKind kind = KIND_OTHER;
 	bool hunting = false;
+};
+
+struct NoticeSlot
+{
+	CBotEntHandle ent;
+	float progress = 0.f;
+	float need = 0.f;
 };
 
 enum VisionKeep : unsigned char
@@ -84,10 +93,25 @@ struct State
 	VisionKeep visionKeep = KEEP_NONE;
 	unsigned int keeps[3] = {};
 
+	NoticeSlot notices[kNoticeSlots];
+
+	float lightTarget = 0.f;
+	float lightBack = 0.f;
+	float lightVis = 1.f;
+	unsigned int darkDrops = 0;
+
+	float clarity = 1.f;
+	unsigned int covTraces = 0;
+	unsigned int covPartial = 0;
+	unsigned int covBlocked = 0;
+
 	unsigned int monSeen = 0;
 	unsigned int monMine = 0;
 	unsigned int monTraces = 0;
 	unsigned int monHits = 0;
+
+	unsigned int cloakRolls = 0;
+	unsigned int cloakSkips = 0;
 
 	CBotEntHandle enemy;
 	Vector enemyPos;
@@ -139,6 +163,12 @@ void Notice(CBot &bot, const edict_t *invoker);
 
 void ResetBoneCache();
 
+void LoadLight(const char *bspPath);
+
+void ForgetLight();
+
+void LightStyle(int style, const char *pattern);
+
 void RefreshMonsters();
 
 void RefreshAllies();
@@ -167,6 +197,8 @@ const Suspicion *NearestLive(const CBot &bot, const Vector &point, float radius,
 	float *distOut = nullptr);
 
 bool HeardEnemy(const CBot &bot, Vector &pos, Vector &vel, edict_t **entOut);
+
+const NoticeSlot *TopNotice(const CBot &bot, int &countOut);
 
 const char *SourceName(SuspicionSource source);
 

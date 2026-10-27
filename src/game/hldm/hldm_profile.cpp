@@ -120,23 +120,27 @@ void CHLDMProfile::ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char
 
 bool CHLDMProfile::IsDead(edict_t *pEdict) const
 {
-	return pEdict->v.deadflag != DEAD_NO || pEdict->v.health <= 0.0f;
+	return pEdict->v.deadflag != DEAD_NO || pEdict->v.health <= 0.0f || pEdict->v.iuser1 > 0;
 }
 
 edict_t *CHLDMProfile::MonsterEnemy(edict_t *ent) const
 {
-	if (!ent || ent->free || !CBotPrivateData(ent))
+	if (!ent || ent->free)
 		return nullptr;
 	if ((ent->v.flags & FL_MONSTER) == 0)
 		return nullptr;
-	if (g_offsets.mon_hEnemy < 0)
+
+	int owner = XPlay::OwnerOf(ent);
+	void *pd = XPlay::PrivateData(ent, owner);
+	int offset = GameData::MonsterEnemyOffset(owner);
+	if (!pd || offset < 0)
 		return nullptr;
 
-	edict_t *foe = GameData::Peek<edict_t *>(CBotPrivateData(ent), g_offsets.mon_hEnemy);
+	edict_t *foe = GameData::Peek<edict_t *>(pd, offset);
 	if (!foe || foe->free)
 		return nullptr;
 
-	int serial = GameData::Peek<int>(CBotPrivateData(ent), g_offsets.mon_hEnemy + 4);
+	int serial = GameData::Peek<int>(pd, offset + 4);
 	if (foe->serialnumber != serial)
 		return nullptr;
 
@@ -341,6 +345,11 @@ int CHLDMProfile::MeleeWeapon() const
 bool CHLDMProfile::IsMeleeWeapon(int id) const
 {
 	return id != 0 && id == MeleeWeapon();
+}
+
+bool CHLDMProfile::MeleeOnlyAllows(int id) const
+{
+	return IsMeleeWeapon(id);
 }
 
 int CHLDMProfile::AmbushWeapon(AmbushKind kind) const

@@ -19,6 +19,7 @@ enum Tier
 	GOAL_GATHER,
 	GOAL_FUN,
 	GOAL_STRATEGIC,
+	GOAL_DIRECTIVE,
 };
 
 struct Candidate
@@ -29,6 +30,7 @@ struct Candidate
 	Vector point;
 	int payload = 0;
 	float worth = 0.f;
+	float rollCost = -1.f;
 };
 
 struct Stop
@@ -41,6 +43,8 @@ struct Stop
 
 	bool camp = false;
 	int campIndex = -1;
+
+	bool revenge = false;
 };
 
 struct State
@@ -85,6 +89,14 @@ void OnRepathFailed(CBot &bot);
 void OnBlocked(CBot &bot, const char *what);
 
 void OnRespawn(CBot &bot);
+
+void NoteDeath(CBot &bot);
+
+bool RevengeEnabled();
+
+float RevengeFovCos();
+
+float RevengeLosRadius();
 
 Tier StopTier(const CBot &bot);
 
