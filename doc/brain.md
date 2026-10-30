@@ -363,6 +363,26 @@ console in 400-byte chunks, because the engine's print truncates longer strings 
 "off"` sends `{"enabled": false}` and the same request answers in about 2s with the tool calls. A
 `length` finish with no calls is reported as an error in `crossbot_brain_status`.
 
+**Picking the LLM.** Free OpenRouter slugs get retired (the old `nemotron-3-super-120b-a12b:free` turned
+into a 404 and every job failed). Four traced de_dust2 requests ("follow me" chat and radio, "go check B",
+"follow me" voice), replayed 2026-10-28, scored on giving the order and acknowledging it:
+
+| model | order + ack | latency |
+|---|---|---|
+| `anthropic/claude-haiku-5.5` ($0.0008/call) | 4/4 | 1.4-1.8s |
+| `nvidia/nemotron-3.5-super-vl:free` (default) | 3/4, always acks | 0.8-3s, one 17s |
+| `qwen/qwen3.7-flash` ($0.0002/call) | 3/4 | ~2s |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | 0/4, acks or acts, never both | 2-6s |
+| `nvidia/nemotron-3.5-lightning:free` | 0/4, silent orders, `release` on "follow me" | 1-5s |
+
+`nemotron-3-nano-omni` refuses `reasoning` off, `inkling:free` refuses non-agent clients, `gemma-4:free`
+was rate-limited.
+
+**Timeouts are a wall-clock deadline.** OpenRouter answers a non-streaming request at once with a 200 and
+then sends whitespace until the model is done (first byte 0.47s, body 8.9s, 33 leading spaces), so
+WinHTTP's per-read timeouts never fire. `BrainHttp::Post` checks the total time after every read; without
+that a stalled free-tier provider held a team's only job slot for over 27s against a 20s `llm.timeout`.
+
 **JEV's scores are read at their most likely level**, not the weighted average: a plain "give me your
 gun" came back almost certainly level 0, but the average leaked 17s of ignore. A re-check is only armed
 when the LLM actually issued calls; otherwise JEV asked to look again after almost every line, "lol"

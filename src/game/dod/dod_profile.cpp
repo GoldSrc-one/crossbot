@@ -481,6 +481,12 @@ bool CDODProfile::PreThink(edict_t *pEdict) const
 	if (teamed && next != -1)
 		return false;
 
+	if (priv && g_offsets.plr_fInitHUD >= 0 && GameData::Peek<int>(priv, g_offsets.plr_fInitHUD))
+	{
+		IdleMove(pEdict);
+		return true;
+	}
+
 	Slot &s = g_slots[slot];
 	float now = gpGlobals->time;
 	if (now >= s.nextJoin || s.nextJoin - now > kJoinInterval)

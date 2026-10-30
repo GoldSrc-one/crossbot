@@ -3,7 +3,7 @@
   "key": "",
   "llm": {
     "url": "https://openrouter.ai/api/v1/chat/completions",
-    "model": "nvidia/nemotron-3.5-lightning:free",
+    "model": "nvidia/nemotron-3.5-super-vl:free",
     "timeout": 20,
     "max_tokens": 1500,
     "reasoning": "off"

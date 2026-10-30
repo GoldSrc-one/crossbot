@@ -57,7 +57,6 @@ target_include_directories(crossbot_mm PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/navgen
     ${CMAKE_SOURCE_DIR}/external/jsmn
-    ${CROSSPLAY_DIR}
     ${HLSDK_DIR}/common
     ${HLSDK_DIR}/dlls
     ${HLSDK_DIR}/engine
@@ -67,8 +66,16 @@ target_include_directories(crossbot_mm PRIVATE
     ${METAMOD_DIR}
 )
 
-target_link_directories(crossbot_mm PRIVATE ${CROSSPLAY_DIR})
 target_link_libraries(crossbot_mm PRIVATE opus)
+
+option(CROSSBOT_STANDALONE "Plain Metamod plugin for one game, without CrossPlay" OFF)
+if(CROSSBOT_STANDALONE)
+    target_compile_definitions(crossbot_mm PRIVATE CROSSBOT_STANDALONE)
+    message(STATUS "crossbot: standalone build, no CrossPlay")
+else()
+    target_include_directories(crossbot_mm PRIVATE ${CROSSPLAY_DIR})
+    target_link_directories(crossbot_mm PRIVATE ${CROSSPLAY_DIR})
+endif()
 
 set_target_properties(crossbot_mm PROPERTIES
     PREFIX ""

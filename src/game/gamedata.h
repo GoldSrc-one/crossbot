@@ -92,6 +92,7 @@ struct GameOffsets
 	int plr_bShieldDrawn;
 	int plr_bOwnsShield;
 	int plr_iNextClass;
+	int plr_fInitHUD;
 	int plr_iFOV;
 
 	int tog_toggleState;

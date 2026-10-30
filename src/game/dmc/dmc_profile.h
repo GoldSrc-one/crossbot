@@ -9,6 +9,7 @@ class CDMCProfile : public CHLDMProfile
 public:
 	const char *GetName() const override;
 	bool Detect(const char *gamedir) const override;
+	bool PreThink(edict_t *pEdict) const override;
 	PmSim::FallRule FallDamage() const override;
 	bool Cloaked(edict_t *pEdict) const override;
 

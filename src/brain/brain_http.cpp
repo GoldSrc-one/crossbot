@@ -152,6 +152,11 @@ bool Post(const std::string &url, const std::string &key, const std::string &bod
 			break;
 		}
 		out.body.resize(at + got);
+		if (std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count() > timeout)
+		{
+			out.error = "timed out";
+			break;
+		}
 	}
 
 	out.seconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();

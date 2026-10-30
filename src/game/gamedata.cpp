@@ -130,6 +130,7 @@ const Request kRequests[] = {
 	{ "CBasePlayer",       "m_bShieldDrawn",          CB_OFF(plr_bShieldDrawn), true },
 	{ "CBasePlayer",       "m_bOwnsShield",           CB_OFF(plr_bOwnsShield), true },
 	{ "CBasePlayer",       "m_iNextClass",            CB_OFF(plr_iNextClass), true },
+	{ "CBasePlayer",       "m_fInitHUD",              CB_OFF(plr_fInitHUD), true },
 	{ "CBasePlayer",       "m_iFOV",                  CB_OFF(plr_iFOV), true },
 
 	{ "CBaseToggle",       "m_toggle_state",          CB_OFF(tog_toggleState) },
@@ -382,6 +383,18 @@ const char *Platform()
 #endif
 }
 
+void GameDataPath(const char *gamedir, char *out, size_t size)
+{
+	char hyperdir[256] = { 0 };
+	g_engfuncs.pfnGetGameDir(hyperdir);
+
+#ifdef CROSSBOT_STANDALONE
+	snprintf(out, size, "%s/addons/crossbot/gamedata/%s-%s.json", hyperdir, gamedir, Platform());
+#else
+	snprintf(out, size, "%s/gamedata/%s-%s.json", hyperdir, gamedir, Platform());
+#endif
+}
+
 }
 
 namespace GameData
@@ -437,18 +450,13 @@ void LoadAll()
 		g_gameLoaded[i] = false;
 	}
 
-	char hyperdir[256] = { 0 };
-	g_engfuncs.pfnGetGameDir(hyperdir);
-
-	const char *platform = Platform();
-
 	char msg[900];
 	for (int iGame = 0; iGame < XPlay::NumGames(); ++iGame)
 	{
 		const char *gamedir = XPlay::GameDir(iGame);
 
 		char path[512];
-		snprintf(path, sizeof(path), "%s/gamedata/%s-%s.json", hyperdir, gamedir, platform);
+		GameDataPath(gamedir, path, sizeof(path));
 
 		const char *why = LoadOne(path, kRequests, kRequestCount, &g_gameOffsets[iGame]);
 		if (!why && g_gameOffsets[iGame].pev != 4)
@@ -493,11 +501,8 @@ const char *LoadMap(const char *gamedir, MapOffsets &out)
 		return Why("no objective offsets are defined for this game");
 	}
 
-	char hyperdir[256] = { 0 };
-	g_engfuncs.pfnGetGameDir(hyperdir);
-
 	char path[512];
-	snprintf(path, sizeof(path), "%s/gamedata/%s-%s.json", hyperdir, gamedir, Platform());
+	GameDataPath(gamedir, path, sizeof(path));
 
 	const char *why = LoadOne(path, requests, count, &out);
 	if (!why)

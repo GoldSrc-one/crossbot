@@ -683,6 +683,21 @@ namespace
 		}
 	}
 
+#ifdef CROSSBOT_STANDALONE
+
+	void Cmd_CrossBotAdd()
+	{
+		const char *name = CMD_ARGC() > 1 ? CMD_ARGV(1) : nullptr;
+		const char *arg = CMD_ARGC() > 2 ? CMD_ARGV(2) : nullptr;
+
+		if (arg && (!arg[0] || strcmp(arg, "*") == 0))
+			arg = nullptr;
+
+		BotManager::AddBot(0, name, arg);
+	}
+
+#else
+
 	void Cmd_CrossBotAdd()
 	{
 		const char *dir = CMD_ARGC() > 1 ? CMD_ARGV(1) : nullptr;
@@ -720,6 +735,8 @@ namespace
 
 		BotManager::AddBot(iGame, name, arg);
 	}
+
+#endif
 
 	void Cmd_CrossBotNavGoal()
 	{

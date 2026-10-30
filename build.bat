@@ -3,6 +3,15 @@ setlocal
 set CROSSBOT_DEPLOY=D:\hlds\crossplay\addons\crossbot
 set VCVARSALL=D:\Program Files\Microsoft Visual Studio\2022\Preview\VC\Auxiliary\Build\vcvarsall.bat
 
+if /i "%~1"=="standalone" (
+    call "%VCVARSALL%" x86
+    if errorlevel 1 exit /b 1
+    cmake -B build-standalone -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCROSSBOT_STANDALONE=ON .
+    if errorlevel 1 exit /b 1
+    cmake --build build-standalone
+    exit /b %errorlevel%
+)
+
 setlocal
 call "%VCVARSALL%" x64
 if errorlevel 1 exit /b 1

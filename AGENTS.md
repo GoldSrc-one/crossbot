@@ -62,6 +62,9 @@ GoldSrc only loads a 32-bit plugin and navgen is 64-bit, so each CMake configure
 each in its own compiler environment, then copies `crossbot_mm.dll` into `D:\hlds\crossplay\addons\crossbot\`.
 `crossbot_mm` links a **Debug** `crossplay.lib`, so CrossPlay's asserts name any context rule you break.
 
+`build.bat standalone` builds a CrossPlay-free plugin into `build-standalone\` and deploys nothing; that
+variant installs only under `D:\hlds\<game>\addons\crossbot\` (`doc/games.md`, "Standalone build").
+
 The copy fails while a server holds the DLL, and a rerun reports `ninja: no work to do` yet still
 deploys. **Check for the `build.bat: deployed crossbot_mm.dll` line before believing any runtime result.**
 

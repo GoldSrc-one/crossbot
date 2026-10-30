@@ -11,6 +11,7 @@
 #include "../../bot/bot_weapons.h"
 #include "../crossplay.h"
 #include "../ent_handle.h"
+#include "../fake_cmd.h"
 #include "../gamedata.h"
 #include "dmc_profile.h"
 
@@ -118,6 +119,13 @@ bool CDMCProfile::Detect(const char *gamedir) const
 		return false;
 
 	return gamedir && CB_STRICMP(gamedir, "dmc") == 0;
+}
+
+bool CDMCProfile::PreThink(edict_t *pEdict) const
+{
+	if (pEdict->v.maxspeed == 1.f)
+		FakeCmd::Run(pEdict, "_firstspawn");
+	return false;
 }
 
 PmSim::FallRule CDMCProfile::FallDamage() const

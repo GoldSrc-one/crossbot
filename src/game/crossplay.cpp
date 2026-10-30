@@ -11,14 +11,18 @@
 #include <FileSystem.h>
 
 #include "crossplay.h"
+#ifndef CROSSBOT_STANDALONE
 #include "crossplay_api.h"
+#endif
 #include "gamedata.h"
 #include "game_profile.h"
 
 namespace
 {
 
+#ifndef CROSSBOT_STANDALONE
 static_assert(XPlay::kMaxGames == CrossPlay::maxGameDlls, "XPlay::kMaxGames must match CrossPlay::maxGameDlls");
+#endif
 
 int g_current = -1;
 IGameProfile *g_profiles[XPlay::kMaxGames] = {};
@@ -45,6 +49,41 @@ IFileSystem *EngineFileSystem()
 namespace XPlay
 {
 
+#ifdef CROSSBOT_STANDALONE
+
+int NumGames()
+{
+	return 1;
+}
+
+const char *GameDir(int iGame)
+{
+	return iGame == 0 ? GET_GAME_INFO(PLID, GINFO_NAME) : "?";
+}
+
+int MapOwner()
+{
+	return 0;
+}
+
+int OwnerOf(const edict_t *ent)
+{
+	return ent && !ent->free && ent->pvPrivateData ? 0 : -1;
+}
+
+void *PrivateData(const edict_t *ent, int iGame)
+{
+	return ent && !ent->free && iGame == 0 ? ent->pvPrivateData : nullptr;
+}
+
+void RunInGame(int iGame, void (*callback)(void *context), void *context)
+{
+	if (iGame == 0)
+		callback(context);
+}
+
+#else
+
 int NumGames()
 {
 	int n = CrossPlay::gNumGameDlls;
@@ -58,19 +97,6 @@ const char *GameDir(int iGame)
 	if (iGame < 0 || iGame >= NumGames())
 		return "?";
 	return CrossPlay::gGameDirs[iGame];
-}
-
-int FindGame(const char *dir)
-{
-	if (!dir || !dir[0])
-		return -1;
-
-	for (int i = 0; i < NumGames(); ++i)
-	{
-		if (CB_STRICMP(CrossPlay::gGameDirs[i], dir) == 0)
-			return i;
-	}
-	return -1;
 }
 
 int MapOwner()
@@ -102,6 +128,29 @@ void *PrivateData(const edict_t *ent, int iGame)
 	return CrossPlay::gEntityObjects[iGame][index];
 }
 
+void RunInGame(int iGame, void (*callback)(void *context), void *context)
+{
+	if (iGame < 0 || iGame >= NumGames())
+		return;
+
+	CrossPlay::GameContext(iGame, callback, context);
+}
+
+#endif
+
+int FindGame(const char *dir)
+{
+	if (!dir || !dir[0])
+		return -1;
+
+	for (int i = 0; i < NumGames(); ++i)
+	{
+		if (CB_STRICMP(GameDir(i), dir) == 0)
+			return i;
+	}
+	return -1;
+}
+
 const char *HyperDir()
 {
 	static char hyperdir[256];
@@ -124,12 +173,12 @@ bool FindMapBsp(const char *mapName, char *out, unsigned int size)
 
 	int owner = MapOwner();
 	if (owner >= 0 && owner < NumGames())
-		dirs[count++] = CrossPlay::gGameDirs[owner];
+		dirs[count++] = GameDir(owner);
 
 	for (int i = 0; i < NumGames(); ++i)
 	{
 		if (i != owner)
-			dirs[count++] = CrossPlay::gGameDirs[i];
+			dirs[count++] = GameDir(i);
 	}
 
 	dirs[count++] = HyperDir();
@@ -148,14 +197,6 @@ bool FindMapBsp(const char *mapName, char *out, unsigned int size)
 
 	snprintf(out, size, "%s/maps/%s.bsp", dirs[0], mapName);
 	return false;
-}
-
-void RunInGame(int iGame, void (*callback)(void *context), void *context)
-{
-	if (iGame < 0 || iGame >= NumGames())
-		return;
-
-	CrossPlay::GameContext(iGame, callback, context);
 }
 
 int Current()
@@ -223,7 +264,7 @@ void DetectProfiles()
 		g_profiles[i] = nullptr;
 
 	for (int i = 0; i < NumGames(); ++i)
-		g_profiles[i] = GameProfile_Detect(CrossPlay::gGameDirs[i]);
+		g_profiles[i] = GameProfile_Detect(GameDir(i));
 
 	char msg[256];
 	for (int i = 0; i < NumGames(); ++i)

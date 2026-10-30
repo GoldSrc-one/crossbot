@@ -5,8 +5,8 @@ invocations.
 
 ## The shared harness
 
-Every script drives the live `D:\hlds` install through CrossPlay, and they share one way of starting,
-talking to and stopping a server.
+Every script drives the live `D:\hlds` install through CrossPlay, except `test_standalone.ps1`, and they
+share one way of starting, talking to and stopping a server.
 
 ### What the tests touch
 
@@ -165,6 +165,39 @@ reason, and exits 1 if anything failed.
 - **Cleanup.** Killing a child skips its cleanup, so the runner tracks the ports it owns and at the end
   kills surviving `hlds.exe` whose command line has one of its `+port`s. A server on the default 27015 is
   outside its range and left alone.
+
+## scripts/test_standalone.ps1
+
+```powershell
+.\scripts\test_standalone.ps1 -Game cstrike -Map de_dust2
+```
+
+The smoke check for `build.bat standalone` (`doc/games.md`, "Standalone build"). It needs no CrossPlay at
+runtime: it runs `deploy_standalone.ps1`, which writes only `<game>\addons\crossbot\` and reads gamedata and
+the `.nav` from `crossplay\`, then boots `-game <game>` through `test_server_start.ps1` with the `-dll` and
+`+localinfo` pair. `crossbot_add` here takes no game. `liblist.gam` and `plugins.ini` stay untouched, and
+the "no plugins.ini" warning is suppressed because it does not apply. The log is
+`nav_debug\logs\standalone_<game>.log`.
+
+Two bots join, and it prints `PASS` or `FAIL` from:
+
+- `game #0 '<game>' ready` and `added Bot1 to '<game>'` in the log;
+- two `crossbot_teams_status` reads 20 s apart with at least one bot's `origin=` changed;
+- on `cstrike`, `czero`, `dod` and `tfc`, no bot on team 0;
+- no `CrossBot: FATAL`, and the server still alive.
+
+The team check is what catches a CS build that lost its `pev->team` mirror: the bots still spawn and walk.
+It proves the plugin boots and bots play, not their quality; the nav, fire and deploy sweeps are
+CrossPlay-only.
+
+| game | map | `-WaitSeconds` | result (2026-10-30, 2 bots, RelWithDebInfo) |
+|---|---|---|---|
+| valve | crossfire | 60 | PASS |
+| gearbox | op4_bootcamp | 60 | PASS |
+| cstrike | de_dust2 | 60 | PASS |
+| dod | dod_anzio | 180 (`.NOD` rebuild) | PASS |
+| tfc | casbah | 60 | PASS |
+| dmc | dcdm5 | 60 | PASS |
 
 ## Sweeping a change
 

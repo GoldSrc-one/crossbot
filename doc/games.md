@@ -168,6 +168,57 @@ Profiles live one directory per game: `src/game/hldm/`, `ricochet/`, `gearbox/`,
 them all, returning function-local statics. Anything keyed off the **map's** game rather than the bot's
 (teams, objectives, gamedata) stays in `src/game/` itself.
 
+### Standalone build
+
+`build.bat standalone` builds `build-standalone\crossbot_mm.dll` with `CROSSBOT_STANDALONE`: a plain
+Metamod plugin for one game, with no `crossplay.dll` import. It runs `valve`, `gearbox`, `cstrike` and
+`dod`, plus `tfc` and `dmc`. `ricochet`, `rewolf` and `ts` are not covered. It has its own build directory
+because the CMake option sticks in the cache, and `build\` deploys into CrossPlay.
+
+Only `XPlay` changes, in six functions in `crossplay.cpp`. The game is always 0, so everything above it
+keeps working: `NumGames` is 1, `MapOwner` is 0 and `OwnerOf` is 0 for a live edict with private data.
+They are not no-ops: `RunInGame` must call its callback (`AddBot` creates the fake client inside it),
+`PrivateData` returns `pvPrivateData`, and `GameDir(0)` is Metamod's `GINFO_NAME`, the bare directory name
+that `GameProfile_Detect` compares.
+
+**Install.** `scripts/deploy_standalone.ps1 -Game <game> [-Map <map>]` fills `<game>/addons/crossbot/` and
+touches nothing else. Gamedata moves there too (`addons/crossbot/gamedata/<game>-win.json`, copied from
+`crossplay/gamedata/`), so one folder is the whole install. Load Metamod either the usual way (`liblist.gam`
+plus a `plugins.ini` line) or without editing anything:
+
+```
+hlds.exe -console -game cstrike -dll addons\metamod\metamod.dll +localinfo mm_pluginsfile addons/crossbot/plugins.ini +map de_dust2
+```
+
+`-dll` resolves through the engine's search path, and `valve` is the base of every mod, so
+`valve/addons/metamod/` serves all of them.
+
+**What CrossPlay did that the build must do itself:**
+
+- **CS teams.** ReGameDLL never writes `pev->team`, and everything here reads it (`Teams::TeamOf`,
+  `Objectives::TeamBit`). `CCSProfile::RefreshWorld`, compiled only into this build, mirrors `m_iTeam`
+  once a second with `FixProxyTeam`'s reversal (T 1→2, CT 2→1). Without it every gate reads team 0, which
+  `Teams::Active` takes as "teams do nothing", and bots look fine until they shoot a teammate. It is safe
+  because ReGameDLL reads `pev->team` on no player.
+- **DMC's first spawn.** With a `motd.txt`, `CBasePlayer::Spawn` holds a new player at maxspeed 1 until the
+  client sends `_firstspawn` (see "Deathmatch Classic").
+
+**Limits:**
+
+- **Gamedata belongs to the game DLL it was generated from.** Those in `D:\hlds` match that install, and
+  `cstrike` is ReGameDLL. Any other build needs its own JSON; a wrong offset read kills the server on
+  purpose.
+- **DMC has no duck or ladder here.** CrossPlay's `noDuck` and `noLadder` hand those moves to a donor game's
+  `PM_Move`. Natively DMC has neither, but nav plans can use them, so a bot can fail such a link.
+- **`crossbot_menu.amxx` does not work unchanged.** It sends the game as the first argument of
+  `crossbot_add`, which this build reads as the bot's name.
+- **`mp_falldamage 0` is the default here**, HL's flat 10 per landing, which is not modelled, so bots are
+  only over-careful about falls.
+- **Windows only.** Only `-win` gamedata exists.
+
+No CrossPlay `moveVars` are needed: `Bot_Physics` reads the real cvars and `Bot_MaxSpeed` learns from
+`PM_Move_Post`. Voice needs ReHLDS and turns itself off without it.
+
 ## The profile interface (game_profile.h)
 
 `IGameProfile` is the mod-specific half of the bot. Everything that is not geometry lives behind it,
@@ -525,6 +576,10 @@ It does not inherit velocity (only modes with `WPN_Q_INHERIT_VEL` do). The grena
   (`noDuck`) to a move donor, and its donor search never increments. With `valve` as game 0 the first
   check succeeds; with `dmc` alone or first the server spins forever the first time a bot crouch-jumps.
   That loop is CrossPlay's to fix.
+- **The MOTD holds a new player.** With a `motd.txt`, `CBasePlayer::Spawn` sets maxspeed 1 and waits for
+  the client's `_firstspawn`, which the bot never sends by itself, so it stands at spawn with gravity still
+  working. `CDMCProfile::PreThink` sends it while `v.maxspeed` is 1. CrossPlay's `dmcMOTD` hides the file
+  from the game, so under CrossPlay this never fires; only the standalone build meets it.
 - **The ring makes a player 80% invisible.** `CDMCProfile::Cloaked` reads `renderfx ==
   kRenderFxGlowShell` with `renderamt == 5`, or `rendermode == kRenderTransColor`. It is not
   `Disguised`: the player is still a target and only sight is rolled (`doc/perception.md`, cloaked
@@ -995,7 +1050,8 @@ what makes following the menu safe.
   valid on 1.6 and CZ.
 - ReGameDLL never writes `pev->team`. CrossPlay's `FixProxyTeam` mirrors `m_iTeam` into it, reversed
   (T 1→2, CT 2→1), for native and foreign players alike, so `Teams::TeamOf` and `ReadCs` need nothing
-  new. `crossbot_list_objectives` prints both columns.
+  new; the standalone build does the mirroring itself ("Standalone build"). `crossbot_list_objectives`
+  prints both columns.
 - `Respawn` is an empty move: CS is round-based, and `IN_ATTACK` only cycles the spectator camera.
 
 ### The table
@@ -1075,6 +1131,12 @@ enfield sten enfields bren piat` (Allies), `k98 k43 mp40 mp44 k98s fg42 fg42_s m
 `pev->team` is 1 or 2 and `m_iNextClass != -1` (the gate CrossPlay's `joinTeam` holds the spawn on).
 After three tries the class becomes `cls_random`, which covers a British class on a US map, a para class
 on a non-para map and class limits without parsing `info_doddetect`.
+
+**Never send `jointeam` while `m_fInitHUD` is set.** The bot's first `PlayerPreThink` runs
+`CDoDTeamPlay::InitHUD`, which broadcasts `ScoreInfo` with team 3 and sends the correcting `PTeam` only to
+the bot itself. A join sent before it is overwritten on every connected client: the bot reads as a
+spectator on the scoreboard and as Axis on the minimap, until that client reconnects. Humans are safe
+because the team menu opens at the end of `InitHUD`. `PreThink` idles until the flag clears, one move later.
 
 Respawn is in waves (`RespawnAllies`/`RespawnAxis` 39629); between death and the wave the player is an
 observer (`iuser1 > 0`) and `Respawn` is an empty move. That observer has `deadflag == DEAD_NO` and

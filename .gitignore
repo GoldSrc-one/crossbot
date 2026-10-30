@@ -1,6 +1,7 @@
 # Build output
 /build/
 /build-x64/
+/build-standalone/
 
 # IDE/editor
 .vs/

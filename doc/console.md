@@ -38,6 +38,8 @@ corrupted` box and looks hung until killed. That code is CrossPlay's, so the lim
   - A model the scan did not find is a warning, not a refusal: it prints the installed list and uses the
     name anyway, because models inside a `.pak` are invisible to the scan. Where the list comes from and
     why CrossPlay may clamp the result: `doc/games.md`, `player_models.cpp`.
+  - The standalone build has one game, so it drops the first argument: `crossbot_add [name] [model|team]`
+    (`doc/games.md`, "Standalone build").
 - `crossbot_nav_goal <x> <y> <z>` — send all bots to a point.
 - `crossbot_revenge_probe <x> <y> <z> <yaw>` — run the revenge sightline scan (`doc/path_planning.md`,
   "Revenge") from that eye and facing against the loaded mesh, printing walk connections, traces and

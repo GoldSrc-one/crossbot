@@ -259,6 +259,27 @@ bool CCSProfile::PreThink(edict_t *pEdict) const
 	return true;
 }
 
+#ifdef CROSSBOT_STANDALONE
+
+void CCSProfile::RefreshWorld() const
+{
+	if (g_offsets.plr_iTeam < 0)
+		return;
+
+	for (int i = 1; i <= gpGlobals->maxClients; ++i)
+	{
+		edict_t *ent = g_engfuncs.pfnPEntityOfEntIndex(i);
+		void *priv = CBotPrivateData(ent);
+		if (!priv)
+			continue;
+
+		int team = GameData::Peek<int>(priv, g_offsets.plr_iTeam);
+		ent->v.team = team == kTeamTerrorist ? 2 : team == kTeamCT ? 1 : 0;
+	}
+}
+
+#endif
+
 void CCSProfile::Respawn(edict_t *pEdict) const
 {
 	IdleMove(pEdict, 0);

@@ -11,6 +11,9 @@ public:
 
 	void Respawn(edict_t *pEdict) const override;
 	bool PreThink(edict_t *pEdict) const override;
+#ifdef CROSSBOT_STANDALONE
+	void RefreshWorld() const override;
+#endif
 	bool AbilityRun(CBot &bot, const Nav::NavMesh &mesh) const override;
 	int Abilities(const AbilityInfo *&list) const override;
 	bool StartAbility(CBot &bot, const char *name, const char *arg, edict_t *target) const override;

@@ -46,7 +46,7 @@ if (-not $Live) {
 }
 
 $boot = @("mp_timelimit 0", "mp_freezetime 0", "mp_roundtime 9", "mp_autoteambalance 0", "mp_limitteams 0",
-    "crossbot_brain_test_human Lead", "sv_alltalk 0")
+    "amxx pause crossbot_menu.amxx", 'crossbot_name_prefix ""', "crossbot_brain_test_human Lead", "crossbot_brain_trace 1", "sv_alltalk 0")
 $start = & "$scriptDir\test_server_start.ps1" -Map $Map -Games @("cstrike") -Port $Port -LogFile $log -WaitSeconds 90 `
     -RequireVerbose -Commands $boot
 $status = ""
