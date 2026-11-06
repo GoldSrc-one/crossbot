@@ -40,6 +40,9 @@ jobs:
           Copy-Item games\*.json "$out\games"
           Copy-Item names.txt, places.txt, brain.example.json $out
           Compress-Archive -Path addons -DestinationPath crossbot.zip
+          New-Item -ItemType Directory -Force "navs\$out" | Out-Null
+          Copy-Item nav "navs\$out" -Recurse
+          Compress-Archive -Path navs\addons -DestinationPath crossbot-navs.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -47,8 +50,16 @@ jobs:
           name: crossbot
           path: crossbot.zip
 
+      - name: Upload navs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossbot-navs
+          path: crossbot-navs.zip
+
       - name: Publish release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: crossbot.zip
+          files: |
+            crossbot.zip
+            crossbot-navs.zip
