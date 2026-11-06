@@ -1,0 +1,54 @@
+name: Build
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    types: [opened, reopened, synchronize]
+  release:
+    types: [published]
+
+jobs:
+  windows:
+    name: 'Windows'
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build crossbot_mm
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A Win32 .
+          cmake --build build --config RelWithDebInfo
+
+      - name: Build navgen
+        run: |
+          cmake -B build-x64 -G "Visual Studio 17 2022" -A x64 .
+          cmake --build build-x64 --config RelWithDebInfo
+
+      - name: Create zip
+        run: |
+          $out = "addons\crossbot"
+          New-Item -ItemType Directory -Force "$out\games", "$out\nav" | Out-Null
+          Copy-Item build\RelWithDebInfo\crossbot_mm.dll, build\RelWithDebInfo\crossbot_mm.pdb $out
+          Copy-Item build-x64\tools\navgen\RelWithDebInfo\navgen.exe, build-x64\tools\navgen\RelWithDebInfo\navgen.pdb $out
+          Copy-Item games\*.json "$out\games"
+          Copy-Item names.txt, places.txt, brain.example.json $out
+          Compress-Archive -Path addons -DestinationPath crossbot.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossbot
+          path: crossbot.zip
+
+      - name: Publish release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: crossbot.zip
