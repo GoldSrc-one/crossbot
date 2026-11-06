@@ -13,17 +13,20 @@
 #include "../../bot/bot_move.h"
 #include "../../bot/bot_timing.h"
 #include "../../bot/bot_weapons.h"
+#include "../../bot/bot_weapons.h"
 #include "../crossplay.h"
+#include "../cvars.h"
+#include "../dmc/dmc_profile.h"
 #include "../ent_handle.h"
 #include "../fake_cmd.h"
 #include "../gamedata.h"
 #include "hldm_profile.h"
-#include "hldm_weapons.h"
 #include "../player_models.h"
 
 namespace
 {
 	constexpr int kEnvExplosionNoDamage = 1;
+	constexpr int kMaxPlayers = 32;
 
 	constexpr float kGaussPunchDot = 0.5f;
 	constexpr float kGaussPunchStep = 8.f;
@@ -31,21 +34,14 @@ namespace
 	constexpr float kGaussMinDamage = 10.f;
 	constexpr float kGaussBlastScale = 1.75f;
 
-	constexpr float kHLDMWeaponRespawn = 20.f;
-	constexpr float kHLDMAmmoRespawn = 20.f;
-	constexpr float kHLDMItemRespawn = 30.f;
-	constexpr float kHLDMRechargeDelay = 30.f;
-	constexpr float kHLDMHealthChargerDelay = 60.f;
-	constexpr float kHLDMFullTimeout = 120.f;
-	constexpr float kHLDMUnreachableTimeout = 30.f;
 	constexpr float kHLDMMaxNormal = 100.f;
 
 	constexpr int kSfHurtNoClients = 8;
 
 	constexpr float kHLDMThrowTilt = 10.f;
-	constexpr float kHLDMThrowRate = 4.f;
-	constexpr float kHLDMThrowSpeedMax = 500.f;
 	constexpr float kHLDMThrowPitchLimit = 89.f;
+
+	void *g_setupDone[kMaxPlayers + 1];
 
 	bool HasPrefix(const char *s, const char *prefix)
 	{
@@ -71,20 +67,12 @@ const char *CBotClassOf(const edict_t *ent)
 
 const char *CHLDMProfile::GetName() const
 {
-	return "HLDM";
+	return config.name;
 }
 
 unsigned int CHLDMProfile::GetFlags() const
 {
 	return GAME_DEATHMATCH;
-}
-
-bool CHLDMProfile::Detect(const char *gamedir) const
-{
-	if (!gpGlobals->deathmatch_)
-		return false;
-
-	return gamedir && CB_STRICMP(gamedir, "valve") == 0;
 }
 
 void CHLDMProfile::ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
@@ -173,12 +161,56 @@ float CHLDMProfile::EvaluateCombat(edict_t *pEdict, const BotInventory &inv) con
 
 PmSim::FallRule CHLDMProfile::FallDamage() const
 {
-	return PmSim::kHlFall;
+	if (config.fallCvar && CBotCvarFloat(config.fallCvar) == 0.f)
+		return PmSim::kNoFall;
+	return config.fall;
+}
+
+bool CHLDMProfile::PreThink(edict_t *pEdict) const
+{
+	if (!config.weaponSetup)
+		return false;
+
+	int index = ENTINDEX(pEdict);
+	if (index <= 0 || index > kMaxPlayers)
+		return false;
+
+	void *priv = CBotPrivateData(pEdict);
+	if (!priv || IsDead(pEdict))
+	{
+		g_setupDone[index] = nullptr;
+		return false;
+	}
+
+	void *active = GameData::Peek<void *>(priv, g_offsets.plr_pActiveItem);
+	if (!active || active == g_setupDone[index])
+		return false;
+
+	g_setupDone[index] = active;
+
+	const WeaponSpec *spec = GetWeaponSpec(GameData::Peek<int>(active, g_offsets.item_iId));
+	if (spec && spec->setup)
+		FakeCmd::Run(pEdict, spec->setup);
+
+	return false;
+}
+
+int CHLDMProfile::RadioCommands(const RadioInfo *&list) const
+{
+	list = config.radio.empty() ? nullptr : config.radio.data();
+	return static_cast<int>(config.radio.size());
+}
+
+bool CHLDMProfile::BraceDucks() const
+{
+	return config.braceDuck;
 }
 
 void CHLDMProfile::Respawn(edict_t *pEdict) const
 {
-	unsigned short buttons = (pEdict->v.deadflag == DEAD_RESPAWNABLE) ? IN_ATTACK : 0;
+	unsigned short buttons = 0;
+	if (config.respawnPress == RESPAWN_ATTACK && pEdict->v.deadflag == DEAD_RESPAWNABLE)
+		buttons = IN_ATTACK;
 
 	byte msec = Bot_FrameMsec();
 	BotTiming::BeginMove(pEdict, msec);
@@ -224,25 +256,19 @@ bool CHLDMProfile::IsArmouryArmor(edict_t *ent)
 
 float CHLDMProfile::ItemRespawnDelay(ItemKind kind) const
 {
-	switch (kind)
-	{
-	case ITEM_WEAPON:         return kHLDMWeaponRespawn;
-	case ITEM_AMMO:           return kHLDMAmmoRespawn;
-	case ITEM_PICKUP:         return kHLDMItemRespawn;
-	case ITEM_RECHARGE:       return kHLDMRechargeDelay;
-	case ITEM_HEALTHCHARGER:  return kHLDMHealthChargerDelay;
-	default:                  return kHLDMItemRespawn;
-	}
+	if (kind < 0 || kind >= kItemKindCount)
+		kind = ITEM_NONE;
+	return config.respawn[kind];
 }
 
 float CHLDMProfile::ItemFullTimeout() const
 {
-	return kHLDMFullTimeout;
+	return config.fullTimeout;
 }
 
 float CHLDMProfile::ItemUnreachableTimeout() const
 {
-	return kHLDMUnreachableTimeout;
+	return config.unreachableTimeout;
 }
 
 float CHLDMProfile::ChargerFullValue(ItemKind kind) const
@@ -260,27 +286,50 @@ float CHLDMProfile::ChargerValue(ItemKind kind, edict_t *pEdict) const
 
 const WeaponSpec *CHLDMProfile::GetWeaponSpec(int id) const
 {
-	return HLDM_WeaponSpec(id);
+	if (id <= 0 || id >= static_cast<int>(config.weapons.size()))
+		return nullptr;
+
+	const WeaponSpec &spec = config.weapons[static_cast<size_t>(id)];
+	return spec.classname ? &spec : nullptr;
 }
 
 int CHLDMProfile::WeaponSlotCount() const
 {
-	return kHLDMWeaponSlots;
+	return static_cast<int>(config.weapons.size());
 }
 
 const WeaponSpec *CHLDMProfile::WeaponSlot(int slot) const
 {
-	return HLDM_WeaponSlot(slot);
+	if (slot < 0 || slot >= static_cast<int>(config.weapons.size()))
+		return nullptr;
+
+	return &config.weapons[static_cast<size_t>(slot)];
 }
 
 int CHLDMProfile::ItemSlots() const
 {
-	return kHLDMItemSlots;
+	return config.itemSlots;
 }
 
-bool CHLDMProfile::ReadInventory(edict_t *, BotInventory &) const
+bool CHLDMProfile::ReadInventory(edict_t *player, BotInventory &out) const
 {
-	return false;
+	if (!config.absoluteTimers)
+		return false;
+
+	BotWeapons::ReadItems(player, out);
+
+	float now = gpGlobals->time;
+	out.nextAttack -= now;
+	for (int i = 0; i < out.count; ++i)
+	{
+		BotWeapon &w = out.weapons[i];
+		w.nextPrimaryAttack -= now;
+		w.nextSecondaryAttack -= now;
+		if (i == out.activeIndex)
+			w.nextPrimaryAttack = std::max(w.nextPrimaryAttack, out.nextAttack);
+	}
+
+	return true;
 }
 
 bool CHLDMProfile::SelectWeapon(edict_t *player, const WeaponSpec &spec) const
@@ -302,13 +351,10 @@ bool CHLDMProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
 	if (!classname || !classname[0])
 		return false;
 
-	if (strcmp(classname, "item_healthkit") == 0 || strcmp(classname, "item_battery") == 0 ||
-		strcmp(classname, "item_longjump") == 0 || IsArmouryArmor(ent))
-		return true;
+	if (strcmp(classname, "armoury_entity") == 0 && !IsArmouryArmor(ent))
+		return false;
 
-	static const char *const kPreferred[] = { "weapon_gauss", "weapon_crossbow", "weapon_egon" };
-
-	return PreferredWeaponOrAmmo(classname, kPreferred, ARRAYSIZE(kPreferred));
+	return PreferredWeaponOrAmmo(classname, config.preferred.data(), config.preferred.size());
 }
 
 bool CHLDMProfile::PreferredWeaponOrAmmo(const char *classname, const char *const *weapons,
@@ -339,12 +385,12 @@ bool CHLDMProfile::PreferredWeaponOrAmmo(const char *classname, const char *cons
 
 int CHLDMProfile::MeleeWeapon() const
 {
-	return kHLDMMelee;
+	return config.melee.empty() ? 0 : config.melee[0];
 }
 
 bool CHLDMProfile::IsMeleeWeapon(int id) const
 {
-	return id != 0 && id == MeleeWeapon();
+	return id != 0 && std::find(config.melee.begin(), config.melee.end(), id) != config.melee.end();
 }
 
 bool CHLDMProfile::MeleeOnlyAllows(int id) const
@@ -354,79 +400,34 @@ bool CHLDMProfile::MeleeOnlyAllows(int id) const
 
 int CHLDMProfile::AmbushWeapon(AmbushKind kind) const
 {
-	switch (kind)
-	{
-	case AMBUSH_GRENADE: return kHLDMGrenade;
-	case AMBUSH_SNARK: return kHLDMSnark;
-	default: return 0;
-	}
+	return (kind >= 0 && kind < AMBUSH_COUNT) ? config.ambush[kind] : 0;
 }
 
 int CHLDMProfile::DeployWeapon(DeployKind kind) const
 {
-	switch (kind)
-	{
-	case DEPLOY_TRIPMINE: return kHLDMTripmine;
-	case DEPLOY_SATCHEL: return kHLDMSatchel;
-	default: return 0;
-	}
+	return (kind >= 0 && kind < DEPLOY_COUNT) ? config.deployWeapon[kind] : 0;
 }
 
 const char *CHLDMProfile::DeployEntity(DeployKind kind) const
 {
-	switch (kind)
-	{
-	case DEPLOY_TRIPMINE: return "monster_tripmine";
-	case DEPLOY_SATCHEL: return "monster_satchel";
-	default: return NULL;
-	}
+	return (kind >= 0 && kind < DEPLOY_COUNT) ? config.deployEntity[kind] : nullptr;
 }
 
 const char *CHLDMProfile::AmmoEntity(int weaponId, WeaponAmmo pool) const
 {
 	const WeaponSpec *spec = GetWeaponSpec(weaponId);
-	if (!spec || !spec->classname || pool == AMMO_NONE)
-		return NULL;
+	if (!spec || pool <= AMMO_NONE || pool > AMMO_SECONDARY)
+		return nullptr;
 
-	static const struct
-	{
-		const char *weapon;
-		const char *clip;
-		const char *primary;
-		const char *secondary;
-	} kAmmo[] = {
-		{ "weapon_9mmhandgun",  "ammo_9mmclip",   NULL,               NULL },
-		{ "weapon_357",         "ammo_357",       NULL,               NULL },
-		{ "weapon_9mmAR",       "ammo_9mmAR",     NULL,               "ammo_ARgrenades" },
-		{ "weapon_crossbow",    "ammo_crossbow",  NULL,               NULL },
-		{ "weapon_shotgun",     "ammo_buckshot",  NULL,               NULL },
-		{ "weapon_rpg",         "ammo_rpgclip",   NULL,               NULL },
-		{ "weapon_gauss",       NULL,             "ammo_gaussclip",   NULL },
-		{ "weapon_egon",        NULL,             "ammo_egonclip",    NULL },
-		{ "weapon_handgrenade", NULL,             "weapon_handgrenade", NULL },
-		{ "weapon_snark",       NULL,             "weapon_snark",     NULL },
-		{ "weapon_tripmine",    NULL,             "weapon_tripmine",  NULL },
-		{ "weapon_satchel",     NULL,             "weapon_satchel",   "weapon_satchel" },
-	};
-
-	for (size_t i = 0; i < ARRAYSIZE(kAmmo); ++i)
-	{
-		if (strcmp(kAmmo[i].weapon, spec->classname) != 0)
-			continue;
-		if (pool == AMMO_CLIP)
-			return kAmmo[i].clip;
-		if (pool == AMMO_PRIMARY)
-			return kAmmo[i].primary;
-		return kAmmo[i].secondary;
-	}
-
-	return NULL;
+	return spec->ammoEntity[pool];
 }
 
 bool CHLDMProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
 	float &speed) const
 {
-	return ThrowArc(mode, viewPitch, kHLDMThrowRate, kHLDMThrowSpeedMax, elevation, speed);
+	if (config.throwStyle == THROW_QUAKE)
+		return (mode.quirks & WPN_Q_THROW_ARC) != 0 && DMC_ThrowLaunch(viewPitch, elevation, speed);
+	return ThrowArc(mode, viewPitch, config.throwRate, config.throwSpeedMax, elevation, speed);
 }
 
 bool CHLDMProfile::ThrowArc(const WeaponMode &mode, float viewPitch, float rate, float speedMax,
@@ -485,7 +486,10 @@ bool CHLDMProfile::IsFunTerminal(edict_t *ent) const
 bool CHLDMProfile::Penetrates(const CBot &bot, int id, const Vector &eye, const Vector &dir,
 	float entry) const
 {
-	if (id != kHLDMGauss || bot.fire.mode != BotFire::MODE_SECONDARY)
+	if (bot.fire.mode != BotFire::MODE_SECONDARY)
+		return false;
+	const WeaponSpec *spec = GetWeaponSpec(id);
+	if (!spec || strcmp(spec->classname, "weapon_gauss") != 0)
 		return false;
 
 	Vector target = eye + dir * entry;

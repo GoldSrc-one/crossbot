@@ -49,11 +49,7 @@ namespace
 	constexpr float kPlantRetry = 3.f;
 	constexpr float kSelectInterval = 0.5f;
 
-	constexpr float kCSThrowRate = 6.f;
-	constexpr float kCSThrowSpeedMax = 750.f;
 
-	constexpr float kFallSafeSpeed = 500.f;
-	constexpr float kFallDamage = 100.f / 600.f * 1.25f;
 
 	constexpr int kMaxPlayers = 32;
 
@@ -175,23 +171,6 @@ namespace
 	}
 }
 
-const char *CCSProfile::GetName() const
-{
-	return "CS";
-}
-
-bool CCSProfile::Detect(const char *gamedir) const
-{
-	return gamedir && (CB_STRICMP(gamedir, "cstrike") == 0 || CB_STRICMP(gamedir, "czero") == 0);
-}
-
-PmSim::FallRule CCSProfile::FallDamage() const
-{
-	if (CBotCvarFloat("mp_falldamage") == 0.f)
-		return PmSim::kNoFall;
-	return { kFallSafeSpeed, kFallDamage };
-}
-
 void CCSProfile::ApplyAddArg(int, edict_t *pEdict, const char *arg, char *out, unsigned int size) const
 {
 	int team = kTeamAuto;
@@ -280,11 +259,6 @@ void CCSProfile::RefreshWorld() const
 
 #endif
 
-void CCSProfile::Respawn(edict_t *pEdict) const
-{
-	IdleMove(pEdict, 0);
-}
-
 bool CCSProfile::AbilityRun(CBot &bot, const Nav::NavMesh &) const
 {
 	BotAbility::State &st = bot.ability;
@@ -343,36 +317,6 @@ int CCSProfile::Abilities(const AbilityInfo *&list) const
 {
 	static const AbilityInfo kList[] = {
 		{ "plant", nullptr, "plant the C4 where you stand; needs the C4 and a bomb zone" },
-	};
-	list = kList;
-	return static_cast<int>(sizeof(kList) / sizeof(kList[0]));
-}
-
-int CCSProfile::RadioCommands(const RadioInfo *&list) const
-{
-	static const RadioInfo kList[] = {
-		{ "coverme", 0, "%!MRAD_COVERME", "Cover me!" },
-		{ "takepoint", 0, "%!MRAD_TAKEPOINT", "You take the point." },
-		{ "holdpos", 0, "%!MRAD_POSITION", "Hold this position." },
-		{ "regroup", 0, "%!MRAD_REGROUP", "Regroup, team." },
-		{ "followme", 0, "%!MRAD_FOLLOWME", "Follow me." },
-		{ "takingfire", 0, "%!MRAD_HITASSIST", "Taking fire, need assistance!" },
-		{ "go", 0, "%!MRAD_GO", "Go go go!" },
-		{ "fallback", 0, "%!MRAD_FALLBACK", "Team, fall back!" },
-		{ "sticktog", 0, "%!MRAD_STICKTOG", "Stick together, team." },
-		{ "getinpos", 0, "%!MRAD_GETINPOS", "Get in position and wait for my go." },
-		{ "stormfront", 0, "%!MRAD_STORMFRONT", "Storm the front!" },
-		{ "report", 0, "%!MRAD_REPORTIN", "Report in, team." },
-		{ "roger", 0, "%!MRAD_ROGER", "Roger that." },
-		{ "roger", 0, "%!MRAD_AFFIRM", "Affirmative." },
-		{ "enemyspot", 0, "%!MRAD_ENEMYSPOT", "Enemy spotted." },
-		{ "needbackup", 0, "%!MRAD_BACKUP", "Need backup." },
-		{ "sectorclear", 0, "%!MRAD_CLEAR", "Sector clear." },
-		{ "inposition", 0, "%!MRAD_INPOS", "I'm in position." },
-		{ "reportingin", 0, "%!MRAD_REPRTINGIN", "Reporting in." },
-		{ "getout", 0, "%!MRAD_BLOW", "Get out of there, it's gonna blow!" },
-		{ "negative", 0, "%!MRAD_NEGATIVE", "Negative." },
-		{ "enemydown", 0, "%!MRAD_ENEMYDOWN", "Enemy down." },
 	};
 	list = kList;
 	return static_cast<int>(sizeof(kList) / sizeof(kList[0]));
@@ -528,11 +472,6 @@ const WeaponSpec *CCSProfile::WeaponSlot(int slot) const
 	return CS_WeaponSlot(slot);
 }
 
-int CCSProfile::ItemSlots() const
-{
-	return kCSItemSlots;
-}
-
 bool CCSProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
 {
 	if (kind != ITEM_WEAPON || !ent || ent->free)
@@ -543,42 +482,6 @@ bool CCSProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
 		return false;
 
 	return CS_InventorySlot(ItemWeapon(priv, CBotClassOf(ent))) == CS_SLOT_PRIMARY;
-}
-
-int CCSProfile::MeleeWeapon() const
-{
-	return CS_KNIFE;
-}
-
-bool CCSProfile::IsMeleeWeapon(int id) const
-{
-	return id == CS_KNIFE;
-}
-
-int CCSProfile::AmbushWeapon(AmbushKind kind) const
-{
-	switch (kind)
-	{
-	case AMBUSH_GRENADE: return CS_HEGRENADE;
-	case AMBUSH_FLASH: return CS_FLASHBANG;
-	case AMBUSH_SMOKE: return CS_SMOKEGRENADE;
-	default: return 0;
-	}
-}
-
-int CCSProfile::DeployWeapon(DeployKind) const
-{
-	return 0;
-}
-
-const char *CCSProfile::DeployEntity(DeployKind) const
-{
-	return nullptr;
-}
-
-bool CCSProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation, float &speed) const
-{
-	return ThrowArc(mode, viewPitch, kCSThrowRate, kCSThrowSpeedMax, elevation, speed);
 }
 
 namespace

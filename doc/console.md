@@ -239,9 +239,11 @@ shooting, live clip and ammo. See `doc/combat.md`, `bot_fire.cpp`.
   (`doc/combat.md`, `bot_weapons.cpp`). In a game with `plr_iPowerups` (Ricochet) it also prints
   `powerups 0x<m_iPowerups>, +4 = <m_iPowerupDiscs>`: 0 normally, `0x4` and 3 right after
   `crossbot_equip item_powerup_hard`, which checks the hand-filled offset.
-- `crossbot_weaponspec [name]` — how each gun is operated. With no argument, the whole table: per weapon
-  id the classname, clip size, `value`, range class and scope FOV, then per firing mode its button
-  pattern, aim requirement, toggle, ammo pool and ballistics. The range class bends routing toward ground
+- `crossbot_weaponspec [name]` — how each gun is operated. With no argument, per loaded game every
+  game-file value (slots, melee, ambush, deploy, respawn, fall, throw, radio; preferred items for the
+  HLDM-class games), then the whole table: per weapon id the classname, clip size, `value`, range class
+  and scope FOV, per firing mode its button pattern, aim requirement, toggle, ammo pool and ballistics,
+  and its refill entities. The range class bends routing toward ground
   the gun can use (`doc/goals.md`, "Range bias"); the scope FOV decides whether a camp spot is worth
   zooming into. With a player name it joins that player's weapons against their specs and flags any
   classname that disagrees, the one way the id-keyed table can be wrong (`doc/games.md`, `weapon_spec.h`).

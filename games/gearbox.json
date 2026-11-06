@@ -1,0 +1,95 @@
+{
+	"base": "valve",
+	"name": "Gearbox",
+	"itemSlots": 7,
+	"braceDuck": true,
+	"melee": [1, 16, 18, 25],
+	"ambush": {
+		"penguin": 26,
+		"grapple": 16
+	},
+	"preferred": ["item_healthkit", "item_battery", "item_longjump", "armoury_entity", "weapon_gauss", "weapon_crossbow", "weapon_egon", "weapon_displacer", "weapon_sniperrifle"],
+	"weapons": {
+		"weapon_grapple": {
+			"id": 16,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "lead", "speed": 2000, "quirks": ["sticky"] }
+		},
+		"weapon_eagle": {
+			"id": 17,
+			"clipSize": 7,
+			"value": 0.3,
+			"rangeClass": "long",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["nounderwater"] },
+			"secondary": { "fire": "tap", "toggle": "laser", "quirks": ["hiddenstate", "laseron"] },
+			"ammoEntity": { "clip": "ammo_357" }
+		},
+		"weapon_pipewrench": {
+			"id": 18,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "range": 32 }
+		},
+		"weapon_m249": {
+			"id": 19,
+			"clipSize": 50,
+			"value": 0.3,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["nounderwater", "sticky", "brace"] },
+			"ammoEntity": { "clip": "ammo_556" }
+		},
+		"weapon_displacer": {
+			"id": 20,
+			"clipSize": -1,
+			"value": 0.4,
+			"rangeClass": "close",
+			"primary": { "fire": "tap", "aim": "lead", "ammo": "prim", "ammoPerShot": 20, "speed": 500, "splash": 300, "chargeFull": 1, "quirks": ["spinup", "aimfeet"] },
+			"ammoEntity": { "prim": "ammo_gaussclip" }
+		},
+		"weapon_shockrifle": {
+			"id": 22,
+			"clipSize": -1,
+			"value": 0.2,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "lead", "ammo": "prim", "ammoPerShot": 1, "speed": 2000, "quirks": ["nounderwater", "sticky"] }
+		},
+		"weapon_sporelauncher": {
+			"id": 23,
+			"clipSize": 5,
+			"value": 0.3,
+			"rangeClass": "long",
+			"primary": { "fire": "hold", "aim": "lead", "ammo": "clip", "ammoPerShot": 1, "speed": 2400, "splash": 200 },
+			"secondary": { "fire": "hold", "aim": "lead", "ammo": "clip", "ammoPerShot": 1, "speed": 800, "gravity": 1, "splash": 200, "quirks": ["inheritvel"] },
+			"ammoEntity": { "clip": "ammo_spore" }
+		},
+		"weapon_sniperrifle": {
+			"id": 24,
+			"clipSize": 5,
+			"value": 0.5,
+			"rangeClass": "long",
+			"zoomFov": 18,
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["nounderwater"] },
+			"primaryZoomed": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["nounderwater"] },
+			"secondary": { "fire": "tap", "toggle": "zoom" },
+			"ammoEntity": { "clip": "ammo_762" }
+		},
+		"weapon_knife": {
+			"id": 25,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "range": 32 }
+		},
+		"weapon_penguin": {
+			"id": 26,
+			"clipSize": -1,
+			"value": 0.2,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "lead", "ammo": "prim", "ammoPerShot": 1, "speed": 200, "gravity": 0.5, "splash": 250, "quirks": ["inheritvel", "homing", "teamunsafe"] },
+			"ammoEntity": { "prim": "weapon_penguin" }
+		}
+	}
+}

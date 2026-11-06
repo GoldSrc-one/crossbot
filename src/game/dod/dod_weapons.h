@@ -4,8 +4,6 @@
 
 constexpr int kDODWeaponSlots = 34;
 
-constexpr int kDODItemSlots = 6;
-
 enum DODWeaponId
 {
 	DOD_AMERKNIFE      = 1,

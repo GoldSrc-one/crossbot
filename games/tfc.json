@@ -1,0 +1,13 @@
+{
+	"profile": "tfc",
+	"name": "TFC",
+	"melee": [5, 3, 4, 23],
+	"fall": {
+		"safeSpeed": 650,
+		"perSpeed": 0.26737967
+	},
+	"throw": {
+		"style": "quake"
+	},
+	"preferred": ["item_healthkit", "item_battery", "item_longjump", "armoury_entity"]
+}

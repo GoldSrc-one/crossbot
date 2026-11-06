@@ -83,7 +83,18 @@ struct WeaponSpec
 	WeaponMode primary;
 	WeaponMode primaryZoomed;
 	WeaponMode secondary;
+	const char *ammoEntity[AMMO_SECONDARY + 1];
+	const char *setup;
 };
+
+struct WeaponQuirkName
+{
+	unsigned int bit;
+	const char *name;
+};
+
+extern const WeaponQuirkName kWeaponQuirkNames[];
+extern const int kWeaponQuirkNameCount;
 
 const char *WeaponFireName(WeaponFire fire);
 const char *WeaponAimName(WeaponAim aim);

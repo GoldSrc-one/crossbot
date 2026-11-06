@@ -120,8 +120,6 @@ public:
 	virtual const char *GetName() const = 0;
 	virtual unsigned int GetFlags() const = 0;
 
-	virtual bool Detect(const char *gamedir) const = 0;
-
 	virtual bool IsDead(edict_t *pEdict) const = 0;
 
 	virtual edict_t *MonsterEnemy(edict_t *ent) const = 0;
@@ -153,6 +151,8 @@ public:
 	virtual bool CanProne(edict_t *) const { return false; }
 
 	virtual int RadioCommands(const RadioInfo *&list) const { list = nullptr; return 0; }
+
+	virtual bool BraceDucks() const { return false; }
 
 	virtual void RefreshWorld() const {}
 

@@ -1,0 +1,147 @@
+{
+	"profile": "hldm",
+	"name": "HLDM",
+	"deathmatchOnly": true,
+	"itemSlots": 6,
+	"melee": [1],
+	"ambush": {
+		"grenade": 12,
+		"snark": 15
+	},
+	"deploy": {
+		"tripmine": {
+			"weapon": 13,
+			"entity": "monster_tripmine"
+		},
+		"satchel": {
+			"weapon": 14,
+			"entity": "monster_satchel"
+		}
+	},
+	"preferred": ["item_healthkit", "item_battery", "item_longjump", "armoury_entity", "weapon_gauss", "weapon_crossbow", "weapon_egon"],
+	"weapons": {
+		"weapon_crowbar": {
+			"id": 1,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "range": 32 }
+		},
+		"weapon_9mmhandgun": {
+			"id": 2,
+			"clipSize": 17,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["sticky"] },
+			"secondary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["sticky"] },
+			"ammoEntity": { "clip": "ammo_9mmclip" }
+		},
+		"weapon_357": {
+			"id": 3,
+			"clipSize": 6,
+			"value": 0.2,
+			"rangeClass": "long",
+			"zoomFov": 40,
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["nounderwater"] },
+			"primaryZoomed": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["nounderwater"] },
+			"secondary": { "fire": "tap", "toggle": "zoom" },
+			"ammoEntity": { "clip": "ammo_357" }
+		},
+		"weapon_9mmAR": {
+			"id": 4,
+			"clipSize": 50,
+			"value": 0.3,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "quirks": ["sticky"] },
+			"secondary": { "fire": "hold", "aim": "lead", "ammo": "sec", "ammoPerShot": 1, "speed": 800, "gravity": 0.5, "splash": 250, "quirks": ["nounderwater"] },
+			"ammoEntity": { "clip": "ammo_9mmAR", "sec": "ammo_ARgrenades" }
+		},
+		"weapon_crossbow": {
+			"id": 6,
+			"clipSize": 5,
+			"value": 0.5,
+			"rangeClass": "long",
+			"zoomFov": 20,
+			"primary": { "fire": "hold", "aim": "lead", "ammo": "clip", "ammoPerShot": 1, "speed": 2000, "quirks": ["slowinwater"] },
+			"primaryZoomed": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1 },
+			"secondary": { "fire": "tap", "toggle": "zoom" },
+			"ammoEntity": { "clip": "ammo_crossbow" }
+		},
+		"weapon_shotgun": {
+			"id": 7,
+			"clipSize": 8,
+			"value": 0.2,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "range": 2048 },
+			"secondary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 2, "range": 2048 },
+			"ammoEntity": { "clip": "ammo_buckshot" }
+		},
+		"weapon_rpg": {
+			"id": 8,
+			"clipSize": 1,
+			"value": 0.3,
+			"rangeClass": "long",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "clip", "ammoPerShot": 1, "speed": 2000, "splash": 250, "quirks": ["keepaiming", "inheritvel"] },
+			"secondary": { "fire": "tap", "toggle": "laser", "quirks": ["hiddenstate"] },
+			"ammoEntity": { "clip": "ammo_rpgclip" }
+		},
+		"weapon_gauss": {
+			"id": 9,
+			"clipSize": -1,
+			"value": 0.5,
+			"rangeClass": "long",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "prim", "ammoPerShot": 2, "quirks": ["nounderwater", "sticky"] },
+			"secondary": { "fire": "charge", "aim": "target", "ammo": "prim", "ammoPerShot": 1, "chargeFull": 1.5, "chargeMax": 10, "quirks": ["nounderwater"] },
+			"ammoEntity": { "prim": "ammo_gaussclip" }
+		},
+		"weapon_egon": {
+			"id": 10,
+			"clipSize": -1,
+			"value": 0.5,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "target", "ammo": "prim", "ammoPerShot": 1, "range": 2048, "quirks": ["sticky"] },
+			"ammoEntity": { "prim": "ammo_egonclip" }
+		},
+		"weapon_hornetgun": {
+			"id": 11,
+			"clipSize": -1,
+			"value": 0.2,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "lead", "ammo": "prim", "ammoPerShot": 1, "speed": 600, "quirks": ["homing", "sticky"] },
+			"secondary": { "fire": "hold", "aim": "lead", "ammo": "prim", "ammoPerShot": 1, "speed": 1200, "quirks": ["sticky"] }
+		},
+		"weapon_handgrenade": {
+			"id": 12,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "tap", "aim": "lead", "ammo": "prim", "ammoPerShot": 1, "speed": 400, "gravity": 0.5, "splash": 250, "quirks": ["throwarc", "inheritvel"] },
+			"ammoEntity": { "prim": "weapon_handgrenade" }
+		},
+		"weapon_tripmine": {
+			"id": 13,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "tap", "aim": "surface", "ammo": "prim", "ammoPerShot": 1, "range": 128 },
+			"ammoEntity": { "prim": "weapon_tripmine" }
+		},
+		"weapon_satchel": {
+			"id": 14,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "tap", "quirks": ["hiddenstate"] },
+			"secondary": { "fire": "tap", "aim": "lead", "ammo": "prim", "ammoPerShot": 1, "speed": 274, "gravity": 0.5, "splash": 375, "quirks": ["hiddenstate", "inheritvel"] },
+			"ammoEntity": { "prim": "weapon_satchel", "sec": "weapon_satchel" }
+		},
+		"weapon_snark": {
+			"id": 15,
+			"clipSize": -1,
+			"value": 0.1,
+			"rangeClass": "close",
+			"primary": { "fire": "hold", "aim": "lead", "ammo": "prim", "ammoPerShot": 1, "speed": 200, "gravity": 0.5, "quirks": ["inheritvel", "homing", "teamunsafe"] },
+			"ammoEntity": { "prim": "weapon_snark" }
+		}
+	}
+}

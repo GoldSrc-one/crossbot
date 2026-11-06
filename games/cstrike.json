@@ -1,0 +1,45 @@
+{
+	"profile": "cs",
+	"name": "CS",
+	"melee": [29],
+	"ambush": {
+		"grenade": 4,
+		"flash": 25,
+		"smoke": 9
+	},
+	"fall": {
+		"safeSpeed": 500,
+		"perSpeed": 0.20833334
+	},
+	"fallCvar": "mp_falldamage",
+	"throw": {
+		"style": "hl",
+		"rate": 6,
+		"speedMax": 750
+	},
+	"respawnPress": "idle",
+	"radio": [
+		{ "command": "coverme", "code": 0, "sound": "%!MRAD_COVERME", "text": "Cover me!" },
+		{ "command": "takepoint", "code": 0, "sound": "%!MRAD_TAKEPOINT", "text": "You take the point." },
+		{ "command": "holdpos", "code": 0, "sound": "%!MRAD_POSITION", "text": "Hold this position." },
+		{ "command": "regroup", "code": 0, "sound": "%!MRAD_REGROUP", "text": "Regroup, team." },
+		{ "command": "followme", "code": 0, "sound": "%!MRAD_FOLLOWME", "text": "Follow me." },
+		{ "command": "takingfire", "code": 0, "sound": "%!MRAD_HITASSIST", "text": "Taking fire, need assistance!" },
+		{ "command": "go", "code": 0, "sound": "%!MRAD_GO", "text": "Go go go!" },
+		{ "command": "fallback", "code": 0, "sound": "%!MRAD_FALLBACK", "text": "Team, fall back!" },
+		{ "command": "sticktog", "code": 0, "sound": "%!MRAD_STICKTOG", "text": "Stick together, team." },
+		{ "command": "getinpos", "code": 0, "sound": "%!MRAD_GETINPOS", "text": "Get in position and wait for my go." },
+		{ "command": "stormfront", "code": 0, "sound": "%!MRAD_STORMFRONT", "text": "Storm the front!" },
+		{ "command": "report", "code": 0, "sound": "%!MRAD_REPORTIN", "text": "Report in, team." },
+		{ "command": "roger", "code": 0, "sound": "%!MRAD_ROGER", "text": "Roger that." },
+		{ "command": "roger", "code": 0, "sound": "%!MRAD_AFFIRM", "text": "Affirmative." },
+		{ "command": "enemyspot", "code": 0, "sound": "%!MRAD_ENEMYSPOT", "text": "Enemy spotted." },
+		{ "command": "needbackup", "code": 0, "sound": "%!MRAD_BACKUP", "text": "Need backup." },
+		{ "command": "sectorclear", "code": 0, "sound": "%!MRAD_CLEAR", "text": "Sector clear." },
+		{ "command": "inposition", "code": 0, "sound": "%!MRAD_INPOS", "text": "I'm in position." },
+		{ "command": "reportingin", "code": 0, "sound": "%!MRAD_REPRTINGIN", "text": "Reporting in." },
+		{ "command": "getout", "code": 0, "sound": "%!MRAD_BLOW", "text": "Get out of there, it's gonna blow!" },
+		{ "command": "negative", "code": 0, "sound": "%!MRAD_NEGATIVE", "text": "Negative." },
+		{ "command": "enemydown", "code": 0, "sound": "%!MRAD_ENEMYDOWN", "text": "Enemy down." }
+	]
+}

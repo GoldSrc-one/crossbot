@@ -1,19 +1,24 @@
 #pragma once
 
+#include "../game_config.h"
 #include "../game_profile.h"
 
 class CHLDMProfile : public IGameProfile
 {
 public:
+	GameConfig config;
+
 	const char *GetName() const override;
 	unsigned int GetFlags() const override;
 
-	bool Detect(const char *gamedir) const override;
 	bool IsDead(edict_t *pEdict) const override;
 	edict_t *MonsterEnemy(edict_t *ent) const override;
 	float EvaluateCombat(edict_t *pEdict, const BotInventory &inv) const override;
 	PmSim::FallRule FallDamage() const override;
 	void Respawn(edict_t *pEdict) const override;
+	bool PreThink(edict_t *pEdict) const override;
+	int RadioCommands(const RadioInfo *&list) const override;
+	bool BraceDucks() const override;
 
 	ItemKind ClassifyItem(edict_t *ent) const override;
 	float ItemRespawnDelay(ItemKind kind) const override;

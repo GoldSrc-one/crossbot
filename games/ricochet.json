@@ -1,0 +1,16 @@
+{
+	"profile": "ricochet",
+	"name": "Ricochet",
+	"deathmatchOnly": true,
+	"fall": "none",
+	"respawn": {
+		"none": 10,
+		"weapon": 10,
+		"ammo": 10,
+		"pickup": 10,
+		"healthcharger": 10,
+		"recharge": 10,
+		"healvolume": 10,
+		"station": 10
+	}
+}

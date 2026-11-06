@@ -40,9 +40,9 @@ How the systems actually work lives in `doc/`. This file is build, commands and 
   `D:\hlds\crossplay\addons\crossbot\`. Registering the plugin in `addons/metamod/plugins.ini` is a
   manual, operator-owned step; the scripts warn when it is missing and never edit it.
 - **What the plugin reads at runtime**: `crossplay/gamedata/<gamedir>-<win|linux>.json`, one per loaded
-  game (**CrossPlay's, not ours**), plus `nav/<map>.nav` and `trace/` under `crossplay/addons/crossbot/`.
-  Missing or wrong gamedata disables that game's bots with a printed reason; a bad offset **read** still
-  kills the server on purpose — see `doc/games.md`.
+  game (**CrossPlay's, not ours**), plus `games/<gamedir>.json`, `nav/<map>.nav` and `trace/` under
+  `crossplay/addons/crossbot/`. Missing or wrong gamedata or game file disables that game's bots with a
+  printed reason; a bad offset **read** still kills the server on purpose — see `doc/games.md`.
 - **Coordinates (GoldSrc / Hammer):** X = East, Y = North, Z = Up (right-handed). The SVG debug view
   flips Y (screen Y down), so world Y+ = North = SVG Y-.
 

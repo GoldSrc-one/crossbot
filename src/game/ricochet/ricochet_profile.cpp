@@ -19,7 +19,6 @@ namespace
 	constexpr int kRicochetDisc = 1;
 	constexpr int kRicochetMaxDiscs = 3;
 	constexpr float kRicochetDiscSpeed = 1000.f;
-	constexpr float kRicochetPowerupRespawn = 10.f;
 	constexpr int kRicochetPowHard = 1 << 2;
 
 	const WeaponMode kNoMode = {};
@@ -30,27 +29,9 @@ namespace
 		{ FIRE_TAP, AIM_LEAD, TOGGLE_NONE, AMMO_PRIMARY, kRicochetMaxDiscs, kRicochetDiscSpeed, 0.f, 0.f, 0.f, 0.f, 0.f, WPN_Q_NONE } };
 }
 
-const char *CRicochetProfile::GetName() const
-{
-	return "Ricochet";
-}
-
-bool CRicochetProfile::Detect(const char *gamedir) const
-{
-	if (!gpGlobals->deathmatch_)
-		return false;
-
-	return gamedir && CB_STRICMP(gamedir, "ricochet") == 0;
-}
-
 float CRicochetProfile::EvaluateCombat(edict_t *, const BotInventory &) const
 {
 	return 0.f;
-}
-
-PmSim::FallRule CRicochetProfile::FallDamage() const
-{
-	return PmSim::kNoFall;
 }
 
 ItemKind CRicochetProfile::ClassifyItem(edict_t *ent) const
@@ -59,11 +40,6 @@ ItemKind CRicochetProfile::ClassifyItem(edict_t *ent) const
 		return ITEM_NONE;
 
 	return strncmp(CBotClassOf(ent), "item_", 5) == 0 || IsArmouryArmor(ent) ? ITEM_PICKUP : ITEM_NONE;
-}
-
-float CRicochetProfile::ItemRespawnDelay(ItemKind) const
-{
-	return kRicochetPowerupRespawn;
 }
 
 bool CRicochetProfile::ItemPreferred(edict_t *, ItemKind kind) const
@@ -97,32 +73,8 @@ bool CRicochetProfile::ModeAvailable(edict_t *player, const WeaponSpec &spec, co
 	return (GameData::Peek<int>(CBotPrivateData(player), g_offsets.plr_iPowerups) & kRicochetPowHard) != 0;
 }
 
-const char *CRicochetProfile::AmmoEntity(int, WeaponAmmo) const
-{
-	return nullptr;
-}
-
-int CRicochetProfile::MeleeWeapon() const
-{
-	return 0;
-}
-
 bool CRicochetProfile::MeleeOnlyAllows(int id) const
 {
 	return id == kRicochetDisc;
 }
 
-int CRicochetProfile::AmbushWeapon(AmbushKind) const
-{
-	return 0;
-}
-
-int CRicochetProfile::DeployWeapon(DeployKind) const
-{
-	return 0;
-}
-
-const char *CRicochetProfile::DeployEntity(DeployKind) const
-{
-	return nullptr;
-}

@@ -1,0 +1,15 @@
+{
+	"profile": "dmc",
+	"name": "DMC",
+	"deathmatchOnly": true,
+	"melee": [1],
+	"fallCvar": "mp_falldamage",
+	"throw": {
+		"style": "quake"
+	},
+	"respawn": {
+		"weapon": 30,
+		"ammo": 30,
+		"pickup": 20
+	}
+}

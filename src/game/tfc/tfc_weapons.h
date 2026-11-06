@@ -4,8 +4,6 @@
 
 constexpr int kTFCWeaponSlots = 24;
 
-constexpr int kTFCItemSlots = 6;
-
 enum TFCWeaponId
 {
 	TFC_MEDIKIT      = 3,

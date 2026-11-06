@@ -157,16 +157,18 @@ and each names a broken rule:
   `GameData::LoadAll()` at `GameDLLInit`. `GameData::Activate(i)` copies one into the `g_offsets`
   every peek site reads.
 - `crossplay.cpp` holds `g_profiles[kMaxGames]`, filled by `XPlay::DetectProfiles()` at
-  `ServerActivate` through `GameProfile_Detect(gamedir)`. `g_pGameProfile` is the active one.
+  `ServerActivate` through `GameProfile_Detect(gamedir)` from `games/<gamedir>.json` (see "Game
+  files"). `g_pGameProfile` is the active one.
 - A game is **playable** (`XPlay::Supported`) only with both. `crossbot_add` refuses anything else and
   `XPlay::PickRandomSupported()` draws only from that set: `valve`, `ricochet`, `gearbox`, `dmc`,
-  `tfc`, `cstrike`/`czero` (one profile), `dod`, `rewolf` and `ts`.
+  `tfc`, `cstrike`/`czero` (one profile class), `dod`, `rewolf` and `ts`.
 - Each `CBot` carries `gameDll`, set once in `AddBot`; it is the key to all of the above.
 
-Profiles live one directory per game: `src/game/hldm/`, `ricochet/`, `gearbox/`, `dmc/`, `tfc/`,
-`cstrike/`, `dod/`, `rewolf/`, `ts/`. `src/game/game_profile.cpp` holds `GameProfile_Detect`, the only file that names
-them all, returning function-local statics. Anything keyed off the **map's** game rather than the bot's
-(teams, objectives, gamedata) stays in `src/game/` itself.
+Profile classes live one directory per game that needs code: `src/game/hldm/`, `ricochet/`, `dmc/`,
+`tfc/`, `cstrike/`, `dod/`, `ts/`. OP4 and Gunman are data only: `CHLDMProfile` plus their game file.
+`src/game/game_profile.cpp` holds `GameProfile_Detect`, the only file that names the classes. Anything
+keyed off the **map's** game rather than the bot's (teams, objectives, gamedata) stays in `src/game/`
+itself.
 
 ### Standalone build
 
@@ -219,6 +221,77 @@ hlds.exe -console -game cstrike -dll addons\metamod\metamod.dll +localinfo mm_pl
 No CrossPlay `moveVars` are needed: `Bot_Physics` reads the real cvars and `Bot_MaxSpeed` learns from
 `PM_Move_Post`. Voice needs ReHLDS and turns itself off without it.
 
+## Game files (games/<gamedir>.json)
+
+`src/game/game_config.cpp`, `games/`
+
+Every playable game has one JSON file named after its game directory. `build.bat` and
+`deploy_standalone.ps1` copy `games/*.json` into `addons/crossbot/games/`, and `GameProfile_Detect` reads
+`games/<gamedir>.json` (lowercased) when a map starts. The file names the C++ class that runs the game
+and fills the `GameConfig` that `CHLDMProfile` answers from, so **a game that plays like HL deathmatch is
+one file and no code**: `gearbox.json` and `rewolf.json` are exactly that.
+
+```json
+{ "base": "valve", "name": "AG" }
+```
+
+is a complete Adrenaline Gamer profile (`games/ag.json`, given CrossPlay gamedata for `ag`): valve's
+class, weapons and roles under another name.
+
+**Loading.**
+
+- `base` names another game file, applied first; this file is applied on top. Objects merge key by key
+  (`ambush`, `respawn`, `fall`, `throw`, one weapon's fields, one mode's fields); everything else,
+  arrays included, replaces. `gearbox.json` therefore repeats valve's whole `melee` and `preferred` lists
+  and adds only its own weapons. A chain is at most 4 deep.
+- Every key must be known, every enum and quirk name must exist, a weapon needs an id in 1-255 and two
+  weapons may not share one. Anything else prints the file and key path, as in `CrossBot: game 'valve':
+  games/valve.json.weapons.weapon_357.primary.quirks: unknown quirk 'nounderwatr'`, and the game gets no
+  profile, so no bots, the way missing gamedata does. A broken file is
+  retried at the next map; a loaded one is kept for the life of the process, so **edits need a server
+  restart**. Profiles cache per gamedir, not per class: `valve` and `ag` are two `CHLDMProfile`s.
+- `deathmatchOnly` refuses the profile under `deathmatch 0`, checked every map.
+
+**Profile keys.** Absent means the HL default in `GameConfig`, so a file states only how its game differs.
+
+| key | meaning | default |
+|---|---|---|
+| `profile` | `hldm`, `ricochet`, `dmc`, `tfc`, `cs`, `dod`, `ts` | required (directly or via `base`) |
+| `name` | `GetName()`, printed in the `ready (profile ...)` line | `""` |
+| `deathmatchOnly` | needs `deathmatch 1` | false |
+| `itemSlots` | `ItemSlots()` | 6 |
+| `melee` | ids; the first is `MeleeWeapon()`, all are `IsMeleeWeapon()` | none |
+| `ambush` | `grenade`, `snark`, `penguin`, `grapple`, `flash`, `smoke` → weapon id | 0 |
+| `deploy` | `tripmine`, `satchel` → `{ weapon, entity }` | 0, null |
+| `preferred` | classnames `ItemPreferred` takes; a weapon's ammo entities come with it, and `armoury_entity` counts only for CS armour | none |
+| `respawn` | seconds per `ItemKind`: `none` (the fallback), `weapon`, `ammo`, `pickup`, `healthcharger`, `recharge`, `healvolume`, `station` | 30 20 20 30 60 30 30 30 |
+| `fullTimeout`, `unreachableTimeout` | item give-up timers | 120, 30 |
+| `fall` | `"hl"`, `"none"` or `{ safeSpeed, perSpeed, health }` | `"hl"` |
+| `fallCvar` | a cvar that turns `fall` off when 0 | none |
+| `throw` | `{ style: "hl", rate, speedMax }` (`ThrowArc`) or `{ style: "quake" }` (`DMC_ThrowLaunch`) | hl, 4, 500 |
+| `respawnPress` | `attack` presses fire while respawnable; `idle` sends an empty move | attack |
+| `absoluteTimers` | the weapon timers are absolute game time (Gunman) | false |
+| `braceDuck` | brace by ducking while moving (OP4's M249) | false |
+| `radio` | `RadioCommands()`: `{ command, code, sound, text }` rows | none |
+| `weapons` | classname → `WeaponSpec` | none |
+
+**Weapons** use the `WeaponSpec` and `WeaponMode` member names (`id`, `clipSize`, `value`,
+`rangeClass`, `zoomFov`, `primary`, `primaryZoomed`, `secondary`; `fire`, `aim`, `toggle`, `ammo`,
+`ammoPerShot`, `speed`, `gravity`, `range`, `splash`, `chargeFull`, `chargeMax`, `quirks`), with enum
+values spelt as `crossbot_weaponspec` prints them (`hold`, `lead`, `prim` ...) and quirks from
+`kWeaponQuirkNames`. Absent is zero. Two fields exist only for data-driven games: `ammoEntity`
+(`clip`, `prim`, `sec` → the refill classname that `AmmoEntity` returns) and `setup`, a console command
+`PreThink` sends whenever the active weapon object changes (Gunman's customization). The slot count is
+the highest id plus one.
+
+**What stays code.** CS, DoD, TFC, DMC, TS and Ricochet keep their weapon tables in C++: their code
+compares ids by enum and keeps per-weapon tables JSON does not describe (CS spread and bullets, DoD
+recoil, TFC ammo fields, DMC's quake bitfields, TS's `CTSGun`). Their files carry only the keys their
+classes no longer override. Team and class joining, inventory readers and `SelectWeapon` stay
+per-class: three games share the join shape but each speaks its own dialect, and every other choice has
+one user. `crossbot_weaponspec` with no argument prints every key a file can set, per loaded game, and
+is the check that a moved table changed nothing.
+
 ## The profile interface (game_profile.h)
 
 `IGameProfile` is the mod-specific half of the bot. Everything that is not geometry lives behind it,
@@ -235,9 +308,9 @@ item decision; an accessor would cost a call for nothing.
   places that need every weapon: `ItemPreferred` and `crossbot_weaponspec`. Every caller goes through
   the virtuals so a derived profile never silently sees HL's table.
 - **`ItemSlots()`** is the number of `m_rgpPlayerItems` buckets: HL 6 (`MAX_ITEM_TYPES`), OP4 7, Gunman 11. It is a
-  profile value because the gamedata JSON carries no array sizes.
-- **`ReadInventory(player, inv)`** fills `BotInventory`. HLDM runs the shared item walk
-  (`BotWeapons::ReadItems`); DMC, TFC and DoD override it.
+  game-file value because the gamedata JSON carries no array sizes.
+- **`ReadInventory(player, inv)`** fills `BotInventory`, or returns false for the shared item walk
+  (`BotWeapons::ReadItems`). HLDM returns false unless `absoluteTimers`; DMC, TFC, DoD and TS override it.
 - **`SelectWeapon(player, spec)`** switches weapons. HLDM sends `weapon_<name>` through `FakeCmd`; DMC
   drives `CmdStart`.
 - **`ModeAvailable(player, spec, mode)`** is a per-player veto on a firing mode that depends on state the
@@ -479,16 +552,16 @@ A powerup waiting to respawn is `EF_NODRAW`.
 
 **No fall damage.** `CBasePlayer::PostThink` has the fall-damage call commented out: `kNoFall`.
 
-## Opposing Force (gearbox_profile.cpp)
+## Opposing Force (games/gearbox.json)
 
-`CGearboxProfile` is OP4 **deathmatch**: HLDM with ten more weapons, the same crowbar-and-glock spawn,
+`gearbox.json` is OP4 **deathmatch** on `CHLDMProfile`: HLDM with ten more weapons, the same crowbar-and-glock spawn,
 and the HL weapons (ids 1-15) with SDK timings. CTF (`op4ctf_*`: `m_iTeamNum` teams, flags, a
 pipewrench/eagle/grapple loadout) is not covered.
 
 **The ids come from retail, not the reconstructed source.** `halflife-op4-updated` numbers the new
 weapons 16-25; retail `opfor.dll` leaves **21 unused** and runs 22-26 (a live `crossbot_weaponspec`
-printed `MISMATCH` past the displacer; jk_botti and Parabot agree). `gearbox_weapons.cpp` has 27 slots:
-0-15 fall through to `HLDM_WeaponSpec`, 21 is empty.
+printed `MISMATCH` past the displacer; jk_botti and Parabot agree). `gearbox.json` takes ids 1-15 from
+`base: valve` and adds 16-26, so it has 27 slots and 21 is empty.
 
 | id | weapon | value | range | handling |
 |---|---|---|---|---|
@@ -589,9 +662,9 @@ It does not inherit velocity (only modes with `WPN_Q_INHERIT_VEL` do). The grena
   so plans are conservative; `WPN_Q_NO_UNDERWATER` tests `waterlevel == 3` but the lightning gun
   discharges at `> 1`.
 
-## Gunman Chronicles (rewolf_profile.cpp)
+## Gunman Chronicles (games/rewolf.json)
 
-`CRewolfProfile` is Gunman deathmatch (`rewolf`, `gunman.dll`, November 2000): an HL SDK 2.x game with
+`rewolf.json` is Gunman deathmatch (`rewolf`, `gunman.dll`, November 2000) on `CHLDMProfile`: an HL SDK 2.x game with
 its own weapons, a weapon-customization system, and absolute weapon timers. Everything below was read out
 of `gunman.dll` and checked live on `takeoff`; sandbot's Gunman bot was the starting point, not the source.
 
@@ -606,7 +679,7 @@ gunman's own save tables or was checked in code (`DefaultReload` for `m_fInReloa
 
 Every weapon's `UseDecrement()` returns 0, and `m_flNextAttack` is compared against `gpGlobals->time`, so
 gunman stores `m_flNextPrimaryAttack`, `m_flNextSecondaryAttack` and `m_flNextAttack` as absolute times.
-`ReadInventory` runs the shared item walk and subtracts `gpGlobals->time`, which gives the bot the same
+With `absoluteTimers`, `ReadInventory` runs the shared item walk and subtracts `gpGlobals->time`, which gives the bot the same
 relative "ready at <= 0" timers as HL. The gauss pistol's pulse sets only the player's `m_flNextAttack`, so
 the held weapon's primary timer is the larger of the two, as in DMC, and the shot counter sees it rise.
 
@@ -614,7 +687,7 @@ the held weapon's primary timer is the larger of the two, as in DMC, and the sho
 
 `cust_<slider><value>` calls a virtual on the **active** weapon with the slider digit and the value;
 `custupdate` calls another. The client's menu only sends these commands, so a bot can too. The table
-describes one setup per weapon, and `PreThink` sends that setup (`Rewolf_WeaponSetup`) whenever the
+describes one setup per weapon (its `setup` field), and `PreThink` sends it whenever the
 active weapon object changes, forgetting it on death:
 
 | weapon | command | effect |
@@ -742,8 +815,8 @@ TFC is the HL SDK with QuakeC Team Fortress 2.x ported in. The inventory is a no
 (`m_rgpPlayerItems`, `m_pActiveItem`), while everything TF (ammo, grenades, `tfstate`, disguise,
 buildings, goal keys) is a QuakeC field **on `CBaseEntity`** (`tfstate`, `ammo_shells`/`nails`/
 `cells`/`rockets`, `no_grenades_1/2`, `tp_grenades_1/2`, `is_building`, `is_feigning`, `team_no`...).
-Class and team are mirrored into `pev->playerclass` and `pev->team`. `CTFCProfile::Detect` does not
-check `deathmatch`, and neither does `CCSProfile::Detect`.
+Class and team are mirrored into `pev->playerclass` and `pev->team`. `tfc.json` does not set
+`deathmatchOnly`, and neither does `cstrike.json`.
 
 References are into the decompiled `tfc.c` (`D:\projects\libs\tfc.c`). **Its offsets are not the live
 DLL's**: every field sits exactly 16 bytes past `tfc-win.json` (`ammo_shells` 228 vs 212, `team_no` 312
@@ -1283,7 +1356,7 @@ CrossPlay's**; nothing here writes it. Results land in `g_gameOffsets[game]`, an
 `GameData::Activate(game)` copies one into `g_offsets`.
 
 Keying by gamedir, not profile, is required: the offsets describe a binary, which the gamedir selects,
-while `CHLDMProfile::Detect` reads `gpGlobals->deathmatch`, which the engine only fills in once a
+while `deathmatchOnly` reads `gpGlobals->deathmatch`, which the engine only fills in once a
 server spawns, so profile detection stays at `ServerActivate`.
 
 **A bad read is fatal; a missing file is not.** A wrong offset is a wild read that corrupts silently and
@@ -1773,9 +1846,10 @@ Spread cones, pellet counts, damage and projectile lifetimes are not fields eith
 below because they were expensive to establish. `zoomFov` is a field despite failing the criterion,
 for the camp scope check (see above).
 
-## The Half-Life table (hldm_weapons.cpp)
+## The Half-Life table (games/valve.json)
 
-`kHLDMWeapons[16]` indexed by `m_iId`, so the lookup is free and needs no string compares.
+`CHLDMProfile` places each weapon of its game file at `config.weapons[id]`, so the lookup is an index
+and needs no string compares.
 
 **It carries multiplayer values throughout**, because `CHLDMProfile` is a deathmatch profile:
 
@@ -1800,11 +1874,11 @@ for the camp scope check (see above).
   `waterlevel == 3` first and plays the empty sound. Nothing checks a field until something drives it.
 
 **Two holes, both real.** `WEAPON_CHAINGUN` is id 5 with no entity in retail, and slot 0 is
-`WEAPON_NONE`. `HLDM_WeaponSpec` returns null for both, so the dump shows 14 weapons in 16 slots and a
+`WEAPON_NONE`. `GetWeaponSpec` returns null for both, so the dump shows 14 weapons in 16 slots and a
 fully equipped player's `pev->weapons` reads `0xffde`, bit 5 clear.
 
-**The lookup validates its own index.** `HLDM_WeaponSpec` returns null when `spec.id != id`, not only
-for an empty row: a row in the wrong slot would otherwise return a confidently wrong weapon.
-`crossbot_weaponspec` with no argument walks the raw slots and prints `TABLE BROKEN` on any mismatch;
+**A row cannot sit in the wrong slot.** The loader places every weapon by its `id` and refuses a file where
+two share one. The C++ tables of the other games index by position, so `crossbot_weaponspec` with no
+argument walks the raw slots and prints `TABLE BROKEN` on any `spec.id != slot`;
 `crossbot_weaponspec <name>` compares each spec's `classname` against `CBotClassOf` on the live weapon
 entity, the only thing that catches a wrong id.

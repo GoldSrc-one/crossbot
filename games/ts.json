@@ -1,0 +1,6 @@
+{
+	"profile": "ts",
+	"name": "TS",
+	"deathmatchOnly": true,
+	"melee": [38, 34]
+}

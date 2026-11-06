@@ -31,19 +31,6 @@ namespace
 	}
 }
 
-const char *CTSProfile::GetName() const
-{
-	return "TS";
-}
-
-bool CTSProfile::Detect(const char *gamedir) const
-{
-	if (!gpGlobals->deathmatch_)
-		return false;
-
-	return gamedir && CB_STRICMP(gamedir, "ts") == 0;
-}
-
 void CTSProfile::Respawn(edict_t *pEdict) const
 {
 	CHLDMProfile::Respawn(pEdict);
@@ -163,27 +150,3 @@ const char *CTSProfile::AmmoEntity(int, WeaponAmmo) const
 	return NULL;
 }
 
-int CTSProfile::MeleeWeapon() const
-{
-	return kTSKungFu;
-}
-
-bool CTSProfile::IsMeleeWeapon(int id) const
-{
-	return id == kTSKungFu || id == kTSKatana;
-}
-
-int CTSProfile::AmbushWeapon(AmbushKind) const
-{
-	return 0;
-}
-
-int CTSProfile::DeployWeapon(DeployKind) const
-{
-	return 0;
-}
-
-const char *CTSProfile::DeployEntity(DeployKind) const
-{
-	return NULL;
-}

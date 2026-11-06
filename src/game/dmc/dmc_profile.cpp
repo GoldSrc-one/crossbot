@@ -38,9 +38,6 @@ namespace
 		DMC_POOL_CELLS,
 	};
 
-	constexpr float kDMCWeaponRespawn = 30.f;
-	constexpr float kDMCAmmoRespawn = 30.f;
-	constexpr float kDMCItemRespawn = 20.f;
 
 	constexpr float kDMCGrenadeForward = 600.f;
 	constexpr float kDMCGrenadeUp = 200.f;
@@ -108,19 +105,6 @@ namespace
 	}
 }
 
-const char *CDMCProfile::GetName() const
-{
-	return "DMC";
-}
-
-bool CDMCProfile::Detect(const char *gamedir) const
-{
-	if (!gpGlobals->deathmatch_)
-		return false;
-
-	return gamedir && CB_STRICMP(gamedir, "dmc") == 0;
-}
-
 bool CDMCProfile::PreThink(edict_t *pEdict) const
 {
 	if (pEdict->v.maxspeed == 1.f)
@@ -128,26 +112,10 @@ bool CDMCProfile::PreThink(edict_t *pEdict) const
 	return false;
 }
 
-PmSim::FallRule CDMCProfile::FallDamage() const
-{
-	return CBotCvarFloat("mp_falldamage") != 0.f ? PmSim::kHlFall : PmSim::kNoFall;
-}
-
 bool CDMCProfile::Cloaked(edict_t *pEdict) const
 {
 	return pEdict->v.renderfx == kRenderFxGlowShell &&
 		(static_cast<int>(pEdict->v.renderamt) == 5 || pEdict->v.rendermode == kRenderTransColor);
-}
-
-float CDMCProfile::ItemRespawnDelay(ItemKind kind) const
-{
-	switch (kind)
-	{
-	case ITEM_WEAPON:  return kDMCWeaponRespawn;
-	case ITEM_AMMO:    return kDMCAmmoRespawn;
-	case ITEM_PICKUP:  return kDMCItemRespawn;
-	default:           return CHLDMProfile::ItemRespawnDelay(kind);
-	}
 }
 
 bool CDMCProfile::ItemPreferred(edict_t *ent, ItemKind kind) const
@@ -257,35 +225,6 @@ const char *CDMCProfile::AmmoEntity(int weaponId, WeaponAmmo pool) const
 	case DMC_POOL_CELLS:   return "item_cells";
 	default:               return nullptr;
 	}
-}
-
-int CDMCProfile::MeleeWeapon() const
-{
-	return DMC_AXE;
-}
-
-int CDMCProfile::AmbushWeapon(AmbushKind) const
-{
-	return 0;
-}
-
-int CDMCProfile::DeployWeapon(DeployKind) const
-{
-	return 0;
-}
-
-const char *CDMCProfile::DeployEntity(DeployKind) const
-{
-	return nullptr;
-}
-
-bool CDMCProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
-	float &speed) const
-{
-	if ((mode.quirks & WPN_Q_THROW_ARC) == 0)
-		return false;
-
-	return DMC_ThrowLaunch(viewPitch, elevation, speed);
 }
 
 bool DMC_ThrowLaunch(float viewPitch, float &elevation, float &speed)

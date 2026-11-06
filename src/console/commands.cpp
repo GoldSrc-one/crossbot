@@ -26,6 +26,7 @@
 #include "../game/game_profile.h"
 #include "../game/gamedata.h"
 #include "../game/give_item.h"
+#include "../game/hldm/hldm_profile.h"
 #include "../game/objectives.h"
 #include "../nav/nav.h"
 #include "../nav/nav_barrier.h"
@@ -437,31 +438,15 @@ namespace
 
 	void AppendQuirks(unsigned int quirks, char *out, size_t cap)
 	{
-		static const struct { unsigned int bit; const char *name; } kNames[] = {
-			{ WPN_Q_HIDDEN_STATE,  "hiddenstate" },
-			{ WPN_Q_NO_UNDERWATER, "nounderwater" },
-			{ WPN_Q_SLOW_IN_WATER, "slowinwater" },
-			{ WPN_Q_THROW_ARC,     "throwarc" },
-			{ WPN_Q_INHERIT_VEL,   "inheritvel" },
-			{ WPN_Q_KEEP_AIMING,   "keepaiming" },
-			{ WPN_Q_STICKY,        "sticky" },
-			{ WPN_Q_HOMING,        "homing" },
-			{ WPN_Q_LASER_ON,      "laseron" },
-			{ WPN_Q_SPINUP,        "spinup" },
-			{ WPN_Q_AIM_FEET,      "aimfeet" },
-			{ WPN_Q_BRACE,         "brace" },
-			{ WPN_Q_TEAM_UNSAFE,   "teamunsafe" },
-		};
-
 		out[0] = '\0';
 		size_t used = 0;
 
-		for (size_t i = 0; i < ARRAYSIZE(kNames); ++i)
+		for (int i = 0; i < kWeaponQuirkNameCount; ++i)
 		{
-			if ((quirks & kNames[i].bit) == 0)
+			if ((quirks & kWeaponQuirkNames[i].bit) == 0)
 				continue;
 
-			int n = snprintf(out + used, cap - used, "%s%s", used ? "," : "", kNames[i].name);
+			int n = snprintf(out + used, cap - used, "%s%s", used ? "," : "", kWeaponQuirkNames[i].name);
 			if (n < 0 || static_cast<size_t>(n) >= cap - used)
 				return;
 			used += static_cast<size_t>(n);
@@ -500,6 +485,125 @@ namespace
 		PrintWeaponMode("P", spec.primary);
 		PrintWeaponMode("Pz", spec.primaryZoomed);
 		PrintWeaponMode("S", spec.secondary);
+	}
+
+	void PrintWeaponAmmo(const IGameProfile &profile, const WeaponSpec &spec)
+	{
+		const char *clip = profile.AmmoEntity(spec.id, AMMO_CLIP);
+		const char *prim = profile.AmmoEntity(spec.id, AMMO_PRIMARY);
+		const char *sec = profile.AmmoEntity(spec.id, AMMO_SECONDARY);
+		if (!clip && !prim && !sec && !spec.setup)
+			return;
+
+		char msg[192];
+		snprintf(msg, sizeof(msg), "CrossBot:    ammo clip %s prim %s sec %s setup %s\n",
+			clip ? clip : "-", prim ? prim : "-", sec ? sec : "-", spec.setup ? spec.setup : "-");
+		SERVER_PRINT(msg);
+	}
+
+	bool ClassnamePreferred(const IGameProfile &profile, const char *classname)
+	{
+		edict_t probe;
+		memset(&probe, 0, sizeof(probe));
+		probe.v.classname = ALLOC_STRING(classname);
+		probe.v.model = ALLOC_STRING("");
+		return profile.ItemPreferred(&probe, profile.ClassifyItem(&probe));
+	}
+
+	void PrintProfileData(const IGameProfile &profile)
+	{
+		char msg[256];
+		PmSim::FallRule fall = profile.FallDamage();
+		snprintf(msg, sizeof(msg), "CrossBot:  slots %d itemslots %d melee %d fall %.3f/%.5f/%.0f\n",
+			profile.WeaponSlotCount(), profile.ItemSlots(), profile.MeleeWeapon(),
+			fall.safeSpeed, fall.perSpeed, fall.health);
+		SERVER_PRINT(msg);
+
+		int len = snprintf(msg, sizeof(msg), "CrossBot:  ismelee");
+		for (int id = 0; id < 128 && len < static_cast<int>(sizeof(msg)) - 8; ++id)
+			if (profile.IsMeleeWeapon(id))
+				len += snprintf(msg + len, sizeof(msg) - len, " %d", id);
+		len += snprintf(msg + len, sizeof(msg) - len, " | meleeonly");
+		for (int id = 0; id < 128 && len < static_cast<int>(sizeof(msg)) - 8; ++id)
+			if (profile.MeleeOnlyAllows(id))
+				len += snprintf(msg + len, sizeof(msg) - len, " %d", id);
+		snprintf(msg + len, sizeof(msg) - len, "\n");
+		SERVER_PRINT(msg);
+
+		len = snprintf(msg, sizeof(msg), "CrossBot:  ambush");
+		for (int k = 0; k < AMBUSH_COUNT; ++k)
+			len += snprintf(msg + len, sizeof(msg) - len, " %d", profile.AmbushWeapon(static_cast<AmbushKind>(k)));
+		len += snprintf(msg + len, sizeof(msg) - len, " | deploy");
+		for (int k = 0; k < DEPLOY_COUNT; ++k)
+		{
+			const char *ent = profile.DeployEntity(static_cast<DeployKind>(k));
+			len += snprintf(msg + len, sizeof(msg) - len, " %d:%s",
+				profile.DeployWeapon(static_cast<DeployKind>(k)), ent ? ent : "-");
+		}
+		snprintf(msg + len, sizeof(msg) - len, "\n");
+		SERVER_PRINT(msg);
+
+		static const ItemKind kKinds[] = { ITEM_NONE, ITEM_WEAPON, ITEM_AMMO, ITEM_PICKUP,
+			ITEM_HEALTHCHARGER, ITEM_RECHARGE, ITEM_HEALVOLUME, ITEM_STATION };
+		len = snprintf(msg, sizeof(msg), "CrossBot:  respawn");
+		for (ItemKind k : kKinds)
+			len += snprintf(msg + len, sizeof(msg) - len, " %.0f", profile.ItemRespawnDelay(k));
+		snprintf(msg + len, sizeof(msg) - len, " full %.0f unreach %.0f\n",
+			profile.ItemFullTimeout(), profile.ItemUnreachableTimeout());
+		SERVER_PRINT(msg);
+
+		WeaponMode arc = {};
+		arc.quirks = WPN_Q_THROW_ARC;
+		len = snprintf(msg, sizeof(msg), "CrossBot:  throw");
+		static const float kPitch[] = { -45.f, 0.f, 45.f };
+		for (float pitch : kPitch)
+		{
+			float elevation = 0.f;
+			float speed = 0.f;
+			bool ok = profile.ThrowLaunch(arc, pitch, elevation, speed);
+			len += snprintf(msg + len, sizeof(msg) - len, " %d:%.2f/%.2f", ok ? 1 : 0, elevation, speed);
+		}
+		snprintf(msg + len, sizeof(msg) - len, "\n");
+		SERVER_PRINT(msg);
+
+		const RadioInfo *radio = nullptr;
+		int radios = profile.RadioCommands(radio);
+		for (int i = 0; i < radios; ++i)
+		{
+			snprintf(msg, sizeof(msg), "CrossBot:  radio %s %d %s %s\n", radio[i].command, radio[i].code,
+				radio[i].sound ? radio[i].sound : "-", radio[i].text);
+			SERVER_PRINT(msg);
+		}
+
+		if (static_cast<const CHLDMProfile &>(profile).config.profile != "hldm")
+			return;
+
+		static const char *const kItems[] = { "item_healthkit", "item_battery", "item_longjump",
+			"item_armor", "item_suit", "weaponbox" };
+		len = snprintf(msg, sizeof(msg), "CrossBot:  preferred");
+		for (const char *item : kItems)
+			if (ClassnamePreferred(profile, item))
+				len += snprintf(msg + len, sizeof(msg) - len, " %s", item);
+		snprintf(msg + len, sizeof(msg) - len, "\n");
+		SERVER_PRINT(msg);
+
+		for (int slot = 0; slot < profile.WeaponSlotCount(); ++slot)
+		{
+			const WeaponSpec *spec = profile.WeaponSlot(slot);
+			if (!spec || !spec->classname)
+				continue;
+			len = snprintf(msg, sizeof(msg), "CrossBot:  preferred %s:%d", spec->classname,
+				ClassnamePreferred(profile, spec->classname) ? 1 : 0);
+			for (int pool = AMMO_CLIP; pool <= AMMO_SECONDARY; ++pool)
+			{
+				const char *ammo = profile.AmmoEntity(spec->id, static_cast<WeaponAmmo>(pool));
+				if (ammo)
+					len += snprintf(msg + len, sizeof(msg) - len, " %s:%d", ammo,
+						ClassnamePreferred(profile, ammo) ? 1 : 0);
+			}
+			snprintf(msg + len, sizeof(msg) - len, "\n");
+			SERVER_PRINT(msg);
+		}
 	}
 
 	void Cmd_CrossBotWeaponSpec()
@@ -570,6 +674,7 @@ namespace
 			snprintf(msg, sizeof(msg), "CrossBot: '%s' (%s) weapon table\n",
 				XPlay::GameDir(game), profile->GetName());
 			SERVER_PRINT(msg);
+			PrintProfileData(*profile);
 
 			for (int slot = 0; slot < profile->WeaponSlotCount(); ++slot)
 			{
@@ -588,6 +693,7 @@ namespace
 				}
 
 				PrintWeaponSpec(*raw);
+				PrintWeaponAmmo(*profile, *raw);
 				++shown;
 			}
 		}

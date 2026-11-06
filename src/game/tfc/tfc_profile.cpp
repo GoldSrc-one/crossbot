@@ -30,8 +30,6 @@ namespace
 	constexpr float kCaltropPrime = 0.5f;
 	constexpr float kGrenadeMaxRange = 650.f;
 
-	constexpr float kFallSafeSpeed = 650.f;
-	constexpr float kFallDamage = 100.f / 374.f;
 
 	const char *const kDisguiseArgs = "class: scout, sniper, soldier, demoman, medic, hwguy, pyro or engineer";
 
@@ -93,21 +91,6 @@ namespace
 		g_engfuncs.pfnRunPlayerMove(pEdict, pEdict->v.v_angle, 0.f, 0.f, 0.f, 0, 0, msec);
 		BotTiming::EndMove(pEdict);
 	}
-}
-
-const char *CTFCProfile::GetName() const
-{
-	return "TFC";
-}
-
-bool CTFCProfile::Detect(const char *gamedir) const
-{
-	return gamedir && CB_STRICMP(gamedir, "tfc") == 0;
-}
-
-PmSim::FallRule CTFCProfile::FallDamage() const
-{
-	return { kFallSafeSpeed, kFallDamage };
 }
 
 void CTFCProfile::ApplyAddArg(int, edict_t *pEdict, const char *arg, char *out,
@@ -388,11 +371,6 @@ const WeaponSpec *CTFCProfile::WeaponSlot(int slot) const
 	return TFC_WeaponSlot(slot);
 }
 
-int CTFCProfile::ItemSlots() const
-{
-	return kTFCItemSlots;
-}
-
 bool CTFCProfile::ReadInventory(edict_t *player, BotInventory &out) const
 {
 	BotWeapons::ReadItems(player, out);
@@ -421,36 +399,3 @@ bool CTFCProfile::ReadInventory(edict_t *player, BotInventory &out) const
 	return true;
 }
 
-int CTFCProfile::MeleeWeapon() const
-{
-	return TFC_AXE;
-}
-
-bool CTFCProfile::IsMeleeWeapon(int id) const
-{
-	return id == TFC_AXE || id == TFC_SPANNER || id == TFC_MEDIKIT || id == TFC_KNIFE;
-}
-
-int CTFCProfile::AmbushWeapon(AmbushKind) const
-{
-	return 0;
-}
-
-int CTFCProfile::DeployWeapon(DeployKind) const
-{
-	return 0;
-}
-
-const char *CTFCProfile::DeployEntity(DeployKind) const
-{
-	return nullptr;
-}
-
-bool CTFCProfile::ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
-	float &speed) const
-{
-	if ((mode.quirks & WPN_Q_THROW_ARC) == 0)
-		return false;
-
-	return DMC_ThrowLaunch(viewPitch, elevation, speed);
-}

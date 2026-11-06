@@ -5,10 +5,6 @@
 class CTFCProfile : public CHLDMProfile
 {
 public:
-	const char *GetName() const override;
-	bool Detect(const char *gamedir) const override;
-	PmSim::FallRule FallDamage() const override;
-
 	bool PreThink(edict_t *pEdict) const override;
 
 	bool OffhandRead(edict_t *pEdict, int slot, OffhandInfo &out) const override;
@@ -37,17 +33,7 @@ public:
 	const WeaponSpec *GetWeaponSpec(int id) const override;
 	int WeaponSlotCount() const override;
 	const WeaponSpec *WeaponSlot(int slot) const override;
-	int ItemSlots() const override;
 	bool ReadInventory(edict_t *player, BotInventory &out) const override;
-
-	int MeleeWeapon() const override;
-	bool IsMeleeWeapon(int id) const override;
-	int AmbushWeapon(AmbushKind kind) const override;
-	int DeployWeapon(DeployKind kind) const override;
-	const char *DeployEntity(DeployKind kind) const override;
-
-	bool ThrowLaunch(const WeaponMode &mode, float viewPitch, float &elevation,
-		float &speed) const override;
 
 	void ApplyAddArg(int iGame, edict_t *pEdict, const char *arg, char *out,
 		unsigned int size) const override;

@@ -13,13 +13,14 @@ $addon = Join-Path $HLDSDir "$Game\addons\crossbot"
 if (-not (Test-Path $dll)) { throw "$dll not found, run: build.bat standalone" }
 if (-not (Test-Path $gamedata)) { throw "no gamedata at $gamedata" }
 
-foreach ($dir in @($addon, "$addon\gamedata", "$addon\nav", "$addon\trace")) {
+foreach ($dir in @($addon, "$addon\gamedata", "$addon\games", "$addon\nav", "$addon\trace")) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
 }
 
 Copy-Item $dll $addon -Force
 Copy-Item (Join-Path $repo "names.txt"), (Join-Path $repo "places.txt") $addon -Force
 Copy-Item $gamedata "$addon\gamedata" -Force
+Copy-Item (Join-Path $repo "games\*.json") "$addon\games" -Force
 if (-not (Test-Path "$addon\brain.json")) {
     Copy-Item (Join-Path $repo "brain.example.json") "$addon\brain.json"
 }

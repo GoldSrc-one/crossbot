@@ -2743,7 +2743,7 @@ bool Brace(CBot &bot, unsigned short buttons, bool &duck, bool &stanceOnly, floa
 	float timer = (fire.mode == MODE_SECONDARY) ? w.nextSecondaryAttack : w.nextPrimaryAttack;
 	float wait = std::max(timer, inv.nextAttack);
 
-	if (BotDiff::BraceMoving() && strcmp(g_pGameProfile->GetName(), "Gearbox") == 0)
+	if (BotDiff::BraceMoving() && g_pGameProfile->BraceDucks())
 	{
 		if (wait > 0.f || (buttons & AttackButton(fire.mode)) == 0)
 			return false;
